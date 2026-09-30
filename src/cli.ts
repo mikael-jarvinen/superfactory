@@ -20,6 +20,8 @@ import { send } from "./gate/send.js";
 import { ACCEPT_PROSE, waitAndSend } from "./gate/wait.js";
 import { KINDS, type Kind, messages, say } from "./messages.js";
 import { type HookName, type HookResult, HOOKS } from "./settings.js";
+import { cmdStack, STACK_USAGE } from "./stacks/command.js";
+import { exportStacks } from "./stacks/engine.js";
 import {
   allRecs, appendEvent, BUSY, DISPATCHABLE, KEY_HINT, loadRec, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
@@ -86,8 +88,9 @@ usage: factory [--workspace <dir>] <command> [options]
   hook <${HOOKS.join("|")}> [...]
                                   a Claude Code hook, reading the event on stdin. The rendered
                                   settings in logs/run/ call these; nothing else needs to.
+${STACK_USAGE}
 
-Not built yet: stack (phase 5), doctor (phase 7).
+Not built yet: doctor (phase 7).
 
 The workspace is --workspace, else $FACTORY_WORKSPACE, else the nearest factory.toml above the
 current directory. Only this program writes the state store.
@@ -95,7 +98,6 @@ current directory. Only this program writes the state store.
 states: queued building pr-open agent-review fixing gate your-review colleague-review done blocked`;
 
 const STUBS: Record<string, [number, string]> = {
-  "stack": [5, "stacks"],
   "doctor": [7, "doctor"],
 };
 
@@ -308,6 +310,8 @@ function cmdReview(ws: Workspace, argv: string[]) {
 
 function up(ws: Workspace, fresh: boolean) {
   const ld = lead(ws);
+  // the board's stacks panel reads this export, so write it before the board's first check
+  exportStacks(ws);
   startBoard(ws, true);
   const s = findSession(ld.name);
   if (sessionAlive(s)) {
@@ -485,6 +489,7 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void>
   "pr-comment": cmdPrComment,
   "pr-media": cmdPrMedia,
   "demo": cmdDemo,
+  "stack": cmdStack,
 };
 
 const HOOK_FNS: Record<HookName, (argv: string[], input: string, workspace?: string) => HookResult> = {
