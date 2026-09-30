@@ -21,6 +21,14 @@
   "dependencies": {
     "smol-toml": "^1.9.0"
   },
+  "peerDependencies": {
+    "@playwright/test": ">=1.63"
+  },
+  "peerDependenciesMeta": {
+    "@playwright/test": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^22.20.4",
     "typescript": "^7.0.2"
