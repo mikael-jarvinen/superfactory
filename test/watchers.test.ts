@@ -151,20 +151,28 @@ test("the round: flags said once, the failures cursor, and its heartbeat", () =>
 
   // A round whose tracker was down still saw the facts, so they are not news again; it writes no
   // heartbeat, because it did not read the tracker.
+  // The outage itself goes to the lead by the courier, once, and again only when it is over.
   r = run(["watch", "round"], [{ stdout: "TRACKER-UNAVAILABLE\n" }], routes);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.ok(!existsSync(logs("round.heartbeat")));
   const prompt = (r.calls[0] as Call).prompt;
   assert.ok(prompt.includes("You are the round") && prompt.includes(SEARCH) && prompt.includes("OVER 90 MIN"));
+  assert.equal(r.calls.length, 2);
+  assert.match((r.calls[1] as Call).prompt, /\[round\]\ntracker UNAVAILABLE/);
   r = run(["watch", "round", "--facts"], [], routes);
   assert.match(r.stdout, /over 90 min \(already probed, not an escalation\)/);
   assert.match(r.stdout, /watcher failures since the last round --\n {2}none/);
+  r = run(["watch", "round"], [{ stdout: "TRACKER-UNAVAILABLE\n" }], routes);
+  assert.equal(r.calls.length, 1, "the same outage is not said twice");
 
-  r = run(["watch", "round"], [{ stdout: "QUEUE: WEB-2\nQUIET\n" }], routes);
+  r = run(["watch", "round"], [{ stdout: "QUEUE: WEB-2\nQUIET\n" }, { stdout: "" }], routes);
   assert.equal(r.status, 0);
+  assert.equal(r.calls.length, 2);
+  assert.match((r.calls[1] as Call).prompt, /\[round\]\ntracker back/);
   const before = age("round.heartbeat");
   r = run(["watch", "round"], [{ stdout: "QUIET\n" }], routes);
   assert.equal(statSync(logs("round.heartbeat")).mtimeMs, before, "QUIET without a QUEUE line is not a read");
+  assert.equal(r.calls.length, 1, "the outage is over, so nothing more is said about it");
   r = run(["watch", "round"], [{ status: 1 }], routes);
   assert.equal(r.status, 1);
   assert.equal(statSync(logs("round.heartbeat")).mtimeMs, before);

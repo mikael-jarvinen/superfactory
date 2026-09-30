@@ -6,7 +6,7 @@
 // read-only. "Report once" cannot be an instruction to it, since it has no memory of the last run,
 // so the facts carry that: a flag that was already escalated says so. Markers and the failures
 // cursor move only once a round has run, so a failed round shows the same lines again.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fleetLines, type Session } from "../fleet.js";
 import { gh, json } from "../gate/github.js";
@@ -18,6 +18,7 @@ import { FactoryError } from "../util.js";
 import { git, worktreeDirty } from "../worktree.js";
 import { beat, failure, failuresLog, heartbeatAge, loadPrompt, logTo, openLog, runClaude } from "./job.js";
 import { belongs, type GhPr, loadQueueState } from "./queue.js";
+import { deliver } from "./relay.js";
 
 export interface Facts {
   text: string;
@@ -188,6 +189,21 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
   };
 }
 
+// The lead hears about a tracker outage once, when a round first cannot read it, and once more when
+// a round reads it again. An outage can last a day, and a message every hour about something the
+// lead cannot fix is noise. Said by the courier from here, not by the session, which has no memory
+// of whether it said it last hour. A message that was not delivered leaves the marker as it was, so
+// the next round says it again.
+function outage(ws: Workspace, read: string): void {
+  const told = join(ws.logsDir, ".tracker-outage.told");
+  if (read === "unavailable" && !existsSync(told)) {
+    if (deliver(ws, "[round]\ntracker UNAVAILABLE: the round could not read the tracker. Said once per outage; the round says so again when it is back."))
+      writeFileSync(told, "");
+  } else if (read === "read" && existsSync(told)) {
+    if (deliver(ws, "[round]\ntracker back: the round read the tracker again.")) rmSync(told, { force: true });
+  }
+}
+
 export function runRound(ws: Workspace, opts: { factsOnly?: boolean } = {}, out: (line: string) => void = console.log): number {
   const facts = gatherFacts(ws);
   if (opts.factsOnly) {
@@ -209,6 +225,7 @@ export function runRound(ws: Workspace, opts: { factsOnly?: boolean } = {}, out:
   logTo(log, `facts=${facts.complete ? "complete" : "partial"} tracker=${read}`);
   // The round ran and saw these facts, whatever the tracker did, so what it saw is not news again.
   if (r.status === 0) facts.commit();
+  outage(ws, read);
   // "Ran, read the facts, and read the tracker": each is required, and the read needs its evidence.
   if (r.status === 0 && facts.complete && (read === "none" || read === "read")) beat(ws, "round");
   if (r.status !== 0) failure(ws, `round FAILED exit=${r.status}`);
