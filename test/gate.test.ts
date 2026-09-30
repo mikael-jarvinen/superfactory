@@ -141,6 +141,11 @@ test("pr-wait waits on a running check, then stops before sending on prose volum
   assert.ok(r.calls.includes(`pr ready ${N} --repo ${REMOTE}`));
   assert.match(r.stdout, /^push text: PR ready: WEB-1 web#7$/m);
 
+  // No check-runs yet may be GitHub not having created them: waited on, and named at the limit.
+  r = run(green({ [cr]: checkRuns() }), ["pr-wait", "web", String(N), HEAD], { FACTORY_WAIT_LIMIT: "0" });
+  assert.equal(r.status, 3, r.stderr);
+  assert.match(r.stderr, /still waiting after \d+s on:\n {2}- NO check-runs at all/);
+
   // Behind the base is not something time clears.
   r = run(green({ [`api repos/${REMOTE}/compare/main...${HEAD}`]: { stdout: { behind_by: 2 } } }), ["pr-wait", "web", String(N), HEAD]);
   assert.equal(r.status, 1);

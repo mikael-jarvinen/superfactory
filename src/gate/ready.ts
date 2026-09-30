@@ -82,7 +82,8 @@ export function ready(ws: Workspace, repo: Repo, n: number, opts: { allowDraft?:
     fail(`COULD NOT READ check-runs at ${sha} -- not the same thing as there being none`, "unreadable");
     realCheckProblem = true;
   } else if (runs.length === 0) {
-    fail(`NO check-runs at all at ${sha} -- this is the failure that looks like a pass`);
+    // Right after a push GitHub may not have created them yet, so time can clear this one.
+    fail(`NO check-runs at all at ${sha} -- this is the failure that looks like a pass`, "waits");
     realCheckProblem = true;
   } else {
     for (const c of runs) {
