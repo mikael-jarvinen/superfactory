@@ -1,0 +1,106 @@
+# factory.toml: the one config file of a workspace. Copy it into the workspace directory and change
+# every name. Paths may use ~ and $VARS; a relative path is relative to this file unless its key
+# says otherwise.
+
+[human]
+name = "Alex"                             # the person the fleet works for; the board shows it
+
+[github]
+org = "acme"
+bots = ["coderabbitai", "Copilot"]        # review bots the factory may answer, inside their own threads
+
+[paths]
+repos = "~/src"                           # parent of the checkouts, for repos with a relative path
+# state = "state"                         # the state store; default state/ in the workspace
+# logs = "logs"                           # logs and rendered run files; default logs/ in the workspace
+
+[repos.web]
+remote = "acme/web"                       # owner/repo on GitHub
+path = "web"                              # the human's checkout, relative to paths.repos; default the repo name
+base = "main"                             # the branch work starts from and PRs target
+gate_checks = ["lint", "test"]            # check-runs of which at least one must run, and every one present pass
+local_checks = ["npm run lint", "npm test"]   # what a builder runs before pushing
+
+[repos.api]
+remote = "acme/api"
+base = "main"
+gate_checks = ["test"]
+local_checks = ["make test"]
+
+[stacks.app]                              # a local environment builders run, one per slot
+repos = ["web", "api"]                    # the repos a stack serves; the first is dispatch's default
+slots = 2                                 # slot numbers run 0..slots
+reserve = [0]                             # slots never allocated, such as the human's own
+pin = { bea = 1, ben = 2 }                # a builder that always gets the same slot
+script = "stacks/app.sh"                  # the stack script, called as `<script> <verb>`
+
+[roles.lead]
+cwd = "lead"                              # where the lead starts; its CLAUDE.md and .claude/skills load
+model = "opus"
+effort = "high"
+autocompact = "1M"                        # passed to claude as --autocompact
+permission_mode = "bypassPermissions"
+settings = "lead"                         # a settings template, or the path of a settings file
+extra_hooks = ["status"]                  # hooks added to the template
+
+[roles.builder]
+model = "opus"
+effort = "high"
+permission_mode = "bypassPermissions"
+settings = "builder"
+# mcp_config = "mcp.json"                 # MCP servers for building sessions
+
+[roles.reviewer]
+cwd = "reviewers"                         # shared by every reviewer
+permission_mode = "auto"
+settings = "readonly"
+add_dirs = ["web", "api"]                 # checkouts the session may read, as repo keys
+
+[[agents]]
+name = "lee"                              # lower case; also the session name
+role = "lead"                             # exactly one lead
+remote_control = true                     # reachable from Remote Control under its name
+
+[[agents]]
+name = "bea"
+role = "builder"
+stack = "app"                             # or repos = [...] for a builder with no stack
+appendix = ["briefs/app.md", "repo:AGENTS.md"]   # appended to the system prompt; repo: is inside the checkout
+add_dirs = ["web", "api"]                 # overrides the role's
+remote_control = true
+
+[[agents]]
+name = "ben"
+role = "builder"
+stack = "app"
+appendix = ["briefs/app.md"]
+add_dirs = ["web", "api"]
+
+[[agents]]
+name = "rae"
+role = "reviewer"
+
+[tracker]
+kind = "jira"                             # or "none"
+site = "acme.atlassian.net"
+queue_jql = 'assignee = currentUser() AND statusCategory = "To Do" AND sprint in openSprints() ORDER BY updated ASC'
+key_pattern = '^[A-Z][A-Z0-9]+-\d+$'      # what a ticket key looks like; LOCAL-<words> is always valid
+
+[tracker.status]                          # factory state -> the status the ticket should read
+queued = "To Do"
+building = "In Progress"                  # also every working state not named here
+colleague-review = "In Review"
+done = "Done"
+
+[board]
+host = "localhost"
+port = 8787
+
+[gate]
+prose_remark = 30                         # added comment lines at which the gate remarks on prose volume
+
+[watchers]
+queue_every_minutes = 15                  # how often the queue watcher reads the tracker
+round_minute = 7                          # the minute past each hour the round runs
+model = "sonnet"
+relay_model = "haiku"
