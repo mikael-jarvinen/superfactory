@@ -26,6 +26,7 @@ import {
   allRecs, appendEvent, BUSY, DISPATCHABLE, KEY_HINT, loadRec, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
 import { FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.js";
+import { relay } from "./watchers/relay.js";
 import { branchPushed, ensureWorktree, git, worktreeDirty } from "./worktree.js";
 import { openWorkspace, resolveWorkspace, type Workspace } from "./workspace.js";
 
@@ -404,7 +405,8 @@ function cmdBoard(ws: Workspace, argv: string[]) {
   const { v } = args("board", argv, { stop: { type: "boolean" }, serve: { type: "boolean" }, inbox: { type: "boolean" } }, [0, 0]);
   if ([v.stop, v.serve, v.inbox].filter(Boolean).length > 1) throw new UsageError("board: give one of --stop, --serve or --inbox");
   if (v.inbox) followInbox(ws);
-  else if (v.serve) runBoard(ws);
+  // The courier carries a page line to the lead while no inbox monitor is armed.
+  else if (v.serve) runBoard(ws, { relay });
   else if (v.stop) stopBoard(ws);
   else startBoard(ws);
 }
