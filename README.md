@@ -29,7 +29,7 @@ every instruction your sessions read. Start from the examples in this repo:
 ```sh
 mkdir ~/fleet && cd ~/fleet
 cp <clone>/examples/factory.toml .
-cp -R <clone>/examples/prompts .
+cp -R <clone>/examples/prompts <clone>/examples/stacks .
 ```
 
 Then edit `factory.toml`. The comments explain each key. Change every name in it: the human, the
@@ -45,7 +45,7 @@ A workspace contains:
 | `prompts/round.md`, `prompts/relay.md` | Always. The relay prompt must contain `{text}`. |
 | `prompts/queue.md` | When `tracker.kind` is not `"none"`. |
 | Each file in an agent's `appendix` | When an agent names it. A `repo:` entry lives in the repo checkout instead. |
-| Each `stacks.<name>.script` | When a stack names one. The stack contract is in [docs/design.md](docs/design.md). |
+| Each `stacks.<name>.script` | When a stack names one. [examples/stacks/app.sh](examples/stacks/app.sh) is a minimal one to start from; the contract is in [docs/design.md](docs/design.md). |
 | A settings or `mcp_config` file | When a role names one by path. |
 | `demo.env` | Optional. See Demos below. |
 
