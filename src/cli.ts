@@ -27,7 +27,10 @@ import {
   allRecs, appendEvent, BUSY, DISPATCHABLE, KEY_HINT, loadRec, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
 import { FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.js";
+import { failure } from "./watchers/job.js";
+import { runQueue } from "./watchers/queue.js";
 import { relay } from "./watchers/relay.js";
+import { runRound } from "./watchers/round.js";
 import { branchPushed, ensureWorktree, git, worktreeDirty } from "./worktree.js";
 import { openWorkspace, resolveWorkspace, type Workspace } from "./workspace.js";
 
@@ -87,6 +90,11 @@ usage: factory [--workspace <dir>] <command> [options]
                                   put a demo's screenshots and video into the PR body
   demo <KEY> --init               copy the demo template to /tmp/demo/<KEY>/demo.spec.ts
   demo <KEY> <spec.ts> [base-url] run a Playwright demo from the worktree; media in /tmp/demo/<KEY>
+  watch queue                     read the tracker's queue once, and tell the lead about new queued
+                                  tickets and fresh merges. What the scheduler runs; prompts/queue.md.
+  watch round [--facts]           the round once: facts gathered here, judged by a disposable session
+                                  that tells the lead what needs judgement; prompts/round.md.
+                                  --facts prints the facts and runs nothing.
   schedule render|install|uninstall|status
                                   the launchd jobs from [watchers]: render them into
                                   logs/run/launchd/, load or unload them for this user, or show
@@ -475,6 +483,21 @@ function cmdDemo(ws: Workspace, argv: string[]): number | void {
   return demo(ws, key, spec, base);
 }
 
+// A scheduled run that dies before it starts leaves a line where the round looks, not only in the
+// launchd log nobody reads.
+function cmdWatch(ws: Workspace, argv: string[]): number {
+  const { v, p } = args("watch", argv, { facts: { type: "boolean" } }, [1, 1]);
+  const job = p[0] as string;
+  if (job !== "queue" && job !== "round") throw new UsageError(`watch: ${pyRepr(job)} is not a watcher; watchers are queue, round`);
+  if (v.facts && job !== "round") throw new UsageError("watch: --facts is for the round");
+  try {
+    return job === "queue" ? runQueue(ws) : runRound(ws, { factsOnly: !!v.facts });
+  } catch (e) {
+    if (e instanceof FactoryError && !v.facts) failure(ws, `${job} FAILED: ${e.message.split("\n")[0]}`);
+    throw e;
+  }
+}
+
 function cmdSchedule(ws: Workspace, argv: string[]): number {
   const { p } = args("schedule", argv, {}, [1, 1]);
   const verb = p[0] as string;
@@ -510,6 +533,7 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void>
   "pr-media": cmdPrMedia,
   "demo": cmdDemo,
   "stack": cmdStack,
+  "watch": cmdWatch,
   "schedule": cmdSchedule,
 };
 
