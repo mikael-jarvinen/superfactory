@@ -10,6 +10,14 @@ import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
 import { hook as noSideChannelsHook } from "./hooks/no-side-channels.js";
 import { hook as statusHook } from "./hooks/status.js";
+import { comment } from "./gate/comment.js";
+import { deltaRange } from "./gate/delta.js";
+import { demo, demoInit } from "./gate/demo.js";
+import { prNumber, resolveRepo } from "./gate/github.js";
+import { media } from "./gate/media.js";
+import { ready, report } from "./gate/ready.js";
+import { send } from "./gate/send.js";
+import { ACCEPT_PROSE, waitAndSend } from "./gate/wait.js";
 import { KINDS, type Kind, messages, say } from "./messages.js";
 import { type HookName, type HookResult, HOOKS } from "./settings.js";
 import {
@@ -54,12 +62,32 @@ usage: factory [--workspace <dir>] <command> [options]
   board --serve                   run the board in this process
   board --inbox                   print each new message from the message page, for a monitor in
                                   the lead's session. One holds the inbox at a time.
+  pr-ready <repo> <n> [--allow-draft]
+                                  may this PR be sent? Every question about its current head sha; a
+                                  missing answer is a failure. <repo> is a key of [repos] or its
+                                  owner/repo. Exit 0 sendable, 1 not, 2 unreadable.
+  pr-send <repo> <n> <reviewed-sha>
+                                  gate, undraft, check the head did not move, print the link and
+                                  the push text. The only undraft there is.
+  pr-wait <repo> <n> <reviewed-sha>
+                                  wait while what is left is running or pending, then pr-send. Stops
+                                  at once on anything waiting cannot clear, and before sending when
+                                  the gate remarks on prose volume unless ${ACCEPT_PROSE}=1.
+  delta-range <repo> <n> <base-sha>
+                                  may this fix range go to a reviewer? Refuses an empty range and a
+                                  base the PR head has never been.
+  pr-comment <repo> <n> <agent> <body-file> <bot-comment-id> [--dry-run]
+                                  reply inside a bot's review thread; never a standalone comment,
+                                  never to a person. The bots are github.bots.
+  pr-media <repo> <n> (--dir <media-dir> | --no-visual-change) [--dry-run]
+                                  put a demo's screenshots and video into the PR body
+  demo <KEY> --init               copy the demo template to /tmp/demo/<KEY>/demo.spec.ts
+  demo <KEY> <spec.ts> [base-url] run a Playwright demo from the worktree; media in /tmp/demo/<KEY>
   hook <${HOOKS.join("|")}> [...]
                                   a Claude Code hook, reading the event on stdin. The rendered
                                   settings in logs/run/ call these; nothing else needs to.
 
-Not built yet: pr-ready, pr-send, pr-wait, delta-range, pr-comment, pr-media and demo (phase 4),
-stack (phase 5), doctor (phase 7).
+Not built yet: stack (phase 5), doctor (phase 7).
 
 The workspace is --workspace, else $FACTORY_WORKSPACE, else the nearest factory.toml above the
 current directory. Only this program writes the state store.
@@ -67,13 +95,6 @@ current directory. Only this program writes the state store.
 states: queued building pr-open agent-review fixing gate your-review colleague-review done blocked`;
 
 const STUBS: Record<string, [number, string]> = {
-  "pr-ready": [4, "the gate"],
-  "pr-send": [4, "the gate"],
-  "pr-wait": [4, "the gate"],
-  "delta-range": [4, "the gate"],
-  "pr-comment": [4, "the gate"],
-  "pr-media": [4, "the gate"],
-  "demo": [4, "the gate"],
   "stack": [5, "stacks"],
   "doctor": [7, "doctor"],
 };
@@ -391,7 +412,59 @@ function cmdMessages(ws: Workspace, argv: string[]) {
   messages(ws, n);
 }
 
-const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => void> = {
+function cmdPrReady(ws: Workspace, argv: string[]): number {
+  const { v, p } = args("pr-ready", argv, { "allow-draft": { type: "boolean" } }, [2, 2]);
+  const verdict = ready(ws, resolveRepo(ws, p[0] as string), prNumber(p[1] as string), { allowDraft: !!v["allow-draft"] });
+  for (const l of report(verdict)) console.log(l);
+  return verdict.sendable ? 0 : 1;
+}
+
+function cmdPrSend(ws: Workspace, argv: string[]) {
+  const { p } = args("pr-send", argv, {}, [3, 3]);
+  send(ws, resolveRepo(ws, p[0] as string), prNumber(p[1] as string), p[2] as string);
+}
+
+function cmdPrWait(ws: Workspace, argv: string[]) {
+  const { p } = args("pr-wait", argv, {}, [3, 3]);
+  waitAndSend(ws, resolveRepo(ws, p[0] as string), prNumber(p[1] as string), p[2] as string);
+}
+
+function cmdDeltaRange(ws: Workspace, argv: string[]): number {
+  const { p } = args("delta-range", argv, {}, [3, 3]);
+  return deltaRange(resolveRepo(ws, p[0] as string), prNumber(p[1] as string), p[2] as string);
+}
+
+function cmdPrComment(ws: Workspace, argv: string[]) {
+  const { v, p } = args("pr-comment", argv, { "dry-run": { type: "boolean" } }, [5, 5]);
+  const [repo, n, agent, bodyFile, replyTo] = p as [string, string, string, string, string];
+  comment(ws, resolveRepo(ws, repo), prNumber(n), { agent, bodyFile, replyTo, dryRun: !!v["dry-run"] });
+}
+
+// The upload is a fetch, so this one finishes after main returns; its failure is reported the way
+// main's own would be.
+function cmdPrMedia(ws: Workspace, argv: string[]) {
+  const { v, p } = args("pr-media", argv, { dir: { type: "string" }, "no-visual-change": { type: "boolean" }, "dry-run": { type: "boolean" } }, [2, 2]);
+  if (!!v.dir === !!v["no-visual-change"]) throw new UsageError("pr-media: give --dir <media-dir> or --no-visual-change");
+  const repo = resolveRepo(ws, p[0] as string);
+  media(repo, prNumber(p[1] as string), { dir: str(v.dir), noVisualChange: !!v["no-visual-change"], dryRun: !!v["dry-run"] }).catch((e: unknown) => {
+    if (!(e instanceof FactoryError)) throw e;
+    console.error(`factory: ${e.message}`);
+    process.exitCode = e.code;
+  });
+}
+
+function cmdDemo(ws: Workspace, argv: string[]): number | void {
+  const { v, p } = args("demo", argv, { init: { type: "boolean" } }, [1, 3]);
+  const [key, spec, base] = p as [string, string | undefined, string | undefined];
+  if (v.init) {
+    if (spec) throw new UsageError("demo: --init takes only the key");
+    return demoInit(ws, key);
+  }
+  if (!spec) throw new UsageError("demo: which spec? factory demo <KEY> <spec.ts> [base-url], or --init for the template");
+  return demo(ws, key, spec, base);
+}
+
+const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void> = {
   "up": cmdUp,
   "down": cmdDown,
   "restart-lead": cmdRestartLead,
@@ -405,6 +478,13 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => void> = {
   "say": cmdSay,
   "messages": cmdMessages,
   "board": cmdBoard,
+  "pr-ready": cmdPrReady,
+  "pr-send": cmdPrSend,
+  "pr-wait": cmdPrWait,
+  "delta-range": cmdDeltaRange,
+  "pr-comment": cmdPrComment,
+  "pr-media": cmdPrMedia,
+  "demo": cmdDemo,
 };
 
 const HOOK_FNS: Record<HookName, (argv: string[], input: string, workspace?: string) => HookResult> = {
@@ -467,8 +547,7 @@ export function main(argv: string[]): number {
   // fleet-wide: the env var beats any settings file.
   process.env.FACTORY_WORKSPACE = ws.dir;
   process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
-  fn(ws, rest);
-  return 0;
+  return fn(ws, rest) ?? 0;
 }
 
 try {
