@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
+import { followInbox } from "./board/inbox.js";
+import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { agentOrDie, byRole, claudeBin, findSession, fleetLines, lead, type Session, sessionAlive, sessions, stopSession, waitForName } from "./fleet.js";
 import { buildAppendix, buildingPrompt, launch, leadPrompt, reviewerPrompt, roleOf } from "./launch.js";
 import { KINDS, type Kind, messages, say } from "./messages.js";
@@ -16,8 +18,8 @@ const USAGE = `factory: start, stop, dispatch and track a fleet of Claude Code s
 
 usage: factory [--workspace <dir>] <command> [options]
 
-  up [--fresh]                    start the lead (resume its thread if one exists)
-  down                            stop every fleet session
+  up [--fresh]                    start the board, and the lead (resuming its thread if one exists)
+  down                            stop every fleet session and the board
   restart-lead [--fresh]          stop the lead, then up
   status [--all]                  sessions joined with the state store
   sessions [--all] [--fleet]      raw \`claude agents --json\`, or one line per fleet member
@@ -43,8 +45,12 @@ usage: factory [--workspace <dir>] <command> [options]
                                   (SF_NOTIFY=0 mutes it, SF_NOTIFY_SOUND names the sound)
   messages [-n 20]                the last n messages. Never read the log whole: it is
                                   append-only and unbounded.
+  board [--stop]                  start the board in the background, or stop it
+  board --serve                   run the board in this process
+  board --inbox                   print each new message from the message page, for a monitor in
+                                  the lead's session. One holds the inbox at a time.
 
-Not built yet: board (phase 3), pr-ready, pr-send, pr-wait, delta-range, pr-comment, pr-media
+Not built yet: pr-ready, pr-send, pr-wait, delta-range, pr-comment, pr-media
 and demo (phase 4), stack (phase 5), hook (phase 2), doctor (phase 7).
 
 The workspace is --workspace, else $FACTORY_WORKSPACE, else the nearest factory.toml above the
@@ -54,7 +60,6 @@ states: queued building pr-open agent-review fixing gate your-review colleague-r
 
 const STUBS: Record<string, [number, string]> = {
   "hook": [2, "hooks as package modules"],
-  "board": [3, "the board"],
   "pr-ready": [4, "the gate"],
   "pr-send": [4, "the gate"],
   "pr-wait": [4, "the gate"],
@@ -92,19 +97,6 @@ function args(cmd: string, argv: string[], options: Options, positionals: [min: 
 }
 
 const str = (v: string | boolean | undefined) => (typeof v === "string" ? v : undefined);
-
-function boardLine(ws: Workspace): string {
-  const { host, port } = ws.config.board;
-  let pid: number | undefined;
-  try {
-    pid = Number.parseInt(readFileSync(join(ws.logsDir, "board.pid"), "utf8").trim(), 10);
-    process.kill(pid, 0);
-    if (!run("ps", ["-o", "command=", "-p", String(pid)]).stdout.includes("board.py")) pid = undefined;
-  } catch {
-    pid = undefined;
-  }
-  return pid ? `  board      http://${host}:${port} (pid ${pid})` : "  board      not running";
-}
 
 function cmdStatus(ws: Workspace, argv: string[]) {
   const { v } = args("status", argv, { all: { type: "boolean" } }, [0, 0]);
@@ -288,7 +280,7 @@ function cmdReview(ws: Workspace, argv: string[]) {
 
 function up(ws: Workspace, fresh: boolean) {
   const ld = lead(ws);
-  console.log("board: not started; the board arrives in phase 3");
+  startBoard(ws, true);
   const s = findSession(ld.name);
   if (sessionAlive(s)) {
     console.log(`${ld.name} already running (${s.id})`);
@@ -325,7 +317,7 @@ function cmdDown(ws: Workspace, argv: string[]) {
       console.log(`stopping ${s.name} (${s.id})`);
       stopSession(s, false);
     }
-  console.log("board: not stopped; the board arrives in phase 3");
+  stopBoard(ws, true);
 }
 
 function cmdRestartLead(ws: Workspace, argv: string[]) {
@@ -376,6 +368,15 @@ function cmdSay(ws: Workspace, argv: string[]) {
   say(ws, p, { ticket: str(v.ticket), link: str(v.link), kind: kind as Kind });
 }
 
+function cmdBoard(ws: Workspace, argv: string[]) {
+  const { v } = args("board", argv, { stop: { type: "boolean" }, serve: { type: "boolean" }, inbox: { type: "boolean" } }, [0, 0]);
+  if ([v.stop, v.serve, v.inbox].filter(Boolean).length > 1) throw new UsageError("board: give one of --stop, --serve or --inbox");
+  if (v.inbox) followInbox(ws);
+  else if (v.serve) runBoard(ws);
+  else if (v.stop) stopBoard(ws);
+  else startBoard(ws);
+}
+
 function cmdMessages(ws: Workspace, argv: string[]) {
   const { v } = args("messages", argv, { n: { type: "string", short: "n" } }, [0, 0]);
   const n = v.n === undefined ? 20 : Number(v.n);
@@ -396,6 +397,7 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => void> = {
   "drop": cmdDrop,
   "say": cmdSay,
   "messages": cmdMessages,
+  "board": cmdBoard,
 };
 
 export function main(argv: string[]): number {
