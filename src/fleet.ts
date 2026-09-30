@@ -18,7 +18,7 @@ export interface Session {
   [k: string]: unknown;
 }
 
-const executable = (p: string) => {
+export const executable = (p: string) => {
   try {
     accessSync(p, constants.X_OK);
     return true;
