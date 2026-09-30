@@ -14,8 +14,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc",
-    "test": "tsc && node --test 'dist/test/*.test.js'"
+    "build": "tsc && cp -R src/board/static dist/src/board/",
+    "test": "npm run build && node --test 'dist/test/*.test.js'"
   },
   "dependencies": {
     "smol-toml": "^1.9.0"
