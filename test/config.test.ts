@@ -31,6 +31,9 @@ test("one message per bad key, naming the key", () => {
 [human]
 nmae = "Alex"
 
+[github]
+own_repos = ["alex/factory", "factory"]
+
 [paths]
 repos = "$NOT_SET/src"
 
@@ -81,6 +84,7 @@ port = 99999
 `), [
     "human.name: missing",
     "human.nmae: unknown key",
+    "github.own_repos: must name repos as owner/repo, got \"factory\"",
     "paths.repos: $NOT_SET is not set",
     "repos.web.remote: must look like owner/repo, got \"not a slug\"",
     "repos.web.gate_checks: must be an array of non-empty strings, got \"test\"",

@@ -12,7 +12,9 @@
 // protect (sessions in bypass permissions, where deny rules do not apply): default allow, but no
 // push to a protected branch by any spelling, no force push without a lease, no wholesale pushes,
 // no branch deletes on origin, no merging or undrafting through gh, no checkout of a protected
-// branch.
+// branch. The --own-repo repos have main as their only branch and no PRs: a push to main is allowed
+// when it names one of them by URL, and so is renaming a branch of one to main. Deleting a branch
+// through the API is allowed outside the --org.
 //
 // Why a parser and not regexes: a blocklist cannot enumerate a shell (`command git commit`, a
 // newline before the command, `git -c x=y push origin main`, `git push origin CL-1:main`,
@@ -30,6 +32,8 @@ export interface GuardContext {
   role: string;
   policy: Policy;
   writeDirs: string[];
+  org?: string;
+  ownRepos: string[];
 }
 
 export const PROTECTED = new Set(["main", "master", "staging", "production", "dev"]);
@@ -355,7 +359,9 @@ function checkGitProtect(words: string[], ctx: GuardContext): void {
     for (const a of pos[0] === "origin" ? pos.slice(1) : pos) {
       if (a.startsWith("+")) refuse("a + refspec is a force push; use --force-with-lease");
       if (a.includes(":") && a.split(":", 2)[1] === "") refuse("deleting a remote branch is not allowed");
-      if (protectedRef(a)) refuse(`pushing to a protected branch (${a}) is not allowed`);
+      // By URL only: the guard cannot see which repo a remote called origin is. `:main` deletes, so never.
+      const ownRepo = ctx.ownRepos.some((r) => pos[0] === `https://github.com/${r}` || pos[0] === `https://github.com/${r}.git`);
+      if (protectedRef(a) && (!ownRepo || a.startsWith(":"))) refuse(`pushing to a protected branch (${a}) is not allowed`);
     }
     return;
   }
@@ -418,12 +424,21 @@ function checkGhReadonly(words: string[]): void {
   refuse(`gh ${args.slice(0, 2).join(" ")} is not read-only`);
 }
 
-function checkGhProtect(words: string[]): void {
+const API_DELETE_BRANCH = /^(-X|--method)\s*=?\s*DELETE repos\/([\w.-]+)\/[\w.-]+\/git\/refs\/heads\/([\w./-]+)$/;
+const API_RENAME_TO_MAIN = /^(-X|--method)\s*=?\s*POST repos\/([\w.-]+\/[\w.-]+)\/branches\/[\w./-]+\/rename -f new_name=main$/;
+
+function checkGhProtect(words: string[], ctx: GuardContext): void {
   const args = words.slice(1);
   if (args[0] === "pr" && ["merge", "close", "lock", "unlock"].includes(args[1] ?? "")) refuse("merging or closing a PR is the human's call");
   if (args[0] === "pr" && args[1] === "ready" && !args.includes("--undo")) refuse("undrafting is done by `factory pr-send` only; gh pr ready --undo is fine");
-  if (args[0] === "api" && ghApiWrites(args.slice(1)) && /(pulls\/\d+\/merge|git\/refs|branches\/[^/]+\/protection)/.test(args.join(" ")))
+  if (args[0] === "api" && ghApiWrites(args.slice(1)) && /(pulls\/\d+\/merge|git\/refs|branches\/\S+\/(protection|rename))/.test(args.join(" "))) {
+    const rest = args.slice(1).join(" ");
+    const del = API_DELETE_BRANCH.exec(rest);
+    if (del && (del[2] as string).toLowerCase() !== ctx.org?.toLowerCase() && !PROTECTED.has((del[3] as string).toLowerCase())) return;
+    const rename = API_RENAME_TO_MAIN.exec(rest);
+    if (rename && ctx.ownRepos.includes(rename[2] as string)) return;
     refuse("writing merges or refs through the API is not allowed");
+  }
 }
 
 // ---------------------------------------------------------------- read-only allowlist
@@ -532,7 +547,7 @@ function checkProtect({ words: raw }: Simple, ctx: GuardContext): void {
     throw e;
   }
   if (name === "git") return checkGitProtect(words, ctx);
-  if (name === "gh") return checkGhProtect(words);
+  if (name === "gh") return checkGhProtect(words, ctx);
   // `bash -c '<script>'` is the script, checked like any other command line
   if (SHELLS.has(name)) {
     const i = words.findIndex((w, k) => k > 0 && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(w));
@@ -569,11 +584,14 @@ export function verdict(cmd: string, ctx: GuardContext): string | null {
 function context(argv: string[]): GuardContext {
   const { values } = parseArgs({
     args: argv, strict: true, allowPositionals: false,
-    options: { "role": { type: "string" }, "policy": { type: "string" }, "write-dir": { type: "string", multiple: true } },
+    options: {
+      "role": { type: "string" }, "policy": { type: "string" }, "write-dir": { type: "string", multiple: true },
+      "org": { type: "string" }, "own-repo": { type: "string", multiple: true },
+    },
   });
   if (!values.role) throw new Error("--role is missing");
   if (!(POLICIES as readonly string[]).includes(values.policy ?? "")) throw new Error(`--policy must be one of ${POLICIES.join(", ")}`);
-  return { role: values.role, policy: values.policy as Policy, writeDirs: values["write-dir"] ?? [] };
+  return { role: values.role, policy: values.policy as Policy, writeDirs: values["write-dir"] ?? [], org: values.org, ownRepos: values["own-repo"] ?? [] };
 }
 
 export function hook(argv: string[], input: string): HookResult {

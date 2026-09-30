@@ -149,7 +149,8 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
   for (const h of names) {
     if (h === "guard") {
       const dirs = t.writeDirs.flatMap((d) => ["--write-dir", WRITE_DIRS[d](ws)]);
-      add("PreToolUse", "Bash", ["hook", "guard", "--role", s.role, "--policy", t.guard as Policy, ...dirs], 10);
+      const repos = t.guard === "protect" ? [...(org ? ["--org", org] : []), ...ws.config.github.ownRepos.flatMap((r) => ["--own-repo", r])] : [];
+      add("PreToolUse", "Bash", ["hook", "guard", "--role", s.role, "--policy", t.guard as Policy, ...dirs, ...repos], 10);
     } else if (h === "no-dialogs") {
       add("PreToolUse", DIALOGS, ["hook", "no-dialogs", "--lead", leadName], 5);
     } else if (h === "no-side-channels") {

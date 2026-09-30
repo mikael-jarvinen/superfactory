@@ -9,6 +9,7 @@ name = "Alex"                             # the person the fleet works for; the 
 [github]
 org = "acme"
 bots = ["coderabbitai", "Copilot"]        # review bots the factory may answer, inside their own threads
+# own_repos = ["alex/factory"]            # repos with main as their only branch and no PRs; a push to main by URL is allowed
 
 [paths]
 repos = "~/src"                           # parent of the checkouts, for repos with a relative path

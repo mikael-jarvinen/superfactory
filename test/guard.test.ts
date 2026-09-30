@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { type GuardContext, verdict } from "../src/hooks/guard.js";
 
-const ro: GuardContext = { role: "reviewer", policy: "readonly", writeDirs: [] };
-const pr: GuardContext = { role: "builder", policy: "protect", writeDirs: [] };
+const ro: GuardContext = { role: "reviewer", policy: "readonly", writeDirs: [], ownRepos: [] };
+const pr: GuardContext = { role: "builder", policy: "protect", writeDirs: [], org: "acme", ownRepos: ["acme/workspace", "alex/factory"] };
 
 const REFUSE = 2;
 const ALLOW = 0;
@@ -58,7 +58,12 @@ const table: [GuardContext, number, string[]][] = [
     "GIT push origin main", "git push", "git push origin", "git branch -f main HEAD", "git update-ref refs/heads/main HEAD", "gh api -X PUT repos/o/r/pulls/1/merge",
     "gh api -X DELETE repos/o/r/git/refs/heads/main", "gh pr merge 1", "gh pr ready 1", "git checkout main", "git switch main", "command git push origin main",
     "\\git push origin main", "git push origin CL-1:refs/heads/main", "ls\ngit push origin main", "cd x && git push --force origin CL-1", "git push origin +CL-1",
-    "git push origin CL-1 main", "env git push origin main",
+    "git push origin CL-1 main", "env git push origin main", "gh api -X DELETE repos/acme/api/git/refs/heads/x",
+    "gh api -X DELETE repos/o/r/git/refs/heads/master", "gh api -X DELETE repos/o/r/git/refs/heads/x -f a=b", "gh api -X POST repos/o/r/branches/x/rename -f new_name=y",
+    "gh api -X POST repos/acme/api/branches/x/rename -f new_name=main", "gh api -X POST repos/acme/workspace/branches/main/rename -f new_name=x",
+    "git push https://github.com/acme/api.git HEAD:main", "git push --force https://github.com/acme/workspace.git main", "git push origin HEAD:main",
+    "gh api -X DELETE repos/Acme/api/git/refs/heads/x", "gh api -X POST repos/o/r/branches/a/b/rename -f new_name=y",
+    "git push https://github.com/acme/workspace.git :main", "git push https://github.com/acme/workspace.git +main",
   ]],
   [pr, ALLOW, [
     "git push -u origin CL-1", "git push --force-with-lease origin MOBILE-1", "git push origin feature/main-menu", "git push origin main-fix",
@@ -66,6 +71,9 @@ const table: [GuardContext, number, string[]][] = [
     "git log main..HEAD", "git diff main", "gh pr create --draft --title x", "gh pr ready 1 --undo", 'git reset --soft origin/main && git commit -m "MOBILE-1 x"',
     "npm install", "yarn build", "flutter pub run build_runner build --delete-conflicting-outputs --force-jit", "python3 scripts/x.py", "rm -rf node_modules",
     "git push -u origin MOBILE-1234", "git fetch origin main", "git reset --hard origin/main", "gh pr view 1", "git push origin HEAD:CL-1",
+    "gh api -X DELETE repos/o/r/git/refs/heads/step-2", "gh api --method=DELETE repos/o/r/git/refs/heads/a/b",
+    "gh api -X POST repos/acme/workspace/branches/workspace/rename -f new_name=main", "git push https://github.com/alex/factory.git HEAD:main",
+    "git push https://github.com/acme/workspace.git main",
   ]],
   // Beyond the old table. timeout is unwrapped and its command checked rather than refused; a shell's
   // -c script is checked; ");" is two operators; a quoted "|" or ">" is a word; >&1 writes no file.
