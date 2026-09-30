@@ -10,33 +10,15 @@
 // re-armed at the next stop at the latest.
 //
 // A hook that fails must not cost the session anything, so every error ends in exit 0.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { inboxHeld } from "../board/inbox.js";
 import { factoryCommand, type HookResult, shq } from "../settings.js";
 import { capitalize } from "../util.js";
 import { openWorkspace, resolveWorkspace, type Workspace } from "../workspace.js";
 
 export const statusFile = (ws: Workspace, agent: string) => join(ws.runDir, `status-${agent}.json`);
-
-// The inbox monitor writes its pid here while it runs; the board owns that half.
-export const inboxPidFile = (ws: Workspace) => join(ws.runDir, "inbox.pid");
-
-export function inboxArmed(ws: Workspace): boolean {
-  let pid: number;
-  try {
-    pid = Number.parseInt(readFileSync(inboxPidFile(ws), "utf8").trim(), 10);
-  } catch {
-    return false;
-  }
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
 
 const armText = (ws: Workspace) =>
   `The message page inbox is not armed, so ${ws.config.human.name}'s messages are going by the slow courier. ` +
@@ -117,7 +99,7 @@ function status(argv: string[], input: string, workspace: string | undefined): H
   const tmp = `${file}.${process.pid}`;
   writeFileSync(tmp, JSON.stringify({ t: Date.now() / 1000, words, event: ev, transcript: d.transcript_path ?? null, session: d.session_id ?? null }));
   renameSync(tmp, file);
-  if (ev === "Stop" && values.inbox && !d.stop_hook_active && !inboxArmed(ws))
+  if (ev === "Stop" && values.inbox && !d.stop_hook_active && !inboxHeld(ws))
     return { code: 0, stdout: JSON.stringify({ decision: "block", reason: armText(ws) }) + "\n" };
   return { code: 0 };
 }

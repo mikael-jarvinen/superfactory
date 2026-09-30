@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { inboxLock, tryLock } from "../src/board/inbox.js";
 import { agentOrDie } from "../src/fleet.js";
-import { inboxPidFile, statusFile } from "../src/hooks/status.js";
+import { statusFile } from "../src/hooks/status.js";
 import { settingsFile } from "../src/launch.js";
 import { TEMPLATES_DIR } from "../src/settings.js";
 import { openWorkspace } from "../src/workspace.js";
@@ -99,6 +100,8 @@ test("the lead's stop is held once while nothing holds the inbox", () => {
   assert.equal(typeof t, "number");
   assert.deepEqual(rest, { words: "idle", event: "Stop", transcript: "/t.jsonl", session: "s1" });
   assert.equal(stop(true).stdout, "");
-  writeFileSync(inboxPidFile(ws), `${process.pid}\n`);
+  const fd = tryLock(inboxLock(ws));
+  assert.notEqual(fd, null);
+  after(() => closeSync(fd as number));
   assert.equal(stop(false).stdout, "");
 });

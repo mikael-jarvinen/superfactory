@@ -45,7 +45,7 @@ model = "opus"
 effort = "high"
 autocompact = "1M"                        # passed to claude as --autocompact
 permission_mode = "bypassPermissions"
-settings = "lead"                         # a settings template (phase 2), or the path of a settings file
+settings = "lead"                         # a settings template, or the path of a settings file
 extra_hooks = ["status"]                  # hooks added to the template
 
 [roles.builder]
