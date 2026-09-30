@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -168,6 +168,10 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
 
   mkdirSync(ws.runDir, { recursive: true });
   const path = join(ws.runDir, `settings-${s.name}.json`);
-  writeFileSync(path, JSON.stringify(out, null, 2) + "\n");
+  // Through a temp file and a rename: the board's courier and a watcher can render the same file at
+  // once, and a session must never read one half written.
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(out, null, 2) + "\n");
+  renameSync(tmp, path);
   return path;
 }

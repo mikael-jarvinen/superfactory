@@ -20,12 +20,17 @@ import { send } from "./gate/send.js";
 import { ACCEPT_PROSE, waitAndSend } from "./gate/wait.js";
 import { KINDS, type Kind, messages, say } from "./messages.js";
 import { type HookName, type HookResult, HOOKS } from "./settings.js";
+import { install, render, status as scheduleStatus, uninstall } from "./scheduler/launchd.js";
 import { cmdStack, STACK_USAGE } from "./stacks/command.js";
 import { exportStacks } from "./stacks/engine.js";
 import {
   allRecs, appendEvent, BUSY, DISPATCHABLE, KEY_HINT, loadRec, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
 import { FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.js";
+import { failure } from "./watchers/job.js";
+import { runQueue } from "./watchers/queue.js";
+import { relay } from "./watchers/relay.js";
+import { runRound } from "./watchers/round.js";
 import { branchPushed, ensureWorktree, git, worktreeDirty } from "./worktree.js";
 import { openWorkspace, resolveWorkspace, type Workspace } from "./workspace.js";
 
@@ -85,6 +90,15 @@ usage: factory [--workspace <dir>] <command> [options]
                                   put a demo's screenshots and video into the PR body
   demo <KEY> --init               copy the demo template to /tmp/demo/<KEY>/demo.spec.ts
   demo <KEY> <spec.ts> [base-url] run a Playwright demo from the worktree; media in /tmp/demo/<KEY>
+  watch queue                     read the tracker's queue once, and tell the lead about new queued
+                                  tickets and fresh merges. What the scheduler runs; prompts/queue.md.
+  watch round [--facts]           the round once: facts gathered here, judged by a disposable session
+                                  that tells the lead what needs judgement; prompts/round.md.
+                                  --facts prints the facts and runs nothing.
+  schedule render|install|uninstall|status
+                                  the launchd jobs from [watchers]: render them into
+                                  logs/run/launchd/, load or unload them for this user, or show
+                                  what is installed and loaded
   hook <${HOOKS.join("|")}> [...]
                                   a Claude Code hook, reading the event on stdin. The rendered
                                   settings in logs/run/ call these; nothing else needs to.
@@ -404,7 +418,8 @@ function cmdBoard(ws: Workspace, argv: string[]) {
   const { v } = args("board", argv, { stop: { type: "boolean" }, serve: { type: "boolean" }, inbox: { type: "boolean" } }, [0, 0]);
   if ([v.stop, v.serve, v.inbox].filter(Boolean).length > 1) throw new UsageError("board: give one of --stop, --serve or --inbox");
   if (v.inbox) followInbox(ws);
-  else if (v.serve) runBoard(ws);
+  // The courier carries a page line to the lead while no inbox monitor is armed.
+  else if (v.serve) runBoard(ws, { relay });
   else if (v.stop) stopBoard(ws);
   else startBoard(ws);
 }
@@ -468,6 +483,34 @@ function cmdDemo(ws: Workspace, argv: string[]): number | void {
   return demo(ws, key, spec, base);
 }
 
+// A scheduled run that dies before it starts leaves a line where the round looks, not only in the
+// launchd log nobody reads.
+function cmdWatch(ws: Workspace, argv: string[]): number {
+  const { v, p } = args("watch", argv, { facts: { type: "boolean" } }, [1, 1]);
+  const job = p[0] as string;
+  if (job !== "queue" && job !== "round") throw new UsageError(`watch: ${pyRepr(job)} is not a watcher; watchers are queue, round`);
+  if (v.facts && job !== "round") throw new UsageError("watch: --facts is for the round");
+  try {
+    return job === "queue" ? runQueue(ws) : runRound(ws, { factsOnly: !!v.facts });
+  } catch (e) {
+    if (e instanceof FactoryError && !v.facts) failure(ws, `${job} FAILED: ${e.message.split("\n")[0]}`);
+    throw e;
+  }
+}
+
+function cmdSchedule(ws: Workspace, argv: string[]): number {
+  const { p } = args("schedule", argv, {}, [1, 1]);
+  const verb = p[0] as string;
+  if (verb === "render") {
+    for (const r of render(ws)) console.log(`rendered ${r.path}`);
+    return 0;
+  }
+  if (verb === "install") return install(ws);
+  if (verb === "uninstall") return uninstall(ws);
+  if (verb === "status") return scheduleStatus(ws);
+  throw new UsageError(`schedule: ${pyRepr(verb)}; give render, install, uninstall or status`);
+}
+
 const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void> = {
   "up": cmdUp,
   "down": cmdDown,
@@ -490,6 +533,8 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void>
   "pr-media": cmdPrMedia,
   "demo": cmdDemo,
   "stack": cmdStack,
+  "watch": cmdWatch,
+  "schedule": cmdSchedule,
 };
 
 const HOOK_FNS: Record<HookName, (argv: string[], input: string, workspace?: string) => HookResult> = {
