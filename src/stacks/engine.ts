@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { stacksFile } from "../board/server.js";
 import type { Repo, Stack } from "../config.js";
@@ -323,8 +323,8 @@ function ensureOwnAll(ws: Workspace, stack: Stack, slot: number, p: Placement, o
   for (const [r, wt] of Object.entries(p)) if (wt === ownWorktree(ws, stack.key, r, slot)) ensureOwn(repoOf(ws, r), wt, out);
 }
 
-function mustRun(ws: Workspace, stack: Stack, slot: number, p: Placement, verb: "up" | "down" | "destroy", after = ""): void {
-  const r = callScript(ws, stack, slot, p, verb, true);
+function mustRun(ws: Workspace, stack: Stack, slot: number, p: Placement, verb: "up" | "down" | "destroy", after = "", args: string[] = []): void {
+  const r = callScript(ws, stack, slot, p, verb, true, args);
   if (r.status !== 0) die(failed(stack, slot, verb, r) + after);
 }
 
@@ -334,6 +334,9 @@ export interface Where {
   cwd: string;
   stack?: string;
   slot?: number;
+  // After `--`: passed to the verb on the slot asked for, never to the calls the engine makes on
+  // other slots' behalf, such as a reclaim or a hand-back.
+  args?: string[];
 }
 
 // Bring up the slot of the work item whose worktree `cwd` is, or with --slot and no worktree, a
@@ -380,7 +383,7 @@ export function stackUp(ws: Workspace, w: Where, out: Out = console.log): void {
     exportStacks(ws);
     return { slot: n, placement: plan };
   });
-  mustRun(ws, stack, slot, placement, "up", `\nThe slot stays placed. Fix it and run up again, or free it with \`factory stack destroy\`.`);
+  mustRun(ws, stack, slot, placement, "up", `\nThe slot stays placed. Fix it and run up again, or free it with \`factory stack destroy\`.`, w.args);
   const u = callScript(ws, stack, slot, placement, "url");
   out(`${stack.key} slot ${slot} up${u.status === 0 && u.stdout.trim() ? `: ${u.stdout.trim()}` : ""}`);
 }
@@ -421,7 +424,7 @@ export function stackDown(ws: Workspace, w: Where, out: Out = console.log): void
   refuseOthers(ws, r, reg);
   const e = reg.slots[String(r.slot)];
   if (!e) die(`${r.stack.key} slot ${r.slot} is free; nothing runs there`);
-  mustRun(ws, r.stack, r.slot, e.worktrees, "down");
+  mustRun(ws, r.stack, r.slot, e.worktrees, "down", "", w.args);
   out(`${r.stack.key} slot ${r.slot} down. Its data is kept; \`factory stack up\` brings it back.`);
 }
 
@@ -430,7 +433,7 @@ export function stackDestroy(ws: Workspace, w: Where, out: Out = console.log): v
   withLock(ws, r.stack.key, out, () => {
     const reg = loadRegistry(ws, r.stack.key);
     refuseOthers(ws, r, reg);
-    mustRun(ws, r.stack, r.slot, reg.slots[String(r.slot)]?.worktrees ?? {}, "destroy");
+    mustRun(ws, r.stack, r.slot, reg.slots[String(r.slot)]?.worktrees ?? {}, "destroy", "", w.args);
     delete reg.slots[String(r.slot)];
     saveRegistry(ws, r.stack.key, reg);
     exportStacks(ws);
@@ -476,8 +479,13 @@ function sitesOf(ws: Workspace, stack: Stack, reg: Registry, slot: number, warn:
 
 // Every slot of every stack with a script, one row per site, for the board: stack, slot, name,
 // worktree ("-" for a free slot), url, health url.
+// With no script there is no file, since the board shows a panel whenever the file exists.
 export function exportStacks(ws: Workspace, warn: Out = console.error): Site[] {
   const sites: Site[] = [];
+  if (!Object.values(ws.config.stacks).some((s) => s.script)) {
+    rmSync(stacksFile(ws), { force: true });
+    return sites;
+  }
   for (const stack of Object.values(ws.config.stacks)) {
     if (!stack.script) continue;
     const reg = loadRegistry(ws, stack.key);

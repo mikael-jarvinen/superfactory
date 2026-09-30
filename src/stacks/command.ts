@@ -4,11 +4,12 @@ import { FactoryError, pyRepr } from "../util.js";
 import { stackDestroy, stackDoctor, stackDown, stackStatus, stackUp, stackUrl, type Where } from "./engine.js";
 import { startDetached, stopDetached, waitHttp, waitPortFree } from "./process.js";
 
-export const STACK_USAGE = `  stack up|down|destroy|url|status|doctor [--stack S] [--slot N]
+export const STACK_USAGE = `  stack up|down|destroy|url|status|doctor [--stack S] [--slot N] [-- <args>]
                                   a work item's local stack, run from its worktree: the slot is
                                   allocated on up and kept until destroy. --slot N names a slot;
                                   up --slot N from outside a worktree runs the base branches.
-                                  status and doctor without --slot cover every slot.
+                                  status and doctor without --slot cover every slot. up, down and
+                                  destroy pass <args> to the script after the verb.
   stack run-detached --pid-file F --log L [--cwd D] [--port P] -- <command>...
                                   for stack scripts: stop what F names and its children, wait for
                                   P to be released, then start the command in a session of its own
@@ -53,10 +54,15 @@ export function cmdStack(ws: Workspace, argv: string[]): void {
   if (verb === "run-detached") return runDetached(rest);
   if (verb === "wait-http") return waitForHttp(rest);
   const s = { type: "string" } as const;
-  const { values: v, positionals: p } = parse(verb ?? "", rest, { stack: s, slot: s });
+  // Split before parsing, so the script's own flags are never read as ours.
+  const dash = rest.indexOf("--");
+  const own = dash < 0 ? rest : rest.slice(0, dash);
+  const args = dash < 0 ? [] : rest.slice(dash + 1);
+  const { values: v, positionals: p } = parse(verb ?? "", own, { stack: s, slot: s });
   if (v.help) return void console.log(STACK_USAGE);
   if (p.length) throw usage(`${verb}: unexpected ${p.map(pyRepr).join(" ")}`);
-  const w: Where = { cwd: process.cwd(), stack: v.stack as string | undefined, slot: int("slot", v.slot) };
+  if (dash >= 0 && verb !== "up" && verb !== "down" && verb !== "destroy") throw usage(`${verb} passes nothing to the script; only up, down and destroy take -- <args>`);
+  const w: Where = { cwd: process.cwd(), stack: v.stack as string | undefined, slot: int("slot", v.slot), args };
   switch (verb) {
     case "up": return stackUp(ws, w);
     case "down": return stackDown(ws, w);

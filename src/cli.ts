@@ -13,6 +13,7 @@ import { hook as statusHook } from "./hooks/status.js";
 import { KINDS, type Kind, messages, say } from "./messages.js";
 import { type HookName, type HookResult, HOOKS } from "./settings.js";
 import { cmdStack, STACK_USAGE } from "./stacks/command.js";
+import { exportStacks } from "./stacks/engine.js";
 import {
   allRecs, appendEvent, BUSY, DISPATCHABLE, KEY_HINT, loadRec, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
@@ -288,6 +289,8 @@ function cmdReview(ws: Workspace, argv: string[]) {
 
 function up(ws: Workspace, fresh: boolean) {
   const ld = lead(ws);
+  // the board's stacks panel reads this export, so write it before the board's first check
+  exportStacks(ws);
   startBoard(ws, true);
   const s = findSession(ld.name);
   if (sessionAlive(s)) {

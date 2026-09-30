@@ -52,13 +52,14 @@ export function scriptOf(stack: Stack): string {
 
 // `stream` hands the script this process's stdout and stderr, for the verbs that take minutes and
 // report as they go. Otherwise both are captured, for the verbs whose output the engine reads.
-export function callScript(ws: Workspace, stack: Stack, slot: number, placement: Placement, verb: Verb, stream = false): RunResult {
+// `args` follow the verb: what the command line gave after `--`, for the script alone.
+export function callScript(ws: Workspace, stack: Stack, slot: number, placement: Placement, verb: Verb, stream = false, args: string[] = []): RunResult {
   const script = scriptOf(stack);
   const env = { ...process.env, ...scriptEnv(ws, stack, slot, placement) };
   mkdirSync(env.FACTORY_SLOT_DIR as string, { recursive: true });
   mkdirSync(env.FACTORY_LOG_DIR as string, { recursive: true });
-  if (!stream) return run(script, [verb], { cwd: ws.dir, env });
-  const r = spawnSync(script, [verb], { cwd: ws.dir, env, stdio: ["ignore", "inherit", "inherit"] });
+  if (!stream) return run(script, [verb, ...args], { cwd: ws.dir, env });
+  const r = spawnSync(script, [verb, ...args], { cwd: ws.dir, env, stdio: ["ignore", "inherit", "inherit"] });
   if (r.error) return { status: 127, stdout: "", stderr: `cannot run ${script}: ${r.error.message}` };
   return { status: r.status ?? 1, stdout: "", stderr: "" };
 }

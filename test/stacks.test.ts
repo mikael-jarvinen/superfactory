@@ -188,9 +188,10 @@ test("allocation order, reclaiming a removed worktree, and taking over the stack
   must(join(dir, "repos", "web"), "worktree", "remove", "--force", removed);
   assert.match(ok(up(wt("web", "A-2", "fay")), "A-2"), /solo slot 2 \(free\)/, "a free slot before a vanished one");
   const a3 = wt("web", "A-3", "eve");
-  assert.match(ok(up(a3), "A-3"), /solo slot 1 \(reclaimed\)/);
+  // what follows -- goes to the up asked for, word by word, and not to the reclaim the engine runs first
+  assert.match(ok(up(a3, "--", "--rebuild", "two words"), "A-3"), /solo slot 1 \(reclaimed\)/);
   assert.match(up(wt("web", "A-4", "fay")).stderr, /every slot of solo open to fay is taken/);
-  assert.deepEqual(calls(dir), ["up solo 2 web=A-2 api=-", "destroy solo 1 web=A-1 api=-", "up solo 1 web=A-3 api=-"]);
+  assert.deepEqual(calls(dir), ["up solo 2 web=A-2 api=-", "destroy solo 1 web=A-1 api=-", "up solo 1 web=A-3 api=- args=--rebuild|two words"]);
 
   ok(factory(dir, ["stack", "destroy", "--stack", "solo", "--slot", "2"]), "destroy");
   assert.match(ok(up(dir, "--stack", "solo", "--slot", "2"), "the base branch"), /solo slot 2 \(asked for\): web=solo-s2/);
