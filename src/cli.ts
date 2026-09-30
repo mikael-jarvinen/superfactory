@@ -20,6 +20,7 @@ import { send } from "./gate/send.js";
 import { ACCEPT_PROSE, waitAndSend } from "./gate/wait.js";
 import { KINDS, type Kind, messages, say } from "./messages.js";
 import { type HookName, type HookResult, HOOKS } from "./settings.js";
+import { install, render, status as scheduleStatus, uninstall } from "./scheduler/launchd.js";
 import { cmdStack, STACK_USAGE } from "./stacks/command.js";
 import { exportStacks } from "./stacks/engine.js";
 import {
@@ -86,6 +87,10 @@ usage: factory [--workspace <dir>] <command> [options]
                                   put a demo's screenshots and video into the PR body
   demo <KEY> --init               copy the demo template to /tmp/demo/<KEY>/demo.spec.ts
   demo <KEY> <spec.ts> [base-url] run a Playwright demo from the worktree; media in /tmp/demo/<KEY>
+  schedule render|install|uninstall|status
+                                  the launchd jobs from [watchers]: render them into
+                                  logs/run/launchd/, load or unload them for this user, or show
+                                  what is installed and loaded
   hook <${HOOKS.join("|")}> [...]
                                   a Claude Code hook, reading the event on stdin. The rendered
                                   settings in logs/run/ call these; nothing else needs to.
@@ -470,6 +475,19 @@ function cmdDemo(ws: Workspace, argv: string[]): number | void {
   return demo(ws, key, spec, base);
 }
 
+function cmdSchedule(ws: Workspace, argv: string[]): number {
+  const { p } = args("schedule", argv, {}, [1, 1]);
+  const verb = p[0] as string;
+  if (verb === "render") {
+    for (const r of render(ws)) console.log(`rendered ${r.path}`);
+    return 0;
+  }
+  if (verb === "install") return install(ws);
+  if (verb === "uninstall") return uninstall(ws);
+  if (verb === "status") return scheduleStatus(ws);
+  throw new UsageError(`schedule: ${pyRepr(verb)}; give render, install, uninstall or status`);
+}
+
 const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void> = {
   "up": cmdUp,
   "down": cmdDown,
@@ -492,6 +510,7 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void>
   "pr-media": cmdPrMedia,
   "demo": cmdDemo,
   "stack": cmdStack,
+  "schedule": cmdSchedule,
 };
 
 const HOOK_FNS: Record<HookName, (argv: string[], input: string, workspace?: string) => HookResult> = {

@@ -104,8 +104,13 @@ port = 8787
 [gate]
 prose_remark = 30                         # added comment lines at which the gate remarks on prose volume
 
-[watchers]
-queue_every_minutes = 15                  # how often the queue watcher reads the tracker
+[watchers]                                # scheduled by `factory schedule install`, as launchd jobs
+                                          # named superfactory.<lead>.<job>. Their prompts are the
+                                          # workspace's prompts/queue.md, round.md and relay.md;
+                                          # examples/prompts/ has one of each to start from.
+queue_every_minutes = 15                  # how often the queue watcher reads the tracker: a number
+                                          # that divides 60, or whole hours that divide 24. No queue
+                                          # watcher runs when tracker.kind is "none".
 round_minute = 7                          # the minute past each hour the round runs
-model = "sonnet"
-relay_model = "haiku"
+model = "sonnet"                          # the queue watcher and the round
+relay_model = "haiku"                     # the courier that carries a message to the lead
