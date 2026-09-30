@@ -12,6 +12,7 @@ import { hook as noSideChannelsHook } from "./hooks/no-side-channels.js";
 import { hook as statusHook } from "./hooks/status.js";
 import { KINDS, type Kind, messages, say } from "./messages.js";
 import { type HookName, type HookResult, HOOKS } from "./settings.js";
+import { cmdStack, STACK_USAGE } from "./stacks/command.js";
 import {
   allRecs, appendEvent, BUSY, DISPATCHABLE, KEY_HINT, loadRec, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
@@ -57,9 +58,10 @@ usage: factory [--workspace <dir>] <command> [options]
   hook <${HOOKS.join("|")}> [...]
                                   a Claude Code hook, reading the event on stdin. The rendered
                                   settings in logs/run/ call these; nothing else needs to.
+${STACK_USAGE}
 
 Not built yet: pr-ready, pr-send, pr-wait, delta-range, pr-comment, pr-media and demo (phase 4),
-stack (phase 5), doctor (phase 7).
+doctor (phase 7).
 
 The workspace is --workspace, else $FACTORY_WORKSPACE, else the nearest factory.toml above the
 current directory. Only this program writes the state store.
@@ -74,7 +76,6 @@ const STUBS: Record<string, [number, string]> = {
   "pr-comment": [4, "the gate"],
   "pr-media": [4, "the gate"],
   "demo": [4, "the gate"],
-  "stack": [5, "stacks"],
   "doctor": [7, "doctor"],
 };
 
@@ -405,6 +406,7 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => void> = {
   "say": cmdSay,
   "messages": cmdMessages,
   "board": cmdBoard,
+  "stack": cmdStack,
 };
 
 const HOOK_FNS: Record<HookName, (argv: string[], input: string, workspace?: string) => HookResult> = {

@@ -5,7 +5,7 @@ import { die, realpathLoose, run } from "./util.js";
 
 export const git = (dir: string, ...args: string[]) => run("git", ["-C", dir, ...args]);
 
-const HTTPS = ["-c", "url.https://github.com/.insteadOf=git@github.com:"];
+export const HTTPS = ["-c", "url.https://github.com/.insteadOf=git@github.com:"];
 
 export const worktreePath = (repoDir: string, ticket: string) => join(repoDir, ".claude", "worktrees", ticket);
 
