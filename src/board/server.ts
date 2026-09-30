@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import { basename, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { claudeBin, lead, type Session, sessionAlive } from "../fleet.js";
+import { statusFile } from "../hooks/status.js";
 import { isHuman, readTail } from "../messages.js";
 import { allRecs, BUSY, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
@@ -21,9 +22,6 @@ import { postMessage, Receipts, type Relay, sweep } from "./inbox.js";
 
 const STATIC = fileURLToPath(new URL("./static/", import.meta.url));
 const CLI = fileURLToPath(new URL("../cli.js", import.meta.url));
-
-// The lead's status hook writes its last word here, with the transcript path the receipts read.
-export const statusFile = (ws: Workspace) => join(ws.runDir, "lead.status.json");
 
 // What the stack engine exports for the board, one row per site of a slot:
 // stack, slot, name, worktree ("-" for a free slot), url, health url.
@@ -295,9 +293,10 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks) {
   };
 }
 
+// The lead's status hook writes its last word there, with the transcript path the receipts read.
 function leadStatus(ws: Workspace): { words?: string; transcript?: string } {
   try {
-    return JSON.parse(readFileSync(statusFile(ws), "utf8"));
+    return JSON.parse(readFileSync(statusFile(ws, lead(ws).name), "utf8"));
   } catch {
     return {};
   }

@@ -1,0 +1,5 @@
+{
+  "hooks": ["guard", "no-dialogs", "no-side-channels"],
+  "guard": "protect",
+  "tracker_writes": true
+}

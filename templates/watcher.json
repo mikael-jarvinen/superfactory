@@ -1,0 +1,10 @@
+{
+  "hooks": ["guard", "no-dialogs", "no-side-channels"],
+  "guard": "readonly",
+  "write_dirs": ["logs"],
+  "settings": {
+    "permissions": {
+      "deny": ["EnterPlanMode", "ExitPlanMode", "NotebookEdit"]
+    }
+  }
+}

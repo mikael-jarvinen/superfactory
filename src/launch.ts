@@ -2,8 +2,9 @@ import { randomBytes } from "node:crypto";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
-import { type Agent, isSettingsPath, type Role } from "./config.js";
+import type { Agent, Role } from "./config.js";
 import { claudeBin, lead, type Session, waitForName } from "./fleet.js";
+import { renderSettings } from "./settings.js";
 import { branchFor, isLocal } from "./state.js";
 import type { Workspace } from "./workspace.js";
 import { capitalize, die, run } from "./util.js";
@@ -16,12 +17,12 @@ export function roleOf(ws: Workspace, agent: Agent): Role {
   return role;
 }
 
-// Phase 1 takes a settings file path; templates are rendered from phase 2 on.
+// Rendered at every launch from the role's template and config, into logs/run/.
 export function settingsFile(ws: Workspace, agent: Agent): string {
-  const s = roleOf(ws, agent).settings;
-  if (!isSettingsPath(s))
-    die(`roles.${agent.role}.settings = ${JSON.stringify(s)} names a template, and templates are rendered from phase 2. Give the path of a settings file for now.`);
-  return s;
+  const role = roleOf(ws, agent);
+  return renderSettings(ws, {
+    name: agent.name, role: agent.role, template: role.settings, extraHooks: role.extraHooks, permissionMode: role.permissionMode,
+  });
 }
 
 export function buildAppendix(ws: Workspace, agent: Agent, repoDir: string | undefined): string | null {

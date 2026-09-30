@@ -33,14 +33,15 @@ model = "opus"
 effort = "high"
 autocompact = "1M"
 permission_mode = "bypassPermissions"
-settings = "settings/lead.json"
+settings = "lead"
+extra_hooks = ["status"]
 
 [roles.builder]
 model = "opus"
 effort = "high"
 autocompact = "1M"
 permission_mode = "bypassPermissions"
-settings = "settings/builder.json"
+settings = "builder"
 mcp_config = "settings/mcp.json"
 
 [roles.reviewer]
@@ -49,7 +50,7 @@ model = "opus"
 effort = "high"
 autocompact = "1M"
 permission_mode = "auto"
-settings = "settings/readonly.json"
+settings = "readonly"
 add_dirs = ["web", "api"]
 
 [[agents]]
