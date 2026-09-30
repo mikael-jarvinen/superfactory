@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>messages &middot; superfactory</title>
+<link rel="stylesheet" href="/static/base.css">
+<link rel="stylesheet" href="/static/messages.css">
+<script src="/static/common.js"></script>
+</head><body>
+<header>
+  <span class="brand"><span class="mark">&#9632;</span> superfactory</span>
+  <nav><a href="/">board</a><a class="on" href="/messages">messages</a></nav>
+  <span class="pulse" id="pulse"><i></i><span id="at">connecting</span></span>
+  <button class="theme" id="theme" title="light or dark">theme</button>
+</header>
+<div class="wrap">
+  <form id="f">
+    <textarea id="t" rows="2" placeholder="enter to send, shift-enter for a new line"></textarea>
+    <button id="b">send</button>
+  </form>
+  <div class="doing idle" id="doing" hidden><i></i><span><span id="lead"></span> &middot; <span id="words">&hellip;</span></span></div>
+  <div class="err" id="err"></div>
+  <div id="list"><div class="skel sk"></div><div class="skel sk"></div></div>
+</div>
+<script src="/static/messages.js"></script>
+</body></html>

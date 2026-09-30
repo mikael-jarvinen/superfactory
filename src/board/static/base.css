@@ -1,0 +1,68 @@
+/* Every text colour is measured against its own ground rather than chosen by eye: nothing under
+   4.5:1, and the small type well above it. Change one and measure it.
+   One meaning per colour, everywhere: green is live or up, red is down, amber is waiting on the
+   human, grey is idle, blue is a link. */
+:root{
+  --ground:#f6f5f2; --panel:#ffffff; --raised:#f2f1ee; --line:#d8d6d1; --line-soft:#e6e4e0;
+  --ink:#1b1d22; --dim:#4a505b; --faint:#5f6773; --mute:#696f7b;
+  --you:#8a5a05; --ok:#1f6b42; --cool:#2a5a95; --hot:#a8341f;
+  --ok-bg:#e5f2ea; --hot-bg:#fbe9e5; --you-bg:#f8eedb; --idle:#9aa0aa;
+  --shadow:0 1px 2px rgba(27,29,34,.06);
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0b0c0f; --panel:#131519; --raised:#181b21; --line:#2c313b; --line-soft:#1f232a;
+    --ink:#e9e7e4; --dim:#c3c8d2; --faint:#a3aab7; --mute:#7b8290;
+    --you:#f0a94c; --ok:#78c795; --cool:#7aa2d6; --hot:#e08573;
+    --ok-bg:#15291e; --hot-bg:#35191a; --you-bg:#33260f; --idle:#4b515c;
+    --shadow:none;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0b0c0f; --panel:#131519; --raised:#181b21; --line:#2c313b; --line-soft:#1f232a;
+  --ink:#e9e7e4; --dim:#c3c8d2; --faint:#a3aab7; --mute:#7b8290;
+  --you:#f0a94c; --ok:#78c795; --cool:#7aa2d6; --hot:#e08573;
+  --ok-bg:#15291e; --hot-bg:#35191a; --you-bg:#33260f; --idle:#4b515c;
+  --shadow:none;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.5 var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--cool);text-decoration:none}
+a:hover{text-decoration:underline}
+
+header{position:sticky;top:0;z-index:5;background:var(--ground);
+       border-bottom:1px solid var(--line);padding:13px 20px;display:flex;align-items:center;gap:18px}
+.brand{font-family:var(--mono);font-size:12px;letter-spacing:.2em;text-transform:uppercase;
+       color:var(--ink);font-weight:500}
+.brand .mark{color:var(--you)}
+nav{display:flex;gap:14px;margin-left:4px}
+nav a{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}
+nav a:hover{color:var(--ink);text-decoration:none}
+nav a.on{color:var(--ink)}
+.pulse{margin-left:auto;display:flex;align-items:center;gap:7px;font-family:var(--mono);
+       font-size:11px;color:var(--faint);letter-spacing:.04em}
+.pulse i{width:6px;height:6px;border-radius:50%;background:var(--ok);display:block;
+         animation:beat 2s ease-in-out infinite}
+.theme{background:none;border:0;padding:0 0 0 4px;cursor:pointer;color:var(--faint);
+       font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+.theme:hover{color:var(--ink)}
+.pulse.stale i{background:var(--hot);animation:none}
+.pulse.stale{color:var(--hot)}
+@keyframes beat{0%,100%{opacity:1}50%{opacity:.25}}
+
+.boot{padding:64px 20px;text-align:center;color:var(--faint);font-family:var(--mono);font-size:12px;
+      letter-spacing:.1em;text-transform:uppercase}
+.boot i{display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--faint);
+        margin:0 3px;animation:beat 1.2s ease-in-out infinite}
+.boot i:nth-child(2){animation-delay:.18s}
+.boot i:nth-child(3){animation-delay:.36s}
+@media (max-width:640px){
+  header{padding:11px 14px;gap:10px}
+  .brand{letter-spacing:.08em;font-size:11px}
+  nav{gap:10px;margin-left:0}
+}
+@media (max-width:400px){.theme{display:none}}
