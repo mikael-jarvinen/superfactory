@@ -4,6 +4,7 @@
 
 [human]
 name = "Alex"                             # the person the fleet works for; the board shows it
+# legacy_message_kind = "alex"            # an older kind for the human's messages, still read as theirs
 
 [github]
 org = "acme"
@@ -27,12 +28,16 @@ base = "main"
 gate_checks = ["test"]
 local_checks = ["make test"]
 
+[worktree]
+tool_written = ["schema.gen.ts"]          # files tools rewrite by running, not counted as unpushed work;
+                                          # a trailing / makes an entry a directory prefix
+
 [stacks.app]                              # a local environment builders run, one per slot
 repos = ["web", "api"]                    # the repos a stack serves; the first is dispatch's default
 slots = 2                                 # slot numbers run 0..slots
 reserve = [0]                             # slots never allocated, such as the human's own
 pin = { bea = 1, ben = 2 }                # a builder that always gets the same slot
-script = "stacks/app.sh"                  # the stack script, called as `<script> <verb>`
+script = "stacks/app.sh"                  # the stack script, called as `<script> <verb>`; from phase 5
 
 [roles.lead]
 cwd = "lead"                              # where the lead starts; its CLAUDE.md and .claude/skills load
@@ -40,7 +45,7 @@ model = "opus"
 effort = "high"
 autocompact = "1M"                        # passed to claude as --autocompact
 permission_mode = "bypassPermissions"
-settings = "lead"                         # a settings template, or the path of a settings file
+settings = "lead"                         # a settings template (phase 2), or the path of a settings file
 extra_hooks = ["status"]                  # hooks added to the template
 
 [roles.builder]
