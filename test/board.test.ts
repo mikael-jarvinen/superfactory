@@ -6,6 +6,7 @@ import { after, test } from "node:test";
 import { inboxHeld, postMessage, sweep } from "../src/board/inbox.js";
 import { serve } from "../src/board/server.js";
 import { transition } from "../src/state.js";
+import { readTail } from "../src/messages.js";
 import { pyDumps } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
 import { CLI, tempWorkspace } from "./helpers.js";
@@ -85,12 +86,30 @@ test("the server: pages, the snapshot, posting, and only the tail of the log", {
   assert.equal(snap.stacks.present, false, "no export from the stack engine, no stacks");
   assert.match(snap.descriptions["your-review"], /^Alex's\./);
 
-  const post = await fetch(board.url + "/api/messages", { method: "POST", body: JSON.stringify({ text: "  typed on the page " }) });
+  const page = { "Content-Type": "application/json", "Origin": board.url };
+  const post = await fetch(board.url + "/api/messages", { method: "POST", headers: page, body: JSON.stringify({ text: "  typed on the page " }) });
   assert.deepEqual(await post.json(), { ok: true, error: null });
   const m = await (await get("/api/messages")).json();
   assert.equal(m.human, "Alex");
   assert.deepEqual(m.messages.map((r: { text: string; from: string; receipt: string }) => [r.text, r.from, r.receipt]),
     [["typed on the page", "human", "sent"], ["from the old kind", "human", "sent"]]);
-  const bad = await fetch(board.url + "/api/messages", { method: "POST", body: JSON.stringify({ text: "x".repeat(4001) }) });
+  const bad = await fetch(board.url + "/api/messages", { method: "POST", headers: page, body: JSON.stringify({ text: "x".repeat(4001) }) });
   assert.equal(bad.status, 400);
+});
+
+// A message reaches the lead as the human's own instruction, so another site's page must not post one.
+test("the message page refuses a cross-site post", { skip: macOnly }, async () => {
+  const dir = tempWorkspace();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  process.env.CLAUDE_BIN = join(dir, "bin", "claude");
+  const ws = openWorkspace(dir);
+  const board = await serve(ws, { host: "127.0.0.1", port: 0 });
+  after(() => board.close());
+  const post = (headers: Record<string, string>) =>
+    fetch(board.url + "/api/messages", { method: "POST", headers, body: JSON.stringify({ text: "do something" }) });
+  // a simple request, no preflight: what fetch(..., {mode: 'no-cors'}) from another site sends
+  assert.equal((await post({ "Content-Type": "text/plain;charset=UTF-8", "Origin": "https://elsewhere.example" })).status, 403);
+  assert.equal((await post({ "Content-Type": "application/json", "Origin": "https://elsewhere.example" })).status, 403);
+  assert.equal((await post({ "Content-Type": "application/json", "Origin": board.url })).status, 200);
+  assert.deepEqual(readTail(ws.messages).map((r) => r.text), ["do something"]);
 });

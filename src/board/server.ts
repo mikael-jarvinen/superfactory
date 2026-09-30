@@ -336,6 +336,22 @@ function send(res: ServerResponse, code: number, body: string | Buffer, type: st
 
 const json = (res: ServerResponse, code: number, v: unknown) => send(res, code, JSON.stringify(v), "application/json; charset=utf-8");
 
+// A posted message reaches the lead as the human's own instruction, so a page on another site open
+// in the same browser must not be able to post one. Requiring application/json makes the request
+// non-simple, which forces a preflight the board never answers with CORS headers, so the browser
+// refuses to send it. An Origin naming another host is refused as well.
+function sameSite(req: IncomingMessage): boolean {
+  const type = (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+  if (type !== "application/json") return false;
+  const origin = req.headers.origin;
+  if (origin === undefined) return true;
+  try {
+    return new URL(origin).host === req.headers.host;
+  } catch {
+    return false;
+  }
+}
+
 export interface ServeOptions {
   host?: string;
   port?: number;
@@ -384,6 +400,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
     const path = (req.url ?? "/").split("?")[0] as string;
     if (req.method === "POST") {
       if (path !== "/api/messages") return send(res, 404, "not found", "text/plain; charset=utf-8");
+      if (!sameSite(req)) return json(res, 403, { ok: false, error: "refused: not from the message page" });
       const chunks: Buffer[] = [];
       let size = 0;
       req.on("data", (c: Buffer) => {
