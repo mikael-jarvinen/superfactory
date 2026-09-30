@@ -159,7 +159,7 @@ export function expandPath(value: string, base: string, env: NodeJS.ProcessEnv =
   return isAbsolute(p) ? resolve(p) : resolve(base, p);
 }
 
-// A settings value is a template name (rendered in phase 2) unless it looks like a path.
+// A settings value is a template name unless it looks like a path.
 export const isSettingsPath = (s: string) => s.includes("/") || s.endsWith(".json");
 
 export function loadConfig(file: string, env: NodeJS.ProcessEnv = process.env): Config {

@@ -193,24 +193,43 @@ export function uninstall(ws: Workspace, out: (line: string) => void = console.l
   return 0;
 }
 
-export function status(ws: Workspace, out: (line: string) => void = console.log): number {
+export interface JobState {
+  job: Job;
+  // "stale" is installed but not what config renders now.
+  installed: "no" | "stale" | "current";
+  loaded?: { pid: string; status: string };
+}
+
+// What launchd has of each job config wants, and the labels installed that config no longer wants.
+// Reads only; `status` and the doctor both print from it.
+export function jobStates(ws: Workspace): { jobs: JobState[]; unwanted: string[]; listFailed: boolean } {
   requireMac();
   const list = listed();
+  const want = jobs(ws);
+  return {
+    jobs: want.map((job) => {
+      const dest = installed(job.label);
+      const how = !existsSync(dest) ? "no" : readFileSync(dest, "utf8") === plist(ws, job) ? "current" : "stale";
+      return { job, installed: how, loaded: list?.get(job.label) };
+    }),
+    unwanted: JOB_NAMES.filter((n) => !want.some((j) => j.name === n)).map((n) => label(ws, n)).filter((l) => existsSync(installed(l))),
+    listFailed: list === null,
+  };
+}
+
+export function status(ws: Workspace, out: (line: string) => void = console.log): number {
+  const s = jobStates(ws);
   let rc = 0;
-  for (const job of jobs(ws)) {
-    const dest = installed(job.label);
-    const row = list?.get(job.label);
-    const current = existsSync(dest) && readFileSync(dest, "utf8") === plist(ws, job);
-    const how = !existsSync(dest) ? "NOT INSTALLED" : !current ? "installed, but not what config renders now (install again)" : "installed";
-    const state = list === null ? "launchctl list failed" : row ? `loaded pid=${row.pid} last_exit=${row.status}` : "NOT LOADED";
-    if (!current || !row) rc = 1;
-    out(`  ${job.label.padEnd(36)} ${how}, ${state}`);
+  for (const { job, installed: how, loaded: row } of s.jobs) {
+    const said = how === "no" ? "NOT INSTALLED" : how === "stale" ? "installed, but not what config renders now (install again)" : "installed";
+    const state = s.listFailed ? "launchctl list failed" : row ? `loaded pid=${row.pid} last_exit=${row.status}` : "NOT LOADED";
+    if (how !== "current" || !row) rc = 1;
+    out(`  ${job.label.padEnd(36)} ${said}, ${state}`);
   }
-  for (const name of JOB_NAMES)
-    if (!jobs(ws).some((j) => j.name === name) && existsSync(installed(label(ws, name)))) {
-      out(`  ${label(ws, name).padEnd(36)} installed but not wanted by config (install again removes it)`);
-      rc = 1;
-    }
+  for (const l of s.unwanted) {
+    out(`  ${l.padEnd(36)} installed but not wanted by config (install again removes it)`);
+    rc = 1;
+  }
   return rc;
 }
 

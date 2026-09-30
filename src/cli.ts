@@ -4,6 +4,7 @@ import { basename } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { followInbox } from "./board/inbox.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
+import { doctor } from "./doctor.js";
 import { agentOrDie, byRole, claudeBin, findSession, fleetLines, lead, type Session, sessionAlive, sessions, stopSession, waitForName } from "./fleet.js";
 import { buildAppendix, buildingPrompt, launch, leadPrompt, reviewerPrompt, roleOf } from "./launch.js";
 import { hook as guardHook } from "./hooks/guard.js";
@@ -38,6 +39,10 @@ const USAGE = `factory: start, stop, dispatch and track a fleet of Claude Code s
 
 usage: factory [--workspace <dir>] <command> [options]
 
+  doctor                          what this machine and workspace lack to run the fleet: one
+                                  \`ok\` or \`MISSING ... [fix: ...]\` line per check, derived from
+                                  config, then each stack script's own doctor. Reads only.
+                                  Exit 1 when anything is missing.
   up [--fresh]                    start the board, and the lead (resuming its thread if one exists)
   down                            stop every fleet session and the board
   restart-lead [--fresh]          stop the lead, then up
@@ -104,16 +109,10 @@ usage: factory [--workspace <dir>] <command> [options]
                                   settings in logs/run/ call these; nothing else needs to.
 ${STACK_USAGE}
 
-Not built yet: doctor (phase 7).
-
 The workspace is --workspace, else $FACTORY_WORKSPACE, else the nearest factory.toml above the
 current directory. Only this program writes the state store.
 
 states: queued building pr-open agent-review fixing gate your-review colleague-review done blocked`;
-
-const STUBS: Record<string, [number, string]> = {
-  "doctor": [7, "doctor"],
-};
 
 class UsageError extends FactoryError {
   constructor(message: string) {
@@ -511,6 +510,19 @@ function cmdSchedule(ws: Workspace, argv: string[]): number {
   throw new UsageError(`schedule: ${pyRepr(verb)}; give render, install, uninstall or status`);
 }
 
+// The board port check binds, which is asynchronous, so this one finishes after main returns.
+function cmdDoctor(ws: Workspace, argv: string[]) {
+  args("doctor", argv, {}, [0, 0]);
+  doctor(ws).then((code) => {
+    if (code) console.error("factory: something is missing; each MISSING line says how to fix it");
+    process.exitCode = code;
+  }, (e: unknown) => {
+    if (!(e instanceof FactoryError)) throw e;
+    console.error(`factory: ${e.message}`);
+    process.exitCode = e.code;
+  });
+}
+
 const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void> = {
   "up": cmdUp,
   "down": cmdDown,
@@ -535,6 +547,7 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void>
   "stack": cmdStack,
   "watch": cmdWatch,
   "schedule": cmdSchedule,
+  "doctor": cmdDoctor,
 };
 
 const HOOK_FNS: Record<HookName, (argv: string[], input: string, workspace?: string) => HookResult> = {
@@ -585,11 +598,6 @@ export function main(argv: string[]): number {
     return 2;
   }
   if (cmd === "hook") return cmdHook(rest, workspace);
-  const stub = STUBS[cmd];
-  if (stub) {
-    console.error(`factory ${cmd}: not built yet; ${stub[1]} arrives in phase ${stub[0]}`);
-    return 1;
-  }
   const fn = COMMANDS[cmd];
   if (!fn) throw new UsageError(`unknown command ${pyRepr(cmd)}; see factory --help`);
   const ws = openWorkspace(resolveWorkspace({ flag: workspace }));
@@ -599,6 +607,13 @@ export function main(argv: string[]): number {
   process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
   return fn(ws, rest) ?? 0;
 }
+
+// A reader that stops early, such as `factory messages | head`, closes the pipe under a write. That
+// is the reader being done, so it ends the command quietly instead of as an unhandled error.
+process.stdout.on("error", (e: NodeJS.ErrnoException) => {
+  if (e.code !== "EPIPE") throw e;
+  process.exit(0);
+});
 
 try {
   process.exitCode = main(process.argv.slice(2));

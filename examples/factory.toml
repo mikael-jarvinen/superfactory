@@ -37,7 +37,7 @@ repos = ["web", "api"]                    # the repos a stack serves; the first 
 slots = 2                                 # slot numbers run 0..slots
 reserve = [0]                             # slots never allocated, such as the human's own
 pin = { bea = 1, ben = 2 }                # a builder that always gets the same slot
-script = "stacks/app.sh"                  # the stack script, called as `<script> <verb>`; from phase 5
+script = "stacks/app.sh"                  # the stack script, called as `<script> <verb>`
 
 [roles.lead]
 cwd = "lead"                              # where the lead starts; its CLAUDE.md and .claude/skills load
