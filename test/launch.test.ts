@@ -14,20 +14,21 @@ test("the claude --bg command line, flag by flag, for each role", () => {
   after(() => rmSync(dir, { recursive: true, force: true }));
   const ws = openWorkspace(dir, {});
   const s = (f: string) => join(dir, "settings", f);
+  const rendered = (name: string) => join(dir, "logs", "run", `settings-${name}.json`);
   const repo = (r: string) => join(dir, "repos", r);
   const fixed = (name: string, mode: string) =>
     ["--name", name, "--model", "opus", "--effort", "high", "--autocompact", "1M", "--permission-mode", mode];
 
   assert.deepEqual(launchArgs(ws, agentOrDie(ws, "ada"), "P", null, undefined), [
-    "--bg", "--settings", s("lead.json"), "--remote-control", "ada", ...fixed("ada", "bypassPermissions"), "P",
+    "--bg", "--settings", rendered("ada"), "--remote-control", "ada", ...fixed("ada", "bypassPermissions"), "P",
   ]);
   assert.deepEqual(launchArgs(ws, agentOrDie(ws, "bea"), "P", "/tmp/a.md", "build"), [
     "--bg", "--add-dir", repo("web"), "--add-dir", repo("api"), "--remote-control", "bea",
-    "--settings", s("builder.json"), "--mcp-config", s("mcp.json"), ...fixed("bea", "bypassPermissions"),
+    "--settings", rendered("bea"), "--mcp-config", s("mcp.json"), ...fixed("bea", "bypassPermissions"),
     "--append-system-prompt-file", "/tmp/a.md", "P",
   ]);
   assert.deepEqual(launchArgs(ws, agentOrDie(ws, "rae"), "P", null, undefined), [
-    "--bg", "--settings", s("readonly.json"), "--add-dir", repo("web"), "--add-dir", repo("api"),
+    "--bg", "--settings", rendered("rae"), "--add-dir", repo("web"), "--add-dir", repo("api"),
     "--remote-control", "rae", ...fixed("rae", "auto"), "P",
   ]);
 });

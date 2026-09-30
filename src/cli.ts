@@ -4,7 +4,12 @@ import { basename, join } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { agentOrDie, byRole, claudeBin, findSession, fleetLines, lead, type Session, sessionAlive, sessions, stopSession, waitForName } from "./fleet.js";
 import { buildAppendix, buildingPrompt, launch, leadPrompt, reviewerPrompt, roleOf } from "./launch.js";
+import { hook as guardHook } from "./hooks/guard.js";
+import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
+import { hook as noSideChannelsHook } from "./hooks/no-side-channels.js";
+import { hook as statusHook } from "./hooks/status.js";
 import { KINDS, type Kind, messages, say } from "./messages.js";
+import { type HookName, type HookResult, HOOKS } from "./settings.js";
 import {
   allRecs, appendEvent, BUSY, DISPATCHABLE, KEY_HINT, loadRec, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
@@ -43,9 +48,12 @@ usage: factory [--workspace <dir>] <command> [options]
                                   (SF_NOTIFY=0 mutes it, SF_NOTIFY_SOUND names the sound)
   messages [-n 20]                the last n messages. Never read the log whole: it is
                                   append-only and unbounded.
+  hook <${HOOKS.join("|")}> [...]
+                                  a Claude Code hook, reading the event on stdin. The rendered
+                                  settings in logs/run/ call these; nothing else needs to.
 
 Not built yet: board (phase 3), pr-ready, pr-send, pr-wait, delta-range, pr-comment, pr-media
-and demo (phase 4), stack (phase 5), hook (phase 2), doctor (phase 7).
+and demo (phase 4), stack (phase 5), doctor (phase 7).
 
 The workspace is --workspace, else $FACTORY_WORKSPACE, else the nearest factory.toml above the
 current directory. Only this program writes the state store.
@@ -53,7 +61,6 @@ current directory. Only this program writes the state store.
 states: queued building pr-open agent-review fixing gate your-review colleague-review done blocked`;
 
 const STUBS: Record<string, [number, string]> = {
-  "hook": [2, "hooks as package modules"],
   "board": [3, "the board"],
   "pr-ready": [4, "the gate"],
   "pr-send": [4, "the gate"],
@@ -398,6 +405,31 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => void> = {
   "messages": cmdMessages,
 };
 
+const HOOK_FNS: Record<HookName, (argv: string[], input: string, workspace?: string) => HookResult> = {
+  "guard": guardHook,
+  "status": statusHook,
+  "no-dialogs": noDialogsHook,
+  "no-side-channels": noSideChannelsHook,
+};
+
+// Runs before the workspace is opened: everything a hook needs is on its command line, and a
+// guard must answer even when factory.toml does not load. Exit 2 blocks the tool call.
+function cmdHook(argv: string[], workspace: string | undefined): number {
+  const [name, ...rest] = argv;
+  const fn = HOOK_FNS[name as HookName];
+  if (!fn) throw new UsageError(`hook: ${name ? `no hook ${pyRepr(name)}` : "which hook?"}; hooks are ${HOOKS.join(", ")}`);
+  let input = "";
+  try {
+    input = readFileSync(0, "utf8");
+  } catch {
+    input = "";
+  }
+  const r = fn(rest, input, workspace);
+  if (r.stdout) process.stdout.write(r.stdout);
+  if (r.stderr) process.stderr.write(r.stderr);
+  return r.code;
+}
+
 export function main(argv: string[]): number {
   let workspace: string | undefined;
   let i = 0;
@@ -420,6 +452,7 @@ export function main(argv: string[]): number {
     console.error(USAGE);
     return 2;
   }
+  if (cmd === "hook") return cmdHook(rest, workspace);
   const stub = STUBS[cmd];
   if (stub) {
     console.error(`factory ${cmd}: not built yet; ${stub[1]} arrives in phase ${stub[0]}`);
