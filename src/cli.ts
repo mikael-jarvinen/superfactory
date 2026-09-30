@@ -608,6 +608,13 @@ export function main(argv: string[]): number {
   return fn(ws, rest) ?? 0;
 }
 
+// A reader that stops early, such as `factory messages | head`, closes the pipe under a write. That
+// is the reader being done, so it ends the command quietly instead of as an unhandled error.
+process.stdout.on("error", (e: NodeJS.ErrnoException) => {
+  if (e.code !== "EPIPE") throw e;
+  process.exit(0);
+});
+
 try {
   process.exitCode = main(process.argv.slice(2));
 } catch (e) {
