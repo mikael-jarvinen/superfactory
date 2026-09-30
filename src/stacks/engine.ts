@@ -288,7 +288,15 @@ export function handBacks(ws: Workspace, stack: Stack, reg: Registry, slot: numb
 }
 
 // Create the stack's own worktree, or move it to origin/<base> when that loses nothing.
-function ensureOwn(repo: Repo, wt: string, out: Out): void {
+// Files a tool rewrites just by running, such as a dev server, do not stop an own worktree following
+// its base: they are put back before the move rather than counted as someone's changes.
+function toolWrittenDirt(wt: string, toolWritten: string[]): { mine: string[]; other: boolean } {
+  const paths = git(wt, "status", "--porcelain", "--untracked-files=no").stdout.split("\n").filter(Boolean).map((l) => l.slice(3));
+  const isTool = (f: string) => toolWritten.some((t) => (t.endsWith("/") ? f.startsWith(t) : f === t || f.endsWith(`/${t}`)));
+  return { mine: paths.filter(isTool), other: paths.some((f) => !isTool(f)) };
+}
+
+function ensureOwn(repo: Repo, wt: string, out: Out, toolWritten: string[] = []): void {
   const fetch = () => git(repo.path, ...HTTPS, "fetch", "-q", "origin", repo.base).status === 0;
   const base = `origin/${repo.base}`;
   if (!isDir(wt)) {
@@ -303,8 +311,9 @@ function ensureOwn(repo: Repo, wt: string, out: Out): void {
   if (!registeredWorktrees(repo.path).has(wt)) die(`${wt} exists but is not a git worktree. Remove or rename it, then run up again.`);
   const old = git(wt, "rev-parse", "HEAD").stdout.trim();
   const branch = git(wt, "branch", "--show-current").stdout.trim();
+  const dirt = toolWrittenDirt(wt, toolWritten);
   const why = branch ? `it is on branch ${branch}`
-    : git(wt, "status", "--porcelain", "--untracked-files=no").stdout.trim() ? "it has uncommitted changes"
+    : dirt.other ? "it has uncommitted changes"
     : git(wt, "rev-list", "-1", "HEAD", "--not", "--remotes=origin").stdout.trim() ? "it has commits no origin branch has"
     : "";
   if (why) {
@@ -314,13 +323,14 @@ function ensureOwn(repo: Repo, wt: string, out: Out): void {
   if (!fetch()) out(`  could not fetch ${repo.key}; ${basename(wt)} goes to the ${base} it already has`);
   const target = git(repo.path, "rev-parse", "--verify", "-q", base).stdout.trim();
   if (!target || target === old) return;
+  if (dirt.mine.length) git(wt, "checkout", "-q", "--", ...dirt.mine);
   const co = git(wt, "checkout", "-q", "--detach", base);
   if (co.status !== 0) out(`  ${wt} stays at ${old.slice(0, 8)}: checkout of ${base} failed: ${co.stderr.trim()}`);
   else out(`  ${wt} moved from ${old.slice(0, 8)} to ${target.slice(0, 8)}, ${base}`);
 }
 
 function ensureOwnAll(ws: Workspace, stack: Stack, slot: number, p: Placement, out: Out): void {
-  for (const [r, wt] of Object.entries(p)) if (wt === ownWorktree(ws, stack.key, r, slot)) ensureOwn(repoOf(ws, r), wt, out);
+  for (const [r, wt] of Object.entries(p)) if (wt === ownWorktree(ws, stack.key, r, slot)) ensureOwn(repoOf(ws, r), wt, out, ws.config.worktree.toolWritten);
 }
 
 function mustRun(ws: Workspace, stack: Stack, slot: number, p: Placement, verb: "up" | "down" | "destroy", after = "", args: string[] = []): void {
