@@ -73,7 +73,9 @@ export function ready(ws: Workspace, repo: Repo, n: number, opts: { allowDraft?:
 
   const cmp = api<{ behind_by?: number }>(`repos/${repo.remote}/compare/${base}...${sha}`);
   if (typeof cmp?.behind_by !== "number") fail(`COULD NOT READ how far ${sha} is behind ${base} -- not the same thing as up to date`, "unreadable");
-  else if (cmp.behind_by !== 0) fail(`${cmp.behind_by} commits behind ${base} -- rebase before sending`);
+  // Behind is a remark, not a failure: on a busy base the branch falls behind while its own checks
+  // run, and the human rebases before merging. A conflict still fails, through mergeable above.
+  else if (cmp.behind_by !== 0) remarks.push(`${cmp.behind_by} commits behind ${base} -- rebase before merging`);
 
   // CHECK-RUNS AT THIS SHA. Absence is the failure this whole gate exists for.
   const runs = checkRuns(repo, sha);

@@ -88,7 +88,6 @@ test("pr-ready asks about the head sha, and a missing answer is a failure", () =
     [{ [cr]: checkRuns(check("scanner")) }, /none of the repo's gate jobs ran/],
     [{ [`api repos/${REMOTE}/commits/${HEAD}/status`]: { status: 1 } }, /COULD NOT READ commit statuses/],
     [{ "api graphql": { status: 1 } }, /COULD NOT READ review threads/],
-    [{ [`api repos/${REMOTE}/compare/main...${HEAD}`]: { stdout: { behind_by: 3 } } }, /3 commits behind main/],
   ];
   for (const [over, why] of cases) {
     r = run(green(over), ["pr-ready", "web", String(N), "--allow-draft"]);
@@ -103,6 +102,11 @@ test("pr-ready asks about the head sha, and a missing answer is a failure", () =
   }), ["pr-ready", "web", String(N), "--allow-draft"]);
   assert.equal(r.status, 0, r.stdout);
   assert.match(r.stdout, /check 'experimental' concluded failure but its workflow run concluded success/);
+
+  // Behind the base is a remark: the human rebases before merging.
+  r = run(green({ [`api repos/${REMOTE}/compare/main...${HEAD}`]: { stdout: { behind_by: 3 } } }), ["pr-ready", "web", String(N), "--allow-draft"]);
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /3 commits behind main -- rebase before merging/);
 });
 
 test("prose counts every line of a block comment, and every added line of markdown", () => {
@@ -146,10 +150,13 @@ test("pr-wait waits on a running check, then stops before sending on prose volum
   assert.equal(r.status, 3, r.stderr);
   assert.match(r.stderr, /still waiting after \d+s on:\n {2}- NO check-runs at all/);
 
-  // Behind the base is not something time clears.
-  r = run(green({ [`api repos/${REMOTE}/compare/main...${HEAD}`]: { stdout: { behind_by: 2 } } }), ["pr-wait", "web", String(N), HEAD]);
+  // A conflict with the base is not something time clears.
+  const conflicting = green();
+  const prKey = `pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`;
+  conflicting[prKey] = { stdout: { ...(conflicting[prKey] as { stdout: object }).stdout, mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" } };
+  r = run(conflicting, ["pr-wait", "web", String(N), HEAD]);
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /waiting will not clear it:\n {2}- 2 commits behind main/);
+  assert.match(r.stderr, /waiting will not clear it:\n {2}- CONFLICTING with main/);
   assert.equal(r.calls.filter((c) => c === cr).length, 1);
 });
 
