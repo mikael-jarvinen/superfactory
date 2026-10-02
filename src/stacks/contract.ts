@@ -9,7 +9,8 @@ import { die, run, type RunResult } from "../util.js";
 // `<script> <verb>` with the slot in its environment, and exit 0 is success.
 //
 //   up       bring the slot to the placement in the environment. Called on a slot that may already
-//            be up, so it must be safe to repeat.
+//            be up, so it must be safe to repeat. `factory up` also calls it, in the background, on
+//            every placed slot whose sites do not answer, a reserved slot on the human's checkouts.
 //   down     stop what the slot runs and keep its data.
 //   destroy  stop it and delete its data. Also called to reclaim a slot whose worktree has been
 //            removed, so it must work when FACTORY_WORKTREE_<REPO> no longer exists.

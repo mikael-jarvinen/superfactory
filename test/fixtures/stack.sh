@@ -11,8 +11,10 @@ case $verb in
   up|down|destroy) [ -d "$FACTORY_LOG_DIR" ] || { echo "no log dir" >&2; exit 9; } ;;
   url) echo "http://$FACTORY_STACK-$FACTORY_SLOT.test" ;;
   status)
-    printf 'web\thttp://web.%s-%s.test\thttp://web.%s-%s.test/up\n' "$FACTORY_STACK" "$FACTORY_SLOT" "$FACTORY_STACK" "$FACTORY_SLOT"
-    [ -z "${FACTORY_WORKTREE_API+x}" ] || printf 'api\thttp://api.%s-%s.test\n' "$FACTORY_STACK" "$FACTORY_SLOT" ;;
+    # a test that probes the slot writes the health url its sites should answer on
+    h=$(cat "$FACTORY_SLOT_DIR/health" 2>/dev/null || true)
+    printf 'web\thttp://web.%s-%s.test\t%s\n' "$FACTORY_STACK" "$FACTORY_SLOT" "${h:-http://web.$FACTORY_STACK-$FACTORY_SLOT.test/up}"
+    [ -z "${FACTORY_WORKTREE_API+x}" ] || printf 'api\thttp://api.%s-%s.test\t%s\n' "$FACTORY_STACK" "$FACTORY_SLOT" "$h" ;;
   doctor)
     echo "ok container runtime"
     [ "$FACTORY_SLOT" != 2 ] || echo "MISSING web.$FACTORY_STACK-2.test resolving [fix: add it to /etc/hosts]" ;;

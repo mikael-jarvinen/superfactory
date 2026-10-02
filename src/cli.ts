@@ -23,7 +23,7 @@ import { KINDS, type Kind, messages, say } from "./messages.js";
 import { type HookName, type HookResult, HOOKS } from "./settings.js";
 import { install, render, status as scheduleStatus, uninstall } from "./scheduler/launchd.js";
 import { cmdStack, STACK_USAGE } from "./stacks/command.js";
-import { exportStacks } from "./stacks/engine.js";
+import { exportStacks, startBoot } from "./stacks/engine.js";
 import {
   allRecs, appendEvent, BUSY, DISPATCHABLE, KEY_HINT, loadRec, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
@@ -43,7 +43,8 @@ usage: factory [--workspace <dir>] <command> [options]
                                   \`ok\` or \`MISSING ... [fix: ...]\` line per check, derived from
                                   config, then each stack script's own doctor. Reads only.
                                   Exit 1 when anything is missing.
-  up [--fresh]                    start the board, and the lead (resuming its thread if one exists)
+  up [--fresh]                    start the board, and the lead (resuming its thread if one exists);
+                                  in the background, bring up every stack slot that does not answer
   down                            stop every fleet session and the board
   restart-lead [--fresh]          stop the lead, then up
   status [--all]                  sessions joined with the state store
@@ -326,6 +327,8 @@ function up(ws: Workspace, fresh: boolean) {
   // the board's stacks panel reads this export, so write it before the board's first check
   exportStacks(ws);
   startBoard(ws, true);
+  const boot = startBoot(ws);
+  if (boot) console.log(`stacks: any slot that does not answer comes up in the background; see ${boot}`);
   const s = findSession(ld.name);
   if (sessionAlive(s)) {
     console.log(`${ld.name} already running (${s.id})`);

@@ -1,7 +1,7 @@
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import type { Workspace } from "../workspace.js";
 import { FactoryError, pyRepr } from "../util.js";
-import { stackDestroy, stackDoctor, stackDown, stackStatus, stackUp, stackUrl, type Where } from "./engine.js";
+import { stackBoot, stackDestroy, stackDoctor, stackDown, stackStatus, stackUp, stackUrl, type Where } from "./engine.js";
 import { startDetached, stopDetached, waitHttp, waitPortFree } from "./process.js";
 
 export const STACK_USAGE = `  stack up|down|destroy|url|status|doctor [--stack S] [--slot N] [-- <args>]
@@ -10,6 +10,9 @@ export const STACK_USAGE = `  stack up|down|destroy|url|status|doctor [--stack S
                                   up --slot N from outside a worktree runs the base branches.
                                   status and doctor without --slot cover every slot. up, down and
                                   destroy pass <args> to the script after the verb.
+  stack boot [--wait S]           for factory up, which starts it detached: wait up to S seconds
+                                  (default 600) for Docker, then run up on every placed slot,
+                                  reserved ones included, whose sites do not answer
   stack run-detached --pid-file F --log L [--cwd D] [--port P] -- <command>...
                                   for stack scripts: stop what F names and its children, wait for
                                   P to be released, then start the command in a session of its own
@@ -53,6 +56,7 @@ export function cmdStack(ws: Workspace, argv: string[]): void {
   if (verb === "-h" || verb === "--help") return void console.log(STACK_USAGE);
   if (verb === "run-detached") return runDetached(rest);
   if (verb === "wait-http") return waitForHttp(rest);
+  if (verb === "boot") return boot(ws, rest);
   const s = { type: "string" } as const;
   // Split before parsing, so the script's own flags are never read as ours.
   const dash = rest.indexOf("--");
@@ -79,6 +83,13 @@ export function cmdStack(ws: Workspace, argv: string[]): void {
     default:
       throw usage(verb ? `no verb ${pyRepr(verb)}; see factory stack --help` : `which verb?\n${STACK_USAGE}`);
   }
+}
+
+function boot(ws: Workspace, argv: string[]): void {
+  const { values: v, positionals: p } = parse("boot", argv, { wait: { type: "string" } });
+  if (v.help) return void console.log(STACK_USAGE);
+  if (p.length) throw usage(`boot: unexpected ${p.map(pyRepr).join(" ")}`);
+  settle(stackBoot(ws, { waitS: int("wait", v.wait) ?? 600 }));
 }
 
 function runDetached(argv: string[]): void {

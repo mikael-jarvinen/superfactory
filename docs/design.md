@@ -168,6 +168,9 @@ The program owns the slots. The workspace owns what a slot runs.
 - runs detached processes with pid files, kills a process tree, and waits for readiness and port
   release, offered to scripts as `factory stack run-detached` and `factory stack wait-http`
 - exports the TSV the board reads
+- at every `factory up`, in the background, waits for Docker and runs `up` on each placed slot,
+  reserved ones on the human's checkouts, whose health urls do not answer; it logs to
+  `logs/stacks/boot.log` and never runs any other verb
 
 **A stack script** is called as `<script> <verb>`, with this environment:
 - `FACTORY_STACK`, `FACTORY_SLOT`

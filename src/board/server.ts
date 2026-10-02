@@ -107,7 +107,9 @@ interface StackRow {
   code: number | null;
 }
 
-function probe(target: string): Promise<{ up: boolean; code: number | null }> {
+export type Probe = { up: boolean; code: number | null };
+
+function probe(target: string): Promise<Probe> {
   return new Promise((resolve) => {
     let u: URL;
     try {
@@ -125,6 +127,13 @@ function probe(target: string): Promise<{ up: boolean; code: number | null }> {
     req.on("timeout", () => req.destroy());
     req.on("error", () => resolve({ up: false, code: null }));
   });
+}
+
+// Up is an answer from 200 to 399. A cold stack can miss one timeout, and one shown down for half a
+// minute because of it is a false alarm. Down means it failed twice.
+export async function probeAll(urls: string[]): Promise<Probe[]> {
+  const first = await Promise.all(urls.map(probe));
+  return Promise.all(urls.map((u, i) => (first[i]!.up ? first[i]! : probe(u))));
 }
 
 class StackChecks {
@@ -150,10 +159,7 @@ class StackChecks {
       const [stack, slot, name, worktree, u, health] = f as [string, string, string, string, string, string];
       rows.push({ stack, slot: Number(slot), name, worktree, url: u, health: health || u, up: false, code: null });
     }
-    const first = await Promise.all(rows.map((r) => probe(r.health)));
-    // A cold stack can miss one timeout, and one shown down for half a minute because of it is a
-    // false alarm. Down means it failed twice.
-    const again = await Promise.all(rows.map((r, i) => (first[i]!.up ? first[i]! : probe(r.health))));
+    const again = await probeAll(rows.map((r) => r.health));
     rows.forEach((r, i) => Object.assign(r, again[i]));
     this.rows = rows;
     this.at = Date.now();

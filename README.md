@@ -104,7 +104,7 @@ The human:
 | Command | What it does |
 |---|---|
 | `factory doctor` | What this machine and workspace lack. |
-| `factory up [--fresh]` | Start the board and the lead. `--fresh` starts a new thread. |
+| `factory up [--fresh]` | Start the board and the lead, and in the background any stack slot that does not answer. `--fresh` starts a new thread. |
 | `factory down` | Stop every fleet session and the board. |
 | `factory restart-lead [--fresh]` | Stop the lead, then `up`. |
 | `factory status` | Sessions, and every open work item. |
@@ -144,6 +144,7 @@ Scripts and hooks. Nobody types these; they are listed so you can recognise them
 | `factory watch queue`, `factory watch round` | The scheduled jobs. |
 | `factory up` | The scheduled job, at login and twice an hour. |
 | `factory hook <name>` | Claude Code, from the settings rendered into `logs/run/`. |
+| `factory stack boot` | `factory up`, which starts it detached and logs to `logs/stacks/boot.log`. |
 | `factory stack run-detached`, `factory stack wait-http` | Stack scripts. |
 | `factory board --serve` | `factory board` and `factory up`, which start it detached. |
 

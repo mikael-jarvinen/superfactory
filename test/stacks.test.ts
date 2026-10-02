@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,7 +12,7 @@ import { alive } from "../src/stacks/process.js";
 import { run } from "../src/util.js";
 import { ensureWorktree, git } from "../src/worktree.js";
 import { openWorkspace, type Workspace } from "../src/workspace.js";
-import { factory, tempWorkspace } from "./helpers.js";
+import { CLI, factory, tempWorkspace } from "./helpers.js";
 
 const SCRIPT = fileURLToPath(new URL("../../test/fixtures/stack.sh", import.meta.url));
 
@@ -203,6 +205,48 @@ test("allocation order, reclaiming a removed worktree, and taking over the stack
     "up solo 2 web=A-4 api=-",
   ]);
   assert.match(ok(factory(dir, ["stack", "status", "--stack", "solo"]), "status"), /slot 1 {2}A-3, eve's {2}web=A-3\n {4}web\s+http:\/\/web\.solo-1\.test/);
+});
+
+// Boot runs async, so the factory is run without blocking the server the slots are probed on.
+test("boot: up only for the slots that do not answer, the reserved one included, once Docker answers", async () => {
+  const { dir, ws, wt } = setup();
+  ok(factory(dir, ["stack", "up"], { cwd: wt("web", "APP-2", "dan") }), "place app slot 2");
+  calls(dir);
+  const server = createHttpServer((_, res) => res.end("ok")).listen(0, "127.0.0.1");
+  after(() => server.close());
+  await new Promise((r) => server.once("listening", r));
+  const live = `http://127.0.0.1:${(server.address() as { port: number }).port}/`;
+  const dead = `http://127.0.0.1:${await freePort()}/`;
+  const health = (stack: string, slot: number, url: string) => {
+    mkdirSync(join(ws.stateDir, "stacks", stack, String(slot)), { recursive: true });
+    writeFileSync(join(ws.stateDir, "stacks", stack, String(slot), "health"), url);
+  };
+  health("app", 0, dead);
+  health("app", 2, live);
+  health("solo", 0, live);
+  const docker = join(dir, "bin", "docker");
+  writeFileSync(docker, `#!/bin/sh\n[ -f "${dir}/docker-up" ]\n`);
+  chmodSync(docker, 0o755);
+  const boot = (...args: string[]) => new Promise<{ status: number; stdout: string }>((resolve) =>
+    execFile(process.execPath, [CLI, "--workspace", dir, "stack", "boot", ...args], { env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH}` } },
+      (e, stdout) => resolve({ status: e ? Number(e.code ?? 1) : 0, stdout })));
+
+  const early = await boot("--wait", "0");
+  assert.equal(early.status, 1);
+  assert.match(early.stdout, /Docker did not answer within 0 s; no stack was checked/);
+  assert.deepEqual(calls(dir), []);
+
+  writeFileSync(join(dir, "docker-up"), "");
+  const r = await boot();
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /app slot 0: web, api not answering; bringing it up on web=web api=api/);
+  assert.match(r.stdout, /app slot 1: free; nothing to bring up/);
+  assert.match(r.stdout, /app slot 2: answers \(web, api\)/);
+  assert.deepEqual(calls(dir), ["up app 0 web=web api=api"], "only the slot that did not answer, on the human's checkouts");
+
+  writeFileSync(join(ws.logsDir, "stacks", "boot.lock"), `${process.pid}\n`);
+  assert.match((await boot()).stdout, new RegExp(`another boot is running, pid ${process.pid}`));
+  assert.deepEqual(calls(dir), []);
 });
 
 async function freePort(): Promise<number> {

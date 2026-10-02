@@ -1,13 +1,16 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { stacksFile } from "../board/server.js";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+import { probeAll, stacksFile } from "../board/server.js";
 import type { Repo, Stack } from "../config.js";
 import { loadRec } from "../state.js";
 import type { Workspace } from "../workspace.js";
-import { die, now, pyDumps, realpathLoose, sleep } from "../util.js";
+import { die, now, pyDumps, realpathLoose, run, sleep } from "../util.js";
 import { git, HTTPS, registeredWorktrees, worktreePath } from "../worktree.js";
 import { callScript, failed, type Placement } from "./contract.js";
-import { alive } from "./process.js";
+import { alive, pidFromFile } from "./process.js";
 
 // The program owns the slots. A slot is a number from 0 to stacks.<key>.slots; the registry in
 // state/stacks/<stack>.json says which worktree holds each repo's place in it. Everything a slot
@@ -197,7 +200,7 @@ function checkSlot(stack: Stack, slot: number): void {
 
 function refuseReserved(ws: Workspace, stack: Stack, slot: number): void {
   if (stack.reserve.includes(slot))
-    die(`${stack.key} slot ${slot} is reserved: it is ${ws.config.human.name}'s own, and the factory never starts, stops or destroys it`);
+    die(`${stack.key} slot ${slot} is reserved: it is ${ws.config.human.name}'s own, and the factory only ever brings it up at boot, never stops or destroys it`);
 }
 
 // ---------------------------------------------------------------- allocation and placement
@@ -556,4 +559,95 @@ export function stackDoctor(ws: Workspace, w: Where): { lines: string[]; ok: boo
     }
   }
   return { lines, ok };
+}
+
+// ---------------------------------------------------------------- boot
+
+// `factory up` brings back every slot whose sites do not answer, the reserved ones included, so a
+// reboot needs nobody to start each stack by hand. It runs detached, since one up can take minutes.
+// A slot that answers costs one probe, and boot never runs anything but `up`.
+export const bootLog = (ws: Workspace) => join(ws.logsDir, "stacks", "boot.log");
+const bootLock = (ws: Workspace) => join(ws.logsDir, "stacks", "boot.lock");
+const CLI = fileURLToPath(new URL("../cli.js", import.meta.url));
+
+export function startBoot(ws: Workspace): string | null {
+  if (!Object.values(ws.config.stacks).some((s) => s.script)) return null;
+  mkdirSync(dirname(bootLog(ws)), { recursive: true });
+  const log = openSync(bootLog(ws), "a");
+  try {
+    spawn(process.execPath, [CLI, "--workspace", ws.dir, "stack", "boot"], { cwd: ws.dir, detached: true, stdio: ["ignore", log, log] }).unref();
+  } finally {
+    closeSync(log);
+  }
+  return bootLog(ws);
+}
+
+// The pid of another boot holding the lock, or null once this one holds it. pidFromFile ignores a
+// pid that the machine has given to a newer process, as it will after a reboot.
+function holdBootLock(ws: Workspace): number | null {
+  const p = bootLock(ws);
+  mkdirSync(dirname(p), { recursive: true });
+  for (;;) {
+    try {
+      writeFileSync(p, `${process.pid}\n`, { flag: "wx" });
+      return null;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    }
+    const holder = pidFromFile(p);
+    if (holder !== null && holder !== process.pid) return holder;
+    rmSync(p, { force: true });
+  }
+}
+
+export async function stackBoot(ws: Workspace, o: { waitS: number }, out: Out = console.log): Promise<number> {
+  const say: Out = (l) => out(`${now()} ${l}`);
+  const holder = holdBootLock(ws);
+  if (holder !== null) {
+    say(`another boot is running, pid ${holder}`);
+    return 0;
+  }
+  try {
+    // A stack script that runs containers fails on every slot until the runtime answers, which
+    // after a login can take a while. A machine without docker has nothing to wait for.
+    let told = false;
+    for (const end = Date.now() + o.waitS * 1000; ;) {
+      const r = run("docker", ["info"], { timeout: 30_000 });
+      if (r.status === 0 || r.status === 127) break;
+      if (Date.now() >= end) {
+        say(`Docker did not answer within ${o.waitS} s; no stack was checked`);
+        return 1;
+      }
+      if (!told) say("waiting for Docker");
+      told = true;
+      await delay(Math.min(5000, Math.max(0, end - Date.now())));
+    }
+    for (const stack of Object.values(ws.config.stacks)) {
+      if (!stack.script) continue;
+      for (const n of slotsOf(stack)) {
+        const name = `${stack.key} slot ${n}`;
+        const reg = loadRegistry(ws, stack.key);
+        const v = viewSlot(ws, stack, reg, n);
+        if (v.kind === "free" || v.kind === "vanished") {
+          say(`${name}: ${describe(v, ws.config.human.name)}; nothing to bring up`);
+          continue;
+        }
+        const sites = sitesOf(ws, stack, reg, n, say);
+        const answers = await probeAll(sites.map((s) => s.health));
+        const down = sites.filter((_, i) => !answers[i]!.up).map((s) => s.name);
+        if (!down.length) {
+          say(`${name}: answers${sites.length ? ` (${sites.map((s) => s.name).join(", ")})` : ""}`);
+          continue;
+        }
+        const p = placementOf(ws, stack, reg, n);
+        say(`${name}: ${down.join(", ")} not answering; bringing it up on ${showPlacement(p)}`);
+        const r = callScript(ws, stack, n, p, "up", true);
+        say(r.status === 0 ? `${name} up` : failed(stack, n, "up", r));
+      }
+    }
+    say("every slot checked");
+    return 0;
+  } finally {
+    rmSync(bootLock(ws), { force: true });
+  }
 }
