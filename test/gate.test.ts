@@ -107,6 +107,14 @@ test("pr-ready asks about the head sha, and a missing answer is a failure", () =
   r = run(green({ [`api repos/${REMOTE}/compare/main...${HEAD}`]: { stdout: { behind_by: 3 } } }), ["pr-ready", "web", String(N), "--allow-draft"]);
   assert.equal(r.status, 0, r.stdout);
   assert.match(r.stdout, /3 commits behind main -- rebase before merging/);
+
+  // So is a base whose branch protection wants it up to date, which GitHub reports as BEHIND.
+  const behind = green({ [`api repos/${REMOTE}/compare/main...${HEAD}`]: { stdout: { behind_by: 2 } } });
+  const behindKey = `pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`;
+  behind[behindKey] = { stdout: { ...(behind[behindKey] as { stdout: object }).stdout, mergeStateStatus: "BEHIND" } };
+  r = run(behind, ["pr-ready", "web", String(N), "--allow-draft"]);
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /2 commits behind main -- rebase before merging/);
 });
 
 test("prose counts every line of a block comment, and every added line of markdown", () => {

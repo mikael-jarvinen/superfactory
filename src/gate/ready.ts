@@ -61,6 +61,8 @@ export function ready(ws: Workspace, repo: Repo, n: number, opts: { allowDraft?:
     // Deferred: GitHub says UNSTABLE for any failing check, including one the workflow allows to
     // fail. Whether that blocks depends on what the check-runs turn out to be, read below.
     unstable = true;
+  } else if (ms === "MERGEABLE/BEHIND") {
+    // Branch protection wants the branch up to date. The compare below says how far behind, as a remark.
   } else if (ms === "MERGEABLE/BLOCKED") {
     remarks.push("mergeStateStatus BLOCKED -- branch protection wants a human approval; that is the human's and the colleagues' step, not a gate failure");
   } else if (ms === "MERGEABLE/UNKNOWN" || pr.mergeable === "UNKNOWN") {
