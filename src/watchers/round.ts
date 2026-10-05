@@ -116,7 +116,9 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
           const st = rec.state ?? "?";
           const rp = recPrs(rec).find((p) => p.repo === repo.remote && p.number === pr.number);
           const where = `${rec.ticket}: ${repo.remote}#${pr.number}`;
-          if (pr.state === "MERGED") out.push(`  ${where} is MERGED but the store says ${st} -- done judgement owed`);
+          // A record that moved after the merge is the judgement already made: the ticket had more to do.
+          const judged = !!pr.mergedAt && !!rec.since && Date.parse(rec.since) >= Date.parse(pr.mergedAt);
+          if (pr.state === "MERGED") { if (!judged) out.push(`  ${where} is MERGED but the store says ${st} -- done judgement owed`); }
           else if (pr.state === "OPEN" && (st === "queued" || st === "building") && !known)
             out.push(`  ${where} is OPEN (draft=${pr.isDraft}) but the store says ${st} -- unreported PR?`);
           else if (pr.state === "OPEN" && rp?.head && pr.headRefOid && !pr.headRefOid.startsWith(rp.head.slice(0, 7)) && ["gate", "your-review", "colleague-review"].includes(st))

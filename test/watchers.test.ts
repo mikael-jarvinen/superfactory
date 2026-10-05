@@ -132,6 +132,21 @@ test("the queue says what is new once, and says it again when the courier failed
   assert.equal(r.calls.length, 1, "nothing is new the third time, so no courier");
 });
 
+test("the round: a merge the record moved after is judged, one it did not is owed", () => {
+  const { ws, run } = watcherWorkspace();
+  assert.equal(factory(ws, ["state", "WEB-2", "queued"]).status, 0);
+  const merged = (n: number, at: string) => ({ number: n, title: "WEB-2: part", headRefName: "WEB-2", state: "MERGED", isDraft: false, mergedAt: at, headRefOid: "abc1234" });
+  const before = new Date(Date.now() - 3600_000).toISOString();
+  const after = new Date(Date.now() + 3600_000).toISOString();
+  const r = run(["watch", "round", "--facts"], [], {
+    "pr list -R acme/web --state all": { stdout: [merged(5, before), merged(6, after)] },
+    "pr list -R acme/api --state all": { stdout: [] },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /acme\/web#5 is MERGED/);
+  assert.match(r.stdout, /WEB-2: acme\/web#6 is MERGED but the store says queued -- done judgement owed/);
+});
+
 test("the round: flags said once, the failures cursor, and its heartbeat", () => {
   const { ws, run, logs, read, age } = watcherWorkspace();
   assert.equal(factory(ws, ["state", "WEB-2", "building", "--agent", "bea"]).status, 0);
