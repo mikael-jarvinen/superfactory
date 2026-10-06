@@ -11,6 +11,7 @@ import { gh, json } from "../gate/github.js";
 import { allRecs, branchFor, isLocal, type Rec, recPrs } from "../state.js";
 import { parseRead, trackerOf, UNAVAILABLE } from "../tracker/read.js";
 import type { Workspace } from "../workspace.js";
+import { dockerWatchdog } from "./docker.js";
 import { beat, failure, heartbeatAge, heartbeatPath, loadPrompt, logTo, openLog, runClaude } from "./job.js";
 import { deliver } from "./relay.js";
 
@@ -133,6 +134,8 @@ export function runQueue(ws: Workspace, out: (line: string) => void = console.lo
   lines.push(...m.lines);
   const stale = roundStale(ws);
   if (stale) lines.push(stale.line);
+  const docker = dockerWatchdog(ws);
+  if (docker) lines.push(docker);
 
   // What was not delivered is not recorded as told, so the next run says it again.
   const delivered = lines.length ? deliver(ws, ["[queue watcher]", ...lines].join("\n")) : true;

@@ -42,7 +42,7 @@ function watcherWorkspace(toml = JIRA) {
     writeFileSync(f("gh.log"), "");
     const res = factory(ws, args, {
       env: {
-        PATH: `${bin}:${process.env.PATH}`, GH_BIN: "", LAUNCHCTL_BIN: join(bin, "launchctl"),
+        PATH: `${bin}:${process.env.PATH}`, GH_BIN: "", DOCKER_BIN: "", LAUNCHCTL_BIN: join(bin, "launchctl"),
         FAKE_CLAUDE_REPLIES: f("replies.json"), FAKE_CLAUDE_LOG: f("claude.log"), FAKE_GH_ROUTES: f("routes.json"), FAKE_GH_LOG: f("gh.log"),
       },
     });
