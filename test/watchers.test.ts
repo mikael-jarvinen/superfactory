@@ -127,6 +127,14 @@ test("the queue says what is new once, and says it again when the courier failed
   state = JSON.parse(read("queue.state"));
   assert.deepEqual([state.known, state.merged], [["WEB-2", "WEB-3", "WEB-4"], ["https://github.com/acme/web/pull/12"]]);
 
+  // The card carries the tracker summary as its title, stamped the moment the ticket is seen: an
+  // existing queued record gets it set, a ticket with no record gets a titled queued one, and a
+  // ticket already past queued is left as it is.
+  const title = (k: string) => (JSON.parse(readFileSync(join(ws, "state", `${k}.json`), "utf8")) as { state: string; title?: string });
+  assert.equal(title("WEB-3").title, "Add the export");
+  assert.deepEqual([title("WEB-4").state, title("WEB-4").title], ["queued", "Retire the old page"]);
+  assert.equal(title("WEB-2").title, undefined, "a ticket already building is not touched");
+
   r = run(["watch", "queue"], [reader], routes);
   assert.equal(r.status, 0);
   assert.equal(r.calls.length, 1, "nothing is new the third time, so no courier");

@@ -8,8 +8,9 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gh, json } from "../gate/github.js";
-import { allRecs, branchFor, isLocal, type Rec, recPrs } from "../state.js";
+import { allRecs, branchFor, isLocal, type Rec, recPrs, saveRec, transition } from "../state.js";
 import { parseRead, trackerOf, UNAVAILABLE } from "../tracker/read.js";
+import { squash } from "../util.js";
 import type { Workspace } from "../workspace.js";
 import { dockerWatchdog } from "./docker.js";
 import { beat, failure, heartbeatAge, heartbeatPath, loadPrompt, logTo, openLog, runClaude } from "./job.js";
@@ -128,7 +129,18 @@ export function runQueue(ws: Workspace, out: (line: string) => void = console.lo
       const rec = byKey.get(k);
       return (!rec || rec.state === "queued") && !prev.known.includes(k);
     });
-    for (const k of fresh) lines.push(`queued: ${k}${read.summaries[k] ? ` ${read.summaries[k]}` : ""}`);
+    // Give the card a title the moment the ticket appears, so the board never shows a bare key: the
+    // tracker summary is only in reach while the ticket is still in the queue, so stamp it now. A
+    // ticket with no record yet gets a queued one; one already recorded without a title gets it set.
+    for (const k of fresh) {
+      const summary = read.summaries[k];
+      if (summary) {
+        const rec = byKey.get(k);
+        if (!rec) transition(ws, k, "queued", { title: summary }, () => {});
+        else if (!rec.title) saveRec(ws, { ...rec, title: squash(summary, 90) });
+      }
+      lines.push(`queued: ${k}${summary ? ` ${summary}` : ""}`);
+    }
   }
   const m = merges(ws, recs, prev.merged);
   lines.push(...m.lines);
