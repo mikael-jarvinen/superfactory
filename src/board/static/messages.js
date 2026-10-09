@@ -32,7 +32,8 @@ function render(d){
         ${m.receipt ? `<span class="rcpt ${esc(m.receipt)}">${esc(m.receipt)}</span>` : ''}
         <span class="when">${esc(when(m.age_min))}</span>
       </div>
-      <div class="body">${esc(m.text)}</div>
+      ${m.text ? `<div class="body">${esc(m.text)}</div>` : ''}
+      ${m.image ? `<div class="shot"><a href="/attachments/${esc(m.image)}" target="_blank" rel="noopener"><img src="/attachments/${esc(m.image)}" alt="screenshot" loading="lazy"></a></div>` : ''}
       ${m.link ? `<div class="link"><a href="${esc(m.link)}" target="_blank" rel="noopener">${esc(m.link)}</a></div>` : ''}
     </div>`;
   }).join('') : '<div class="none">nothing yet</div>';
@@ -41,14 +42,36 @@ function render(d){
 const tick = poll('/api/messages', render);
 
 const t = document.getElementById('t'), b = document.getElementById('b'), err = document.getElementById('err');
+const preview = document.getElementById('preview'), previewImg = document.getElementById('previewImg');
+let pendingImage = null;
+function showPreview(dataUrl){ pendingImage = dataUrl; previewImg.src = dataUrl; preview.hidden = false; }
+function clearPreview(){ pendingImage = null; previewImg.removeAttribute('src'); preview.hidden = true; }
+document.getElementById('previewX').addEventListener('click', clearPreview);
+
+// A pasted screenshot rides along with the text, or stands in for it.
+t.addEventListener('paste', e => {
+  const items = (e.clipboardData && e.clipboardData.items) || [];
+  for(const it of items){
+    if(it.type && it.type.indexOf('image/') === 0){
+      const file = it.getAsFile();
+      if(!file) continue;
+      const reader = new FileReader();
+      reader.onload = () => showPreview(reader.result);
+      reader.readAsDataURL(file);
+      e.preventDefault();
+      return;
+    }
+  }
+});
+
 async function send(){
   const text = t.value.trim();
-  if(!text) return;
+  if(!text && !pendingImage) return;
   b.disabled = true; b.textContent = 'sending'; err.textContent = '';
   try {
     const r = await (await fetch('/api/messages', {method:'POST', headers:{'Content-Type':'application/json'},
-                                                   body: JSON.stringify({text})})).json();
-    if(r.ok){ t.value = ''; await tick(); } else { err.textContent = r.error || 'not sent'; }
+                                                   body: JSON.stringify({text, image: pendingImage})})).json();
+    if(r.ok){ t.value = ''; clearPreview(); await tick(); } else { err.textContent = r.error || 'not sent'; }
   } catch { err.textContent = 'not sent: the board is not answering'; }
   b.disabled = false; b.textContent = 'send'; t.focus();
 }

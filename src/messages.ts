@@ -23,6 +23,8 @@ export interface Message {
   ticket?: string | null;
   kind?: string;
   link?: string | null;
+  // File name (never a path) of a screenshot pasted on the page, stored under the attachments dir.
+  image?: string | null;
 }
 
 export function isHuman(ws: Workspace, kind: string | undefined): boolean {

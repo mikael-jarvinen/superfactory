@@ -11,7 +11,7 @@ import { isHuman, readTail } from "../messages.js";
 import { allRecs, BUSY, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { capitalize, run, sleep } from "../util.js";
-import { postMessage, Receipts, type Relay, sweep } from "./inbox.js";
+import { attachmentsDir, postMessage, Receipts, type Relay, saveAttachment, sweep } from "./inbox.js";
 
 // The board: a read-only picture of the fleet at `/`, and the thread between the human and the lead
 // at `/messages`. `/api` and `/api/messages` are the JSON behind them, and both pages re-fetch every
@@ -328,10 +328,15 @@ const TYPES: Record<string, string> = {
   ".js": "text/javascript; charset=utf-8",
   ".svg": "image/svg+xml",
   ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
   ".ico": "image/x-icon",
 };
 const PAGES: Record<string, string> = { "/": "board.html", "/messages": "messages.html" };
-const MAX_BODY = 64 * 1024;
+// Large enough for a pasted screenshot; the POST is same-site only, so this is not a public surface.
+const MAX_BODY = 12 * 1024 * 1024;
 
 function send(res: ServerResponse, code: number, body: string | Buffer, type: string): void {
   const raw = typeof body === "string" ? Buffer.from(body) : body;
@@ -414,13 +419,18 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
         else chunks.push(c);
       });
       req.on("end", () => {
-        let body: { text?: unknown };
+        let body: { text?: unknown; image?: unknown };
         try {
           body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
         } catch {
           return json(res, 400, { ok: false, error: "bad json" });
         }
-        const r = postMessage(ws, body?.text);
+        let image: string | null = null;
+        if (typeof body?.image === "string" && body.image !== "") {
+          image = saveAttachment(ws, body.image);
+          if (image === null) return json(res, 400, { ok: false, error: "that image could not be read (png, jpeg, gif or webp, up to 10MB)" });
+        }
+        const r = postMessage(ws, body?.text, image);
         json(res, r.ok ? 200 : 400, r);
       });
       return;
@@ -428,6 +438,17 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
     if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, "method not allowed", "text/plain; charset=utf-8");
     if (path === "/api") return json(res, 200, snapshot(ws, sessions, stacks));
     if (path === "/api/messages") return json(res, 200, messagesView(ws, sessions, receipts));
+    if (path.startsWith("/attachments/")) {
+      // A pasted screenshot, stored beside the message log. The name was minted server-side, so a
+      // request for anything but a plain file name in that one directory is refused.
+      const file = path.slice("/attachments/".length);
+      if (!/^[A-Za-z0-9._-]+$/.test(file) || file.includes("..")) return send(res, 404, "not found", "text/plain; charset=utf-8");
+      try {
+        return send(res, 200, readFileSync(join(attachmentsDir(ws), file)), TYPES[extname(file)] ?? "application/octet-stream");
+      } catch {
+        return send(res, 404, "not found", "text/plain; charset=utf-8");
+      }
+    }
     const name = PAGES[path] ?? (path.startsWith("/static/") ? path.slice("/static/".length) : undefined);
     const body = name !== undefined ? files.get(name) : undefined;
     if (body) return send(res, 200, body, TYPES[extname(name as string)] ?? "application/octet-stream");
