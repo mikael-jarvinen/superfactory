@@ -14,6 +14,7 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { inboxHeld } from "../board/inbox.js";
+import { idleWorkFor } from "../idle.js";
 import { factoryCommand, type HookResult, shq } from "../settings.js";
 import { capitalize } from "../util.js";
 import { openWorkspace, resolveWorkspace, type Workspace } from "../workspace.js";
@@ -25,6 +26,11 @@ const armText = (ws: Workspace) =>
   `Arm it now: Monitor with command \`${factoryCommand()} --workspace ${shq(ws.dir)} board --inbox\`, timeout_ms 1800000, ` +
   `description "message page" (load Monitor with ToolSearch first if it is deferred). ` +
   `Re-arm it on every expiry notice. Then carry on with whatever you were doing.`;
+
+const idleText = (work: string[]) =>
+  `There is work waiting while you go idle:\n` +
+  work.map((w) => `  - ${w}`).join("\n") +
+  `\nDispatch it, run the review, or record why it must wait (\`factory state <TICKET> blocked\`), then stop again.`;
 
 const EVENT_WORDS: Record<string, string> = {
   SessionStart: "starting", UserPromptSubmit: "reading", PostToolUse: "thinking",
@@ -99,8 +105,19 @@ function status(argv: string[], input: string, workspace: string | undefined): H
   const tmp = `${file}.${process.pid}`;
   writeFileSync(tmp, JSON.stringify({ t: Date.now() / 1000, words, event: ev, transcript: d.transcript_path ?? null, session: d.session_id ?? null }));
   renameSync(tmp, file);
-  if (ev === "Stop" && values.inbox && !d.stop_hook_active && !inboxHeld(ws))
-    return { code: 0, stdout: JSON.stringify({ decision: "block", reason: armText(ws) }) + "\n" };
+  if (ev === "Stop" && values.inbox && !d.stop_hook_active) {
+    const reasons: string[] = [];
+    if (!inboxHeld(ws)) reasons.push(armText(ws));
+    let work: string[] = [];
+    try {
+      work = idleWorkFor(ws);
+    } catch {
+      work = [];
+    }
+    if (work.length) reasons.push(idleText(work));
+    if (reasons.length)
+      return { code: 0, stdout: JSON.stringify({ decision: "block", reason: reasons.join("\n\n") }) + "\n" };
+  }
   return { code: 0 };
 }
 
