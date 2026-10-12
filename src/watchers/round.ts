@@ -75,7 +75,11 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
     }
   });
 
-  const recs = allRecs(ws).filter((r) => r.state !== "done");
+  const allItems = allRecs(ws);
+  // ticket -> state across every record, done included, so a blocked item's named blocker can be
+  // looked up even after it has reached done and left the open set below.
+  const stateByTicket = new Map(allItems.map((r) => [r.ticket, r.state ?? ""]));
+  const recs = allItems.filter((r) => r.state !== "done");
   section("state store", () => {
     if (!recs.length) out.push("  no open items");
     for (const r of recs) {
@@ -94,6 +98,20 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
         flag = firstTime(r.ticket, s, r.since!) ? `  waiting on ${human} over a working day` : `  waiting on ${human} (already reported, not an escalation)`;
       const sessions = live as Map<string, Session> | null;
       if (BUSY.has(s) && r.agent && sessions && !sessions.has(r.agent)) flag += `  NO SESSION: ${r.agent} has no live session while ${s}`;
+      // Mikael, 2026-10-09: the round must check whether a blocked item is still truly blocked. A
+      // blocked item that names a ticket it waits on ("held behind CL-2247 merge") stays blocked
+      // silently after that ticket merges. When a named blocker has reached done, say so once, so
+      // the dependent is re-dispatched rather than forgotten -- CL-2246 sat blocked for days behind
+      // a dependency that had already merged.
+      if (s === "blocked" && r.asked_you?.question) {
+        // Any key-shaped token in the question; the done-record filter below makes over-matching
+        // harmless, since a word that is not a tracked ticket is never a done record.
+        const refs = [...new Set((r.asked_you.question.match(/\b[A-Z][A-Z0-9]*-[A-Za-z0-9-]+\b/g) ?? []))]
+          .filter((k) => k !== r.ticket);
+        const cleared = refs.filter((k) => stateByTicket.get(k) === "done");
+        if (cleared.length && firstTime(r.ticket, `blocker-done:${cleared.join(",")}`, r.since ?? ""))
+          flag += `  BLOCKER DONE: ${cleared.join(", ")} merged -- ${r.ticket} may no longer be blocked`;
+      }
       const pr = recPrs(r).map((p) => `${p.repo ?? ""}#${p.number ?? ""}`).join(",");
       out.push(`  ${r.ticket.padEnd(12)} ${s.padEnd(17)} ${(age === null ? "?" : `${Math.floor(age / 60)}m`).padStart(6)} ` +
         `agent=${(r.agent || "-").padEnd(8)} tracker=${(isLocal(r.ticket) ? "none" : r.jira || "?").padEnd(12)} pr=${pr}${flag}`);

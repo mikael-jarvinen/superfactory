@@ -202,6 +202,31 @@ test("the round: flags said once, the failures cursor, and its heartbeat", () =>
   assert.match(read("watcher-failures.log"), /round FAILED exit=1\n$/);
 });
 
+test("the round: a blocked item whose named blocker has merged is flagged, once", () => {
+  const { ws, run, read } = watcherWorkspace();
+  // WEB-9 is merged (done); WEB-5 is still open. WEB-2 waits on WEB-9, WEB-3 waits on WEB-5.
+  assert.equal(factory(ws, ["state", "WEB-9", "queued"]).status, 0);
+  const web9 = join(ws, "state", "WEB-9.json");
+  writeFileSync(web9, JSON.stringify({ ...JSON.parse(readFileSync(web9, "utf8")), state: "done" }));
+  assert.equal(factory(ws, ["state", "WEB-5", "queued"]).status, 0);
+  for (const [k, note] of [["WEB-2", "verify_site held behind WEB-9 merge"], ["WEB-3", "held behind WEB-5 merge"]] as const) {
+    assert.equal(factory(ws, ["state", k, "queued"]).status, 0);
+    assert.equal(factory(ws, ["state", k, "blocked", "--note", note]).status, 0);
+  }
+  const routes = { "pr list -R acme/web --state all": { stdout: [] }, "pr list -R acme/api --state all": { stdout: [] } };
+
+  let r = run(["watch", "round", "--facts"], [], routes);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /WEB-2 .*BLOCKER DONE: WEB-9 merged -- WEB-2 may no longer be blocked/);
+  assert.doesNotMatch(r.stdout, /WEB-3 .*BLOCKER DONE/, "a blocker that is still open is not flagged");
+
+  // Said once: a real (non-facts) run commits the marker, after which the flag goes quiet.
+  r = run(["watch", "round"], [{ stdout: "QUIET\n" }], routes);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  r = run(["watch", "round", "--facts"], [], routes);
+  assert.doesNotMatch(r.stdout, /WEB-2 .*BLOCKER DONE/, "the cleared blocker is reported once, not every round");
+});
+
 test("with no tracker there is no queue to watch, and the round needs no read", () => {
   const { run, logs } = watcherWorkspace(JIRA.replace('kind = "jira"', 'kind = "none"'));
   let r = run(["watch", "queue"], []);
