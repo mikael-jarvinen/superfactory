@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse, TomlError } from "smol-toml";
 import { FactoryError } from "./util.js";
 
-export const ROLES = ["lead", "builder", "reviewer"] as const;
+export const ROLES = ["lead", "builder", "reviewer", "assistant"] as const;
 export type RoleName = (typeof ROLES)[number];
 
 export const STATES = [
