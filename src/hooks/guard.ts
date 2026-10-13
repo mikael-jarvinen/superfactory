@@ -14,7 +14,8 @@
 // no branch deletes on origin, no merging or undrafting through gh, no checkout of a protected
 // branch. The --own-repo repos have main as their only branch and no PRs: a push to main is allowed
 // when it names one of them by URL, and so is renaming a branch of one to main. Deleting a branch
-// through the API is allowed outside the --org.
+// through the API is allowed outside the --org, and for the lead in an --own-repo when GitHub says
+// the branch is merged into the default branch.
 //
 // Why a parser and not regexes: a blocklist cannot enumerate a shell (`command git commit`, a
 // newline before the command, `git -c x=y push origin main`, `git push origin CL-1:main`,
@@ -23,7 +24,7 @@
 import { posix } from "node:path";
 import { parseArgs } from "node:util";
 import type { HookResult } from "../settings.js";
-import { chars } from "../util.js";
+import { chars, run } from "../util.js";
 
 export const POLICIES = ["readonly", "protect"] as const;
 export type Policy = (typeof POLICIES)[number];
@@ -34,6 +35,8 @@ export interface GuardContext {
   writeDirs: string[];
   org?: string;
   ownRepos: string[];
+  // Whether a branch of owner/repo is merged into the default branch. Tests stub it; the hook asks GitHub.
+  isMerged?: (repo: string, branch: string) => boolean;
 }
 
 export const PROTECTED = new Set(["main", "master", "staging", "production", "dev"]);
@@ -424,8 +427,19 @@ function checkGhReadonly(words: string[]): void {
   refuse(`gh ${args.slice(0, 2).join(" ")} is not read-only`);
 }
 
-const API_DELETE_BRANCH = /^(-X|--method)\s*=?\s*DELETE repos\/([\w.-]+)\/[\w.-]+\/git\/refs\/heads\/([\w./-]+)$/;
+const API_DELETE_BRANCH = /^(-X|--method)\s*=?\s*DELETE repos\/([\w.-]+)\/([\w.-]+)\/git\/refs\/heads\/([\w./-]+)$/;
 const API_RENAME_TO_MAIN = /^(-X|--method)\s*=?\s*POST repos\/([\w.-]+\/[\w.-]+)\/branches\/[\w./-]+\/rename -f new_name=main$/;
+
+// Merged means GitHub's compare of the default branch with the branch finds nothing ahead: every
+// commit on the branch is already in the default branch, so deleting it loses nothing. A squash
+// merge leaves the branch ahead and reads as unmerged. Any failure reads as unmerged.
+function mergedOnGitHub(repo: string, branch: string): boolean {
+  const opts = { timeout: 15_000 };
+  const base = run("gh", ["api", `repos/${repo}`, "--jq", ".default_branch"], opts);
+  if (base.status !== 0 || !base.stdout.trim()) return false;
+  const cmp = run("gh", ["api", `repos/${repo}/compare/${base.stdout.trim()}...${branch}`, "--jq", ".ahead_by"], opts);
+  return cmp.status === 0 && cmp.stdout.trim() === "0";
+}
 
 // The owner/repo a `gh pr <merge|close|...>` targets, from --repo/-R or a PR URL. null when the
 // command relies on the cwd's remote, which the guard cannot resolve -- the caller then fails safe.
@@ -460,7 +474,14 @@ function checkGhProtect(words: string[], ctx: GuardContext): void {
   if (args[0] === "api" && ghApiWrites(args.slice(1)) && /(pulls\/\d+\/merge|git\/refs|branches\/\S+\/(protection|rename))/.test(args.join(" "))) {
     const rest = args.slice(1).join(" ");
     const del = API_DELETE_BRANCH.exec(rest);
-    if (del && (del[2] as string).toLowerCase() !== ctx.org?.toLowerCase() && !PROTECTED.has((del[3] as string).toLowerCase())) return;
+    if (del && !PROTECTED.has((del[4] as string).toLowerCase())) {
+      if ((del[2] as string).toLowerCase() !== ctx.org?.toLowerCase()) return;
+      const repo = `${del[2]}/${del[3]}`;
+      if (ctx.role === "lead" && ctx.ownRepos.some((r) => r.toLowerCase() === repo.toLowerCase())) {
+        if ((ctx.isMerged ?? mergedOnGitHub)(repo, del[4] as string)) return;
+        refuse(`${del[4]} is not merged into ${repo}'s default branch, so it stays`);
+      }
+    }
     const rename = API_RENAME_TO_MAIN.exec(rest);
     if (rename && ctx.ownRepos.includes(rename[2] as string)) return;
     refuse("writing merges or refs through the API is not allowed");
