@@ -48,9 +48,12 @@ section{padding:18px 20px 20px;border-bottom:1px solid var(--line)}
 /* The connector zone between the lead and the agent teams: the main line runs down the middle from the
    lead to the groups, and the assistants tee off it to the side on a dashed advisory spur -- a 2IC/XO
    position, below the lead and before the builder teams, not a link in the lead-to-agents chain. */
-.spur{position:relative;height:84px}
+/* A two-track grid reserves the spur's space by construction: the left track is the lead-to-teams
+   connector column, the right track HOLDS the Assistants box in normal flow, so the row (and the
+   whole .spur) grows to the box's real height and the groups below can never be overlapped. */
+.spur{position:relative;display:grid;grid-template-columns:50% auto;align-items:center;padding:16px 0}
 .spur::before{content:"";position:absolute;left:50%;top:0;bottom:0;border-left:1px solid var(--line)}
-.spur .staff{position:absolute;left:calc(50% + 30px);top:10px;min-width:200px;max-width:260px}
+.spur .staff{grid-column:2;margin-left:30px;min-width:200px;max-width:240px;position:relative}
 .spur .staff::before{content:"";position:absolute;left:-30px;top:24px;width:30px;border-top:1px dashed var(--line)}
 .spur .staff .group::before{display:none}
 .groups{display:grid;grid-template-columns:repeat(var(--n),minmax(0,1fr));gap:14px;position:relative;
@@ -140,9 +143,9 @@ footer .stale{color:var(--hot)}
   .groups{grid-template-columns:repeat(2,minmax(0,1fr));padding-top:0}
   .groups::before,.group::before,.lead::after{display:none}
   .lead{padding-bottom:14px}
-  .spur{height:auto}
+  .spur{display:block;padding:0}
   .spur::before,.spur .staff::before{display:none}
-  .spur .staff{position:static;margin:0 0 14px}
+  .spur .staff{margin:0 0 14px;max-width:none}
   .kind{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 @media (max-width:640px){
