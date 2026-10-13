@@ -105,6 +105,11 @@ export function ready(ws: Workspace, repo: Repo, n: number, opts: { allowDraft?:
       } else if (allowedFailure(repo, c)) {
         remarks.push(`check '${c.name}' concluded ${concl} but its workflow run concluded success -- the job is continue-on-error, ` +
           "so the repo does not gate on it. Read the failure, do not ignore it; it just is not a blocker.");
+      } else if (/deep review/i.test(c.name)) {
+        // Mikael, 2026-10-09: "Ignore failing deep reviews." Aikido's Deep Review often concludes
+        // neutral/"could not complete" for infra reasons; it is not a gate. The repo's own code scan
+        // (a separate check) is what gates, and gateChecks below still requires a real job to have run.
+        remarks.push(`check '${c.name}' concluded ${concl} -- deep reviews are not a blocker by configuration; the gating scan is a separate check`);
       } else {
         fail(`check '${c.name}' concluded ${concl}`);
         realCheckProblem = true;
