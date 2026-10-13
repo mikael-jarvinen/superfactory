@@ -41,16 +41,18 @@ section{padding:18px 20px 20px;border-bottom:1px solid var(--line)}
 .dot.down{background:var(--hot)}
 
 /* team: the lead on top, a group per role under a bar that joins them */
-.leadrow{position:relative;padding-bottom:22px;display:grid;grid-template-columns:1fr auto 1fr;align-items:center}
-.leadrow::after{content:"";position:absolute;left:50%;bottom:0;height:22px;border-left:1px solid var(--line)}
-.lead{grid-column:2;display:flex;justify-content:center}
+.lead{display:flex;justify-content:center;position:relative;padding-bottom:16px}
+.lead::after{content:"";position:absolute;left:50%;bottom:0;height:16px;border-left:1px solid var(--line)}
 .lead .person{min-width:240px;border:1px solid var(--line);border-radius:8px;background:var(--panel);
               padding:10px 14px;box-shadow:var(--shadow)}
-/* the lead's assistants: a staff position beside the lead (a 2IC/XO), off the chain down to the groups.
-   A dashed connector to the lead marks it advisory, not a link in the lead-to-agents chain. */
-.staff{grid-column:3;justify-self:start;margin-left:28px;min-width:200px;max-width:260px;position:relative}
-.staff::before{content:"";position:absolute;left:-28px;top:26px;width:28px;border-top:1px dashed var(--line)}
-.staff .group::before{display:none}
+/* The connector zone between the lead and the agent teams: the main line runs down the middle from the
+   lead to the groups, and the assistants tee off it to the side on a dashed advisory spur -- a 2IC/XO
+   position, below the lead and before the builder teams, not a link in the lead-to-agents chain. */
+.spur{position:relative;height:84px}
+.spur::before{content:"";position:absolute;left:50%;top:0;bottom:0;border-left:1px solid var(--line)}
+.spur .staff{position:absolute;left:calc(50% + 30px);top:10px;min-width:200px;max-width:260px}
+.spur .staff::before{content:"";position:absolute;left:-30px;top:24px;width:30px;border-top:1px dashed var(--line)}
+.spur .staff .group::before{display:none}
 .groups{display:grid;grid-template-columns:repeat(var(--n),minmax(0,1fr));gap:14px;position:relative;
         padding-top:18px;align-items:start}
 .groups::before{content:"";position:absolute;top:0;border-top:1px solid var(--line);
@@ -138,6 +140,9 @@ footer .stale{color:var(--hot)}
   .groups{grid-template-columns:repeat(2,minmax(0,1fr));padding-top:0}
   .groups::before,.group::before,.lead::after{display:none}
   .lead{padding-bottom:14px}
+  .spur{height:auto}
+  .spur::before,.spur .staff::before{display:none}
+  .spur .staff{position:static;margin:0 0 14px}
   .kind{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 @media (max-width:640px){
