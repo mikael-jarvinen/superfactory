@@ -114,6 +114,9 @@ export function buildingPrompt(ws: Workspace, agent: Agent, ticket: string): str
 export const reviewerPrompt = (ws: Workspace) =>
   `You are one of ${leadName(ws)}'s reviewers. Read CLAUDE.md, reply exactly READY, and wait for the review brief.`;
 
+export const assistantPrompt = (ws: Workspace) =>
+  `You are one of ${leadName(ws)}'s assistants. Read CLAUDE.md, reply exactly READY, and wait for a task from ${leadName(ws)}.`;
+
 export const leadPrompt = (ws: Workspace) =>
   `You are ${leadName(ws)}. Read CLAUDE.md, then run \`factory status\` and read every record in ` +
   `state/. Say in one message what is in flight and what is waiting on ${ws.config.human.name}. Then wait for messages.`;

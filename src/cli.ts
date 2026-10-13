@@ -6,7 +6,7 @@ import { followInbox } from "./board/inbox.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
 import { agentOrDie, byRole, claudeBin, findSession, fleetLines, lead, type Session, sessionAlive, sessions, stopSession, waitForName } from "./fleet.js";
-import { buildAppendix, buildingPrompt, launch, leadPrompt, reviewerPrompt, roleOf } from "./launch.js";
+import { assistantPrompt, buildAppendix, buildingPrompt, launch, leadPrompt, reviewerPrompt, roleOf } from "./launch.js";
 import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
 import { hook as noSideChannelsHook } from "./hooks/no-side-channels.js";
@@ -59,6 +59,9 @@ usage: factory [--workspace <dir>] <command> [options]
                                   the worktree unless --remove-worktree.
   review [--name <r>] [--prompt-file <f>] [--force]
                                   a fresh reviewer for one review: the first free one
+  assistant [name] [--prompt-file <f>] [--force]
+                                  start a lead assistant (vega or cruz; first free if unnamed) to
+                                  take the lead's non-code work, then brief it by message
   state <KEY>                     show one record
   state <KEY> --title "<words>"   what it is about, for the board. No transition.
   state <KEY> <new-state> [--agent A] [--stack S] [--evidence E] [--note N] [--title T]
@@ -334,6 +337,51 @@ function cmdReview(ws: Workspace, argv: string[]) {
   throw new FactoryError(`every reviewer is busy: ${busy.join(", ")}. Stop one, or pass --force to restart the first.`);
 }
 
+// An assistant is started on demand to take a piece of the lead's non-code work -- managing PRs,
+// fixing factory state or config, a computer task, research. Like a reviewer it is a fresh session,
+// started with the role's settings/model/effort/permission-mode and the shared assistants/ cwd, no
+// stack. Named vega or cruz; with no name it takes the first free one. The lead then sends the task
+// by message and stops the session with `factory stop <name>` when it is done.
+function cmdAssistant(ws: Workspace, argv: string[]) {
+  const { v, p } = args("assistant", argv, { "prompt-file": { type: "string" }, name: { type: "string" }, force: { type: "boolean" } }, [0, 1]);
+  let names = byRole(ws, "assistant").map((a) => a.name);
+  if (!names.length) throw new FactoryError(`no assistants are configured.`);
+  const want = (p[0] as string | undefined) ?? str(v.name);
+  if (want) {
+    if (!names.includes(want)) throw new FactoryError(`${pyRepr(want)} is not an assistant. Assistants: ${names.join(", ")}`);
+    names = [want];
+  }
+  const promptFile = str(v["prompt-file"]);
+  const start = (name: string) => {
+    const ag = agentOrDie(ws, name);
+    const prompt = promptFile ? readFileSync(promptFile, "utf8") : assistantPrompt(ws);
+    return launch(ws, ag, roleOf(ws, ag).cwd as string, prompt);
+  };
+  const busy: string[] = [];
+  for (const name of names) {
+    const s = findSession(name);
+    if (sessionAlive(s)) {
+      busy.push(`${name} (${s.id})`);
+      continue;
+    }
+    console.log(`${name} started (${start(name).id})`);
+    return;
+  }
+  if (v.force && busy.length) {
+    const name = names[0] as string;
+    stopSession(findSession(name));
+    console.log(`${name} restarted (${start(name).id})`);
+    return;
+  }
+  // A named assistant already running is not an error: the lead just messages the live session.
+  if (want) {
+    const s = findSession(want);
+    console.log(`${want} is already running${sessionAlive(s) ? ` (${s.id})` : ""}; send it the task by message, or pass --force to restart it.`);
+    return;
+  }
+  throw new FactoryError(`every assistant is busy: ${busy.join(", ")}. Message one, or pass --force to restart the first.`);
+}
+
 function up(ws: Workspace, fresh: boolean) {
   const ld = lead(ws);
   // the board's stacks panel reads this export, so write it before the board's first check
@@ -548,6 +596,7 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void>
   "dispatch": cmdDispatch,
   "stop": cmdStop,
   "review": cmdReview,
+  "assistant": cmdAssistant,
   "state": cmdState,
   "drop": cmdDrop,
   "say": cmdSay,
