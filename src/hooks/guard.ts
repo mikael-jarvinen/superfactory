@@ -361,7 +361,8 @@ function checkGitProtect(words: string[], ctx: GuardContext): void {
     }
     for (const a of pos[0] === "origin" ? pos.slice(1) : pos) {
       if (a.startsWith("+")) refuse("a + refspec is a force push; use --force-with-lease");
-      if (a.includes(":") && a.split(":", 2)[1] === "") refuse("deleting a remote branch is not allowed");
+      // `:branch` is a delete: an empty source pushes nothing over the destination.
+      if (a.startsWith(":") || (a.includes(":") && a.split(":", 2)[1] === "")) refuse("deleting a remote branch is not allowed");
       // By URL only: the guard cannot see which repo a remote called origin is. `:main` deletes, so never.
       const ownRepo = ctx.ownRepos.some((r) => pos[0] === `https://github.com/${r}` || pos[0] === `https://github.com/${r}.git`);
       if (protectedRef(a) && (!ownRepo || a.startsWith(":"))) refuse(`pushing to a protected branch (${a}) is not allowed`);

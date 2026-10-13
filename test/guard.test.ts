@@ -114,3 +114,12 @@ test("only the lead deletes a merged branch of a factory-own repo", () => {
   for (const [what, reason] of Object.entries(refused)) assert.notEqual(reason, null, `${what} should be refused`);
   assert.match(refused["an unmerged branch"] as string, /not merged/);
 });
+
+// A refspec with an empty source deletes the destination; every role is refused, by remote name or URL.
+test("a :branch refspec is a refused delete for every role", () => {
+  const cmds = ["git push origin :CL-1", "git push origin :refs/heads/CL-1", "git push origin HEAD:CL-1 :CL-2",
+    "git push https://github.com/acme/workspace.git :CL-1", "git push https://github.com/acme/api.git :CL-1"];
+  const allowed = ["lead", "assistant", "builder"].flatMap((role) =>
+    cmds.filter((c) => verdict(c, { ...pr, role }) === null).map((c) => `${role}: ${c}`));
+  assert.deepEqual(allowed, []);
+});
