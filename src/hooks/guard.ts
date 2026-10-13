@@ -427,9 +427,30 @@ function checkGhReadonly(words: string[]): void {
 const API_DELETE_BRANCH = /^(-X|--method)\s*=?\s*DELETE repos\/([\w.-]+)\/[\w.-]+\/git\/refs\/heads\/([\w./-]+)$/;
 const API_RENAME_TO_MAIN = /^(-X|--method)\s*=?\s*POST repos\/([\w.-]+\/[\w.-]+)\/branches\/[\w./-]+\/rename -f new_name=main$/;
 
+// The owner/repo a `gh pr <merge|close|...>` targets, from --repo/-R or a PR URL. null when the
+// command relies on the cwd's remote, which the guard cannot resolve -- the caller then fails safe.
+function ghPrRepo(args: string[]): string | null {
+  const slug = /^[\w.-]+\/[\w.-]+$/;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    if (a === "--repo" || a === "-R") { const v = args[i + 1]; return v !== undefined && slug.test(v) ? v : null; }
+    if (a.startsWith("--repo=")) { const v = a.slice(7); return slug.test(v) ? v : null; }
+    if (a.startsWith("-R") && a.length > 2) { const v = a.slice(2); return slug.test(v) ? v : null; }
+    const m = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+/.exec(a);
+    if (m) return m[1] as string;
+  }
+  return null;
+}
+
 function checkGhProtect(words: string[], ctx: GuardContext): void {
   const args = words.slice(1);
-  if (args[0] === "pr" && ["merge", "close", "lock", "unlock"].includes(args[1] ?? "")) refuse("merging or closing a PR is the human's call");
+  if (args[0] === "pr" && ["merge", "close", "lock", "unlock"].includes(args[1] ?? "")) {
+    const repo = ghPrRepo(args);
+    if (repo === null) refuse("merging or closing a PR needs an explicit --repo owner/name (or a PR URL) so the guard can confirm it is a factory-own repo");
+    const target = (repo as string).toLowerCase();
+    if (!ctx.ownRepos.some((r) => r.toLowerCase() === target)) refuse("merging or closing a PR on a product repo is the human's and colleagues' call");
+    // a factory-own repo (lyyti-factory / superfactory): the lead and its assistants may merge or close it.
+  }
   if (args[0] === "pr" && args[1] === "ready" && !args.includes("--undo")) refuse("undrafting is done by `factory pr-send` only; gh pr ready --undo is fine");
   if (args[0] === "api" && ghApiWrites(args.slice(1)) && /(pulls\/\d+\/merge|git\/refs|branches\/\S+\/(protection|rename))/.test(args.join(" "))) {
     const rest = args.slice(1).join(" ");
