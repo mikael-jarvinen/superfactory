@@ -92,7 +92,7 @@ port = 99999
     "stacks.app.slots: must be a whole number from 1 up, got 0",
     "roles.lead.cwd: missing",
     "roles.builder.cwd: a builder starts in its worktree, so it takes no cwd",
-    "roles.boss: unknown role; roles are lead, builder, reviewer",
+    "roles.boss: unknown role; roles are lead, builder, reviewer, assistant",
     "agents[0].name: must be lower case letters, digits and dashes, got \"Ada\"",
     "agents[1].stack: no stack \"ap\"; stacks: app",
     "agents[2].name: \"bea\" is used by another agent",
@@ -115,7 +115,7 @@ test("the CLI prints every problem at once and exits 1", () => {
   const r = factory(ws, ["state", "--list"]);
   assert.equal(r.status, 1);
   assert.equal(r.stderr, `factory: ${join(ws, "factory.toml")} has 2 problems:\n` +
-    `  agents[0].role: must be one of lead, builder, reviewer, got "boss"\n` +
+    `  agents[0].role: must be one of lead, builder, reviewer, assistant, got "boss"\n` +
     `  agents: exactly one agent needs role = "lead", found 0\n`);
   writeFileSync(join(ws, "factory.toml"), "[human\n");
   assert.match(factory(ws, ["status"]).stderr, /has 1 problem:\n {2}not valid TOML: /);
