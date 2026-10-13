@@ -22,7 +22,8 @@ function team(groups){
   const staff = assistants.map(grp).join('');
   const members = groups.flatMap(g => g.members);
   return `<section><div class="shead"><h2>Team</h2><span class="sum">${members.filter(p => p.alive).length} of ${members.length} running</span></div>
-    ${leads ? `<div class="leadrow${staff ? ' has-staff' : ''}"><div class="lead">${leads}</div>${staff ? `<div class="staff">${staff}</div>` : ''}</div>` : ''}
+    ${leads ? `<div class="lead">${leads}</div>` : ''}
+    ${staff ? `<div class="spur"><div class="staff">${staff}</div></div>` : ''}
     <div class="groups" style="--n:${rest.length || 1}">${cols}</div></section>`;
 }
 
