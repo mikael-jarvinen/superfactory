@@ -11,6 +11,7 @@ import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
 import { hook as noSideChannelsHook } from "./hooks/no-side-channels.js";
 import { hook as statusHook } from "./hooks/status.js";
+import { idleWork, idleWorkFor } from "./idle.js";
 import { comment } from "./gate/comment.js";
 import { deltaRange } from "./gate/delta.js";
 import { demo, demoInit } from "./gate/demo.js";
@@ -156,6 +157,17 @@ function cmdStatus(ws: Workspace, argv: string[]) {
     if (r.state && BUSY.has(r.state) && r.agent && !live.has(r.agent))
       console.log(`  ${"".padEnd(12)} !! ${r.agent} has no live session while ${r.ticket} is ${r.state} -- dropped delegation?`);
   }
+  console.log("-- waiting --");
+  const work = idleWork(recs, ws.config.agents, new Set(live.keys()));
+  if (!work.length) console.log("  none");
+  else for (const w of work) console.log(`  ${w}`);
+}
+
+function cmdIdleWork(ws: Workspace, argv: string[]) {
+  args("idle-work", argv, {}, [0, 0]);
+  const work = idleWorkFor(ws);
+  if (!work.length) console.log("  none");
+  else for (const w of work) console.log(`  ${w}`);
 }
 
 function cmdState(ws: Workspace, argv: string[]) {
@@ -531,6 +543,7 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void>
   "down": cmdDown,
   "restart-lead": cmdRestartLead,
   "status": cmdStatus,
+  "idle-work": cmdIdleWork,
   "sessions": cmdSessions,
   "dispatch": cmdDispatch,
   "stop": cmdStop,
