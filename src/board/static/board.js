@@ -38,6 +38,14 @@ function owner(st){
 }
 
 function stackCard(st){
+  // A non-web slot (events: a Firebase emulator + Android AVD, no URL) has no up/down: its state is
+  // free/reserved/in-use from the worktree, and each site is a status note rather than a link.
+  if(st.web === false){
+    const notes = st.sites.map(s => `<div class="site note">${esc(s.link)}</div>`).join('');
+    return `<div class="stack noweb ${st.mine ? 'mine' : ''}">
+      <div class="top"><span class="nm">${stackName(st)}</span></div>
+      ${owner(st)}<div class="sites">${notes}</div></div>`;
+  }
   const down = st.up < st.of;
   const pill = !down ? 'up' : st.of > 1 && st.up ? `${st.of - st.up} of ${st.of} down` : 'down';
   const sites = st.sites.map(s => `<a class="site" href="${esc(s.link)}" target="_blank" rel="noopener">
@@ -59,7 +67,9 @@ function stacksPanel(s){
       <span class="sum ${bad ? 'bad' : ''}">${sum}</span><span class="more">${more}</span></button>`;
   if(s.checked_s == null)
     return `<aside class="side">${head('checking', false, '')}</aside>`;
-  const up = s.stacks.filter(x => x.up === x.of).length, all = s.stacks.length;
+  // The up/of summary counts web stacks only; non-web slots (events) have no HTTP health to sum.
+  const webStacks = s.stacks.filter(x => x.web !== false);
+  const up = webStacks.filter(x => x.up === x.of).length, all = webStacks.length;
   const ago = s.checked_s < 60 ? s.checked_s + 's ago' : mins(Math.floor(s.checked_s / 60)) + ' ago';
   const downs = s.stacks.filter(x => x.up < x.of).map(stackName);
   const sum = `${up} of ${all} up${downs.length ? ' &middot; ' + downs.join(', ') + ' down' : ''} &middot; checked ${ago}`;

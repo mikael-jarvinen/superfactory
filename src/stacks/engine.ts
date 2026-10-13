@@ -472,15 +472,9 @@ export interface Site {
   health: string;
 }
 
-function sitesOf(ws: Workspace, stack: Stack, reg: Registry, slot: number, warn: Out): Site[] {
-  const p = placementOf(ws, stack, reg, slot);
-  const r = callScript(ws, stack, slot, p, "status");
-  if (r.status !== 0) {
-    warn(failed(stack, slot, "status", r));
-    return [];
-  }
+function parseStatusSites(stdout: string, stack: Stack, slot: number, p: Placement): Site[] {
   const sites: Site[] = [];
-  for (const line of r.stdout.split("\n")) {
+  for (const line of stdout.split("\n")) {
     const [name, url, health] = line.split("\t").map((f) => f.trim());
     if (!name || !url || name.startsWith("#")) continue;
     // a site named after a repo is that repo's worktree; any other is the stack's first repo's
@@ -488,6 +482,35 @@ function sitesOf(ws: Workspace, stack: Stack, reg: Registry, slot: number, warn:
     sites.push({ stack: stack.key, slot, name, worktree, url, health: health || url });
   }
   return sites;
+}
+
+function sitesOf(ws: Workspace, stack: Stack, reg: Registry, slot: number, warn: Out): Site[] {
+  const p = placementOf(ws, stack, reg, slot);
+  const r = callScript(ws, stack, slot, p, "status");
+  if (r.status !== 0) {
+    warn(failed(stack, slot, "status", r));
+    return [];
+  }
+  return parseStatusSites(r.stdout, stack, slot, p);
+}
+
+// Like sitesOf, but a slot whose script lists no web site still gets one row, so the slot shows on
+// the board. The events stack is a Firebase emulator plus an Android AVD with no HTTP URL to open,
+// so its status prints prose rather than `name<TAB>url<TAB>health` lines and sitesOf returns none.
+// The "-" health marks the row non-web: the board never probes it and shows no up/down, only the
+// slot's state. The note is the script's own status line, the same text `factory stack status`
+// prints, or the slot's state when the script says nothing.
+function slotSites(ws: Workspace, stack: Stack, reg: Registry, slot: number, warn: Out): Site[] {
+  const p = placementOf(ws, stack, reg, slot);
+  const r = callScript(ws, stack, slot, p, "status");
+  if (r.status !== 0) warn(failed(stack, slot, "status", r));
+  const web = r.status === 0 ? parseStatusSites(r.stdout, stack, slot, p) : [];
+  if (web.length) return web;
+  const note =
+    (r.status === 0 ? r.stdout.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).join("; ") : "") ||
+    describe(viewSlot(ws, stack, reg, slot), ws.config.human.name);
+  const worktree = p[stack.repos[0] as string] ?? "-";
+  return [{ stack: stack.key, slot, name: stack.key, worktree, url: note, health: "-" }];
 }
 
 // Every slot of every stack with a script, one row per site, for the board: stack, slot, name,
@@ -502,7 +525,7 @@ export function exportStacks(ws: Workspace, warn: Out = console.error): Site[] {
   for (const stack of Object.values(ws.config.stacks)) {
     if (!stack.script) continue;
     const reg = loadRegistry(ws, stack.key);
-    for (const n of slotsOf(stack)) sites.push(...sitesOf(ws, stack, reg, n, warn));
+    for (const n of slotsOf(stack)) sites.push(...slotSites(ws, stack, reg, n, warn));
   }
   const clean = (s: string | number) => String(s).replace(/[\t\r\n]/g, " ");
   const text = sites.map((s) => [s.stack, s.slot, s.name, s.worktree, s.url, s.health].map(clean).join("\t") + "\n").join("");

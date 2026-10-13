@@ -72,6 +72,8 @@ section{padding:18px 20px 20px;border-bottom:1px solid var(--line)}
 .stack{background:var(--panel);border:1px solid var(--line-soft);border-left:3px solid var(--ok);
        border-radius:8px;padding:11px 14px 12px;box-shadow:var(--shadow);min-width:0}
 .stack.down{border-left-color:var(--hot);background:var(--hot-bg)}
+/* A non-web slot (events) has no HTTP health, so neither the up-green nor the down-red applies. */
+.stack.noweb{border-left-color:var(--line)}
 .stack.mine{border-style:dashed;border-left-style:solid}
 .stack .top{display:flex;align-items:center;gap:8px}
 .stack .nm{font-weight:600;font-size:14px}
@@ -90,6 +92,8 @@ section{padding:18px 20px 20px;border-bottom:1px solid var(--line)}
 .site:hover{border-color:var(--cool);text-decoration:none}
 .site .code{color:var(--hot)}
 .site .arr{color:var(--faint)}
+/* A status note on a non-web slot: plain text, not a link, so no border highlight on hover. */
+.site.note{color:var(--dim);border-style:dashed;cursor:default;overflow-wrap:anywhere}
 
 /* work */
 .board{display:grid;grid-template-columns:repeat(auto-fill,minmax(224px,1fr));gap:8px 14px;align-items:start}

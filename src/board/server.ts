@@ -103,6 +103,9 @@ interface StackRow {
   worktree: string;
   url: string;
   health: string;
+  // A non-web site (the events stack: a Firebase emulator and an Android AVD, no HTTP URL) carries
+  // "-" as its health. It is never probed and shows no up/down; its state comes from the worktree.
+  web: boolean;
   up: boolean;
   code: number | null;
 }
@@ -157,10 +160,12 @@ class StackChecks {
       const f = line.split("\t");
       if (f.length !== 6 || !/^\d+$/.test(f[1] as string)) continue;
       const [stack, slot, name, worktree, u, health] = f as [string, string, string, string, string, string];
-      rows.push({ stack, slot: Number(slot), name, worktree, url: u, health: health || u, up: false, code: null });
+      const h = health || u;
+      rows.push({ stack, slot: Number(slot), name, worktree, url: u, health: h, web: /^https?:\/\//i.test(h), up: false, code: null });
     }
-    const again = await probeAll(rows.map((r) => r.health));
-    rows.forEach((r, i) => Object.assign(r, again[i]));
+    const web = rows.filter((r) => r.web);
+    const again = await probeAll(web.map((r) => r.health));
+    web.forEach((r, i) => Object.assign(r, again[i]));
     this.rows = rows;
     this.at = Date.now();
   }
@@ -188,14 +193,20 @@ class StackChecks {
       for (const slot of slots) {
         const rows = here.filter((r) => r.slot === slot);
         const mine = reserve.includes(slot);
+        // A non-web slot (events) has no host to show; its sites carry a status note as their link.
+        const web = rows.some((r) => r.web);
         let host = "";
-        try {
-          host = new URL(rows[0]!.url).host;
-        } catch {
-          host = rows[0]!.url;
+        if (web) {
+          try {
+            host = new URL(rows.find((r) => r.web)!.url).host;
+          } catch {
+            host = rows[0]!.url;
+          }
         }
-        const sites = rows.map((r) => ({ name: r.name, link: r.url, up: r.up, code: r.code, owner: mine ? null : owner(r.worktree) }));
-        out.push({ stack, slot, mine, host, up: sites.filter((s) => s.up).length, of: sites.length, sites });
+        const sites = rows.map((r) => ({ name: r.name, link: r.url, web: r.web, up: r.up, code: r.code, owner: mine ? null : owner(r.worktree) }));
+        // Up/of count only web sites, so a slot with none never reads as "down".
+        const webSites = sites.filter((s) => s.web);
+        out.push({ stack, slot, mine, web, host, up: webSites.filter((s) => s.up).length, of: webSites.length, sites });
       }
     }
     return { present: this.present, checked_s: this.at === null ? null : Math.floor((Date.now() - this.at) / 1000), stacks: out };
