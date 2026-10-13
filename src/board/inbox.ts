@@ -17,19 +17,47 @@ const cursorFile = (ws: Workspace) => join(ws.runDir, "inbox.cursor");
 
 // The human's side of the thread. Appended here rather than through `say`, which is the lead's
 // voice; the kind keeps the two apart on the page and in the log.
-export function postMessage(ws: Workspace, text: unknown): { ok: boolean; error: string | null } {
+export function postMessage(ws: Workspace, text: unknown, image: string | null = null): { ok: boolean; error: string | null } {
   const t = typeof text === "string" ? text.trim() : "";
-  if (!t) return { ok: false, error: "nothing to send" };
+  const img = typeof image === "string" && image !== "" ? image : null;
+  // A pasted screenshot is a message on its own; a caption is optional.
+  if (!t && !img) return { ok: false, error: "nothing to send" };
   const n = chars(t).length;
   if (n > MAX_CHARS) return { ok: false, error: `${n} characters, over the ${MAX_CHARS} the page takes` };
   mkdirSync(ws.stateDir, { recursive: true });
-  const row = { t: now(), id: randomBytes(3).toString("hex"), text: t, ticket: null, kind: HUMAN_KIND, link: null };
+  const row = { t: now(), id: randomBytes(3).toString("hex"), text: t, ticket: null, kind: HUMAN_KIND, link: null, image: img };
   appendFileSync(ws.messages, pyDumps(row) + "\n");
   return { ok: true, error: null };
 }
 
-// What reaches the session. The id tag is how the receipts find it again in the transcript.
-export const pageText = (row: Message) => `[from the message page] [m:${row.id}] ${row.text ?? ""}`;
+// Pasted screenshots are written here, beside the message log, and served at /attachments/<name>.
+export const attachmentsDir = (ws: Workspace): string => join(ws.stateDir, "attachments");
+
+const IMAGE_EXT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+// Decode a `data:image/...;base64,...` payload from the page and store it, returning the file name
+// to record on the row, or null when it is not an image we accept. The name is random and never
+// taken from the client, so a posted name cannot escape the attachments dir.
+export function saveAttachment(ws: Workspace, dataUrl: unknown): string | null {
+  if (typeof dataUrl !== "string") return null;
+  const m = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+  if (!m) return null;
+  const buf = Buffer.from(m[2]!, "base64");
+  if (buf.length === 0 || buf.length > MAX_IMAGE_BYTES) return null;
+  const dir = attachmentsDir(ws);
+  mkdirSync(dir, { recursive: true });
+  const name = `m-${randomBytes(6).toString("hex")}.${IMAGE_EXT[m[1]!]}`;
+  writeFileSync(join(dir, name), buf);
+  return name;
+}
+
+// What reaches the session. The id tag is how the receipts find it again in the transcript. A
+// pasted screenshot is named by its on-disk path on a second line, so the session can open it.
+export const pageText = (ws: Workspace, row: Message): string => {
+  const base = `[from the message page] [m:${row.id}] ${row.text ?? ""}`.trimEnd();
+  return row.image ? `${base}\n[image saved at: ${join(attachmentsDir(ws), row.image)}]` : base;
+};
 
 // The inbox has one owner at a time, and the owner holds the lock: `factory board --inbox`, run as
 // a monitor in the lead's session, or failing that the board's courier sweep. The lock dies with its
@@ -165,7 +193,7 @@ export function followInbox(ws: Workspace, out: (line: string) => void = writeLi
   let cursor = readCursor(ws);
   for (;;) {
     for (const u of unsent(ws, cursor)) {
-      if (u.row) out(pageText(u.row));
+      if (u.row) out(pageText(ws, u.row));
       writeCursor(ws, u.cursor);
       cursor = u.cursor;
     }
@@ -180,7 +208,7 @@ export function sweep(ws: Workspace, relay: Relay): boolean {
   if (fd === null) return false;
   try {
     for (const u of unsent(ws, readCursor(ws))) {
-      if (u.row) relay(ws, pageText(u.row));
+      if (u.row) relay(ws, pageText(ws, u.row));
       writeCursor(ws, u.cursor);
     }
   } finally {

@@ -45,4 +45,14 @@ form button:disabled{color:var(--faint);cursor:default}
 .msg .tk{font-family:var(--mono);font-size:10.5px;color:var(--dim)}
 .none{color:var(--mute);font-size:13px;font-family:var(--mono)}
 .sk{height:58px;margin-bottom:20px}
+/* pasted-screenshot preview sitting in the compose row, and the screenshot in a message */
+.preview{position:relative;display:flex;align-items:flex-start}
+.preview img{max-height:58px;max-width:120px;border:1px solid var(--line);border-radius:6px;display:block}
+.preview button{position:absolute;top:-7px;right:-7px;width:18px;height:18px;min-height:0;padding:0;
+  border-radius:50%;background:var(--panel);border:1px solid var(--line);color:var(--ink);
+  font-size:13px;line-height:1;letter-spacing:0;text-transform:none;cursor:pointer;
+  display:flex;align-items:center;justify-content:center}
+.shot{margin-top:7px}
+.shot img{max-width:100%;max-height:420px;border:1px solid var(--line-soft);border-radius:8px;
+  box-shadow:var(--shadow);display:block}
 @media (max-width:720px){.wrap{padding:14px}header{padding:11px 14px;gap:12px}}
