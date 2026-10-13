@@ -12,14 +12,17 @@ function person(p){
 
 function team(groups){
   const lead = groups.filter(g => g.key === 'lead');
-  const rest = groups.filter(g => g.key !== 'lead');
+  const assistants = groups.filter(g => g.key === 'assistants');
+  const rest = groups.filter(g => g.key !== 'lead' && g.key !== 'assistants');
   const leads = lead.flatMap(g => g.members).map(person).join('');
-  const cols = rest.map(g => `<div class="group">
+  const grp = g => `<div class="group">
       <h3>${esc(g.title)}<span class="scope">${esc(g.scope)}</span><span class="n">${g.members.length}</span></h3>
-      ${g.members.map(person).join('')}</div>`).join('');
+      ${g.members.map(person).join('')}</div>`;
+  const cols = rest.map(grp).join('');
+  const staff = assistants.map(grp).join('');
   const members = groups.flatMap(g => g.members);
   return `<section><div class="shead"><h2>Team</h2><span class="sum">${members.filter(p => p.alive).length} of ${members.length} running</span></div>
-    ${leads ? `<div class="lead">${leads}</div>` : ''}
+    ${leads ? `<div class="leadrow${staff ? ' has-staff' : ''}"><div class="lead">${leads}</div>${staff ? `<div class="staff">${staff}</div>` : ''}</div>` : ''}
     <div class="groups" style="--n:${rest.length || 1}">${cols}</div></section>`;
 }
 

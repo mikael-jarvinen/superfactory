@@ -223,6 +223,7 @@ function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>) {
   for (const a of ws.config.agents) {
     const [key, title, scope] =
       a.role === "lead" ? ["lead", "Lead", ""]
+      : a.role === "assistant" ? ["assistants", "Assistants", ""]
       : a.role === "reviewer" ? ["reviewers", "Reviewers", reviewerRepos.join(", ")]
       : a.stack ? [`stack:${a.stack}`, capitalize(a.stack), a.repos.join(", ")]
       : [`repos:${a.repos.join(",")}`, a.repos.length === 1 ? capitalize(a.repos[0] as string) : "Builders", a.repos.join(", ")];
@@ -240,7 +241,7 @@ function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>) {
       since_min: rec ? ageMinutes(rec.since) : null,
     });
   }
-  const rank = (k: string) => (k === "lead" ? 0 : k === "reviewers" ? 2 : 1);
+  const rank = (k: string) => (k === "lead" ? 0 : k === "assistants" ? 1 : k === "reviewers" ? 3 : 2);
   return [...groups.values()].sort((a, b) => rank(a.key) - rank(b.key));
 }
 
