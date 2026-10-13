@@ -94,3 +94,23 @@ test("the guard's allow and refuse table", () => {
     }
   assert.deepEqual(wrong, []);
 });
+
+// The lead may delete a merged branch of an --own-repo inside the --org, through the API only. The
+// stub calls every branch merged but wip-2, so each refusal below is its own rule, not the merge check.
+test("only the lead deletes a merged branch of a factory-own repo", () => {
+  const isMerged = (repo: string, branch: string) => repo === "acme/workspace" && branch !== "wip-2";
+  const as = (role: string): GuardContext => ({ ...pr, role, isMerged });
+  const del = (repo: string, branch: string) => `gh api -X DELETE repos/${repo}/git/refs/heads/${branch}`;
+  assert.equal(verdict(del("acme/workspace", "done-1"), as("lead")), null);
+  assert.equal(verdict(`gh api --method=DELETE repos/acme/workspace/git/refs/heads/feature/done`, as("lead")), null);
+  const refused = {
+    "an assistant": verdict(del("acme/workspace", "done-1"), as("assistant")),
+    "a builder": verdict(del("acme/workspace", "done-1"), as("builder")),
+    "a product repo": verdict(del("acme/api", "done-1"), as("lead")),
+    "an unmerged branch": verdict(del("acme/workspace", "wip-2"), as("lead")),
+    "a protected branch": verdict(del("acme/workspace", "main"), as("lead")),
+    "git push --delete": verdict("git push origin --delete done-1", as("lead")),
+  };
+  for (const [what, reason] of Object.entries(refused)) assert.notEqual(reason, null, `${what} should be refused`);
+  assert.match(refused["an unmerged branch"] as string, /not merged/);
+});
