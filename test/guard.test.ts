@@ -117,7 +117,8 @@ test("only the lead deletes a merged branch of a factory-own repo", () => {
 
 // A refspec with an empty source deletes the destination; every role is refused, by remote name or URL.
 test("a :branch refspec is a refused delete for every role", () => {
-  const cmds = ["git push origin :CL-1", "git push origin :refs/heads/CL-1", "git push origin HEAD:CL-1 :CL-2",
+  // +:CL-1 is refused by the + refspec rule before it reaches the delete rule; it stays here as a pin.
+  const cmds = ["git push origin :CL-1", "git push origin :refs/heads/CL-1", "git push origin HEAD:CL-1 :CL-2", "git push origin +:CL-1",
     "git push https://github.com/acme/workspace.git :CL-1", "git push https://github.com/acme/api.git :CL-1"];
   const allowed = ["lead", "assistant", "builder"].flatMap((role) =>
     cmds.filter((c) => verdict(c, { ...pr, role }) === null).map((c) => `${role}: ${c}`));
