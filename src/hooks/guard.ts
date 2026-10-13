@@ -451,7 +451,12 @@ function checkGhProtect(words: string[], ctx: GuardContext): void {
     if (!ctx.ownRepos.some((r) => r.toLowerCase() === target)) refuse("merging or closing a PR on a product repo is the human's and colleagues' call");
     // a factory-own repo (lyyti-factory / superfactory): the lead and its assistants may merge or close it.
   }
-  if (args[0] === "pr" && args[1] === "ready" && !args.includes("--undo")) refuse("undrafting is done by `factory pr-send` only; gh pr ready --undo is fine");
+  if (args[0] === "pr" && args[1] === "ready" && !args.includes("--undo")) {
+    const repo = ghPrRepo(args);
+    if (repo === null) refuse("undrafting a PR needs an explicit --repo owner/name (or a PR URL) so the guard can confirm it is a factory-own repo; otherwise undrafting is `factory pr-send`'s job");
+    if (!ctx.ownRepos.some((r) => r.toLowerCase() === (repo as string).toLowerCase())) refuse("undrafting a product-repo PR is done by `factory pr-send` only; gh pr ready --undo is fine");
+    // a factory-own repo (lyyti-factory / superfactory): the lead and its assistants may undraft it to merge it.
+  }
   if (args[0] === "api" && ghApiWrites(args.slice(1)) && /(pulls\/\d+\/merge|git\/refs|branches\/\S+\/(protection|rename))/.test(args.join(" "))) {
     const rest = args.slice(1).join(" ");
     const del = API_DELETE_BRANCH.exec(rest);
