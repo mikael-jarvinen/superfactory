@@ -30,7 +30,7 @@ form button:disabled{color:var(--faint);cursor:default}
 
 .msg{border-left:2px solid var(--line);padding:0 0 0 14px;margin-bottom:20px}
 .msg .who{display:flex;align-items:baseline;gap:9px;margin-bottom:5px;flex-wrap:wrap}
-.msg .name{font-size:13px;font-weight:600;letter-spacing:-.01em}
+.msg .name{font-size:15px;font-weight:650;letter-spacing:-.01em}
 /* a chat line: the lead's avatar in its own column, the human's slot left empty at the same width */
 .msg.chat{display:grid;grid-template-columns:48px minmax(0,1fr);column-gap:12px;align-items:start}
 .msg .main{min-width:0}
@@ -38,7 +38,7 @@ form button:disabled{color:var(--faint);cursor:default}
 .msg .kind{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;
            color:var(--faint);border:1px solid var(--line);border-radius:3px;padding:1px 5px}
 .msg .when{font-family:var(--mono);font-size:11px;color:var(--faint);margin-left:auto}
-.msg .body{white-space:pre-wrap;font-size:14.5px;line-height:1.6;color:var(--ink)}
+.msg .body{white-space:pre-wrap;font-size:15px;line-height:1.6;color:var(--ink)}
 .msg .link{margin-top:7px;font-family:var(--mono);font-size:12px;word-break:break-all}
 .msg.human{border-left-color:var(--cool)}
 .msg.human .name{color:var(--cool)}
