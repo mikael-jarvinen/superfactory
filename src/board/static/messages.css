@@ -49,6 +49,7 @@ form button:disabled{color:var(--faint);cursor:default}
 .sk{height:58px;margin-bottom:20px}
 /* pasted-screenshot preview sitting in the compose row, and the screenshot in a message */
 .preview{position:relative;display:flex;align-items:flex-start}
+.preview[hidden]{display:none}
 .preview img{max-height:58px;max-width:120px;border:1px solid var(--line);border-radius:6px;display:block}
 .preview button{position:absolute;top:-7px;right:-7px;width:18px;height:18px;min-height:0;padding:0;
   border-radius:50%;background:var(--panel);border:1px solid var(--line);color:var(--ink);
