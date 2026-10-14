@@ -1,36 +1,58 @@
 // The board: team, stacks, work and heartbeats, from /api. Every name on it comes from the data.
 let human = '', avatars = {};
 
-// With an avatar, it stands left of the name and the job, with the running dot on its corner; without
-// one, the person looks as before.
-function person(p){
-  const job = p.ticket
-    ? `<b>${esc(p.ticket)}</b> <span class="st">${esc(p.state)}${p.since_min != null ? ' &middot; ' + mins(p.since_min) : ''}</span>`
-    : (p.alive ? esc(p.status || 'idle') : 'not running');
-  const av = face(avatars[p.name], 'p');
-  const dot = `<span class="dot ${p.alive ? 'on' : ''}"></span>`;
-  if(av) return `<div class="person has-av"><span class="face">${av}${dot}</span>
-      <div class="txt"><div class="who"><span class="nm">${esc(p.name)}</span></div><div class="job">${job}</div></div></div>`;
-  return `<div class="person">
-      <div class="who">${dot}<span class="nm">${esc(p.name)}</span></div>
-      <div class="job">${job}</div></div>`;
+// A team's accent is its portraits' backdrop: the top rows of the first member's avatar, averaged once
+// per image. Until it is sampled, and for a team with no avatars, the heading keeps the plain rule.
+const tints = {};
+function tint(url){
+  if(!url) return '';
+  if(url in tints) return tints[url];
+  tints[url] = '';
+  const img = new Image();
+  img.onload = () => {
+    try {
+      const c = document.createElement('canvas');
+      c.width = c.height = 16;
+      const x = c.getContext('2d');
+      x.drawImage(img, 0, 0, 16, 16);
+      const d = x.getImageData(0, 0, 16, 2).data;
+      const avg = k => Math.round(d.filter((_, i) => i % 4 === k).reduce((a, b) => a + b, 0) / (d.length / 4));
+      tints[url] = `rgb(${avg(0)},${avg(1)},${avg(2)})`;
+      document.querySelectorAll('[data-tint]').forEach(e => { if(e.dataset.tint === url) e.style.setProperty('--tint', tints[url]); });
+    } catch {}
+  };
+  img.src = url;
+  return '';
 }
 
+// A person in the chart: portrait with the running dot on its corner, name, and what they are on.
+function member(p, cls = ''){
+  const status = p.ticket
+    ? `<span class="tk">${esc(p.ticket)}</span><span class="st">${esc(p.state)}${p.since_min != null ? ' &middot; ' + mins(p.since_min) : ''}</span>`
+    : `<span class="st">${p.alive ? esc(p.status || 'idle') : 'not running'}</span>`;
+  return `<div class="mem ${cls}"><span class="face">${face(avatars[p.name], '', p.name)}<span class="dot ${p.alive ? 'on' : ''}"></span></span>
+      <div class="nm">${esc(p.name)}</div><div class="status">${status}</div></div>`;
+}
+
+function roster(g){
+  const url = g.members.map(m => avatars[m.name]).find(Boolean);
+  const t = tint(url);
+  return `<div class="roster"${url ? ` data-tint="${esc(url)}"` : ''}${t ? ` style="--tint:${t}"` : ''}>
+      <h3><span class="tt">${esc(g.title)}</span>${g.scope ? `<span class="scope">${esc(g.scope)}</span>` : ''}<span class="n">${g.members.length}</span></h3>
+      <div class="people">${g.members.map(p => member(p)).join('')}</div></div>`;
+}
+
+// An org chart of rosters rather than a box per person: the lead on top, the assistants to the side on
+// a dashed line, the teams below on a bar that joins them.
 function team(groups){
-  const lead = groups.filter(g => g.key === 'lead');
-  const assistants = groups.filter(g => g.key === 'assistants');
+  const lead = groups.filter(g => g.key === 'lead').flatMap(g => g.members);
+  const staff = groups.filter(g => g.key === 'assistants');
   const rest = groups.filter(g => g.key !== 'lead' && g.key !== 'assistants');
-  const leads = lead.flatMap(g => g.members).map(person).join('');
-  const grp = g => `<div class="group">
-      <h3>${esc(g.title)}<span class="scope">${esc(g.scope)}</span><span class="n">${g.members.length}</span></h3>
-      ${g.members.map(person).join('')}</div>`;
-  const cols = rest.map(grp).join('');
-  const staff = assistants.map(grp).join('');
   const members = groups.flatMap(g => g.members);
-  return `<section><div class="shead"><h2>Team</h2><span class="sum">${members.filter(p => p.alive).length} of ${members.length} running</span></div>
-    ${leads ? `<div class="lead">${leads}</div>` : ''}
-    ${staff ? `<div class="spur"><div class="staff">${staff}</div></div>` : ''}
-    <div class="groups" style="--n:${rest.length || 1}">${cols}</div></section>`;
+  return `<section class="team"><div class="shead"><h2>Team</h2><span class="sum">${members.filter(p => p.alive).length} of ${members.length} running</span></div>
+    <div class="top">${lead.length ? `<div class="head">${lead.map(p => member(p, 'big')).join('')}</div>` : ''}
+      ${staff.length ? `<div class="staff">${staff.map(roster).join('')}</div>` : ''}</div>
+    <div class="rosters" style="--n:${rest.length || 1}">${rest.map(roster).join('')}</div></section>`;
 }
 
 const stackName = st => st.mine ? `${esc(human)}&rsquo;s ${esc(st.stack)}` : `${esc(cap(st.stack))} ${st.slot}`;
@@ -98,7 +120,8 @@ function work(d){
       <div class="card">
         <div class="k">${esc(t.ticket)}${t.local ? '<span class="tag">local</span>' : ''}</div>
         ${t.title ? `<div class="t">${esc(t.title)}</div>` : ''}
-        <div class="m"><span class="who">${face(avatars[t.agent], 'c')}${esc(t.agent || 'unassigned')}</span>${t.age_min != null ? ' &middot; ' + mins(t.age_min) + ' here' : ''}</div>
+        <div class="m">${t.agent ? `${face(avatars[t.agent], 'c', t.agent)}<span class="who">${esc(t.agent)}</span>` : '<span class="who none">unassigned</span>'}
+          ${t.age_min != null ? `<span class="age">${mins(t.age_min)} here</span>` : ''}</div>
         ${t.prs.length ? `<div class="pr">${t.prs.map(p => `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.repo)}#${esc(p.number)}</a>`).join('')}</div>` : ''}
         ${t.question ? `<div class="q">${esc(t.question)}</div>` : ''}
         ${t.line && t.line !== t.question ? `<div class="line">${esc(t.line)}</div>` : ''}
