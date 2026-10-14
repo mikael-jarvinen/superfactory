@@ -2,6 +2,8 @@
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const cap = s => String(s ?? '').replace(/^./, c => c.toUpperCase());
 const mins = m => m == null ? '' : m < 60 ? m + 'm' : m < 1440 ? Math.floor(m/60) + 'h' : Math.floor(m/1440) + 'd';
+// An agent's round avatar, or nothing when the workspace has no picture of them.
+const face = (url, cls) => url ? `<img class="av ${cls}" src="${esc(url)}" alt="">` : '';
 
 // The choice is this browser's, not the factory's, so it lives in localStorage and defaults to
 // whatever the machine asks for. Wrapped because a private window can throw on access. Run from

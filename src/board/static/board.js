@@ -1,12 +1,15 @@
 // The board: team, stacks, work and heartbeats, from /api. Every name on it comes from the data.
-let human = '';
+let human = '', avatars = {};
 
+// With an avatar, the running dot sits on its corner; without one, the person looks as before.
 function person(p){
   const job = p.ticket
     ? `<b>${esc(p.ticket)}</b> <span class="st">${esc(p.state)}${p.since_min != null ? ' &middot; ' + mins(p.since_min) : ''}</span>`
     : (p.alive ? esc(p.status || 'idle') : 'not running');
-  return `<div class="person">
-      <div class="who"><span class="dot ${p.alive ? 'on' : ''}"></span><span class="nm">${esc(p.name)}</span></div>
+  const av = face(avatars[p.name], 'p');
+  const dot = `<span class="dot ${p.alive ? 'on' : ''}"></span>`;
+  return `<div class="person ${av ? 'has-av' : ''}">
+      <div class="who">${av ? `<span class="face">${av}${dot}</span>` : dot}<span class="nm">${esc(p.name)}</span></div>
       <div class="job">${job}</div></div>`;
 }
 
@@ -38,7 +41,7 @@ function owner(st){
   }
   const seen = new Set();
   return `<div class="own">${held.filter(o => !seen.has(o.ticket) && seen.add(o.ticket)).map(o =>
-    `${o.who ? `<b>${esc(o.who)}</b> ` : ''}<span class="tk">${esc(o.ticket)}</span>`).join(', ')}</div>`;
+    `${o.who ? `${face(avatars[String(o.who).toLowerCase()], 'c')}<b>${esc(o.who)}</b> ` : ''}<span class="tk">${esc(o.ticket)}</span>`).join(', ')}</div>`;
 }
 
 function stackCard(st){
@@ -92,7 +95,7 @@ function work(d){
       <div class="card">
         <div class="k">${esc(t.ticket)}${t.local ? '<span class="tag">local</span>' : ''}</div>
         ${t.title ? `<div class="t">${esc(t.title)}</div>` : ''}
-        <div class="m"><span class="who">${esc(t.agent || 'unassigned')}</span>${t.age_min != null ? ' &middot; ' + mins(t.age_min) + ' here' : ''}</div>
+        <div class="m"><span class="who">${face(avatars[t.agent], 'c')}${esc(t.agent || 'unassigned')}</span>${t.age_min != null ? ' &middot; ' + mins(t.age_min) + ' here' : ''}</div>
         ${t.prs.length ? `<div class="pr">${t.prs.map(p => `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.repo)}#${esc(p.number)}</a>`).join('')}</div>` : ''}
         ${t.question ? `<div class="q">${esc(t.question)}</div>` : ''}
         ${t.line && t.line !== t.question ? `<div class="line">${esc(t.line)}</div>` : ''}
@@ -107,7 +110,7 @@ function work(d){
 }
 
 function render(d){
-  human = d.human;
+  human = d.human; avatars = d.avatars || {};
   const plumbing = d.plumbing.map(h => {
     const stale = h.age_s == null || h.age_s > 7800;
     const when = h.age_s == null ? 'never' : Math.floor(h.age_s / 60) + 'm ago';
