@@ -1,15 +1,18 @@
 // The board: team, stacks, work and heartbeats, from /api. Every name on it comes from the data.
 let human = '', avatars = {};
 
-// With an avatar, the running dot sits on its corner; without one, the person looks as before.
+// With an avatar, it stands left of the name and the job, with the running dot on its corner; without
+// one, the person looks as before.
 function person(p){
   const job = p.ticket
     ? `<b>${esc(p.ticket)}</b> <span class="st">${esc(p.state)}${p.since_min != null ? ' &middot; ' + mins(p.since_min) : ''}</span>`
     : (p.alive ? esc(p.status || 'idle') : 'not running');
   const av = face(avatars[p.name], 'p');
   const dot = `<span class="dot ${p.alive ? 'on' : ''}"></span>`;
-  return `<div class="person ${av ? 'has-av' : ''}">
-      <div class="who">${av ? `<span class="face">${av}${dot}</span>` : dot}<span class="nm">${esc(p.name)}</span></div>
+  if(av) return `<div class="person has-av"><span class="face">${av}${dot}</span>
+      <div class="txt"><div class="who"><span class="nm">${esc(p.name)}</span></div><div class="job">${job}</div></div></div>`;
+  return `<div class="person">
+      <div class="who">${dot}<span class="nm">${esc(p.name)}</span></div>
       <div class="job">${job}</div></div>`;
 }
 

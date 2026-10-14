@@ -76,15 +76,19 @@ section{padding:18px 20px 20px;border-bottom:1px solid var(--line)}
              overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .person .job b{font-weight:500;color:var(--ink)}
 .person .job .st{color:var(--dim)}
-/* avatars: round, a fixed size for each place, with the running dot as a badge on the corner */
+/* avatars: round, a fixed size for each place. In the team the avatar stands left of the name and the
+   job, with the running dot as a badge on its corner, scaled with it. */
 .av{border-radius:50%;object-fit:cover;background:var(--line-soft);flex:0 0 auto;display:block}
+.person.has-av{display:flex;align-items:center;gap:12px}
+.person.has-av .txt{flex:1;min-width:0}
+.person.has-av .job{margin-left:0}
 .face{position:relative;flex:0 0 auto}
-.face .av.p{width:28px;height:28px}
-.face .dot{position:absolute;right:-1px;bottom:-1px;box-shadow:0 0 0 2px var(--panel)}
-.lead .face .av.p{width:36px;height:36px}
-.person.has-av .job{margin-left:36px}
-.lead .person.has-av .job{margin-left:44px}
-.card .m .who .av.c,.stack .own .av.c{width:16px;height:16px;display:inline-block;vertical-align:-4px;margin-right:5px}
+.face .av.p{width:56px;height:56px}
+.face .dot{position:absolute;right:2px;bottom:2px;width:12px;height:12px;box-shadow:0 0 0 2px var(--panel)}
+.lead .face .av.p{width:72px;height:72px}
+.lead .face .dot{right:3px;bottom:3px;width:14px;height:14px}
+.card .m .who .av.c{width:32px;height:32px;display:inline-block;vertical-align:middle;margin-right:7px}
+.stack .own .av.c{width:28px;height:28px;display:inline-block;vertical-align:middle;margin-right:6px}
 
 /* stacks */
 .kind{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}
