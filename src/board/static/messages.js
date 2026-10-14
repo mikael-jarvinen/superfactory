@@ -21,12 +21,15 @@ function render(d){
   // mouse is down on it or a selection sits in it, and whenever nothing in it changed.
   const list = document.getElementById('list'), sel = getSelection();
   if(pressing || (!sel.isCollapsed && list.contains(sel.anchorNode))) return;
+  // With a lead avatar, each row is a chat line: the avatar in a column of its own on the lead's
+  // messages, and an empty slot of the same width on the human's, so every message's text lines up.
   const html = d.messages.length ? d.messages.map(m => {
     const mine = m.from === 'human';
+    const slot = d.lead_avatar ? `<div class="slot">${mine ? '' : face(d.lead_avatar, 'm')}</div>` : '';
     return `
-    <div class="msg ${mine ? 'human' : esc(m.kind || 'note')}">
+    <div class="msg ${mine ? 'human' : esc(m.kind || 'note')} ${slot ? 'chat' : ''}">${slot}<div class="main">
       <div class="who">
-        ${mine ? '' : face(d.lead_avatar, 'm')}<span class="name">${esc(mine ? d.human : lead)}</span>
+        <span class="name">${esc(mine ? d.human : lead)}</span>
         ${mine ? '' : `<span class="kind">${esc(m.kind || 'note')}</span>`}
         ${m.ticket ? `<span class="tk">${esc(m.ticket)}</span>` : ''}
         ${m.receipt ? `<span class="rcpt ${esc(m.receipt)}">${esc(m.receipt)}</span>` : ''}
@@ -35,7 +38,7 @@ function render(d){
       ${m.text ? `<div class="body">${esc(m.text)}</div>` : ''}
       ${m.image ? `<div class="shot"><a href="/attachments/${esc(m.image)}" target="_blank" rel="noopener"><img src="/attachments/${esc(m.image)}" alt="screenshot" loading="lazy"></a></div>` : ''}
       ${m.link ? `<div class="link"><a href="${esc(m.link)}" target="_blank" rel="noopener">${esc(m.link)}</a></div>` : ''}
-    </div>`;
+    </div></div>`;
   }).join('') : '<div class="none">nothing yet</div>';
   if(html !== lastList){ list.innerHTML = html; lastList = html; }
 }
