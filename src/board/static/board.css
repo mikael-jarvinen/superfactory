@@ -76,6 +76,15 @@ section{padding:18px 20px 20px;border-bottom:1px solid var(--line)}
              overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .person .job b{font-weight:500;color:var(--ink)}
 .person .job .st{color:var(--dim)}
+/* avatars: round, a fixed size for each place, with the running dot as a badge on the corner */
+.av{border-radius:50%;object-fit:cover;background:var(--line-soft);flex:0 0 auto;display:block}
+.face{position:relative;flex:0 0 auto}
+.face .av.p{width:28px;height:28px}
+.face .dot{position:absolute;right:-1px;bottom:-1px;box-shadow:0 0 0 2px var(--panel)}
+.lead .face .av.p{width:36px;height:36px}
+.person.has-av .job{margin-left:36px}
+.lead .person.has-av .job{margin-left:44px}
+.card .m .who .av.c,.stack .own .av.c{width:16px;height:16px;display:inline-block;vertical-align:-4px;margin-right:5px}
 
 /* stacks */
 .kind{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}

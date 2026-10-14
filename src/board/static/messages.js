@@ -26,7 +26,7 @@ function render(d){
     return `
     <div class="msg ${mine ? 'human' : esc(m.kind || 'note')}">
       <div class="who">
-        <span class="name">${esc(mine ? d.human : lead)}</span>
+        ${mine ? '' : face(d.lead_avatar, 'm')}<span class="name">${esc(mine ? d.human : lead)}</span>
         ${mine ? '' : `<span class="kind">${esc(m.kind || 'note')}</span>`}
         ${m.ticket ? `<span class="tk">${esc(m.ticket)}</span>` : ''}
         ${m.receipt ? `<span class="rcpt ${esc(m.receipt)}">${esc(m.receipt)}</span>` : ''}

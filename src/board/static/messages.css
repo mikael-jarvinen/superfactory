@@ -31,6 +31,8 @@ form button:disabled{color:var(--faint);cursor:default}
 .msg{border-left:2px solid var(--line);padding:0 0 0 14px;margin-bottom:20px}
 .msg .who{display:flex;align-items:baseline;gap:9px;margin-bottom:5px;flex-wrap:wrap}
 .msg .name{font-size:13px;font-weight:600;letter-spacing:-.01em}
+.msg .av{width:20px;height:20px;border-radius:50%;object-fit:cover;align-self:center;margin-right:-2px;
+         background:var(--line-soft)}
 .msg .kind{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;
            color:var(--faint);border:1px solid var(--line);border-radius:3px;padding:1px 5px}
 .msg .when{font-family:var(--mono);font-size:11px;color:var(--faint);margin-left:auto}

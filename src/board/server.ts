@@ -272,6 +272,19 @@ function heartbeats(ws: Workspace) {
   });
 }
 
+// The workspace's agent avatars, portraits/avatars/<agent>.webp (or .png), as agent -> URL. An agent
+// with no file is absent, and the page keeps its plain look for them.
+const avatarsDir = (ws: Workspace) => join(ws.dir, "portraits", "avatars");
+const AVATAR_FILE = /^[a-z0-9_-]+\.(webp|png)$/;
+
+function avatars(ws: Workspace): Record<string, string> {
+  try {
+    return Object.fromEntries(readdirSync(avatarsDir(ws)).filter((f) => AVATAR_FILE.test(f)).map((f) => [f.replace(/\.\w+$/, ""), `/avatars/${f}`]));
+  } catch {
+    return {};
+  }
+}
+
 function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks) {
   const recs = allRecs(ws);
   const lines = latestLines(ws);
@@ -308,6 +321,7 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks) {
     stacks: stacks.view(ws, recs),
     tickets,
     plumbing: heartbeats(ws),
+    avatars: avatars(ws),
   };
 }
 
@@ -329,7 +343,7 @@ function messagesView(ws: Workspace, sessions: SessionCache, receipts: Receipts)
     const human = isHuman(ws, r.kind);
     return { ...r, from: human ? "human" : "lead", age_min: ageMinutes(r.t), receipt: human && r.id ? receipts.receipt(r.id) : null };
   });
-  return { at: clock(), human: ws.config.human.name, lead: leadName, status, messages: rows };
+  return { at: clock(), human: ws.config.human.name, lead: leadName, lead_avatar: avatars(ws)[leadName] ?? null, status, messages: rows };
 }
 
 // ---------------------------------------------------------------- HTTP
@@ -350,9 +364,9 @@ const PAGES: Record<string, string> = { "/": "board.html", "/messages": "message
 // Large enough for a pasted screenshot; the POST is same-site only, so this is not a public surface.
 const MAX_BODY = 12 * 1024 * 1024;
 
-function send(res: ServerResponse, code: number, body: string | Buffer, type: string): void {
+function send(res: ServerResponse, code: number, body: string | Buffer, type: string, cache = "no-store"): void {
   const raw = typeof body === "string" ? Buffer.from(body) : body;
-  res.writeHead(code, { "Content-Type": type, "Content-Length": raw.length, "Cache-Control": "no-store" });
+  res.writeHead(code, { "Content-Type": type, "Content-Length": raw.length, "Cache-Control": cache });
   res.end(raw);
 }
 
@@ -457,6 +471,17 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
       if (!/^[A-Za-z0-9._-]+$/.test(file) || file.includes("..")) return send(res, 404, "not found", "text/plain; charset=utf-8");
       try {
         return send(res, 200, readFileSync(join(attachmentsDir(ws), file)), TYPES[extname(file)] ?? "application/octet-stream");
+      } catch {
+        return send(res, 404, "not found", "text/plain; charset=utf-8");
+      }
+    }
+    if (path.startsWith("/avatars/")) {
+      // Only a plain avatar file name in that one directory. Cached for an hour, because the board
+      // redraws every two seconds and an uncached image would be fetched again each time.
+      const file = path.slice("/avatars/".length);
+      if (!AVATAR_FILE.test(file)) return send(res, 404, "not found", "text/plain; charset=utf-8");
+      try {
+        return send(res, 200, readFileSync(join(avatarsDir(ws), file)), TYPES[extname(file)] as string, "max-age=3600");
       } catch {
         return send(res, 404, "not found", "text/plain; charset=utf-8");
       }

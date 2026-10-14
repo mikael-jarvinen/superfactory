@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { appendFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { inboxHeld, postMessage, sweep } from "../src/board/inbox.js";
@@ -95,6 +95,33 @@ test("the server: pages, the snapshot, posting, and only the tail of the log", {
     [["typed on the page", "human", "sent"], ["from the old kind", "human", "sent"]]);
   const bad = await fetch(board.url + "/api/messages", { method: "POST", headers: page, body: JSON.stringify({ text: "x".repeat(4001) }) });
   assert.equal(bad.status, 400);
+});
+
+// An agent with a file in portraits/avatars/ gets its URL on both pages; the route serves only a plain
+// avatar file name from that directory, cached, since the board redraws every two seconds.
+test("the server: agent avatars from the workspace", { skip: macOnly }, async () => {
+  const dir = tempWorkspace();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  process.env.CLAUDE_BIN = join(dir, "bin", "claude");
+  const ws = openWorkspace(dir);
+  mkdirSync(join(dir, "portraits", "avatars"), { recursive: true });
+  writeFileSync(join(dir, "portraits", "avatars", "ada.webp"), "RIFF-ada");
+  writeFileSync(join(dir, "portraits", "avatars", "bea.png"), "PNG-bea");
+  writeFileSync(join(dir, "portraits", "avatars", "notes.txt"), "not an avatar");
+
+  const board = await serve(ws, { host: "127.0.0.1", port: 0 });
+  after(() => board.close());
+  const get = async (p: string) => fetch(board.url + p);
+
+  assert.deepEqual((await (await get("/api")).json()).avatars, { ada: "/avatars/ada.webp", bea: "/avatars/bea.png" });
+  assert.equal((await (await get("/api/messages")).json()).lead_avatar, "/avatars/ada.webp");
+  const img = await get("/avatars/ada.webp");
+  assert.equal(img.status, 200);
+  assert.equal(img.headers.get("content-type"), "image/webp");
+  assert.equal(img.headers.get("cache-control"), "max-age=3600");
+  assert.equal(await img.text(), "RIFF-ada");
+  for (const p of ["/avatars/notes.txt", "/avatars/cal.webp", "/avatars/..%2Fportraits%2Favatars%2Fada.webp", "/avatars/Ada.webp"])
+    assert.equal((await get(p)).status, 404, p);
 });
 
 // A message reaches the lead as the human's own instruction, so another site's page must not post one.
