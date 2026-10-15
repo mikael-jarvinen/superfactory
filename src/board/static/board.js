@@ -112,6 +112,32 @@ function stacksPanel(s){
     <div class="kinds">${kinds}</div></aside>`;
 }
 
+// Where a PR in review stands with its human reviewers: none yet, reviewed, changes asked for, or
+// approved and ready to merge. The parts after the first only appear when there is something to say.
+const plural = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`;
+function review(r){
+  if(!r) return '';
+  const tip = r.reviewers.map(x => `${x.login}: ${x.state.toLowerCase().replace('_', ' ')}`).join(', ');
+  const when = `checked ${r.checked_s < 60 ? 'just now' : mins(Math.floor(r.checked_s / 60)) + ' ago'}${r.stale ? ', and the last read failed' : ''}`;
+  const head = {
+    none: ['none', 'No reviews yet'],
+    commented: ['seen', `${plural(r.reviewers.length, 'review')} &middot; commented`],
+    changes: ['changes', 'Changes requested'],
+    approved: ['ok', r.ready ? 'Approved &middot; ready to merge' : 'Approved'],
+    merged: ['done', 'merged'],
+    closed: ['done', 'closed'],
+  }[r.state] || ['none', esc(r.state)];
+  const open = r.state !== 'merged' && r.state !== 'closed';
+  // each its own small pill, so a narrow card wraps between them rather than inside one
+  const more = open ? [
+    r.draft ? '<span class="rv x">draft</span>' : '',
+    r.threads ? `<span class="rv x">${plural(r.threads, 'open thread')}</span>` : '',
+    r.conflicts ? '<span class="rv x bad">conflicts</span>' : '',
+    r.stale ? '<span class="rv x">stale</span>' : '',
+  ].join('') : '';
+  return `<span class="rvs" title="${esc((tip ? tip + ' \u00b7 ' : '') + when)}"><span class="rv ${head[0]}${r.ready ? ' ready' : ''}">${head[1]}</span>${more}</span>`;
+}
+
 function work(d){
   const cols = d.columns.map(col => {
     const mine = d.waiting_on_you.includes(col);
@@ -122,7 +148,7 @@ function work(d){
         ${t.title ? `<div class="t">${esc(t.title)}</div>` : ''}
         <div class="m">${t.agent ? `${face(avatars[t.agent], 'c', t.agent)}<span class="who">${esc(t.agent)}</span>` : '<span class="who none">unassigned</span>'}
           ${t.age_min != null ? `<span class="age">${mins(t.age_min)} here</span>` : ''}</div>
-        ${t.prs.length ? `<div class="pr">${t.prs.map(p => `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.repo)}#${esc(p.number)}</a>`).join('')}</div>` : ''}
+        ${t.prs.length ? `<div class="pr">${t.prs.map(p => `<div class="prl"><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.repo)}#${esc(p.number)}</a>${review(p.review)}</div>`).join('')}</div>` : ''}
         ${t.question ? `<div class="q">${esc(t.question)}</div>` : ''}
         ${t.line && t.line !== t.question ? `<div class="line">${esc(t.line)}</div>` : ''}
       </div>`).join('');

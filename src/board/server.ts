@@ -12,6 +12,7 @@ import { allRecs, BUSY, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from
 import type { Workspace } from "../workspace.js";
 import { capitalize, run, sleep } from "../util.js";
 import { attachmentsDir, postMessage, Receipts, type Relay, saveAttachment, sweep } from "./inbox.js";
+import { type Fetch, ReviewCache } from "./reviews.js";
 
 // The board: a read-only picture of the fleet at `/`, and the thread between the human and the lead
 // at `/messages`. `/api` and `/api/messages` are the JSON behind them, and both pages re-fetch every
@@ -213,6 +214,20 @@ class StackChecks {
   }
 }
 
+// ---------------------------------------------------------------- reviews
+//
+// A PR in review carries where it stands with its human reviewers. GitHub is read on a timer, every PR
+// in one call, and a request is served the last answer and never waits on GitHub.
+const REVIEW_EVERY = 5 * 60_000;
+const IN_REVIEW: ReadonlySet<string> = new Set(["your-review", "colleague-review"]);
+
+const prKey = (p: { repo?: string; number?: number }) => `${p.repo}#${p.number}`;
+
+function reviewKeys(ws: Workspace): string[] {
+  const keys = allRecs(ws).filter((r) => r.state !== null && IN_REVIEW.has(r.state)).flatMap((r) => recPrs(r).map(prKey));
+  return [...new Set(keys)];
+}
+
 // ---------------------------------------------------------------- the snapshot
 
 // Builders group by their stack, or by their repos when they have none, so an agent added to the
@@ -285,7 +300,7 @@ function avatars(ws: Workspace): Record<string, string> {
   }
 }
 
-function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks) {
+function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, reviews: ReviewCache) {
   const recs = allRecs(ws);
   const lines = latestLines(ws);
   const human = ws.config.human.name;
@@ -305,6 +320,7 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks) {
       repo: (p.repo ?? "").split("/").pop(),
       number: p.number ?? null,
       url: `https://github.com/${p.repo}/pull/${p.number}`,
+      review: r.state !== null && IN_REVIEW.has(r.state) ? reviews.get(prKey(p)) : null,
     })),
   }));
   const idx = (s: string | null) => (s !== null && (STATES as readonly string[]).includes(s) ? STATES.indexOf(s as (typeof STATES)[number]) : 99);
@@ -394,6 +410,8 @@ export interface ServeOptions {
   // Step in for the lead while no monitor holds the inbox. Without one, messages wait in the log
   // and the next monitor prints them from its cursor.
   relay?: Relay;
+  // How the review badges read GitHub; gh by default.
+  reviews?: Fetch;
 }
 
 export interface Board {
@@ -410,6 +428,14 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
   const sessions = new SessionCache();
   const stacks = new StackChecks();
   const receipts = new Receipts();
+  const reviews = new ReviewCache(opts.reviews);
+  const readReviews = () => {
+    try {
+      reviews.refresh(reviewKeys(ws)).catch(() => {});
+    } catch {
+      // a torn record is read again on the next turn
+    }
+  };
   const timers: NodeJS.Timeout[] = [];
   const every = (ms: number, fn: () => void) => {
     fn();
@@ -422,6 +448,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
     checking = true;
     stacks.check(ws).catch(() => {}).finally(() => (checking = false));
   });
+  every(REVIEW_EVERY, readReviews);
   const relay = opts.relay;
   if (relay)
     every(500, () => {
@@ -462,7 +489,10 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
       return;
     }
     if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, "method not allowed", "text/plain; charset=utf-8");
-    if (path === "/api") return json(res, 200, snapshot(ws, sessions, stacks));
+    if (path === "/api") {
+      if (reviews.wantsEarly(reviewKeys(ws))) readReviews();
+      return json(res, 200, snapshot(ws, sessions, stacks, reviews));
+    }
     if (path === "/api/messages") return json(res, 200, messagesView(ws, sessions, receipts));
     if (path.startsWith("/attachments/")) {
       // A pasted screenshot, stored beside the message log. The name was minted server-side, so a
