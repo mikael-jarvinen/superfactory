@@ -1,7 +1,7 @@
 /* Every text colour is measured against its own ground rather than chosen by eye: nothing under
    4.5:1, and the small type well above it. Change one and measure it.
-   One meaning per colour, everywhere: green is live or up, red is down, amber is waiting on the
-   human, grey is idle, blue is a link. */
+   One meaning per colour, everywhere: green is live, up or approved, red is down or needs fixing,
+   amber is waiting on the human, grey is idle, blue is a link. */
 :root{
   --ground:#f6f5f2; --panel:#ffffff; --raised:#f2f1ee; --line:#d8d6d1; --line-soft:#e6e4e0;
   --ink:#1b1d22; --dim:#4a505b; --faint:#5f6773; --mute:#696f7b;

@@ -138,7 +138,20 @@ section{padding:18px 20px 20px;border-bottom:1px solid var(--line)}
               overflow-wrap:anywhere}
 .card .m .who.none{font-weight:400;color:var(--faint);text-transform:none}
 .card .m .age{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--faint);white-space:nowrap}
-.card .pr{margin-top:10px;font-family:var(--mono);font-size:12.5px;display:flex;gap:3px 12px;flex-wrap:wrap}
+.card .pr{margin-top:10px;font-family:var(--mono);font-size:12.5px;display:flex;flex-direction:column;gap:6px}
+/* a PR line: the link, then where it stands with its reviewers. Every badge has its own ground, so its
+   text is measured against panel or its tint and never against the amber of a card waiting on you. */
+.card .prl{display:flex;align-items:center;gap:4px 8px;flex-wrap:wrap;min-width:0}
+.rvs{display:inline-flex;flex-wrap:wrap;gap:4px;min-width:0;cursor:default}
+.rv{font-family:var(--sans);font-size:12.5px;font-weight:600;line-height:18px;white-space:nowrap;
+    border:1px solid var(--line);border-radius:10px;padding:0 8px;background:var(--panel);color:var(--dim)}
+.rv.none{color:var(--faint);border-style:dashed}
+.rv.changes{color:var(--hot);border-color:var(--hot)}
+.rv.ok{color:var(--ok);border-color:var(--ok)}
+.rv.ok.ready{background:var(--ok-bg)}
+.rv.done{color:var(--mute);border-color:var(--line-soft)}
+.rv.x{font-weight:400;color:var(--faint);border-color:var(--line-soft)}
+.rv.x.bad{color:var(--hot);border-color:var(--hot);font-weight:600}
 .card .line{font-size:13.5px;line-height:1.5;color:var(--dim);margin-top:10px;padding-top:9px;
             border-top:1px solid var(--line-soft);overflow-wrap:anywhere}
 .card .q{color:var(--you);font-size:13.5px;margin-top:10px;line-height:1.5;
