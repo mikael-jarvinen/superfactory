@@ -155,6 +155,31 @@ test("the round: a merge the record moved after is judged, one it did not is owe
   assert.match(r.stdout, /WEB-2: acme\/web#6 is MERGED but the store says queued -- done judgement owed/);
 });
 
+// Mikael, 2026-10-15: "they can be open, don't put to draft". An open PR in a fix round is only
+// undrafted early if it was never sent: no reviewed sha on it and no review state in its history.
+test("the round: a sent PR open during a fix round is not undrafted early", () => {
+  const { ws, run } = watcherWorkspace();
+  const state = (...a: string[]) => assert.equal(factory(ws, ["state", ...a]).status, 0, a.join(" "));
+  state("WEB-2", "building");
+  state("WEB-2", "pr-open", "--pr", "acme/web#2", "--head", "aaa2222");
+  state("WEB-3", "building");
+  state("WEB-3", "pr-open", "--pr", "acme/web#3", "--head", "aaa3333");
+  state("WEB-3", "your-review", "--reviewed", "aaa3333", "--force");
+  state("WEB-3", "fixing");
+  state("WEB-4", "building");
+  state("WEB-4", "colleague-review", "--force");
+  state("WEB-4", "fixing");
+  const open = (n: number) => ({ number: n, title: `WEB-${n}: x`, headRefName: `WEB-${n}`, state: "OPEN", isDraft: false, mergedAt: null, headRefOid: `aaa${String(n).repeat(4)}` });
+  const r = run(["watch", "round", "--facts"], [], {
+    "pr list -R acme/web --state all": { stdout: [open(2), open(3), open(4)] },
+    "pr list -R acme/api --state all": { stdout: [] },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /WEB-2: acme\/web#2 is NOT a draft while pr-open -- undrafted early\?/);
+  assert.doesNotMatch(r.stdout, /WEB-3: .*undrafted early/, "a reviewed sha on the PR");
+  assert.doesNotMatch(r.stdout, /WEB-4: .*undrafted early/, "colleague-review in its history");
+});
+
 test("the round: flags said once, the failures cursor, and its heartbeat", () => {
   const { ws, run, logs, read, age } = watcherWorkspace();
   assert.equal(factory(ws, ["state", "WEB-2", "building", "--agent", "bea"]).status, 0);
