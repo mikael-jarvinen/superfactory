@@ -115,6 +115,24 @@ test("only the lead deletes a merged branch of a factory-own repo", () => {
   assert.match(refused["an unmerged branch"] as string, /not merged/);
 });
 
+// The lead undrafts a product PR of the --org by hand as well as through `factory pr-send`; nobody else
+// does, and nobody at all outside the org or without naming the repo.
+test("only the lead undrafts a product-repo PR", () => {
+  const as = (role: string): GuardContext => ({ ...pr, role });
+  for (const c of ["gh pr ready 8250 -R acme/api", "gh pr ready 8250 --repo acme/api", "gh pr ready https://github.com/acme/api/pull/8250", "gh pr ready 8250 -R Acme/api"])
+    assert.equal(verdict(c, as("lead")), null, c);
+  const refused = {
+    "a builder": verdict("gh pr ready 8250 -R acme/api", as("builder")),
+    "a reviewer": verdict("gh pr ready 8250 -R acme/api", as("reviewer")),
+    "an assistant": verdict("gh pr ready 8250 -R acme/api", as("assistant")),
+    "outside the org": verdict("gh pr ready 1 -R other/api", as("lead")),
+    "no repo named": verdict("gh pr ready 8250", as("lead")),
+  };
+  for (const [what, reason] of Object.entries(refused)) assert.notEqual(reason, null, `${what} should be refused`);
+  // the factory's own repos are unchanged: the lead and its assistants undraft them to merge them
+  assert.equal(verdict("gh pr ready 3 -R acme/workspace", as("assistant")), null);
+});
+
 // A refspec with an empty source deletes the destination; every role is refused, by remote name or URL.
 test("a :branch refspec is a refused delete for every role", () => {
   // +:CL-1 is refused by the + refspec rule before it reaches the delete rule; it stays here as a pin.
