@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { fleetLines, type Session } from "../fleet.js";
 import { gh, json } from "../gate/github.js";
+import { readTail } from "../messages.js";
 import { loaded } from "../scheduler/launchd.js";
 import { allRecs, BUSY, isLocal, recPrs, WAITING_ON_YOU } from "../state.js";
 import { parseRead, trackerOf } from "../tracker/read.js";
@@ -120,6 +121,10 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
 
   section("gates: PRs on GitHub against the store", () => {
     if (!recs.length) return void out.push("  nothing open");
+    // A PR that has been sent stays open through a fix round (Mikael, 2026-10-15: "they can be open,
+    // don't put to draft"), so only one never sent can have been undrafted early.
+    const sent = new Set((readTail(ws.events) as Record<string, unknown>[])
+      .filter((e) => e.to === "your-review" || e.to === "colleague-review").map((e) => e.ticket));
     for (const repo of Object.values(ws.config.repos)) {
       const r = gh("pr", "list", "-R", repo.remote, "--state", "all", "--limit", "40", "--json", "number,title,headRefName,state,isDraft,mergedAt,headRefOid");
       const prs = json<GhPr[]>(r);
@@ -141,7 +146,7 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
             out.push(`  ${where} is OPEN (draft=${pr.isDraft}) but the store says ${st} -- unreported PR?`);
           else if (pr.state === "OPEN" && rp?.head && pr.headRefOid && !pr.headRefOid.startsWith(rp.head.slice(0, 7)) && ["gate", "your-review", "colleague-review"].includes(st))
             out.push(`  ${where} head moved to ${pr.headRefOid.slice(0, 7)} while ${st} (recorded ${rp.head.slice(0, 7)}) -- frozen PR pushed?`);
-          else if (pr.state === "OPEN" && pr.isDraft === false && ["pr-open", "agent-review", "fixing", "gate"].includes(st))
+          else if (pr.state === "OPEN" && pr.isDraft === false && ["pr-open", "agent-review", "fixing", "gate"].includes(st) && !rp?.reviewed_sha && !sent.has(rec.ticket))
             out.push(`  ${where} is NOT a draft while ${st} -- undrafted early?`);
         }
     }
