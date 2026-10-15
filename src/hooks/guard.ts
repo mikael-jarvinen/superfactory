@@ -11,8 +11,8 @@
 //
 // protect (sessions in bypass permissions, where deny rules do not apply): default allow, but no
 // push to a protected branch by any spelling, no force push without a lease, no wholesale pushes,
-// no branch deletes on origin, no merging or undrafting through gh, no checkout of a protected
-// branch. The --own-repo repos have main as their only branch and no PRs: a push to main is allowed
+// no branch deletes on origin, no merging through gh, no undrafting through gh except by the lead on
+// a PR of the --org, no checkout of a protected branch. The --own-repo repos have main as their only branch and no PRs: a push to main is allowed
 // when it names one of them by URL, and so is renaming a branch of one to main. Deleting a branch
 // through the API is allowed outside the --org, and for the lead in an --own-repo when GitHub says
 // the branch is merged into the default branch.
@@ -468,8 +468,12 @@ function checkGhProtect(words: string[], ctx: GuardContext): void {
   }
   if (args[0] === "pr" && args[1] === "ready" && !args.includes("--undo")) {
     const repo = ghPrRepo(args);
-    if (repo === null) refuse("undrafting a PR needs an explicit --repo owner/name (or a PR URL) so the guard can confirm it is a factory-own repo; otherwise undrafting is `factory pr-send`'s job");
-    if (!ctx.ownRepos.some((r) => r.toLowerCase() === (repo as string).toLowerCase())) refuse("undrafting a product-repo PR is done by `factory pr-send` only; gh pr ready --undo is fine");
+    if (repo === null) refuse("undrafting a PR needs an explicit --repo owner/name (or a PR URL) so the guard can confirm whose repo it is; otherwise undrafting is `factory pr-send`'s job");
+    const target = (repo as string).toLowerCase();
+    // The human, 2026-10-15: "You should be able to undraft". The lead may, on a product repo of the
+    // --org; a builder or reviewer still goes through the lead.
+    const lead = ctx.role === "lead" && ctx.org !== undefined && target.split("/")[0] === ctx.org.toLowerCase();
+    if (!lead && !ctx.ownRepos.some((r) => r.toLowerCase() === target)) refuse("undrafting a product-repo PR is the lead's, by `factory pr-send` or `gh pr ready <n> -R owner/repo`; gh pr ready --undo is fine");
     // a factory-own repo (lyyti-factory / superfactory): the lead and its assistants may undraft it to merge it.
   }
   if (args[0] === "api" && ghApiWrites(args.slice(1)) && /(pulls\/\d+\/merge|git\/refs|branches\/\S+\/(protection|rename))/.test(args.join(" "))) {
