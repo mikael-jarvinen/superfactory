@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { proseLines } from "../src/gate/ready.js";
+import { loadRec, saveRec } from "../src/state.js";
+import { openWorkspace } from "../src/workspace.js";
 import { git } from "../src/worktree.js";
 import { factory, TOML, tempWorkspace } from "./helpers.js";
 
@@ -252,6 +254,22 @@ test("pr-open-for-review opens the item's PRs at the reviewed sha, then records 
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /acme\/web#7 is already open/);
   assert.deepEqual(opens(r.calls), []);
+});
+
+// A PR stacked on another PR's branch waits for that one: CL-2284's #8351 sits on #8315's branch.
+test("pr-open-for-review leaves a PR stacked on another branch as it is", () => {
+  const { ws, run } = gateWorkspace();
+  assert.equal(factory(ws, ["state", "WEB-1", "your-review", "--reviewed", HEAD]).status, 0);
+  const w = openWorkspace(ws);
+  const rec = loadRec(w, "WEB-1")!;
+  const stackedHead = "d".repeat(40);
+  saveRec(w, { ...rec, prs: [...(rec.prs ?? []), { repo: REMOTE, number: 8, head: stackedHead }] });
+  const fields = `pr view 8 --repo ${REMOTE} --json ${PR_FIELDS}`;
+  const base = (green()[`pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`] as { stdout: object }).stdout;
+  const r = run(green({ [fields]: { stdout: { ...base, headRefOid: stackedHead, baseRefName: "feature" } } }), ["pr-open-for-review", "WEB-1"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /acme\/web#8 is stacked on feature, not main; left as it is/);
+  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [`pr ready ${N} --repo ${REMOTE}`], "only the PR against main opens");
 });
 
 test("delta-range refuses an empty range and a base the head has never been", () => {

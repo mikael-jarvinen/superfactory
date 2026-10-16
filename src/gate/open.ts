@@ -21,13 +21,19 @@ export function openForReview(ws: Workspace, ticket: string, out: (line: string)
   for (const p of recPrs(rec)) {
     if (!p.repo || !p.number) continue;
     const where = `${p.repo}#${p.number}`;
-    const pr = prView(resolveRepo(ws, p.repo), p.number);
+    const repo = resolveRepo(ws, p.repo);
+    const pr = prView(repo, p.number);
     if (!pr) {
       bad.push(`${where}: cannot read it`);
       continue;
     }
     // an earlier slice of the item, already merged or closed
     if (pr.state !== "OPEN") continue;
+    // stacked on another PR's branch: it waits for that one and stays as it is
+    if (pr.baseRefName !== repo.base) {
+      out(`${where} is stacked on ${pr.baseRefName}, not ${repo.base}; left as it is`);
+      continue;
+    }
     if (!p.reviewed_sha) bad.push(`${where}: the record has no reviewed sha for it`);
     else if (!pr.headRefOid.startsWith(p.reviewed_sha))
       bad.push(`${where}: head ${pr.headRefOid.slice(0, 7)} is not the reviewed sha ${p.reviewed_sha.slice(0, 7)}`);
