@@ -45,6 +45,7 @@ export interface GhPr {
   isDraft?: boolean;
   mergedAt?: string | null;
   headRefOid?: string;
+  baseRefName?: string;
 }
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
