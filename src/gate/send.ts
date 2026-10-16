@@ -2,8 +2,9 @@
 //
 // `pr-ready` answers about the head it reads; this asks the two questions it cannot: is the head
 // still the sha somebody reviewed, and is it STILL that sha after undrafting. Out of draft is a
-// merge on sight, so if the head moves in the window, the PR goes back to draft. The window is as
-// long as the reviewers the undraft itself starts take to finish.
+// merge on sight, so if the head moves in the window, a PR this run undrafted goes back to draft;
+// one that was already open stays open. The window is as long as the reviewers the undraft itself
+// starts take to finish.
 import type { Repo } from "../config.js";
 import { allRecs, recPrs } from "../state.js";
 import type { Workspace } from "../workspace.js";
@@ -52,10 +53,13 @@ export function send(ws: Workspace, repo: Repo, n: number, reviewed: string, out
   if (!first.sendable) throw refused("pr-ready did not pass");
   if (first.head !== before) throw refused(`head moved from ${before} to ${first.head} while the gate read it`);
 
-  const redraft = () => gh("pr", "ready", String(n), "--repo", repo.remote, "--undo");
-  if (gh("pr", "ready", String(n), "--repo", repo.remote).status !== 0) throw refused(`could not undraft #${n}`);
+  // A PR already open stays open (Mikael, 2026-10-15: "they can be open, don't put to draft"), so
+  // only one this run undrafted goes back to draft when the send fails.
+  const wasDraft = first.draft;
+  if (wasDraft && gh("pr", "ready", String(n), "--repo", repo.remote).status !== 0) throw refused(`could not undraft #${n}`);
   const fail = (msg: string) => {
-    redraft();
+    if (!wasDraft) return refused(`${msg} Left open, as it was; nothing sent.`);
+    gh("pr", "ready", String(n), "--repo", repo.remote, "--undo");
     return refused(`${msg} Put back in draft, nothing sent.`);
   };
 
@@ -80,13 +84,25 @@ export function send(ws: Workspace, repo: Repo, n: number, reviewed: string, out
     if (now !== before) throw fail(`head moved from ${before} to ${now ?? "(unreadable)"} while waiting for checks.`);
   }
 
+  // Then the whole gate, waited on the way pr-wait waits: while every failure is one time clears. A
+  // merge into the base makes GitHub recompute every open PR's mergeability, and reads UNKNOWN until
+  // it has; on 2026-10-16 one landed seconds before this read and sent #8367 back to draft for it.
   let last;
-  try {
-    last = ready(ws, repo, n);
-  } catch (e) {
-    throw fail(`the gate could not be read after undrafting: ${(e as Error).message}.`);
+  for (;;) {
+    try {
+      last = ready(ws, repo, n);
+    } catch (e) {
+      throw fail(`the gate could not be read after undrafting: ${(e as Error).message}.`);
+    }
+    if (last.head !== before) throw fail(`head moved from ${before} to ${last.head} while waiting for the gate.`);
+    if (last.sendable) break;
+    if (waited >= limit || last.failures.some((f) => f.kind !== "waits")) {
+      for (const l of report(last)) out(l);
+      throw fail("gate went red after undrafting.");
+    }
+    sleep(poll * 1000);
+    waited += poll;
   }
-  if (!last.sendable || last.head !== before) throw fail("gate went red after undrafting. Run `factory pr-ready` to see why.");
   const pr = prView(repo, n);
   out(`SENDABLE  ${repo.remote}#${n}  head ${before}  reviewed ${reviewed}`);
   out(pr?.url ?? `https://github.com/${repo.remote}/pull/${n}`);

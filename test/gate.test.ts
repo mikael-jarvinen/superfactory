@@ -147,8 +147,12 @@ test("pr-wait waits on a running check, then stops before sending on prose volum
   assert.equal(r.calls.filter((c) => c === cr).length, 2, "read again after waiting");
   assert.ok(!r.calls.some((c) => c.startsWith("pr ready")), "nothing was undrafted");
 
-  // Already out of draft, so the gate after the undraft reads it the way GitHub would then.
-  r = run(green(over, HEAD, false), ["pr-wait", "web", String(N), HEAD], { FACTORY_ACCEPT_PROSE: "1" });
+  // A draft until pr-send undrafts it: the two waits and pr-send's first gate read it as a draft, and
+  // the gate after the undraft reads it the way GitHub would then.
+  const prKey = `pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`;
+  const asDraft = green(over)[prKey] as { stdout: object };
+  const undrafted = { stdout: { ...asDraft.stdout, isDraft: false } };
+  r = run(green({ ...over, [prKey]: [asDraft, asDraft, asDraft, undrafted] }), ["pr-wait", "web", String(N), HEAD], { FACTORY_ACCEPT_PROSE: "1" });
   assert.equal(r.status, 0, r.stderr);
   assert.ok(r.calls.includes(`pr ready ${N} --repo ${REMOTE}`));
   assert.match(r.stdout, /^push text: PR ready: WEB-1 web#7$/m);
@@ -160,7 +164,6 @@ test("pr-wait waits on a running check, then stops before sending on prose volum
 
   // A conflict with the base is not something time clears.
   const conflicting = green();
-  const prKey = `pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`;
   conflicting[prKey] = { stdout: { ...(conflicting[prKey] as { stdout: object }).stdout, mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" } };
   r = run(conflicting, ["pr-wait", "web", String(N), HEAD]);
   assert.equal(r.status, 1);
@@ -181,6 +184,34 @@ test("pr-send refuses a head that is not the reviewed sha, and redrafts when the
   assert.equal(r.status, 1);
   assert.match(r.stderr, /head moved from a+ to c+ while undrafting\. Put back in draft, nothing sent\./);
   assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [`pr ready ${N} --repo ${REMOTE}`, `pr ready ${N} --repo ${REMOTE} --undo`]);
+});
+
+// A sent PR stays open through a fix round (Mikael, 2026-10-15), so pr-send meets PRs that are already
+// open. It does not undraft them, does not put them back in draft, and waits out a mergeability that
+// GitHub is recomputing because something merged into the base, as #8367 met on 2026-10-16.
+test("pr-send leaves an open PR open, and waits out mergeability being recomputed", () => {
+  const { run } = gateWorkspace();
+  const prKey = `pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`;
+  const open = green({}, HEAD, false);
+  const pr = (open[prKey] as { stdout: object }).stdout;
+  const as = (over: object) => ({ stdout: { ...pr, ...over } });
+
+  let r = run({ ...open, [prKey]: [as({}), as({ mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }), as({})] }, ["pr-send", "web", String(N), HEAD]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^SENDABLE {2}acme\/web#7/m);
+  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [], "already open: nothing to undraft");
+
+  r = run({ ...open, [prKey]: [as({}), as({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" })] }, ["pr-send", "web", String(N), HEAD]);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /CONFLICTING with main/, "the red is named, not left to a second command");
+  assert.match(r.stderr, /gate went red after undrafting\. Left open, as it was; nothing sent\./);
+  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [], "not put back in draft");
+
+  r = run({ ...open, [`pr view ${N} --repo ${REMOTE} --json headRefOid`]: [{ stdout: { headRefOid: HEAD } }, { stdout: { headRefOid: "c".repeat(40) } }] },
+    ["pr-send", "web", String(N), HEAD]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /head moved from a+ to c+ while undrafting\. Left open, as it was; nothing sent\./);
+  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), []);
 });
 
 test("delta-range refuses an empty range and a base the head has never been", () => {
