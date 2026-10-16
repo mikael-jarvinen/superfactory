@@ -121,10 +121,11 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
 
   section("gates: PRs on GitHub against the store", () => {
     if (!recs.length) return void out.push("  nothing open");
-    // A PR that has been sent stays open through a fix round (Mikael, 2026-10-15: "they can be open,
-    // don't put to draft"), so only one never sent can have been undrafted early.
-    const sent = new Set((readTail(ws.events) as Record<string, unknown>[])
-      .filter((e) => e.to === "your-review" || e.to === "colleague-review").map((e) => e.ticket));
+    // Mikael, 2026-10-16: a PR is a draft in every column but colleague review, and open there. Once
+    // an item has been with colleagues its PR stays open through the fix rounds after (2026-10-15:
+    // "they can be open, don't put to draft").
+    const withColleagues = new Set((readTail(ws.events) as Record<string, unknown>[])
+      .filter((e) => e.to === "colleague-review").map((e) => e.ticket));
     for (const repo of Object.values(ws.config.repos)) {
       const r = gh("pr", "list", "-R", repo.remote, "--state", "all", "--limit", "40", "--json", "number,title,headRefName,state,isDraft,mergedAt,headRefOid");
       const prs = json<GhPr[]>(r);
@@ -146,8 +147,10 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
             out.push(`  ${where} is OPEN (draft=${pr.isDraft}) but the store says ${st} -- unreported PR?`);
           else if (pr.state === "OPEN" && rp?.head && pr.headRefOid && !pr.headRefOid.startsWith(rp.head.slice(0, 7)) && ["gate", "your-review", "colleague-review"].includes(st))
             out.push(`  ${where} head moved to ${pr.headRefOid.slice(0, 7)} while ${st} (recorded ${rp.head.slice(0, 7)}) -- frozen PR pushed?`);
-          else if (pr.state === "OPEN" && pr.isDraft === false && ["pr-open", "agent-review", "fixing", "gate"].includes(st) && !rp?.reviewed_sha && !sent.has(rec.ticket))
-            out.push(`  ${where} is NOT a draft while ${st} -- undrafted early?`);
+          else if (pr.state === "OPEN" && pr.isDraft === false && st !== "colleague-review" && !withColleagues.has(rec.ticket))
+            out.push(`  ${where} is open while ${st} -- should be a draft until colleague review`);
+          else if (pr.state === "OPEN" && pr.isDraft === true && st === "colleague-review")
+            out.push(`  ${where} is a draft while colleague-review -- should be open: factory pr-open-for-review ${rec.ticket}`);
         }
     }
   });

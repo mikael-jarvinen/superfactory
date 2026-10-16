@@ -72,14 +72,15 @@ test("pr-ready asks about the head sha, and a missing answer is a failure", () =
   const { run } = gateWorkspace();
   const ready = (r: Routes) => run(r, ["pr-ready", "web", String(N)]);
 
-  let r = run(green(), ["pr-ready", REMOTE, String(N), "--allow-draft"]);
+  let r = run(green(), ["pr-ready", REMOTE, String(N)]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /^SENDABLE/m);
   assert.ok(r.calls.includes(`api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`), "check-runs are read at the head sha");
 
+  // A draft is no failure: every PR is one until colleague review.
   r = ready(green());
-  assert.equal(r.status, 1);
-  assert.match(r.stdout, /still a DRAFT/);
+  assert.equal(r.status, 0, r.stdout);
+  assert.doesNotMatch(r.stdout, /DRAFT/);
 
   const cr = `api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`;
   const cases: [Routes, RegExp][] = [
@@ -90,7 +91,7 @@ test("pr-ready asks about the head sha, and a missing answer is a failure", () =
     [{ "api graphql": { status: 1 } }, /COULD NOT READ review threads/],
   ];
   for (const [over, why] of cases) {
-    r = run(green(over), ["pr-ready", "web", String(N), "--allow-draft"]);
+    r = run(green(over), ["pr-ready", "web", String(N)]);
     assert.equal(r.status, 1, `${why}: ${r.stdout}`);
     assert.match(r.stdout, why);
   }
@@ -99,12 +100,12 @@ test("pr-ready asks about the head sha, and a missing answer is a failure", () =
   r = run(green({
     [cr]: checkRuns(check("test"), check("experimental", { conclusion: "failure" })),
     [`api repos/${REMOTE}/actions/runs/100`]: { stdout: { conclusion: "success" } },
-  }), ["pr-ready", "web", String(N), "--allow-draft"]);
+  }), ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 0, r.stdout);
   assert.match(r.stdout, /check 'experimental' concluded failure but its workflow run concluded success/);
 
   // Behind the base is a remark: the human rebases before merging.
-  r = run(green({ [`api repos/${REMOTE}/compare/main...${HEAD}`]: { stdout: { behind_by: 3 } } }), ["pr-ready", "web", String(N), "--allow-draft"]);
+  r = run(green({ [`api repos/${REMOTE}/compare/main...${HEAD}`]: { stdout: { behind_by: 3 } } }), ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 0, r.stdout);
   assert.match(r.stdout, /3 commits behind main -- rebase before merging/);
 
@@ -112,7 +113,7 @@ test("pr-ready asks about the head sha, and a missing answer is a failure", () =
   const behind = green({ [`api repos/${REMOTE}/compare/main...${HEAD}`]: { stdout: { behind_by: 2 } } });
   const behindKey = `pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`;
   behind[behindKey] = { stdout: { ...(behind[behindKey] as { stdout: object }).stdout, mergeStateStatus: "BEHIND" } };
-  r = run(behind, ["pr-ready", "web", String(N), "--allow-draft"]);
+  r = run(behind, ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 0, r.stdout);
   assert.match(r.stdout, /2 commits behind main -- rebase before merging/);
 });
@@ -136,6 +137,7 @@ test("prose counts every line of a block comment, and every added line of markdo
 test("pr-wait waits on a running check, then stops before sending on prose volume", () => {
   const { run } = gateWorkspace();
   const cr = `api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`;
+  const prKey = `pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`;
   const over = {
     [cr]: [checkRuns(check("test", { status: "in_progress", conclusion: null })), checkRuns(check("test"))],
     [`pr diff ${N} --repo ${REMOTE}`]: { stdout: diffOf(35, 60) },
@@ -145,17 +147,12 @@ test("pr-wait waits on a running check, then stops before sending on prose volum
   assert.match(r.stderr, /waiting \(\d+s\) on: check 'test' is in_progress, not completed/);
   assert.match(r.stderr, /gate is green but not sending:\n {2}- 35 added prose\/comment lines/);
   assert.equal(r.calls.filter((c) => c === cr).length, 2, "read again after waiting");
-  assert.ok(!r.calls.some((c) => c.startsWith("pr ready")), "nothing was undrafted");
 
-  // A draft until pr-send undrafts it: the two waits and pr-send's first gate read it as a draft, and
-  // the gate after the undraft reads it the way GitHub would then.
-  const prKey = `pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`;
-  const asDraft = green(over)[prKey] as { stdout: object };
-  const undrafted = { stdout: { ...asDraft.stdout, isDraft: false } };
-  r = run(green({ ...over, [prKey]: [asDraft, asDraft, asDraft, undrafted] }), ["pr-wait", "web", String(N), HEAD], { FACTORY_ACCEPT_PROSE: "1" });
+  // The draft is sent as a draft: nothing undrafts it on the way.
+  r = run(green(over), ["pr-wait", "web", String(N), HEAD], { FACTORY_ACCEPT_PROSE: "1" });
   assert.equal(r.status, 0, r.stderr);
-  assert.ok(r.calls.includes(`pr ready ${N} --repo ${REMOTE}`));
   assert.match(r.stdout, /^push text: PR ready: WEB-1 web#7$/m);
+  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [], "left a draft");
 
   // No check-runs yet may be GitHub not having created them: waited on, and named at the limit.
   r = run(green({ [cr]: checkRuns() }), ["pr-wait", "web", String(N), HEAD], { FACTORY_WAIT_LIMIT: "0" });
@@ -171,52 +168,32 @@ test("pr-wait waits on a running check, then stops before sending on prose volum
   assert.equal(r.calls.filter((c) => c === cr).length, 1);
 });
 
-test("pr-send refuses a head that is not the reviewed sha, and redrafts when the head moves", () => {
+// Mikael, 2026-10-16: a PR is a draft until it goes to colleagues. pr-send gates it as it is, checks the
+// head is the reviewed sha before and after, and opens nothing.
+test("pr-send gates the PR as it is and refuses a head that is not the reviewed sha", () => {
   const { run } = gateWorkspace();
   let r = run(green(), ["pr-send", "web", String(N), "b".repeat(40)]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /is not the reviewed sha/);
-  assert.ok(!r.calls.some((c) => c.startsWith("pr ready")));
 
-  const moved = "c".repeat(40);
-  r = run(green({ [`pr view ${N} --repo ${REMOTE} --json headRefOid`]: [{ stdout: { headRefOid: HEAD } }, { stdout: { headRefOid: moved } }] }),
-    ["pr-send", "web", String(N), HEAD.slice(0, 12)]);
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /head moved from a+ to c+ while undrafting\. Put back in draft, nothing sent\./);
-  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [`pr ready ${N} --repo ${REMOTE}`, `pr ready ${N} --repo ${REMOTE} --undo`]);
-});
-
-// A sent PR stays open through a fix round (Mikael, 2026-10-15), so pr-send meets PRs that are already
-// open. It does not undraft them, does not put them back in draft, and waits out a mergeability that
-// GitHub is recomputing because something merged into the base, as #8367 met on 2026-10-16.
-test("pr-send leaves an open PR open, and waits out mergeability being recomputed", () => {
-  const { run } = gateWorkspace();
-  const prKey = `pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`;
-  const open = green({}, HEAD, false);
-  const pr = (open[prKey] as { stdout: object }).stdout;
-  const as = (over: object) => ({ stdout: { ...pr, ...over } });
-
-  let r = run({ ...open, [prKey]: [as({}), as({ mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }), as({})] }, ["pr-send", "web", String(N), HEAD]);
+  r = run(green(), ["pr-send", "web", String(N), HEAD]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^SENDABLE {2}acme\/web#7/m);
-  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [], "already open: nothing to undraft");
 
-  r = run({ ...open, [prKey]: [as({}), as({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" })] }, ["pr-send", "web", String(N), HEAD]);
+  r = run(green({ [`pr view ${N} --repo ${REMOTE} --json headRefOid`]: [{ stdout: { headRefOid: HEAD } }, { stdout: { headRefOid: "c".repeat(40) } }] }),
+    ["pr-send", "web", String(N), HEAD.slice(0, 12)]);
   assert.equal(r.status, 1);
-  assert.match(r.stdout, /CONFLICTING with main/, "the red is named, not left to a second command");
-  assert.match(r.stderr, /gate went red after undrafting\. Left open, as it was; nothing sent\./);
-  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [], "not put back in draft");
+  assert.match(r.stderr, /head moved from a+ to c+ after the gate passed/);
 
-  r = run({ ...open, [`pr view ${N} --repo ${REMOTE} --json headRefOid`]: [{ stdout: { headRefOid: HEAD } }, { stdout: { headRefOid: "c".repeat(40) } }] },
-    ["pr-send", "web", String(N), HEAD]);
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /head moved from a+ to c+ while undrafting\. Left open, as it was; nothing sent\./);
-  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), []);
+  // already open, as in a fix round after colleague review: gated the same way, left open
+  r = run(green({}, HEAD, false), ["pr-send", "web", String(N), HEAD]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!r.calls.some((c) => c.startsWith("pr ready")), "pr-send never opens or drafts a PR");
 });
 
-// The first read, before any undraft, waits out the same transients: on 2026-10-16 pr-wait saw CL-2290
-// green and pr-send's own first read, a moment later, met mergeability being recomputed.
-test("pr-send's first gate read waits out what time clears, and stops at once on what it does not", () => {
+// On 2026-10-16 pr-wait saw CL-2290 green and pr-send's own read, a moment later, met mergeability
+// being recomputed after a merge into the base.
+test("pr-send's gate read waits out what time clears, and stops at once on what it does not", () => {
   const { run } = gateWorkspace();
   const prKey = `pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`;
   const draft = green();
@@ -224,22 +201,57 @@ test("pr-send's first gate read waits out what time clears, and stops at once on
   const as = (over: object) => ({ stdout: { ...pr, ...over } });
   const unknown = { mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" };
 
-  let r = run({ ...draft, [prKey]: [as(unknown), as({}), as({ isDraft: false })] }, ["pr-send", "web", String(N), HEAD]);
+  let r = run({ ...draft, [prKey]: [as(unknown), as({})] }, ["pr-send", "web", String(N), HEAD]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^SENDABLE {2}acme\/web#7/m);
-  assert.equal(r.calls.filter((c) => c === prKey).length, 4, "read again, then after the undraft, then for the link");
-  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [`pr ready ${N} --repo ${REMOTE}`]);
+  assert.equal(r.calls.filter((c) => c === prKey).length, 3, "read again, then once for the link");
 
   r = run({ ...draft, [prKey]: [as({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" })] }, ["pr-send", "web", String(N), HEAD]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /pr-ready did not pass/);
   assert.equal(r.calls.filter((c) => c === prKey).length, 1, "a conflict is not waited on");
-  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), []);
 
   r = run({ ...draft, [prKey]: [as(unknown)] }, ["pr-send", "web", String(N), HEAD], { FACTORY_SEND_LIMIT: "0" });
   assert.equal(r.status, 1);
   assert.match(r.stdout, /mergeability not computed yet/);
-  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [], "still unknown at the limit: nothing undrafted");
+});
+
+// Every PR is a draft until colleague review, and CodeRabbit skips drafts with a green status.
+test("a review bot that skipped the draft is named as having reviewed nothing", () => {
+  const { run } = gateWorkspace();
+  const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
+  const r = run(green({ [st]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review skipped: draft pull request" }] } } }),
+    ["pr-ready", "web", String(N)]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /status 'CodeRabbit' is green only because it skipped a draft and reviewed nothing -- comment "@coderabbitai review" on the PR/);
+});
+
+// Mikael, 2026-10-16: "Only when they are in my colleagues review column should they be open PRs."
+test("pr-open-for-review opens the item's PRs at the reviewed sha, then records colleague review", () => {
+  const { ws, run } = gateWorkspace();
+  const stateOf = () => /"state": "([a-z-]+)"/.exec(factory(ws, ["state", "WEB-1"]).stdout)?.[1];
+  const opens = (calls: string[]) => calls.filter((c) => c.startsWith("pr ready"));
+
+  let r = run(green(), ["pr-open-for-review", "WEB-1"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /WEB-1 is gate; a PR goes to colleagues from your-review/);
+  assert.equal(factory(ws, ["state", "WEB-1", "your-review", "--reviewed", HEAD]).status, 0);
+
+  r = run(green({}, "c".repeat(40)), ["pr-open-for-review", "WEB-1"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /nothing opened:\n {2}acme\/web#7: head ccccccc is not the reviewed sha aaaaaaa/);
+  assert.deepEqual(opens(r.calls), []);
+  assert.equal(stateOf(), "your-review");
+
+  r = run(green(), ["pr-open-for-review", "WEB-1"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(opens(r.calls), [`pr ready ${N} --repo ${REMOTE}`]);
+  assert.equal(stateOf(), "colleague-review");
+
+  r = run(green({}, HEAD, false), ["pr-open-for-review", "WEB-1"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /acme\/web#7 is already open/);
+  assert.deepEqual(opens(r.calls), []);
 });
 
 test("delta-range refuses an empty range and a base the head has never been", () => {

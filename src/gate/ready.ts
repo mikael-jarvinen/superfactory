@@ -41,7 +41,7 @@ const WORKING = new Set(["building", "fixing", "agent-review", "pr-open"]);
 
 export const DEFAULT_PROSE_REMARK = 30;
 
-export function ready(ws: Workspace, repo: Repo, n: number, opts: { allowDraft?: boolean } = {}): Verdict {
+export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
   const pr = prView(repo, n);
   if (!pr) throw new Unreadable(`pr-ready: cannot read PR #${n} from ${repo.remote}, or it returned no head sha`);
   const sha = pr.headRefOid;
@@ -51,7 +51,7 @@ export function ready(ws: Workspace, repo: Repo, n: number, opts: { allowDraft?:
   const fail = (text: string, kind: FailureKind = "fatal") => failures.push({ text, kind });
 
   if (pr.state !== "OPEN") fail(`state is ${pr.state}, not OPEN`);
-  if (pr.isDraft && !opts.allowDraft) fail("still a DRAFT -- a draft means the author knows it is incomplete");
+  // A draft is no failure: Mikael, 2026-10-16, every PR stays one until it goes to colleagues.
   if (base !== repo.base) fail(`base branch is ${base}, expected ${repo.base}`);
 
   let unstable = false;
@@ -137,7 +137,12 @@ export function ready(ws: Workspace, repo: Repo, n: number, opts: { allowDraft?:
     for (const s of sts) {
       const desc = s.description ?? "-";
       if (s.state === "success") {
-        if (/rate limit|skipped|no review|not run/i.test(desc)) remarks.push(`status '${s.context}' is GREEN but says: ${desc} -- a pass that read nothing`);
+        // A review bot that skips drafts reports the skip as a success. Every PR is a draft until
+        // colleague review now, so its review has to be asked for by hand.
+        if (/skipped/i.test(desc) && /draft/i.test(desc)) {
+          const ask = /coderabbit/i.test(s.context) ? 'comment "@coderabbitai review" on the PR' : "ask it for a review by hand";
+          remarks.push(`status '${s.context}' is green only because it skipped a draft and reviewed nothing -- ${ask}`);
+        } else if (/rate limit|skipped|no review|not run/i.test(desc)) remarks.push(`status '${s.context}' is GREEN but says: ${desc} -- a pass that read nothing`);
       } else {
         fail(`status '${s.context}' is ${s.state} -- ${desc}`, s.state === "pending" ? "waits" : "fatal");
       }

@@ -155,9 +155,9 @@ test("the round: a merge the record moved after is judged, one it did not is owe
   assert.match(r.stdout, /WEB-2: acme\/web#6 is MERGED but the store says queued -- done judgement owed/);
 });
 
-// Mikael, 2026-10-15: "they can be open, don't put to draft". An open PR in a fix round is only
-// undrafted early if it was never sent: no reviewed sha on it and no review state in its history.
-test("the round: a sent PR open during a fix round is not undrafted early", () => {
+// Mikael, 2026-10-16: a PR is a draft in every column but colleague review, and open there. After
+// colleague review it stays open through the fix rounds (2026-10-15).
+test("the round: a PR open outside colleague review, or a draft in it, is flagged", () => {
   const { ws, run } = watcherWorkspace();
   const state = (...a: string[]) => assert.equal(factory(ws, ["state", ...a]).status, 0, a.join(" "));
   state("WEB-2", "building");
@@ -165,19 +165,24 @@ test("the round: a sent PR open during a fix round is not undrafted early", () =
   state("WEB-3", "building");
   state("WEB-3", "pr-open", "--pr", "acme/web#3", "--head", "aaa3333");
   state("WEB-3", "your-review", "--reviewed", "aaa3333", "--force");
-  state("WEB-3", "fixing");
   state("WEB-4", "building");
   state("WEB-4", "colleague-review", "--force");
   state("WEB-4", "fixing");
-  const open = (n: number) => ({ number: n, title: `WEB-${n}: x`, headRefName: `WEB-${n}`, state: "OPEN", isDraft: false, mergedAt: null, headRefOid: `aaa${String(n).repeat(4)}` });
+  state("WEB-5", "building");
+  state("WEB-5", "colleague-review", "--force");
+  state("WEB-6", "building");
+  state("WEB-6", "pr-open", "--pr", "acme/web#6", "--head", "aaa6666");
+  const pr = (n: number, isDraft: boolean) => ({ number: n, title: `WEB-${n}: x`, headRefName: `WEB-${n}`, state: "OPEN", isDraft, mergedAt: null, headRefOid: `aaa${String(n).repeat(4)}` });
   const r = run(["watch", "round", "--facts"], [], {
-    "pr list -R acme/web --state all": { stdout: [open(2), open(3), open(4)] },
+    "pr list -R acme/web --state all": { stdout: [pr(2, false), pr(3, false), pr(4, false), pr(5, true), pr(6, true)] },
     "pr list -R acme/api --state all": { stdout: [] },
   });
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /WEB-2: acme\/web#2 is NOT a draft while pr-open -- undrafted early\?/);
-  assert.doesNotMatch(r.stdout, /WEB-3: .*undrafted early/, "a reviewed sha on the PR");
-  assert.doesNotMatch(r.stdout, /WEB-4: .*undrafted early/, "colleague-review in its history");
+  assert.match(r.stdout, /WEB-2: acme\/web#2 is open while pr-open -- should be a draft until colleague review/);
+  assert.match(r.stdout, /WEB-3: acme\/web#3 is open while your-review -- should be a draft until colleague review/);
+  assert.doesNotMatch(r.stdout, /WEB-4: /, "open in a fix round after colleague review");
+  assert.match(r.stdout, /WEB-5: acme\/web#5 is a draft while colleague-review -- should be open: factory pr-open-for-review WEB-5/);
+  assert.doesNotMatch(r.stdout, /WEB-6: /, "a draft before colleague review");
 });
 
 test("the round: flags said once, the failures cursor, and its heartbeat", () => {
