@@ -17,6 +17,7 @@ import { deltaRange } from "./gate/delta.js";
 import { demo, demoInit } from "./gate/demo.js";
 import { prNumber, resolveRepo } from "./gate/github.js";
 import { media } from "./gate/media.js";
+import { openForReview } from "./gate/open.js";
 import { ready, report } from "./gate/ready.js";
 import { send } from "./gate/send.js";
 import { ACCEPT_PROSE, waitAndSend } from "./gate/wait.js";
@@ -79,13 +80,16 @@ usage: factory [--workspace <dir>] <command> [options]
   board --serve                   run the board in this process
   board --inbox                   print each new message from the message page, for a monitor in
                                   the lead's session. One holds the inbox at a time.
-  pr-ready <repo> <n> [--allow-draft]
+  pr-ready <repo> <n>
                                   may this PR be sent? Every question about its current head sha; a
                                   missing answer is a failure. <repo> is a key of [repos] or its
                                   owner/repo. Exit 0 sendable, 1 not, 2 unreadable.
   pr-send <repo> <n> <reviewed-sha>
-                                  gate, undraft, check the head did not move, print the link and
-                                  the push text. The only undraft there is.
+                                  gate the draft, check the head is still the reviewed sha, print
+                                  the link and the push text. It leaves the PR a draft.
+  pr-open-for-review <TICKET>     open the item's draft PRs for colleague review, each only while its
+                                  head is the reviewed sha, then record colleague-review. The one
+                                  undraft there is.
   pr-wait <repo> <n> <reviewed-sha>
                                   wait while what is left is running or pending, then pr-send. Stops
                                   at once on anything waiting cannot clear, and before sending when
@@ -496,8 +500,8 @@ function cmdMessages(ws: Workspace, argv: string[]) {
 }
 
 function cmdPrReady(ws: Workspace, argv: string[]): number {
-  const { v, p } = args("pr-ready", argv, { "allow-draft": { type: "boolean" } }, [2, 2]);
-  const verdict = ready(ws, resolveRepo(ws, p[0] as string), prNumber(p[1] as string), { allowDraft: !!v["allow-draft"] });
+  const { p } = args("pr-ready", argv, {}, [2, 2]);
+  const verdict = ready(ws, resolveRepo(ws, p[0] as string), prNumber(p[1] as string));
   for (const l of report(verdict)) console.log(l);
   return verdict.sendable ? 0 : 1;
 }
@@ -505,6 +509,11 @@ function cmdPrReady(ws: Workspace, argv: string[]): number {
 function cmdPrSend(ws: Workspace, argv: string[]) {
   const { p } = args("pr-send", argv, {}, [3, 3]);
   send(ws, resolveRepo(ws, p[0] as string), prNumber(p[1] as string), p[2] as string);
+}
+
+function cmdPrOpenForReview(ws: Workspace, argv: string[]) {
+  const { p } = args("pr-open-for-review", argv, {}, [1, 1]);
+  openForReview(ws, p[0] as string);
 }
 
 function cmdPrWait(ws: Workspace, argv: string[]) {
@@ -607,6 +616,7 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void>
   "pr-ready": cmdPrReady,
   "pr-send": cmdPrSend,
   "pr-wait": cmdPrWait,
+  "pr-open-for-review": cmdPrOpenForReview,
   "delta-range": cmdDeltaRange,
   "pr-comment": cmdPrComment,
   "pr-media": cmdPrMedia,

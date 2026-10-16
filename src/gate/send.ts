@@ -1,15 +1,14 @@
 // `factory pr-send <repo> <n> <reviewed-sha>`: the last gate before the human sees a link.
 //
-// `pr-ready` answers about the head it reads; this asks the two questions it cannot: is the head
-// still the sha somebody reviewed, and is it STILL that sha after undrafting. Out of draft is a
-// merge on sight, so if the head moves in the window, a PR this run undrafted goes back to draft;
-// one that was already open stays open. The window is as long as the reviewers the undraft itself
-// starts take to finish.
+// `pr-ready` answers about the head it reads; this asks what it cannot: is the head still the sha
+// somebody reviewed, before and after the gate. It leaves the PR as it is. Mikael, 2026-10-16: "Only
+// when they are in my colleagues review column should they be open PRs", so a PR stays a draft
+// through his review and is opened by `factory pr-open-for-review` when it goes to colleagues.
 import type { Repo } from "../config.js";
 import { allRecs, recPrs } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError, sleep } from "../util.js";
-import { checkRuns, gh, headOf, prView, statuses } from "./github.js";
+import { headOf, prView } from "./github.js";
 import { ready, report, type Verdict } from "./ready.js";
 
 export function seconds(name: string, fallback: number): number {
@@ -26,14 +25,6 @@ export function checkReviewed(reviewed: string, cmd: string): void {
   if (!/^[0-9a-f]{7,40}$/.test(reviewed)) throw new FactoryError(`${cmd}: give the full reviewed sha, not ${reviewed}`);
 }
 
-// no check-run incomplete and no commit status pending at this sha
-function settled(repo: Repo, sha: string): boolean {
-  const runs = checkRuns(repo, sha);
-  if (!runs || runs.some((c) => c.status !== "completed")) return false;
-  const sts = statuses(repo, sha);
-  return !!sts && !sts.some((s) => s.state === "pending");
-}
-
 // The ticket the PR belongs to, from the state store, else a key leading the title.
 function ticketOf(ws: Workspace, repo: Repo, n: number, title: string): string {
   for (const r of allRecs(ws)) if (recPrs(r).some((p) => p.repo === repo.remote && p.number === n)) return r.ticket;
@@ -45,9 +36,9 @@ function ticketOf(ws: Workspace, repo: Repo, n: number, title: string): string {
 // every open PR's mergeability and read UNKNOWN until it has, so a read that lands in that window is
 // not an answer. Returns the first verdict that is sendable, on another head, or failing on
 // something time will not clear, else the last one once `waited` reaches the limit.
-function gateWaiting(ws: Workspace, repo: Repo, n: number, before: string, draftOk: boolean, w: { waited: number; limit: number; poll: number }): Verdict {
+function gateWaiting(ws: Workspace, repo: Repo, n: number, before: string, w: { waited: number; limit: number; poll: number }): Verdict {
   for (;;) {
-    const v = ready(ws, repo, n, { allowDraft: draftOk });
+    const v = ready(ws, repo, n);
     if (v.sendable || v.head !== before || w.waited >= w.limit || v.failures.some((f) => f.kind !== "waits")) return v;
     sleep(w.poll * 1000);
     w.waited += w.poll;
@@ -63,53 +54,12 @@ export function send(ws: Workspace, repo: Repo, n: number, reviewed: string, out
       "Get the delta reviewed (factory delta-range), then run this again with the new sha.");
 
   const w = { waited: 0, limit: seconds("FACTORY_SEND_LIMIT", 900), poll: seconds("FACTORY_SEND_POLL", 20) };
-  const first = gateWaiting(ws, repo, n, before, true, w);
-  for (const l of report(first)) out(l);
-  if (!first.sendable) throw refused("pr-ready did not pass");
-  if (first.head !== before) throw refused(`head moved from ${before} to ${first.head} while the gate read it`);
-
-  // A PR already open stays open (Mikael, 2026-10-15: "they can be open, don't put to draft"), so
-  // only one this run undrafted goes back to draft when the send fails.
-  const wasDraft = first.draft;
-  if (wasDraft && gh("pr", "ready", String(n), "--repo", repo.remote).status !== 0) throw refused(`could not undraft #${n}`);
-  const fail = (msg: string) => {
-    if (!wasDraft) return refused(`${msg} Left open, as it was; nothing sent.`);
-    gh("pr", "ready", String(n), "--repo", repo.remote, "--undo");
-    return refused(`${msg} Put back in draft, nothing sent.`);
-  };
-
+  const v = gateWaiting(ws, repo, n, before, w);
+  for (const l of report(v)) out(l);
+  if (!v.sendable) throw refused("pr-ready did not pass");
+  if (v.head !== before) throw refused(`head moved from ${before} to ${v.head} while the gate read it`);
   const after = headOf(repo, n);
-  if (after !== before) throw fail(`head moved from ${before} to ${after ?? "(unreadable)"} while undrafting.`);
-
-  // Leaving draft is itself an event some reviewers wait for: a review bot that skips drafts starts
-  // the moment the PR is ready, so its status goes pending a second after the undraft. Gating
-  // straight away read that pending as red and put the PR back in draft, which cancelled the review
-  // it had just triggered. So wait for whatever the undraft started, and keep watching the head.
-  // A first look before the undraft's webhooks land sees the statuses of a draft and calls them
-  // settled, which is how a review that has not started yet reads as one that passed.
-  sleep(seconds("FACTORY_SEND_DELAY", 30) * 1000);
-  w.waited = 0;
-  while (!settled(repo, before)) {
-    if (w.waited >= w.limit) throw fail(`checks or statuses never settled after undrafting (${w.waited} s).`);
-    sleep(w.poll * 1000);
-    w.waited += w.poll;
-    const now = headOf(repo, n);
-    if (now !== before) throw fail(`head moved from ${before} to ${now ?? "(unreadable)"} while waiting for checks.`);
-  }
-
-  // Then the whole gate again, waited on the same way. On 2026-10-16 a merge into the base landed
-  // seconds before this read and sent #8367 back to draft for an UNKNOWN mergeability.
-  let last: Verdict;
-  try {
-    last = gateWaiting(ws, repo, n, before, false, w);
-  } catch (e) {
-    throw fail(`the gate could not be read after undrafting: ${(e as Error).message}.`);
-  }
-  if (last.head !== before) throw fail(`head moved from ${before} to ${last.head} while waiting for the gate.`);
-  if (!last.sendable) {
-    for (const l of report(last)) out(l);
-    throw fail("gate went red after undrafting.");
-  }
+  if (after !== before) throw refused(`head moved from ${before} to ${after ?? "(unreadable)"} after the gate passed`);
   const pr = prView(repo, n);
   out(`SENDABLE  ${repo.remote}#${n}  head ${before}  reviewed ${reviewed}`);
   out(pr?.url ?? `https://github.com/${repo.remote}/pull/${n}`);

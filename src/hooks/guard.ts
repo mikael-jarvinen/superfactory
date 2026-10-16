@@ -473,7 +473,7 @@ function checkGhProtect(words: string[], ctx: GuardContext): void {
     // The human, 2026-10-15: "You should be able to undraft". The lead may, on a product repo of the
     // --org; a builder or reviewer still goes through the lead.
     const lead = ctx.role === "lead" && ctx.org !== undefined && target.split("/")[0] === ctx.org.toLowerCase();
-    if (!lead && !ctx.ownRepos.some((r) => r.toLowerCase() === target)) refuse("undrafting a product-repo PR is the lead's, by `factory pr-send` or `gh pr ready <n> -R owner/repo`; gh pr ready --undo is fine");
+    if (!lead && !ctx.ownRepos.some((r) => r.toLowerCase() === target)) refuse("undrafting a product-repo PR is the lead's, by `factory pr-open-for-review` or `gh pr ready <n> -R owner/repo`; gh pr ready --undo is fine");
     // a factory-own repo (lyyti-factory / superfactory): the lead and its assistants may undraft it to merge it.
   }
   if (args[0] === "api" && ghApiWrites(args.slice(1)) && /(pulls\/\d+\/merge|git\/refs|branches\/\S+\/(protection|rename))/.test(args.join(" "))) {

@@ -43,10 +43,11 @@ const DESCRIPTIONS: Record<string, string> = {
   "agent-review": "A reviewer is reading the diff in a fresh session that has seen nothing before it.",
   "fixing": "The builder is back on the same item, closing every finding the review reported.",
   "gate": "The gate is asking every question about the current head and treating any absence as a " +
-    "failure. The PR is undrafted only once all of them pass.",
-  "your-review": "{human}'s. The PR is frozen at the sha that was reviewed, and nobody pushes over it " +
-    "without saying so first.",
-  "colleague-review": "{human} has asked the team. {lead} watches GitHub and does nothing until the merge lands.",
+    "failure. The PR stays a draft: it opens only when it goes to colleagues.",
+  "your-review": "{human}'s. The PR is a draft frozen at the sha that was reviewed, and nobody pushes over " +
+    "it without saying so first.",
+  "colleague-review": "{human} has asked the team, and the PR is open. {lead} watches GitHub and does nothing " +
+    "until the merge lands.",
   "blocked": "{lead} asked {human} something and has no answer yet. The state underneath is kept, so " +
     "the work resumes where it stopped rather than starting again.",
 };

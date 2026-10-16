@@ -34,7 +34,7 @@ export function waitAndSend(ws: Workspace, repo: Repo, n: number, reviewed: stri
     let unread = "";
     let waiting: string[] = [];
     try {
-      const v = ready(ws, repo, n, { allowDraft: true });
+      const v = ready(ws, repo, n);
       if (!v.head.startsWith(reviewed)) throw stop(1, `head ${v.head} is not the reviewed sha ${reviewed} -- get the delta reviewed`);
       if (v.sendable) {
         if (v.prose && !process.env[ACCEPT_PROSE])
