@@ -28,6 +28,7 @@ export interface Verdict {
   n: number;
   head: string;
   base: string;
+  draft: boolean;
   failures: Failure[];
   remarks: string[];
   // The remark on comment volume, when there is one. Not blocking here; `pr-wait` stops on it.
@@ -185,7 +186,7 @@ export function ready(ws: Workspace, repo: Repo, n: number, opts: { allowDraft?:
   if (!(pr.body ?? "").includes(MEDIA_BEGIN))
     remarks.push("no demo section in the PR body: `factory pr-media` adds screenshots, or --no-visual-change writes the sentence");
 
-  return { remote: repo.remote, n, head: sha, base, failures, remarks, prose, sendable: failures.length === 0 };
+  return { remote: repo.remote, n, head: sha, base, draft: pr.isDraft, failures, remarks, prose, sendable: failures.length === 0 };
 }
 
 function superseded(c: CheckRun, runs: CheckRun[]): boolean {
