@@ -10,6 +10,7 @@ import { stacksFile } from "../src/board/server.js";
 import { loadRec, saveRec, transition } from "../src/state.js";
 import { alive } from "../src/stacks/process.js";
 import { run } from "../src/util.js";
+import { slotless } from "../src/stacks/engine.js";
 import { ensureWorktree, git } from "../src/worktree.js";
 import { openWorkspace, type Workspace } from "../src/workspace.js";
 import { CLI, factory, tempWorkspace } from "./helpers.js";
@@ -176,6 +177,23 @@ test("stack placement across repos, and the hand-back when an item changes slot"
   assert.equal(doc.status, 1);
   assert.equal(doc.stdout, "app: ok container runtime\napp: MISSING web.app-2.test resolving [fix: add it to /etc/hosts]\n",
     "a check that reads the same for every slot is printed once");
+});
+
+// A destroyed slot keeps its worktrees, and what the last up wrote into them still names the slot's
+// project, which the next item placed there reuses. Dispatch says so for a worktree that holds no slot.
+test("a worktree whose slot was destroyed is named as holding none", () => {
+  const { dir, ws, wt } = setup();
+  const web1 = wt("web", "APP-1", "eve");
+  assert.equal(slotless(ws, "solo", "APP-1", web1)?.startsWith("APP-1's worktree holds no solo stack slot"), true, "never placed");
+  ok(factory(dir, ["stack", "up"], { cwd: web1 }), "up");
+  assert.equal(slotless(ws, "solo", "APP-1", web1), null, "it holds slot 1");
+  ok(factory(dir, ["stack", "destroy"], { cwd: web1 }), "destroy");
+  const web2 = wt("web", "APP-2", "fay");
+  assert.match(ok(factory(dir, ["stack", "up"], { cwd: web2 }), "the next item"), /solo slot 1 \(free\)/);
+  assert.match(slotless(ws, "solo", "APP-1", web1) ?? "", /Run `factory stack up` before anything that uses the stack's containers/,
+    "slot 1 now runs APP-2, so APP-1's worktree holds none");
+  assert.equal(slotless(ws, "solo", "APP-2", web2), null);
+  assert.equal(slotless(ws, "none-such", "APP-1", web1), null, "a stack the config does not run");
 });
 
 // The order: its own slot, then free, then vanished (reclaimed by destroy), then the stack's own.

@@ -42,6 +42,19 @@ function saveRegistry(ws: Workspace, stack: string, reg: Registry): void {
   renameSync(p + ".tmp", p);
 }
 
+// A worktree that holds no slot of its stack runs against no stack, whatever an earlier up wrote into
+// it says: `destroy` frees a slot and keeps its worktrees, and the next item placed there gets the
+// same project. On 2026-10-16 a builder sent back into CL-2290, whose slot 4 had been destroyed and
+// given to CL-2275, ran its tests in CL-2275's containers. Null when it holds a slot, or the stack
+// runs nothing.
+export function slotless(ws: Workspace, stackKey: string, ticket: string, wt: string): string | null {
+  if (!ws.config.stacks[stackKey]?.script) return null;
+  const me = realpathLoose(wt);
+  if (Object.values(loadRegistry(ws, stackKey).slots).some((e) => Object.values(e.worktrees).includes(me))) return null;
+  return `${ticket}'s worktree holds no ${stackKey} stack slot, so no stack runs its code. Run \`factory stack up\` ` +
+    "before anything that uses the stack's containers: until then, a .env an earlier slot left in the worktree names another item's stack.";
+}
+
 // Allocation reads the registry, runs scripts and writes it back, and two builders starting their
 // stacks at once must not both take the same free slot. The lock covers the other slots' scripts
 // (reclaim, hand-back) but not this slot's own `up`, which can take minutes.

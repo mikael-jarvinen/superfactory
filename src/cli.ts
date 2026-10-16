@@ -24,7 +24,7 @@ import { KINDS, type Kind, messages, say } from "./messages.js";
 import { type HookName, type HookResult, HOOKS } from "./settings.js";
 import { install, render, status as scheduleStatus, uninstall } from "./scheduler/launchd.js";
 import { cmdStack, STACK_USAGE } from "./stacks/command.js";
-import { exportStacks, startBoot } from "./stacks/engine.js";
+import { exportStacks, slotless, startBoot } from "./stacks/engine.js";
 import {
   allRecs, appendEvent, BUSY, DISPATCHABLE, KEY_HINT, loadRec, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
@@ -250,7 +250,9 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   const { wt, how } = ensureWorktree(repo.path, ticket, repo.base);
   const appendix = buildAppendix(ws, ag, repo.path);
   const promptFile = str(v["prompt-file"]);
-  const prompt = promptFile ? readFileSync(promptFile, "utf8") : buildingPrompt(ws, ag, ticket);
+  const noSlot = slotless(ws, stack, ticket, wt);
+  if (noSlot) console.log(`  warning: ${noSlot}`);
+  const prompt = (promptFile ? readFileSync(promptFile, "utf8") : buildingPrompt(ws, ag, ticket)) + (noSlot ? `\n\n${noSlot}` : "");
   const started = launch(ws, ag, wt, prompt, appendix, "build");
   if (rec === null || cur === "queued") {
     transition(ws, ticket, "building", { agent: name, stack, worktree: wt, evidence: `building session ${started.id}` });
