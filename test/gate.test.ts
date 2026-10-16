@@ -214,6 +214,34 @@ test("pr-send leaves an open PR open, and waits out mergeability being recompute
   assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), []);
 });
 
+// The first read, before any undraft, waits out the same transients: on 2026-10-16 pr-wait saw CL-2290
+// green and pr-send's own first read, a moment later, met mergeability being recomputed.
+test("pr-send's first gate read waits out what time clears, and stops at once on what it does not", () => {
+  const { run } = gateWorkspace();
+  const prKey = `pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`;
+  const draft = green();
+  const pr = (draft[prKey] as { stdout: object }).stdout;
+  const as = (over: object) => ({ stdout: { ...pr, ...over } });
+  const unknown = { mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" };
+
+  let r = run({ ...draft, [prKey]: [as(unknown), as({}), as({ isDraft: false })] }, ["pr-send", "web", String(N), HEAD]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^SENDABLE {2}acme\/web#7/m);
+  assert.equal(r.calls.filter((c) => c === prKey).length, 4, "read again, then after the undraft, then for the link");
+  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [`pr ready ${N} --repo ${REMOTE}`]);
+
+  r = run({ ...draft, [prKey]: [as({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" })] }, ["pr-send", "web", String(N), HEAD]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /pr-ready did not pass/);
+  assert.equal(r.calls.filter((c) => c === prKey).length, 1, "a conflict is not waited on");
+  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), []);
+
+  r = run({ ...draft, [prKey]: [as(unknown)] }, ["pr-send", "web", String(N), HEAD], { FACTORY_SEND_LIMIT: "0" });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /mergeability not computed yet/);
+  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [], "still unknown at the limit: nothing undrafted");
+});
+
 test("delta-range refuses an empty range and a base the head has never been", () => {
   const { ws, run } = gateWorkspace();
   const clone = join(ws, "repos", "web");
