@@ -10,7 +10,7 @@ import { allRecs, recPrs } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError, sleep } from "../util.js";
 import { checkRuns, gh, headOf, prView, statuses } from "./github.js";
-import { ready, report } from "./ready.js";
+import { ready, report, type Verdict } from "./ready.js";
 
 export function seconds(name: string, fallback: number): number {
   const v = process.env[name];
@@ -40,6 +40,20 @@ function ticketOf(ws: Workspace, repo: Repo, n: number, title: string): string {
   return /^[A-Z][A-Z0-9]+-\d+/.exec(title)?.[0] ?? "?";
 }
 
+// The gate, read again while every failure is one time clears, the way pr-wait waits: a check
+// running, a status pending, mergeability not computed. A merge into the base makes GitHub recompute
+// every open PR's mergeability and read UNKNOWN until it has, so a read that lands in that window is
+// not an answer. Returns the first verdict that is sendable, on another head, or failing on
+// something time will not clear, else the last one once `waited` reaches the limit.
+function gateWaiting(ws: Workspace, repo: Repo, n: number, before: string, draftOk: boolean, w: { waited: number; limit: number; poll: number }): Verdict {
+  for (;;) {
+    const v = ready(ws, repo, n, { allowDraft: draftOk });
+    if (v.sendable || v.head !== before || w.waited >= w.limit || v.failures.some((f) => f.kind !== "waits")) return v;
+    sleep(w.poll * 1000);
+    w.waited += w.poll;
+  }
+}
+
 export function send(ws: Workspace, repo: Repo, n: number, reviewed: string, out: (line: string) => void = console.log): void {
   checkReviewed(reviewed, "pr-send");
   const before = headOf(repo, n);
@@ -48,7 +62,8 @@ export function send(ws: Workspace, repo: Repo, n: number, reviewed: string, out
     throw refused(`head ${before} is not the reviewed sha ${reviewed}. Somebody pushed after the review. ` +
       "Get the delta reviewed (factory delta-range), then run this again with the new sha.");
 
-  const first = ready(ws, repo, n, { allowDraft: true });
+  const w = { waited: 0, limit: seconds("FACTORY_SEND_LIMIT", 900), poll: seconds("FACTORY_SEND_POLL", 20) };
+  const first = gateWaiting(ws, repo, n, before, true, w);
   for (const l of report(first)) out(l);
   if (!first.sendable) throw refused("pr-ready did not pass");
   if (first.head !== before) throw refused(`head moved from ${before} to ${first.head} while the gate read it`);
@@ -73,35 +88,27 @@ export function send(ws: Workspace, repo: Repo, n: number, reviewed: string, out
   // A first look before the undraft's webhooks land sees the statuses of a draft and calls them
   // settled, which is how a review that has not started yet reads as one that passed.
   sleep(seconds("FACTORY_SEND_DELAY", 30) * 1000);
-  const limit = seconds("FACTORY_SEND_LIMIT", 900);
-  const poll = seconds("FACTORY_SEND_POLL", 20);
-  let waited = 0;
+  w.waited = 0;
   while (!settled(repo, before)) {
-    if (waited >= limit) throw fail(`checks or statuses never settled after undrafting (${waited} s).`);
-    sleep(poll * 1000);
-    waited += poll;
+    if (w.waited >= w.limit) throw fail(`checks or statuses never settled after undrafting (${w.waited} s).`);
+    sleep(w.poll * 1000);
+    w.waited += w.poll;
     const now = headOf(repo, n);
     if (now !== before) throw fail(`head moved from ${before} to ${now ?? "(unreadable)"} while waiting for checks.`);
   }
 
-  // Then the whole gate, waited on the way pr-wait waits: while every failure is one time clears. A
-  // merge into the base makes GitHub recompute every open PR's mergeability, and reads UNKNOWN until
-  // it has; on 2026-10-16 one landed seconds before this read and sent #8367 back to draft for it.
-  let last;
-  for (;;) {
-    try {
-      last = ready(ws, repo, n);
-    } catch (e) {
-      throw fail(`the gate could not be read after undrafting: ${(e as Error).message}.`);
-    }
-    if (last.head !== before) throw fail(`head moved from ${before} to ${last.head} while waiting for the gate.`);
-    if (last.sendable) break;
-    if (waited >= limit || last.failures.some((f) => f.kind !== "waits")) {
-      for (const l of report(last)) out(l);
-      throw fail("gate went red after undrafting.");
-    }
-    sleep(poll * 1000);
-    waited += poll;
+  // Then the whole gate again, waited on the same way. On 2026-10-16 a merge into the base landed
+  // seconds before this read and sent #8367 back to draft for an UNKNOWN mergeability.
+  let last: Verdict;
+  try {
+    last = gateWaiting(ws, repo, n, before, false, w);
+  } catch (e) {
+    throw fail(`the gate could not be read after undrafting: ${(e as Error).message}.`);
+  }
+  if (last.head !== before) throw fail(`head moved from ${before} to ${last.head} while waiting for the gate.`);
+  if (!last.sendable) {
+    for (const l of report(last)) out(l);
+    throw fail("gate went red after undrafting.");
   }
   const pr = prView(repo, n);
   out(`SENDABLE  ${repo.remote}#${n}  head ${before}  reviewed ${reviewed}`);
