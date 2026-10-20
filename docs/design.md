@@ -142,6 +142,7 @@ port = 8787
 
 [gate]
 prose_remark = 30                     # added comment lines that make the gate stop before sending
+review_bot = "coderabbitai"           # its review of the head is required before a PR is sent
 
 [watchers]
 queue_every_minutes = 15

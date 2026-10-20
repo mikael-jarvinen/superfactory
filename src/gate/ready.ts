@@ -13,8 +13,9 @@ import type { Repo } from "../config.js";
 import { allRecs, recPrs } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { splitlines } from "../util.js";
-import { api, type CheckRun, checkRuns, gh, json, prView, statuses, Unreadable } from "./github.js";
+import { api, type CheckRun, checkRuns, type CommitStatus, gh, json, prView, reviews, statuses, Unreadable } from "./github.js";
 import { MEDIA_BEGIN } from "./media.js";
+import { seconds } from "./send.js";
 
 export type FailureKind = "fatal" | "waits" | "unreadable";
 
@@ -40,6 +41,25 @@ export interface Verdict {
 const WORKING = new Set(["building", "fixing", "agent-review", "pr-open"]);
 
 export const DEFAULT_PROSE_REMARK = 30;
+
+// What a missing answer gets right after a push: GitHub starts the jobs and the review bot posts its
+// status a little after the head lands, so for this long their absence is waited out, not refused.
+const graceS = () => seconds("FACTORY_GATE_GRACE", 600);
+
+// Seconds since the first check-run or status at the head, the nearest thing to when it was pushed.
+function sinceHead(times: (string | null | undefined)[]): number {
+  const t = times.filter((x): x is string => !!x).map(Date.parse).filter(Number.isFinite);
+  return t.length ? (Date.now() - Math.min(...t)) / 1000 : 0;
+}
+
+// The review bots the gate knows by name: the commit status each posts, and how to ask it to review.
+const KNOWN_BOTS: Record<string, { status: string; ask: string }> = {
+  coderabbitai: { status: "CodeRabbit", ask: 'comment "@coderabbitai review" on the PR' },
+};
+const reviewBotOf = (login: string) => KNOWN_BOTS[login] ?? { status: login, ask: `ask ${login} for a review of this head` };
+
+// A green status that reviewed nothing: a skipped draft, a rate limit.
+const NOT_A_REVIEW = /rate limit|skipped|no review|not run/i;
 
 export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
   const pr = prView(repo, n);
@@ -118,9 +138,13 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
     }
     // At least one of the repo's own gate jobs must have RUN. A security scanner alone tests
     // nothing of ours.
+    // Right after a push only some jobs may have started, so their absence waits a while first.
     const want = repo.gateChecks;
-    if (want.length && !runs.some((c) => want.includes(c.name)))
-      fail(`none of the repo's gate jobs ran at ${sha} (${want.join(",")}) -- the gate is missing, not green`);
+    if (want.length && !runs.some((c) => want.includes(c.name))) {
+      const age = Math.round(sinceHead(runs.map((c) => c.started_at)));
+      if (age < graceS()) fail(`none of the repo's gate jobs has started at ${sha} yet (${want.join(",")}), ${age}s after its first check -- waiting up to ${graceS()}s`, "waits");
+      else fail(`none of the repo's gate jobs ran at ${sha} (${want.join(",")}) -- the gate is missing, not green`);
+    }
   }
   // The deferred UNSTABLE verdict. If every failing check was superseded or allowed to fail,
   // UNSTABLE is GitHub restating that; refusing on it would refuse a PR the repo does not gate.
@@ -130,11 +154,16 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
   }
 
   // COMMIT STATUSES: a separate API. Reported, not interpreted, except a green that read nothing.
+  // The required review bot's own status is read below, as the question whether it reviewed.
+  const botLogin = ws.config.gate.reviewBot;
+  const bot = botLogin ? reviewBotOf(botLogin) : null;
+  const isBot = (s: CommitStatus) => !!bot && s.context.toLowerCase() === bot.status.toLowerCase();
   const sts = statuses(repo, sha);
   if (sts === undefined) {
     fail("COULD NOT READ commit statuses -- not the same thing as there being none", "unreadable");
   } else {
     for (const s of sts) {
+      if (isBot(s)) continue;
       const desc = s.description ?? "-";
       if (s.state === "success") {
         // A review bot that skips drafts reports the skip as a success. Every PR is a draft until
@@ -145,6 +174,27 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
         } else if (/rate limit|skipped|no review|not run/i.test(desc)) remarks.push(`status '${s.context}' is GREEN but says: ${desc} -- a pass that read nothing`);
       } else {
         fail(`status '${s.context}' is ${s.state} -- ${desc}`, s.state === "pending" ? "waits" : "fatal");
+      }
+    }
+  }
+
+  // THE REVIEW BOT AT THIS HEAD. Mikael, 2026-10-20, after a PR reached him with CodeRabbit never
+  // having reviewed its final head: "Coderabbit should review before you even give the PR to me?"
+  // Every PR is a draft until colleague review, and the bot skips drafts, so it reviews only when
+  // asked; a green status from it is no evidence until it says it reviewed this sha.
+  if (botLogin && bot && sts !== undefined) {
+    const short = sha.slice(0, 7);
+    const st = sts.find(isBot);
+    const desc = st?.description ?? "-";
+    const ask = `${bot.ask}, then run this again`;
+    if (st?.state === "pending") fail(`${bot.status} is reviewing ${short} (${desc})`, "waits");
+    else if (!(st?.state === "success" && !NOT_A_REVIEW.test(desc))) {
+      const rs = reviews(repo, n);
+      if (rs === undefined) fail(`COULD NOT READ the reviews of #${n} -- cannot say whether ${bot.status} reviewed ${short}`, "unreadable");
+      else if (!rs.some((r) => (r.user?.login ?? "").replace(/\[bot\]$/, "") === botLogin && r.commit_id === sha)) {
+        const age = Math.round(sinceHead([...(runs ?? []).map((c) => c.started_at), ...sts.map((x) => x.created_at)]));
+        if (!st && age < graceS()) fail(`${bot.status} has posted nothing at ${short} yet, ${age}s after its first check -- waiting up to ${graceS()}s`, "waits");
+        else fail(`${bot.status} has not reviewed ${short}: ${st ? `its status here says "${desc}"` : "it has posted nothing at this head"} -- ${ask}`);
       }
     }
   }

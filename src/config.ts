@@ -74,7 +74,7 @@ export interface Config {
   agents: Agent[];
   tracker: Tracker;
   board: { host: string; port: number };
-  gate: { proseRemark?: number };
+  gate: { proseRemark?: number; reviewBot?: string };
   watchers: { queueEveryMinutes?: number; roundMinute?: number; model?: string; relayModel?: string };
   worktree: { toolWritten: string[] };
 }
@@ -385,7 +385,7 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   b.done();
 
   const g = reader(problems, "gate", top.table("gate") ?? {});
-  const gate = { proseRemark: g.int("prose_remark", false, 1) };
+  const gate = { proseRemark: g.int("prose_remark", false, 1), reviewBot: g.str("review_bot") };
   g.done();
 
   const w = reader(problems, "watchers", top.table("watchers") ?? {});
