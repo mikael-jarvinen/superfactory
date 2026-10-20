@@ -161,8 +161,11 @@ The program owns the slots. The workspace owns what a slot runs.
 - keeps a registry per stack in `state/stacks/<stack>.json`, mapping each slot to its worktree per
   repo and when it was created
 - allocates in this order: the worktree's existing slot, the agent's pinned slot, a free slot, a
-  slot whose worktree vanished (reclaimed by calling the script's `destroy`), then a yieldable slot
-  held by the stack's own idle worktree
+  slot whose worktree vanished (reclaimed by calling the script's `destroy`), a slot released by an
+  item in review (also destroyed first), then a yieldable slot held by the stack's own idle worktree
+- releases an item's slots when it enters your-review or colleague-review: each stays up with its
+  data, so the item can still be looked at, until another item's `up` takes it; the item's own `up`
+  in a fix round takes it back if nobody has
 - places multi-repo stacks, handing a borrowed repo back to its slot's own worktree
 - guards against a reserved slot, another builder's slot, and a worktree with no builder
 - runs detached processes with pid files, kills a process tree, and waits for readiness and port

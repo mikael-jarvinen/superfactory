@@ -27,8 +27,11 @@ function tint(url){
 
 // A person in the chart: portrait with the running dot on its corner, name, and what they are on.
 function member(p, cls = ''){
+  // A builder whose only items are in review is free for new work, session or not.
   const status = p.ticket
     ? `<span class="tk">${esc(p.ticket)}</span><span class="st">${esc(p.state)}${p.since_min != null ? ' &middot; ' + mins(p.since_min) : ''}</span>`
+    : p.in_review && p.in_review.length
+    ? `<span class="st">free &middot; ${p.in_review.map(esc).join(', ')} in review</span>`
     : `<span class="st">${p.alive ? esc(p.status || 'idle') : 'not running'}</span>`;
   return `<div class="mem ${cls}"><span class="face">${face(avatars[p.name], '', p.name)}<span class="dot ${p.alive ? 'on' : ''}"></span></span>
       <div class="nm">${esc(p.name)}</div><div class="status">${status}</div></div>`;
@@ -66,7 +69,8 @@ function owner(st){
   }
   const seen = new Set();
   return `<div class="own">${held.filter(o => !seen.has(o.ticket) && seen.add(o.ticket)).map(o =>
-    `${o.who ? `${face(avatars[String(o.who).toLowerCase()], 'c')}<b>${esc(o.who)}</b> ` : ''}<span class="tk">${esc(o.ticket)}</span>`).join(', ')}</div>`;
+    `${o.who ? `${face(avatars[String(o.who).toLowerCase()], 'c')}<b>${esc(o.who)}</b> ` : ''}<span class="tk">${esc(o.ticket)}</span>` +
+    (o.released ? ' &middot; in review, free for the next item' : '')).join(', ')}</div>`;
 }
 
 function stackCard(st){

@@ -5,7 +5,7 @@ import { parseArgs, type ParseArgsConfig } from "node:util";
 import { followInbox } from "./board/inbox.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
-import { agentOrDie, byRole, claudeBin, findSession, fleetLines, lead, type Session, sessionAlive, sessions, stopSession, waitForName } from "./fleet.js";
+import { agentOrDie, byRole, claudeBin, findSession, fleetLines, lead, leftWork, type Session, sessionAlive, sessions, stopSession, waitForName } from "./fleet.js";
 import { assistantPrompt, buildAppendix, buildingPrompt, launch, leadPrompt, reviewerPrompt, roleOf } from "./launch.js";
 import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
@@ -25,16 +25,16 @@ import { KINDS, type Kind, messages, say } from "./messages.js";
 import { type HookName, type HookResult, HOOKS } from "./settings.js";
 import { install, render, status as scheduleStatus, uninstall } from "./scheduler/launchd.js";
 import { cmdStack, STACK_USAGE } from "./stacks/command.js";
-import { exportStacks, slotless, startBoot } from "./stacks/engine.js";
+import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/engine.js";
 import {
-  allRecs, appendEvent, BUSY, DISPATCHABLE, KEY_HINT, loadRec, removeRec, saveRec, showRec, transition, validKey,
+  allRecs, appendEvent, BUSY, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
 import { FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.js";
 import { failure } from "./watchers/job.js";
 import { runQueue } from "./watchers/queue.js";
 import { relay } from "./watchers/relay.js";
 import { runRound } from "./watchers/round.js";
-import { branchPushed, ensureWorktree, git, worktreeDirty } from "./worktree.js";
+import { ensureWorktree, git } from "./worktree.js";
 import { openWorkspace, resolveWorkspace, type Workspace } from "./workspace.js";
 
 const USAGE = `factory: start, stop, dispatch and track a fleet of Claude Code sessions.
@@ -207,6 +207,7 @@ function cmdState(ws: Workspace, argv: string[]) {
     agent: str(v.agent), evidence: str(v.evidence), pr: str(v.pr), head: str(v.head), reviewed: str(v.reviewed),
     jira: str(v.jira), stack: str(v.stack), note: str(v.note), force: !!v.force, title: str(v.title),
   });
+  if (IN_REVIEW.has(next)) releaseForReview(ws, ticket);
 }
 
 function cmdDispatch(ws: Workspace, argv: string[]) {
@@ -224,6 +225,8 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   // A builder keeps its session across the rounds of one work item and is cleared only when it
   // starts a different one. A fix round on the item the live session is already on keeps that
   // session and its context: the brief goes to it by SendMessage, and this only records the state.
+  // A session whose item is in review holds the builder no longer: a new item stops it here, with
+  // the checks `factory stop` makes.
   const s = findSession(name);
   if (sessionAlive(s)) {
     const on = basename((s.cwd ?? "").replace(/\/+$/, ""));
@@ -231,12 +234,20 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
       if (loadRec(ws, ticket)?.state !== "fixing")
         transition(ws, ticket, "fixing", { agent: name, evidence: `fix round sent to the live session ${s.id}, context kept` });
       console.log(`${name} is still on ${ticket} (${s.id}), so it keeps its context.`);
+      const noSlot = slotless(ws, stack, ticket, s.cwd ?? "");
+      if (noSlot) console.log(`  warning: ${noSlot}\n  Put that in the fix brief.`);
       console.log(`  next: SendMessage the fix brief to ${name}; no new session was started`);
       return;
     }
+    const onState = on ? loadRec(ws, on)?.state : null;
     if (force) {
       console.log(`${name} is running (${s.id}); --force given, stopping it`);
       stopSession(s);
+    } else if (onState && IN_REVIEW.has(onState)) {
+      const left = s.cwd && isDir(s.cwd) ? leftWork(ws, name, s.cwd) : null;
+      if (left) throw new FactoryError(`${on} is ${onState}, so ${name} is free for ${ticket}, but ${left}`);
+      stopSession(s);
+      console.log(`${name}'s item ${on} is ${onState}, so ${name} is free: stopped ${s.id}, worktree kept: ${s.cwd}`);
     } else {
       throw new FactoryError(`${name} is still on ${on || s.cwd} (${s.id}). Starting ${ticket} is a new work item, which clears ` +
         `the session: \`factory stop ${name}\` first. It checks for uncommitted work.`);
@@ -285,13 +296,9 @@ function cmdStop(ws: Workspace, argv: string[]) {
   }
   const cwd = s.cwd;
   const builder = ag.role === "builder";
-  if (cwd && isDir(cwd) && builder) {
-    const left = worktreeDirty(cwd, ws.config.worktree.toolWritten);
-    if (left.length && !v.force)
-      throw new FactoryError(`${name}'s worktree ${cwd} has uncommitted changes: ${left.slice(0, 4).join(", ")}. Ask them to commit and push, or --force to lose it.`);
-    let base = "main";
-    for (const r of Object.values(ws.config.repos)) if (cwd.startsWith(r.path + "/")) base = r.base;
-    if (!branchPushed(cwd, base) && !v.force) throw new FactoryError(`${name}'s branch in ${cwd} is not fully pushed. Ask them to push, or --force.`);
+  if (cwd && isDir(cwd) && builder && !v.force) {
+    const left = leftWork(ws, name, cwd);
+    if (left) throw new FactoryError(left);
   }
   stopSession(s);
   console.log(`stopped ${name} (${s.id})`);

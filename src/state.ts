@@ -20,6 +20,9 @@ export const TRANSITIONS: Record<State, ReadonlySet<State>> = {
 };
 export const BUSY: ReadonlySet<string> = new Set(["building", "fixing"]);
 export const WAITING_ON_YOU: ReadonlySet<string> = new Set(["your-review", "blocked"]);
+// Mikael, 2026-10-20: "Tickets that are already in review should not reserve a stack and agent, let
+// the stack and agent work on something else." An item here frees its builder and its stack slot.
+export const IN_REVIEW: ReadonlySet<string> = new Set(["your-review", "colleague-review"]);
 // Where a dispatch makes sense without argument. Anywhere else is a judgement, so it needs --force.
 export const DISPATCHABLE: ReadonlySet<string | null> = new Set([null, "queued", "building", "fixing"]);
 
