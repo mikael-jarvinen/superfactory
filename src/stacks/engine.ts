@@ -21,6 +21,9 @@ type Out = (line: string) => void;
 export interface SlotEntry {
   created: string;
   worktrees: Placement;
+  // When its work item went to review. The slot keeps running and keeps its data, so the item can
+  // still be looked at, but the next up from another item takes it.
+  released?: string;
 }
 
 export interface Registry {
@@ -50,7 +53,11 @@ function saveRegistry(ws: Workspace, stack: string, reg: Registry): void {
 export function slotless(ws: Workspace, stackKey: string, ticket: string, wt: string): string | null {
   if (!ws.config.stacks[stackKey]?.script) return null;
   const me = realpathLoose(wt);
-  if (Object.values(loadRegistry(ws, stackKey).slots).some((e) => Object.values(e.worktrees).includes(me))) return null;
+  const mine = Object.values(loadRegistry(ws, stackKey).slots).find((e) => Object.values(e.worktrees).includes(me));
+  if (mine?.released)
+    return `${ticket}'s ${stackKey} stack slot was released when it went to review, and another item's \`factory stack up\` may take it. ` +
+      "Run `factory stack up` before anything that uses the stack's containers: it takes the slot back, or gives the item another one.";
+  if (mine) return null;
   return `${ticket}'s worktree holds no ${stackKey} stack slot, so no stack runs its code. Run \`factory stack up\` ` +
     "before anything that uses the stack's containers: until then, a .env an earlier slot left in the worktree names another item's stack.";
 }
@@ -116,7 +123,7 @@ function isOwn(ws: Workspace, stack: string, repo: string, wt: string): boolean 
 // A worktree is named after its work item, and the item's record names the builder.
 const ownerOf = (ws: Workspace, wt: string) => loadRec(ws, basename(wt))?.agent ?? null;
 
-export type SlotKind = "reserved" | "free" | "vanished" | "own" | "held";
+export type SlotKind = "reserved" | "free" | "vanished" | "own" | "held" | "released";
 
 export interface SlotView {
   slot: number;
@@ -127,7 +134,7 @@ export interface SlotView {
 }
 
 // Vanished: every work item's worktree in it is gone, or, with none, every worktree is. Own: only
-// the stack's own worktrees, which any builder may take over.
+// the stack's own worktrees, which any builder may take over. Released: its item is in review.
 export function viewSlot(ws: Workspace, stack: Stack, reg: Registry, slot: number): SlotView {
   const v: SlotView = { slot, kind: "free", entry: reg.slots[String(slot)] ?? null, ticket: null, agent: null };
   if (stack.reserve.includes(slot)) return { ...v, kind: "reserved", entry: null };
@@ -138,7 +145,7 @@ export function viewSlot(ws: Workspace, stack: Stack, reg: Registry, slot: numbe
   if (items.length ? items.every(gone) : all.every(gone)) return { ...v, kind: "vanished" };
   if (!items.length) return { ...v, kind: "own" };
   const wt = items.find((x) => !gone(x))![1];
-  return { ...v, kind: "held", ticket: basename(wt), agent: ownerOf(ws, wt) };
+  return { ...v, kind: v.entry.released ? "released" : "held", ticket: basename(wt), agent: ownerOf(ws, wt) };
 }
 
 export function describe(v: SlotView, human: string): string {
@@ -148,6 +155,7 @@ export function describe(v: SlotView, human: string): string {
     case "vanished": return "its worktree was removed; the next up reclaims it";
     case "own": return "the stack's own worktrees, idle";
     case "held": return `${v.ticket}, ${v.agent ?? "no builder"}'s`;
+    case "released": return `${v.ticket} is in review and still up; the next up takes it`;
   }
 }
 
@@ -236,8 +244,8 @@ interface Choice {
 }
 
 // In order: the item's existing slot, the builder's pinned slot, a free slot, a slot whose worktree
-// vanished, then one held only by the stack's own idle worktrees. A slot pinned to another builder
-// is never offered, and a reserved one never at all.
+// vanished, one whose item is in review, then one held only by the stack's own idle worktrees. A
+// slot pinned to another builder is never offered, and a reserved one never at all.
 export function allocate(ws: Workspace, stack: Stack, reg: Registry, item: Placement, from: string | null, agent: string | null, want?: number): Choice {
   const pinnedTo = (n: number) => Object.keys(stack.pin).find((a) => stack.pin[a] === n) ?? null;
   const view = (n: number) => viewSlot(ws, stack, reg, n);
@@ -263,7 +271,9 @@ export function allocate(ws: Workspace, stack: Stack, reg: Registry, item: Place
     if (v.kind === "held" && v.agent !== agent) die(`${agent}'s pinned slot: ${heldBy(v)}. Move that item to its own builder's slot first.`);
     return { slot: pin, how: "pinned" };
   }
-  for (const [kind, how] of [["free", "free"], ["vanished", "reclaimed"], ["own", "taken over from the stack's own worktrees"]] as const) {
+  for (const [kind, how] of [
+    ["free", "free"], ["vanished", "reclaimed"], ["released", "taken from an item in review"], ["own", "taken over from the stack's own worktrees"],
+  ] as const) {
     const n = slotsOf(stack).find((x) => open(x) && view(x).kind === kind);
     if (n !== undefined) return { slot: n, how };
   }
@@ -272,10 +282,10 @@ export function allocate(ws: Workspace, stack: Stack, reg: Registry, item: Place
 }
 
 // Each repo's place in the slot: the item's worktree where it has one, else the stack's own. A
-// place held by another builder's work is never taken over.
+// place held by another builder's work is never taken over, unless that work is in review.
 export function place(ws: Workspace, stack: Stack, reg: Registry, slot: number, item: Placement, ticket: string | null, agent: string | null): Placement {
   const v = viewSlot(ws, stack, reg, slot);
-  const cur = v.kind === "vanished" ? {} : (v.entry?.worktrees ?? {});
+  const cur = v.kind === "vanished" || (v.kind === "released" && v.ticket !== ticket) ? {} : (v.entry?.worktrees ?? {});
   const own = (r: string) => ownWorktree(ws, stack.key, r, slot);
   const p: Placement = {};
   for (const r of stack.repos) {
@@ -392,6 +402,13 @@ export function stackUp(ws: Workspace, w: Where, out: Out = console.log): void {
       delete reg.slots[String(n)];
       saveRegistry(ws, stack.key, reg);
     }
+    if (v.kind === "released" && v.ticket === caller?.ticket) out(`  ${v.ticket} takes back the slot it released for review`);
+    else if (v.kind === "released") {
+      out(`  taking slot ${n} from ${v.ticket}, which is in review: destroy drops its data, and its worktree is kept`);
+      mustRun(ws, stack, n, v.entry!.worktrees, "destroy");
+      delete reg.slots[String(n)];
+      saveRegistry(ws, stack.key, reg);
+    }
     for (const [s, back] of handBacks(ws, stack, reg, n, item)) {
       const e = reg.slots[String(s)] as SlotEntry;
       out(`  slot ${s} takes back its own worktree: ${showPlacement(back)}`);
@@ -465,6 +482,33 @@ export function stackDestroy(ws: Workspace, w: Where, out: Out = console.log): v
     exportStacks(ws);
   });
   out(`${r.stack.key} slot ${r.slot} destroyed and free. Its worktrees are kept.`);
+}
+
+// An item gone to review gives up its slots without stopping them: each stays up on its worktrees,
+// with its data, until another item's up takes it (a destroy, then that item's up). A fix round's
+// up from the item's worktree takes it back if nobody has.
+export function releaseForReview(ws: Workspace, ticket: string, out: Out = console.log): void {
+  let changed = false;
+  for (const stack of Object.values(ws.config.stacks)) {
+    if (!stack.script) continue;
+    const ours = (reg: Registry) => Object.keys(reg.slots).filter((k) => {
+      const e = reg.slots[k] as SlotEntry;
+      return !e.released && !stack.reserve.includes(Number(k)) &&
+        Object.entries(e.worktrees).some(([r, wt]) => basename(wt) === ticket && !isOwn(ws, stack.key, r, wt));
+    });
+    if (!ours(loadRegistry(ws, stack.key)).length) continue;
+    withLock(ws, stack.key, out, () => {
+      const reg = loadRegistry(ws, stack.key);
+      for (const k of ours(reg)) {
+        (reg.slots[k] as SlotEntry).released = now();
+        out(`${stack.key} slot ${k} released: ${ticket} is in review. It stays up until another item's \`factory stack up\` takes it; ` +
+          `a fix round's \`factory stack up\` takes it back.`);
+      }
+      saveRegistry(ws, stack.key, reg);
+    });
+    changed = true;
+  }
+  if (changed) exportStacks(ws);
 }
 
 export function stackUrl(ws: Workspace, w: Where, out: Out = console.log): void {

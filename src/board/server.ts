@@ -5,10 +5,10 @@ import { get as httpsGet } from "node:https";
 import type { AddressInfo } from "node:net";
 import { basename, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { claudeBin, lead, type Session, sessionAlive } from "../fleet.js";
+import { claudeBin, lead, reviewOnly, type Session, sessionAlive } from "../fleet.js";
 import { statusFile } from "../hooks/status.js";
 import { isHuman, readTail } from "../messages.js";
-import { allRecs, BUSY, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
+import { allRecs, BUSY, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { capitalize, run, sleep } from "../util.js";
 import { attachmentsDir, postMessage, Receipts, type Relay, saveAttachment, sweep } from "./inbox.js";
@@ -179,7 +179,8 @@ class StackChecks {
       const rec = byTicket.get(basename(worktree));
       // a worktree that is no work item's is the stack's own, idle on its base branch
       if (!rec) return { who: null, ticket: null, idle: true, free: false };
-      return { who: rec.agent, ticket: rec.ticket, idle: false, free: false };
+      // an item in review has released its slot to the next up, though the slot still runs it
+      return { who: rec.agent, ticket: rec.ticket, idle: false, free: false, released: rec.state !== null && IN_REVIEW.has(rec.state) };
     };
     const order = Object.keys(ws.config.stacks);
     const keys = [...new Set(this.rows.map((r) => r.stack))].sort((a, b) => {
@@ -220,7 +221,6 @@ class StackChecks {
 // A PR in review carries where it stands with its human reviewers. GitHub is read on a timer, every PR
 // in one call, and a request is served the last answer and never waits on GitHub.
 const REVIEW_EVERY = 5 * 60_000;
-const IN_REVIEW: ReadonlySet<string> = new Set(["your-review", "colleague-review"]);
 
 const prKey = (p: { repo?: string; number?: number }) => `${p.repo}#${p.number}`;
 
@@ -255,6 +255,8 @@ function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>) {
       ticket: rec?.ticket ?? null,
       state: rec?.state ?? null,
       since_min: rec ? ageMinutes(rec.since) : null,
+      // free for new work while these are in review
+      in_review: a.role === "builder" ? reviewOnly(recs, a.name).map((r) => r.ticket) : [],
     });
   }
   const rank = (k: string) => (k === "lead" ? 0 : k === "assistants" ? 1 : k === "reviewers" ? 3 : 2);

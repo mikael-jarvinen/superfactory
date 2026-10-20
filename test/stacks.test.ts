@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { stacksFile } from "../src/board/server.js";
-import { loadRec, saveRec, transition } from "../src/state.js";
+import { leftWork, reviewOnly } from "../src/fleet.js";
+import { allRecs, loadRec, saveRec, transition } from "../src/state.js";
 import { alive } from "../src/stacks/process.js";
 import { run } from "../src/util.js";
 import { slotless } from "../src/stacks/engine.js";
@@ -194,6 +195,78 @@ test("a worktree whose slot was destroyed is named as holding none", () => {
     "slot 1 now runs APP-2, so APP-1's worktree holds none");
   assert.equal(slotless(ws, "solo", "APP-2", web2), null);
   assert.equal(slotless(ws, "none-such", "APP-1", web1), null, "a stack the config does not run");
+});
+
+// Mikael, 2026-10-20: "Tickets that are already in review should not reserve a stack and agent." The
+// slot stays up for the review until another item needs it; a fix round takes it back if it is still there.
+test("an item in review releases its slot: still up, taken back by its fix round, else taken by the next item", () => {
+  const { dir, ws, wt } = setup();
+  const up = (cwd: string) => factory(dir, ["stack", "up"], { cwd });
+  const state = (...a: string[]) => ok(factory(dir, ["state", ...a]), `state ${a.join(" ")}`);
+  const toReview = (k: string) => {
+    if (!loadRec(ws, k)?.pr) state(k, "pr-open", "--pr", "acme/web#1", "--head", "abc1234");
+    state(k, "agent-review", "--evidence", "x");
+    state(k, "gate", "--evidence", "x");
+    return state(k, "your-review", "--reviewed", "abc1234");
+  };
+  const reg = () => JSON.parse(readFileSync(join(ws.stateDir, "stacks", "solo.json"), "utf8")).slots;
+  const web1 = wt("web", "A-1", "eve");
+  ok(up(web1), "A-1");
+  calls(dir);
+
+  assert.match(toReview("A-1"), /solo slot 1 released: A-1 is in review\. It stays up/);
+  assert.deepEqual(calls(dir), [], "nothing is stopped or destroyed: the slot stays up for the review");
+  assert.ok(reg()["1"].released);
+  assert.match(slotless(ws, "solo", "A-1", web1) ?? "", /was released when it went to review[\s\S]*Run `factory stack up`/);
+  assert.match(ok(factory(dir, ["stack", "status", "--stack", "solo"]), "status"), /slot 1 {2}A-1 is in review and still up; the next up takes it/);
+  assert.doesNotMatch(state("A-1", "colleague-review", "--evidence", "x"), /released/, "an item already released is not released again");
+
+  // the fix round's up takes its slot back, as it left it
+  state("A-1", "fixing");
+  assert.match(ok(up(web1), "fix round"), /solo slot 1 \(its slot\): web=A-1\n {2}A-1 takes back the slot it released for review/);
+  assert.deepEqual(calls(dir), ["up solo 1 web=A-1 api=-"]);
+  assert.equal(reg()["1"].released, undefined);
+  assert.equal(slotless(ws, "solo", "A-1", web1), null);
+
+  // in review again: a free slot goes first, and only then the released one, destroyed for the next item
+  toReview("A-1");
+  assert.match(ok(up(wt("web", "A-2", "fay")), "A-2"), /solo slot 2 \(free\)/);
+  assert.match(ok(up(wt("web", "A-3", "fay")), "A-3"),
+    /solo slot 1 \(taken from an item in review\): web=A-3\n {2}taking slot 1 from A-1, which is in review: destroy drops its data/);
+  assert.deepEqual(calls(dir), ["up solo 2 web=A-2 api=-", "destroy solo 1 web=A-1 api=-", "up solo 1 web=A-3 api=-"]);
+  assert.ok(existsSync(web1), "A-1's worktree is kept");
+  assert.match(slotless(ws, "solo", "A-1", web1) ?? "", /holds no solo stack slot[\s\S]*Run `factory stack up`/);
+
+  // a fix round with every slot held by work in progress gets none, and takes nobody's
+  state("A-1", "fixing");
+  assert.match(up(web1).stderr, /every slot of solo open to eve is taken/);
+  assert.deepEqual(calls(dir), []);
+});
+
+// Dispatching a new item stops a session whose item is in review, with the checks `factory stop` makes.
+test("a builder whose only items are in review is free, and stopping it loses nothing", () => {
+  const { dir, ws, wt } = setup();
+  const web1 = wt("web", "A-1", "eve");
+  const state = (...a: string[]) => ok(factory(dir, ["state", ...a]), `state ${a.join(" ")}`);
+  state("A-1", "pr-open", "--pr", "acme/web#1", "--head", "abc1234");
+  state("A-1", "agent-review", "--evidence", "x");
+  state("A-1", "gate", "--evidence", "x");
+  state("A-1", "your-review", "--reviewed", "abc1234");
+  wt("web", "A-2", "fay");
+  assert.deepEqual(reviewOnly(allRecs(ws), "eve").map((r) => r.ticket), ["A-1"]);
+  assert.deepEqual(reviewOnly(allRecs(ws), "fay"), [], "fay is building A-2");
+  const st = ok(factory(dir, ["status"]), "status");
+  assert.match(st, /^ {2}eve +builder +not running {2}-- free: A-1 is your-review$/m);
+  assert.match(st, /^ {2}fay +builder +not running$/m);
+
+  assert.equal(leftWork(ws, "eve", web1), null, "no commits of its own yet");
+  writeFileSync(join(web1, "change.txt"), "x\n");
+  assert.match(leftWork(ws, "eve", web1) ?? "", /eve's worktree .* has uncommitted changes: change\.txt/);
+  must(web1, "add", "change.txt");
+  must(web1, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "change");
+  assert.match(leftWork(ws, "eve", web1) ?? "", /eve's branch in .* is not fully pushed/);
+  must(web1, "push", "-q", "origin", "A-1");
+  assert.equal(leftWork(ws, "eve", web1), null);
 });
 
 // The order: its own slot, then free, then vanished (reclaimed by destroy), then the stack's own.

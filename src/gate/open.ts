@@ -4,6 +4,7 @@
 // Every PR stays a draft through the factory's rounds and his own review, and this is where it
 // leaves draft. Every open PR on the record is checked before any is opened: its head must still be
 // the sha that was reviewed. The record moves to colleague-review only once all of them are open.
+import { releaseForReview } from "../stacks/engine.js";
 import { loadRec, recPrs, transition } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
@@ -52,4 +53,5 @@ export function openForReview(ws: Workspace, ticket: string, out: (line: string)
   }
   if (rec.state === "your-review")
     transition(ws, ticket, "colleague-review", { evidence: `opened for colleague review: ${open.map((x) => `${x.remote}#${x.n}`).join(", ")}` }, out);
+  releaseForReview(ws, ticket, out);
 }

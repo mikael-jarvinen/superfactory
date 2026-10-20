@@ -116,7 +116,7 @@ The lead:
 
 | Command | What it does |
 |---|---|
-| `factory dispatch <agent> <KEY>` | Start a builder on a work item, in a worktree of its own. |
+| `factory dispatch <agent> <KEY>` | Start a builder on a work item, in a worktree of its own. A builder whose item is in review is free: its session is stopped here, with the checks `stop` makes. |
 | `factory stop <agent>` | Stop a teammate. Refuses when work is uncommitted or unpushed. |
 | `factory review` | Start the first free reviewer. |
 | `factory state <KEY> <new-state>` | Move a work item. `factory state --list` shows every open one. |

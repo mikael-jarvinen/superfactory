@@ -68,6 +68,11 @@ test("the server: pages, the snapshot, posting, and only the tail of the log", {
   transition(ws, "WEB-1", "building", { agent: "bea", title: "Fix the redirect" }, quiet);
   transition(ws, "WEB-2", "building", {}, quiet);
   transition(ws, "WEB-2", "blocked", { note: "asked about the header row" }, quiet);
+  // cal's only item is in review, which frees cal
+  transition(ws, "API-1", "building", { agent: "cal" }, quiet);
+  transition(ws, "API-1", "pr-open", { pr: "acme/api#3", head: "abc1234" }, quiet);
+  for (const s of ["agent-review", "gate"]) transition(ws, "API-1", s, { evidence: "x" }, quiet);
+  transition(ws, "API-1", "your-review", { reviewed: "abc1234" }, quiet);
   // A first row longer than the tail window: reading it would mean reading the file from the start.
   appendFileSync(ws.messages, pyDumps({ t: "x", text: "y".repeat(300 * 1024), kind: "note" }) + "\n");
   appendFileSync(ws.messages, pyDumps({ t: "x", id: "abc123", text: "from the old kind", kind: "alex" }) + "\n");
@@ -81,8 +86,12 @@ test("the server: pages, the snapshot, posting, and only the tail of the log", {
   assert.equal((await get("/static/..%2Fserver.js")).status, 404);
 
   const snap = await (await get("/api")).json();
-  assert.deepEqual(snap.tickets.map((t: { ticket: string; state: string }) => `${t.ticket} ${t.state}`), ["WEB-1 building", "WEB-2 blocked"]);
-  assert.equal(snap.tickets[1].question, "asked about the header row");
+  assert.deepEqual(snap.tickets.map((t: { ticket: string; state: string }) => `${t.ticket} ${t.state}`), ["WEB-1 building", "API-1 your-review", "WEB-2 blocked"]);
+  assert.equal(snap.tickets[2].question, "asked about the header row");
+  type Member = { name: string; ticket: string | null; in_review: string[] };
+  const member = (n: string) => snap.teams.flatMap((g: { members: Member[] }) => g.members).find((m: Member) => m.name === n) as Member;
+  assert.deepEqual([member("cal").ticket, member("cal").in_review], [null, ["API-1"]], "a builder with only an item in review is free");
+  assert.deepEqual([member("bea").ticket, member("bea").in_review], ["WEB-1", []]);
   assert.equal(snap.stacks.present, false, "no export from the stack engine, no stacks");
   assert.match(snap.descriptions["your-review"], /^Alex's\./);
 
