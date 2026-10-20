@@ -45,8 +45,8 @@ function green(over: Routes = {}, head = HEAD, draft = true): Routes {
 }
 
 // A workspace whose gh is the fake, with a record for the PR that is past its working states.
-function gateWorkspace() {
-  const ws = tempWorkspace(`${TOML}\n[github]\nbots = ["coderabbitai", "Copilot"]\n\n[gate]\nprose_remark = 30\n`);
+function gateWorkspace(gate = "") {
+  const ws = tempWorkspace(`${TOML}\n[github]\nbots = ["coderabbitai", "Copilot"]\n\n[gate]\nprose_remark = 30\n${gate}`);
   after(() => rmSync(ws, { recursive: true, force: true }));
   const gh = join(ws, "bin", "gh");
   writeFileSync(gh, `#!/bin/sh\nexec "${process.execPath}" "${FAKE}" "$@"\n`);
@@ -218,7 +218,8 @@ test("pr-send's gate read waits out what time clears, and stops at once on what 
   assert.match(r.stdout, /mergeability not computed yet/);
 });
 
-// Every PR is a draft until colleague review, and CodeRabbit skips drafts with a green status.
+// Every PR is a draft until colleague review, and CodeRabbit skips drafts with a green status. With
+// no review bot required, that is only named.
 test("a review bot that skipped the draft is named as having reviewed nothing", () => {
   const { run } = gateWorkspace();
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
@@ -226,6 +227,69 @@ test("a review bot that skipped the draft is named as having reviewed nothing", 
     ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /status 'CodeRabbit' is green only because it skipped a draft and reviewed nothing -- comment "@coderabbitai review" on the PR/);
+});
+
+// Mikael, 2026-10-20: "Coderabbit should review before you even give the PR to me?" The statuses
+// are CodeRabbit's own, as read off lyyti-api#3270 and #3271, lyyti-classic#8350 and lyyti-public#1740.
+test("a required review bot must have reviewed the head: pr-ready refuses, pr-wait waits while it reviews", () => {
+  const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
+  const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
+  const rv = `api repos/${REMOTE}/pulls/${N}/reviews?per_page=100&page=1`;
+  const cr = `api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`;
+  const rabbit = (state: string, description: string) => ({ stdout: { statuses: [{ context: "CodeRabbit", state, description, created_at: "2026-01-01T10:00:10Z" }] } });
+  const review = (commit: string) => ({ user: { login: "coderabbitai[bot]" }, commit_id: commit, state: "COMMENTED" });
+  const ready = (over: Routes, env: NodeJS.ProcessEnv = {}) => run(green(over), ["pr-ready", "web", String(N)], env);
+  const ASK = /-- comment "@coderabbitai review" on the PR, then run this again/;
+
+  let r = ready({ [st]: rabbit("success", "Review completed") });
+  assert.equal(r.status, 0, r.stdout);
+  assert.ok(!r.calls.includes(rv), "a completed review at this head needs nothing more");
+
+  for (const desc of ["Review skipped: draft pull request", "Review rate limited"]) {
+    r = ready({ [st]: rabbit("success", desc), [rv]: { stdout: [review("b".repeat(40))] } });
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stdout, new RegExp(`CodeRabbit has not reviewed aaaaaaa: its status here says "${desc}"`));
+    assert.match(r.stdout, ASK);
+    assert.doesNotMatch(r.stdout, /green only because/, "the failure replaces the remark");
+  }
+
+  // a review it left at this head counts, whatever its status went on to say
+  r = ready({ [st]: rabbit("success", "Review skipped: draft pull request"), [rv]: { stdout: [review(HEAD)] } });
+  assert.equal(r.status, 0, r.stdout);
+  r = ready({ [st]: rabbit("success", "Review skipped: draft pull request"), [rv]: { status: 1 } });
+  assert.match(r.stdout, /COULD NOT READ the reviews of #7/);
+
+  // nothing from it at all: waited out right after the push, refused once its checks are old
+  r = ready({ [st]: { stdout: { statuses: [] } }, [rv]: { stdout: [] } });
+  assert.match(r.stdout, /CodeRabbit has not reviewed aaaaaaa: it has posted nothing at this head/);
+  const fresh = new Date().toISOString();
+  r = ready({ [st]: { stdout: { statuses: [] } }, [rv]: { stdout: [] }, [cr]: checkRuns(check("test", { started_at: fresh })) });
+  assert.match(r.stdout, /CodeRabbit has posted nothing at aaaaaaa yet, \d+s after its first check -- waiting up to 600s/);
+
+  // pr-wait waits while it reviews, then sends
+  r = run(green({ [st]: [rabbit("pending", "Review in progress"), rabbit("success", "Review completed")] }), ["pr-wait", "web", String(N), HEAD]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /waiting \(\d+s\) on: CodeRabbit is reviewing aaaaaaa \(Review in progress\)/);
+  assert.equal(r.calls.filter((c) => c === st).length, 3, "read while waiting, then by pr-send's own gate");
+
+  // and stops at once on a head it skipped, with the line that asks for the review
+  r = run(green({ [st]: rabbit("success", "Review skipped: draft pull request"), [rv]: { stdout: [] } }), ["pr-wait", "web", String(N), HEAD]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /waiting will not clear it:\n {2}- CodeRabbit has not reviewed aaaaaaa/);
+  assert.match(r.stderr, ASK);
+});
+
+// On 2026-10-20 pr-wait refused a lyyti-api PR whose gate jobs had simply not started yet.
+test("gate jobs that have not started yet are waited on for a while after the push", () => {
+  const { run } = gateWorkspace();
+  const cr = `api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`;
+  const fresh = new Date().toISOString();
+  const r = run(green({ [cr]: [checkRuns(check("scanner", { started_at: fresh })), checkRuns(check("scanner", { started_at: fresh }), check("test"))] }),
+    ["pr-wait", "web", String(N), HEAD]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /waiting \(\d+s\) on: none of the repo's gate jobs has started at a+ yet \(test\), \d+s after its first check -- waiting up to 600s/);
+  const late = run(green({ [cr]: checkRuns(check("scanner", { started_at: fresh })) }), ["pr-ready", "web", String(N)], { FACTORY_GATE_GRACE: "0" });
+  assert.match(late.stdout, /none of the repo's gate jobs ran at a+ \(test\) -- the gate is missing, not green/);
 });
 
 // Mikael, 2026-10-16: "Only when they are in my colleagues review column should they be open PRs."

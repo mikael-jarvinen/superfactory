@@ -92,9 +92,27 @@ export interface CommitStatus {
   context: string;
   state: string;
   description: string | null;
+  created_at?: string;
 }
 
 export function statuses(repo: Repo, sha: string): CommitStatus[] | undefined {
   const d = api<{ statuses?: CommitStatus[] }>(`repos/${repo.remote}/commits/${sha}/status`);
   return d && Array.isArray(d.statuses) ? d.statuses : undefined;
+}
+
+export interface Review {
+  user: { login: string } | null;
+  commit_id: string | null;
+  state: string;
+}
+
+// Every review on a PR, every page.
+export function reviews(repo: Repo, n: number): Review[] | undefined {
+  const all: Review[] = [];
+  for (let page = 1; ; page++) {
+    const d = api<Review[]>(`repos/${repo.remote}/pulls/${n}/reviews?per_page=100&page=${page}`);
+    if (!Array.isArray(d)) return undefined;
+    all.push(...d);
+    if (d.length < 100) return all;
+  }
 }
