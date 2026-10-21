@@ -151,6 +151,7 @@ function splitOps(run: string): string[] {
 interface Simple {
   words: string[];
   writes: string[];
+  reads: string[];
 }
 
 // Simple commands with the files their redirects write. `2>` arrives as "2" then ">", and the
@@ -160,10 +161,12 @@ function simpleCommands(toks: Tok[]): Simple[] {
   const out: Simple[] = [];
   let cur: string[] = [];
   let writes: string[] = [];
+  let reads: string[] = [];
   const flush = () => {
-    if (cur.length || writes.length) out.push({ words: cur, writes });
+    if (cur.length || writes.length || reads.length) out.push({ words: cur, writes, reads });
     cur = [];
     writes = [];
+    reads = [];
   };
   for (let i = 0; i < flat.length; i++) {
     const { t, op } = flat[i] as Tok;
@@ -173,6 +176,7 @@ function simpleCommands(toks: Tok[]): Simple[] {
       const target = flat[i + 1]?.t ?? "";
       if (cur.length && /^\d$/.test(cur[cur.length - 1] as string)) cur.pop();
       if (t.includes(">") && !(t === ">&" && /^(\d+|-)$/.test(target))) writes.push(target);
+      if (t === "<" || t === "<>") reads.push(target);
       i++;
     } else if (t === "$") {
       // the $ of $( ... ); what is inside is its own simple command
@@ -607,6 +611,76 @@ function checkProtect({ words: raw }: Simple, ctx: GuardContext): void {
   }
 }
 
+// ---------------------------------------------------------------- secret files
+//
+// Every role, both policies. A key in lyyti-classic's lyyti-config.php reached a transcript twice, on
+// 2026-10-20 and 2026-10-21, both times through a grep whose redaction missed. So no command prints a
+// secret file's contents, filtered or not. What cannot print it stays allowed: test -f, ls, stat,
+// grep -q/-l/-c, writing it by redirect, editing it in place with sed -i, and copying a template into
+// it. The stack scripts write .env inside `factory stack up`, which the guard never sees into.
+
+// Committed templates hold no secrets, and builders read them to learn the keys.
+const ENV_TEMPLATES = new Set([".env.example", ".env.sample", ".env.dist", ".env.template"]);
+
+export function secretFile(p: string): boolean {
+  const b = posix.basename(p.replace(/\/+$/, ""));
+  if (ENV_TEMPLATES.has(b)) return false;
+  return b === ".env" || b.startsWith(".env.") || b === "lyyti-config.php" || b === "auth.json" || b.endsWith(".token");
+}
+
+// A glob counts when it could expand to one. A shell's * does not match a leading dot.
+const SECRET_SAMPLES = [".env", ".env.local", "lyyti-config.php", "auth.json", "github.token"];
+function namesSecret(word: string): boolean {
+  const b = posix.basename(word.replace(/\/+$/, ""));
+  if (!/[*?[]/.test(b)) return secretFile(word);
+  const re = new RegExp(`^${b.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+  return SECRET_SAMPLES.some((x) => (!x.startsWith(".") || b.startsWith(".")) && re.test(x));
+}
+
+// A path named inside an interpreter's code, `open('.env')`; `process.env.X` is not one.
+const SECRET_IN_CODE = /(^|[^\w.])(\.env(\.[\w-]+)?|lyyti-config\.php|auth\.json|[\w-]+\.token)(?![\w.-])/;
+
+// Commands that print what they read, or hand it to something that will.
+const PRINTERS = new Set(["cat", "tac", "head", "tail", "less", "more", "most", "bat", "nl", "od", "xxd", "hexdump", "strings", "base64",
+  "cut", "sort", "uniq", "awk", "gawk", "sed", "grep", "egrep", "fgrep", "rg", "ag", "ack", "jq", "yq", "paste", "column", "fold", "fmt",
+  "rev", "tr", "iconv", "diff", "sdiff", "diff3", "vimdiff", "comm", "join", "view", "vi", "vim", "nvim", "nano", "emacs", "pico", "ed", "ex",
+  "plutil", "openssl", "gzip", "zcat", "tee", "dd", "envsubst", "pbcopy"]);
+// A shell's -c line is parsed as a command line of its own, so only these are read as code.
+const CODE_RUNNERS = new Set(["python", "python3", "node", "deno", "bun", "ruby", "perl", "php", "osascript", "lua", "tclsh"]);
+// grep/rg flags whose output carries no line of the file: quiet, names only, counts.
+const GREP_SILENT = /^-([a-zA-Z]*[qlLc][a-zA-Z]*)$|^--(quiet|silent|files-with-matches|files-without-match|count)$/;
+
+function checkSecrets({ words: raw, reads }: Simple): void {
+  const secret = (w: string) => namesSecret(w);
+  for (const r of reads) if (secret(r)) refuse(`reading ${r} into a command prints a secret; check it is set with grep -q instead`);
+  const words = raw.filter((w) => !/^\w+=/.test(w));
+  if (!words.length) return;
+  const name = posix.basename(words[0] as string);
+  const args = words.slice(1);
+  const named = args.filter((a) => !a.startsWith("-") && secret(a));
+  if (CODE_RUNNERS.has(name) && args.some((a) => SECRET_IN_CODE.test(a) && !ENV_TEMPLATES.has(posix.basename(a))))
+    refuse(`${name} with a secret file in its code could print it; check the key with grep -q instead`);
+  if (!named.length) return;
+  const file = named[0] as string;
+  const why = `${file} holds secrets, and ${name} would print them. Check a key is set with \`grep -q '^KEY=' ${file} && echo set\``;
+  if (["grep", "egrep", "fgrep", "rg", "ag"].includes(name)) {
+    if (args.some((a) => GREP_SILENT.test(a))) return;
+    refuse(why);
+  }
+  if (name === "sed") {
+    if (args.some((a) => /^-[a-zA-Z]*i/.test(a) || a.startsWith("--in-place")) && !args.some((a) => a === "-n" || /(^|;)\s*\d*,?\d*\s*[pw]\b/.test(a)))
+      return; // edited in place, nothing printed
+    refuse(why);
+  }
+  if (["cp", "mv", "ln", "install", "rsync"].includes(name)) {
+    const pos = args.filter((a) => !a.startsWith("-"));
+    if (pos.length >= 2 && secret(pos[pos.length - 1] as string)) return; // into another secret file
+    if (pos.slice(0, -1).some(secret)) refuse(`copying ${file} out to a file that is not a secret one exposes it to the next reader`);
+    return;
+  }
+  if (PRINTERS.has(name) || CODE_RUNNERS.has(name)) refuse(why);
+}
+
 // ---------------------------------------------------------------- the hook
 
 const HEREDOC = /<<-?\s*['"]?(\w+)['"]?\s*\n([\s\S]*?)\n\1\s*(\n|$)/;
@@ -618,6 +692,7 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
     text = text.slice(0, m.index) + (m[0].split("\n", 1)[0] as string) + " HEREDOC " + text.slice(m.index + m[0].length);
   for (const s of simpleCommands(tokenize(text))) {
     const simple = { ...s, words: s.words.filter((w) => w !== "HEREDOC") };
+    checkSecrets({ ...simple, words: stripPrefixes(simple.words) });
     if (ctx.policy === "readonly") checkReadonly(simple, ctx);
     else checkProtect(simple, ctx);
   }
@@ -655,12 +730,25 @@ export function hook(argv: string[], input: string): HookResult {
   }
   const refused = (reason: string, cmd: string): HookResult =>
     ({ code: 2, stderr: `guard[${ctx.role}]: refused. ${reason}\nCommand: ${chars(cmd).slice(0, 300).join("")}\n` });
-  let cmd: unknown;
+  let call: { tool_name?: unknown; tool_input?: Record<string, unknown> };
   try {
-    cmd = (JSON.parse(input) as { tool_input?: { command?: unknown } }).tool_input?.command ?? "";
+    call = JSON.parse(input) as typeof call;
   } catch {
     return refused("hook input was not the expected JSON", "");
   }
+  const tin = call.tool_input ?? {};
+  const str = (k: string) => (typeof tin[k] === "string" ? (tin[k] as string) : "");
+  // Read prints the file; Grep prints matching lines only in content mode.
+  if (call.tool_name === "Read") {
+    const f = str("file_path");
+    return secretFile(f) ? refused(`${f} holds secrets; check a key is set with \`grep -q '^KEY=' ${f} && echo set\``, f) : { code: 0 };
+  }
+  if (call.tool_name === "Grep") {
+    const target = [str("path"), str("glob")].find((x) => x && namesSecret(x));
+    return target && str("output_mode") === "content"
+      ? refused(`${target} holds secrets; Grep may list or count matches there, not print them`, target) : { code: 0 };
+  }
+  const cmd = tin.command ?? "";
   if (typeof cmd !== "string" || !cmd.trim()) return { code: 0 };
   const reason = verdict(cmd, ctx);
   return reason === null ? { code: 0 } : refused(reason, cmd);
