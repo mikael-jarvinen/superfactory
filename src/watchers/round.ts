@@ -17,7 +17,7 @@ import { parseRead, trackerOf } from "../tracker/read.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
 import { git, worktreeDirty } from "../worktree.js";
-import { beat, failure, failuresLog, heartbeatAge, loadPrompt, logTo, openLog, runClaude } from "./job.js";
+import { beat, failure, failuresLog, heartbeatAge, loadPrompt, logTo, openLog, runClaude, runFailure } from "./job.js";
 import { belongs, type GhPr, loadQueueState } from "./queue.js";
 import { deliver } from "./relay.js";
 
@@ -258,7 +258,8 @@ export function runRound(ws: Workspace, opts: { factsOnly?: boolean } = {}, out:
   outage(ws, read);
   // "Ran, read the facts, and read the tracker": each is required, and the read needs its evidence.
   if (r.status === 0 && facts.complete && (read === "none" || read === "read")) beat(ws, "round");
-  if (r.status !== 0) failure(ws, `round FAILED exit=${r.status}`);
+  const failed = r.status !== 0 ? runFailure("round", r) : null;
+  if (failed) failure(ws, failed);
   if (!facts.complete) failure(ws, "round: the facts were partial");
   out(`round: exit=${r.status} facts=${facts.complete ? "complete" : "partial"} tracker=${read}`);
   return r.status === 0 && facts.complete ? 0 : 1;

@@ -13,7 +13,7 @@ import { parseRead, trackerOf, UNAVAILABLE } from "../tracker/read.js";
 import { squash } from "../util.js";
 import type { Workspace } from "../workspace.js";
 import { dockerWatchdog } from "./docker.js";
-import { beat, failure, heartbeatAge, heartbeatPath, loadPrompt, logTo, openLog, runClaude } from "./job.js";
+import { beat, failure, heartbeatAge, heartbeatPath, loadPrompt, logTo, openLog, runClaude, runFailure } from "./job.js";
 import { deliver } from "./relay.js";
 
 // What the last runs left: the queue keys already seen, the merge urls already reported, and the
@@ -153,7 +153,7 @@ export function runQueue(ws: Workspace, out: (line: string) => void = console.lo
   // What was not delivered is not recorded as told, so the next run says it again.
   const delivered = lines.length ? deliver(ws, ["[queue watcher]", ...lines].join("\n")) : true;
   if (delivered) stale?.told();
-  const outcome = r.status !== 0 ? "failed" : read?.outcome === "read" ? (lines.length ? "reported" : "quiet") : (read?.outcome ?? "failed");
+  const outcome = r.slept ? "slept" : r.status !== 0 ? "failed" : read?.outcome === "read" ? (lines.length ? "reported" : "quiet") : (read?.outcome ?? "failed");
   const state: QueueState = {
     known: read?.outcome === "read" ? read.keys.filter((k) => delivered || !fresh.includes(k)) : prev.known,
     merged: delivered ? [...prev.merged, ...m.urls].slice(-50) : prev.merged,
@@ -165,8 +165,9 @@ export function runQueue(ws: Workspace, out: (line: string) => void = console.lo
   // The heartbeat needs positive evidence that the tracker was read, so an outage, a failed run and
   // a run that went off contract all leave the last healthy run's heartbeat where it was.
   if (read?.outcome === "read") beat(ws, "queue");
-  if (r.status !== 0) failure(ws, `queue FAILED exit=${r.status}`);
-  else if (read?.outcome === "off-contract") failure(ws, `queue READ NOTHING: no QUEUE: line and no ${UNAVAILABLE} sentinel`);
+  const failed = r.status !== 0 ? runFailure("queue", r) : null;
+  if (failed) failure(ws, failed);
+  else if (r.status === 0 && read?.outcome === "off-contract") failure(ws, `queue READ NOTHING: no QUEUE: line and no ${UNAVAILABLE} sentinel`);
   for (const l of lines) out(l);
   out(`queue: ${outcome}`);
   return outcome === "failed" || outcome === "off-contract" || !delivered ? 1 : 0;
