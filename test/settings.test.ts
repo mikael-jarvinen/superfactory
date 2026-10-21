@@ -52,9 +52,9 @@ test("each role renders its own hooks and rules into logs/run/", () => {
   assert.match(commandFor(lead, "Stop", undefined), / hook status --agent ada --inbox$/);
   assert.equal(builder.hooks.Stop, undefined);
 
-  assert.match(commandFor(lead, "PreToolUse", "Bash"), / hook guard --role lead --policy protect$/);
-  assert.match(commandFor(builder, "PreToolUse", "Bash"), / hook guard --role builder --policy protect$/);
-  assert.match(commandFor(reviewer, "PreToolUse", "Bash"), / hook guard --role reviewer --policy readonly$/);
+  assert.match(commandFor(lead, "PreToolUse", "Bash|Read|Grep"), / hook guard --role lead --policy protect$/);
+  assert.match(commandFor(builder, "PreToolUse", "Bash|Read|Grep"), / hook guard --role builder --policy protect$/);
+  assert.match(commandFor(reviewer, "PreToolUse", "Bash|Read|Grep"), / hook guard --role reviewer --policy readonly$/);
   assert.equal(lead.permissions?.defaultMode, "bypassPermissions");
   assert.equal(reviewer.permissions?.defaultMode, "auto");
 
@@ -70,13 +70,21 @@ test("each role renders its own hooks and rules into logs/run/", () => {
 test("the rendered guard runs, labelled with the role it was rendered for", () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
-  const guard = commandFor(render(dir, "ada"), "PreToolUse", "Bash");
+  const guard = commandFor(render(dir, "ada"), "PreToolUse", "Bash|Read|Grep");
   const bash = (command: string) => ({ tool_name: "Bash", tool_input: { command } });
 
   const push = runHook(guard, bash("timeout 60 git push origin main"));
   assert.equal(push.status, 2);
   assert.match(push.stderr, /^guard\[lead\]: refused\. pushing to a protected branch \(main\) is not allowed\n/);
   assert.equal(runHook(guard, bash("timeout 5 ls")).status, 0);
+
+  // the guard also sees Read and Grep, which can print a secret file without any Bash
+  const read = runHook(guard, { tool_name: "Read", tool_input: { file_path: "/w/lyyti-classic/lyyti-config.php" } });
+  assert.equal(read.status, 2);
+  assert.match(read.stderr, /lyyti-config\.php holds secrets/);
+  assert.equal(runHook(guard, { tool_name: "Read", tool_input: { file_path: "/w/web/.env.example" } }).status, 0);
+  const grep = (output_mode: string) => runHook(guard, { tool_name: "Grep", tool_input: { pattern: "KEY", path: "/w/api/.env", output_mode } }).status;
+  assert.deepEqual([grep("content"), grep("files_with_matches"), grep("count")], [2, 0, 0]);
 
   const unlabelled = runHook(guard.replace(/ --role lead/, ""), bash("ls"));
   assert.equal(unlabelled.status, 2);

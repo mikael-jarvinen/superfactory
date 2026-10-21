@@ -142,3 +142,30 @@ test("a :branch refspec is a refused delete for every role", () => {
     cmds.filter((c) => verdict(c, { ...pr, role }) === null).map((c) => `${role}: ${c}`));
   assert.deepEqual(allowed, []);
 });
+
+// A key in lyyti-config.php reached a transcript on 2026-10-20 and again on 2026-10-21, both times
+// through a grep whose redaction missed. Every role refuses to print a secret file, filtered or not.
+test("no role prints a secret file; checking a key is set, writing and editing one stay allowed", () => {
+  const refused = [
+    "grep -n UPCLOUD lyyti-classic/lyyti-config.php", "grep -rn KEY /w/lyyti-config.php | sed 's/=.*/=***/'",
+    "cat .env", "cat api/.env | sed -E 's/(KEY=).*/\\1***/'", "head -5 .env.local", "tail .env.testing", "less ~/.config/superfactory/github.token",
+    "awk -F= '{print $1}' .env", "sed -n 1,5p .env", "sed 's/=.*//' .env", "jq . ~/.codex/auth.json", "rg KEY .env", "grep -E KEY .env*",
+    "cut -d= -f1 < .env", "while read l; do echo ${l%%=*}; done < .env", "base64 lyyti-config.php", "diff .env .env.example",
+    "cp .env /tmp/env.txt", "python3 -c \"print(open('.env').read())\"", "php -r 'echo file_get_contents(\"lyyti-config.php\");'",
+    "echo $(cat .env)", "cd api && cat .env",
+  ];
+  const allowed = [
+    "grep -q '^ANTHROPIC_API_KEY=' lyyti-config.php && echo set", "grep -c KEY .env", "grep -l KEY .env .env.local", "grep -qE '^KEY=' .env",
+    "test -f .env", "[ -f lyyti-config.php ] && echo present", "ls -la .env", "stat .env", "wc -l .env",
+    "echo 'KEY=x' >> .env", "cat > .env <<'EOF'\nKEY=x\nEOF", "cp .env.example .env", "cp .env .env.bak", "sed -i '' 's/^A=.*/A=b/' .env",
+    "cat .env.example", "grep KEY .env.example", "node -e 'console.log(process.env.HOME)'", "bash -c 'grep -q KEY .env && echo set'",
+    "git check-ignore -q .env", "cat README.md",
+  ];
+  for (const ctx of [pr, { ...pr, role: "lead" }]) {
+    assert.deepEqual(refused.filter((c) => verdict(c, ctx) === null), [], `${ctx.role} printed a secret`);
+    assert.deepEqual(allowed.filter((c) => verdict(c, ctx) !== null).map((c) => `${c}: ${verdict(c, ctx)}`), [], `${ctx.role} was refused a safe command`);
+  }
+  // readonly sessions refuse them too; writing is theirs to refuse anyway
+  assert.deepEqual(["cat .env", "grep KEY lyyti-config.php"].filter((c) => verdict(c, ro) === null), []);
+  assert.equal(verdict("grep -q KEY .env", ro), null);
+});
