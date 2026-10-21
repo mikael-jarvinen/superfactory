@@ -20,7 +20,9 @@ export interface RunResult {
 
 export function run(cmd: string, args: string[], opts: SpawnSyncOptions = {}): RunResult {
   const r = spawnSync(cmd, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, ...opts });
-  if (r.error) return { status: 127, stdout: "", stderr: String(r.error.message) };
+  // 127 for a command that could not start, as a shell says; 124 for one killed at its timeout, as
+  // timeout(1) says, so a slow or sleeping run is not read as a missing binary.
+  if (r.error) return { status: (r.error as NodeJS.ErrnoException).code === "ETIMEDOUT" ? 124 : 127, stdout: "", stderr: String(r.error.message) };
   return { status: r.status ?? 1, stdout: String(r.stdout ?? ""), stderr: String(r.stderr ?? "") };
 }
 

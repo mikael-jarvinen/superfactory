@@ -3,6 +3,8 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSy
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { run } from "../src/util.js";
+import { type ClaudeRun, runFailure, TIMED_OUT } from "../src/watchers/job.js";
 import { factory, TOML, tempWorkspace } from "./helpers.js";
 
 const FAKE_CLAUDE = fileURLToPath(new URL("./fake-claude.js", import.meta.url));
@@ -272,4 +274,16 @@ test("with no tracker there is no queue to watch, and the round needs no read", 
   assert.ok(existsSync(logs("round.heartbeat")));
   const prompt = (r.calls[0] as Call).prompt;
   assert.ok(prompt.includes("no tracker") && !prompt.includes(SEARCH) && !prompt.includes("queue heartbeat"));
+});
+
+// On 2026-10-20 every "exit=127" in the failures log was a claude run that launchd started in a
+// seconds-long dark wake and the laptop's sleep froze past its timeout, not a missing binary.
+test("a timeout is not a missing command, and a run the laptop slept through is not a failure", () => {
+  assert.equal(run("sleep", ["5"], { timeout: 200 }).status, TIMED_OUT, "killed at its timeout: 124");
+  assert.equal(run("/no/such/command", []).status, 127, "could not start: 127");
+
+  const ran = (status: number, seconds: number, slept = false): ClaudeRun => ({ status, stdout: "", seconds, slept });
+  assert.equal(runFailure("queue", ran(1, 30)), "queue FAILED exit=1");
+  assert.equal(runFailure("round", ran(TIMED_OUT, 901)), "round TIMED OUT after 901s");
+  assert.equal(runFailure("queue", ran(TIMED_OUT, 3604, true)), null, "the laptop slept: nothing for the failures log");
 });

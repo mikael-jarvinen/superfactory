@@ -84,11 +84,37 @@ export const claudeOptions = (job: Job) => ({
   killSignal: "SIGTERM" as const,
 });
 
-// The run's reply and exit. A run killed at its timeout has no exit status, and counts as failed.
-export function runClaude(ws: Workspace, job: Job, prompt: string, tools: string[], log: string): { status: number; stdout: string } {
+export const TIMED_OUT = 124;
+
+export interface ClaudeRun {
+  status: number;
+  stdout: string;
+  seconds: number;
+  // Cut short by the laptop sleeping, not by the run itself.
+  slept: boolean;
+}
+
+// launchd starts a missed run in a dark wake that lasts seconds, the Mac sleeps again mid-run, and
+// on waking the timeout has long passed. A run that outlived its timeout by more than this was
+// frozen, not stuck. On 2026-10-20 every "exit=127" in the failures log was one of these.
+const SLEPT_MARGIN_S = 120;
+
+// The run's reply and exit. A run killed at its timeout counts as failed.
+export function runClaude(ws: Workspace, job: Job, prompt: string, tools: string[], log: string): ClaudeRun {
+  const t0 = Date.now();
   const r = run(claudeBin(), claudeArgs(ws, job, tools), { ...claudeOptions(job), input: prompt });
+  const seconds = Math.round((Date.now() - t0) / 1000);
+  const slept = r.status === TIMED_OUT && seconds > TIMEOUT_S[job] + SLEPT_MARGIN_S;
   logTo(log, r.stdout);
   if (r.stderr.trim()) logTo(log, r.stderr);
-  logTo(log, `exit=${r.status}`);
-  return { status: r.status, stdout: r.stdout };
+  const why = r.status === TIMED_OUT ? ` (timed out after ${seconds}s${slept ? "; the laptop slept during the run" : ""})` : "";
+  logTo(log, `exit=${r.status}${why}`);
+  return { status: r.status, stdout: r.stdout, seconds, slept };
+}
+
+// The failures-log line for a run that did not exit 0, or null for one the laptop's sleep cut
+// short: that is nobody's fault, and logging it would only make the round's plumbing check cry wolf.
+export function runFailure(job: Job, r: ClaudeRun): string | null {
+  if (r.slept) return null;
+  return r.status === TIMED_OUT ? `${job} TIMED OUT after ${r.seconds}s` : `${job} FAILED exit=${r.status}`;
 }
