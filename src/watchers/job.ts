@@ -4,9 +4,10 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { claudeBin, lead } from "../fleet.js";
+import { ghBin } from "../gate/github.js";
 import { renderSettings } from "../settings.js";
 import type { Workspace } from "../workspace.js";
-import { die, run } from "../util.js";
+import { die, run, type RunResult } from "../util.js";
 
 export type Job = "queue" | "round" | "relay";
 
@@ -117,4 +118,24 @@ export function runClaude(ws: Workspace, job: Job, prompt: string, tools: string
 export function runFailure(job: Job, r: ClaudeRun): string | null {
   if (r.slept) return null;
   return r.status === TIMED_OUT ? `${job} TIMED OUT after ${r.seconds}s` : `${job} FAILED exit=${r.status}`;
+}
+
+// On 2026-10-23 a queue run started in a 45-second dark wake, and its `gh pr list` hung on the
+// network when the laptop slept again. It was still hanging 3h20m later, and launchd starts no run
+// while one is alive, so every queue run after it was skipped. A watcher's `gh` call has a bound.
+const GH_TIMEOUT_S = 60;
+
+export interface GhRun extends RunResult {
+  slept: boolean;
+}
+
+// A watcher's `gh` call, killed at its bound. A timeout puts its reason in stderr, where a failed
+// read already looks, and names the laptop's sleep as runClaude does.
+export function watcherGh(args: string[], timeoutS = GH_TIMEOUT_S): GhRun {
+  const t0 = Date.now();
+  const r = run(ghBin(), args, { timeout: timeoutS * 1000, killSignal: "SIGTERM" });
+  if (r.status !== TIMED_OUT) return { ...r, slept: false };
+  const seconds = Math.round((Date.now() - t0) / 1000);
+  const slept = seconds > timeoutS + SLEPT_MARGIN_S;
+  return { ...r, stderr: `gh ${args.slice(0, 2).join(" ")} timed out after ${seconds}s${slept ? "; the laptop slept during the call" : ""}`, slept };
 }

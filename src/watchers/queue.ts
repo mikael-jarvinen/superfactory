@@ -7,13 +7,13 @@
 // and the delivery, which goes by the courier and only when something is new.
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { gh, json } from "../gate/github.js";
+import { json } from "../gate/github.js";
 import { allRecs, branchFor, isLocal, type Rec, recPrs, saveRec, transition } from "../state.js";
 import { parseRead, trackerOf, UNAVAILABLE } from "../tracker/read.js";
 import { squash } from "../util.js";
 import type { Workspace } from "../workspace.js";
 import { dockerWatchdog } from "./docker.js";
-import { beat, failure, heartbeatAge, heartbeatPath, loadPrompt, logTo, openLog, runClaude, runFailure } from "./job.js";
+import { beat, failure, heartbeatAge, heartbeatPath, loadPrompt, logTo, openLog, runClaude, runFailure, TIMED_OUT, watcherGh } from "./job.js";
 import { deliver } from "./relay.js";
 
 // What the last runs left: the queue keys already seen, the merge urls already reported, and the
@@ -65,15 +65,18 @@ export function belongs(rec: Rec, remote: string, pr: GhPr): { known: boolean; m
 const MERGE_WINDOW_MS = 3 * 3600_000;
 
 // Merges in the last three hours that belong to an open record and were not reported before.
-function merges(ws: Workspace, recs: Rec[], reported: string[]): { lines: string[]; urls: string[] } {
+function merges(ws: Workspace, recs: Rec[], reported: string[], log: string): { lines: string[]; urls: string[] } {
   const lines: string[] = [];
   const urls: string[] = [];
   const open = recs.filter((r) => r.state !== "done");
   if (!open.length) return { lines, urls };
   for (const repo of Object.values(ws.config.repos)) {
-    const prs = json<GhPr[]>(gh("pr", "list", "-R", repo.remote, "--state", "merged", "--limit", "10", "--json", "number,title,url,mergedAt,headRefName"));
+    const r = watcherGh(["pr", "list", "-R", repo.remote, "--state", "merged", "--limit", "10", "--json", "number,title,url,mergedAt,headRefName"]);
+    const prs = json<GhPr[]>(r);
     if (!Array.isArray(prs)) {
-      failure(ws, `queue: cannot read the merged PRs of ${repo.remote}`);
+      const timedOut = r.status === TIMED_OUT;
+      if (timedOut) logTo(log, `${repo.remote}: ${r.stderr}`);
+      if (!r.slept) failure(ws, `queue: cannot read the merged PRs of ${repo.remote}${timedOut ? `: ${r.stderr}` : ""}`);
       continue;
     }
     for (const pr of prs) {
@@ -143,7 +146,7 @@ export function runQueue(ws: Workspace, out: (line: string) => void = console.lo
       lines.push(`queued: ${k}${summary ? ` ${summary}` : ""}`);
     }
   }
-  const m = merges(ws, recs, prev.merged);
+  const m = merges(ws, recs, prev.merged, log);
   lines.push(...m.lines);
   const stale = roundStale(ws);
   if (stale) lines.push(stale.line);

@@ -9,7 +9,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fleetLines, type Session } from "../fleet.js";
-import { gh, json } from "../gate/github.js";
+import { json } from "../gate/github.js";
 import { readTail } from "../messages.js";
 import { loaded } from "../scheduler/launchd.js";
 import { allRecs, BUSY, isLocal, recPrs, WAITING_ON_YOU } from "../state.js";
@@ -17,7 +17,7 @@ import { parseRead, trackerOf } from "../tracker/read.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
 import { git, worktreeDirty } from "../worktree.js";
-import { beat, failure, failuresLog, heartbeatAge, loadPrompt, logTo, openLog, runClaude, runFailure } from "./job.js";
+import { beat, failure, failuresLog, heartbeatAge, loadPrompt, logTo, openLog, runClaude, runFailure, watcherGh } from "./job.js";
 import { belongs, type GhPr, loadQueueState } from "./queue.js";
 import { deliver } from "./relay.js";
 
@@ -127,7 +127,7 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
     const withColleagues = new Set((readTail(ws.events) as Record<string, unknown>[])
       .filter((e) => e.to === "colleague-review").map((e) => e.ticket));
     for (const repo of Object.values(ws.config.repos)) {
-      const r = gh("pr", "list", "-R", repo.remote, "--state", "all", "--limit", "40", "--json", "number,title,headRefName,state,isDraft,mergedAt,headRefOid,baseRefName");
+      const r = watcherGh(["pr", "list", "-R", repo.remote, "--state", "all", "--limit", "40", "--json", "number,title,headRefName,state,isDraft,mergedAt,headRefOid,baseRefName"]);
       const prs = json<GhPr[]>(r);
       if (!Array.isArray(prs)) {
         out.push(`  ${repo.remote}: CANNOT read PRs (${r.stderr.trim().slice(0, 80)})`);
