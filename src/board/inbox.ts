@@ -6,7 +6,7 @@ import type { Workspace } from "../workspace.js";
 import { chars, die, now, pyDumps, sleep } from "../util.js";
 
 // What the human can type on the page; `factory say` keeps its own 1200 for the lead.
-export const MAX_CHARS = 4000;
+export const MAX_CHARS = 20_000;
 
 // Carries one message to the lead when no inbox is held. It must return at once: the courier runs
 // inside the board, and a sweep that waits on a model call is a page that hangs after Send.
