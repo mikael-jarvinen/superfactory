@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { run } from "../src/util.js";
-import { type ClaudeRun, runFailure, TIMED_OUT } from "../src/watchers/job.js";
+import { type ClaudeRun, runFailure, TIMED_OUT, watcherGh } from "../src/watchers/job.js";
 import { factory, TOML, tempWorkspace } from "./helpers.js";
 
 const FAKE_CLAUDE = fileURLToPath(new URL("./fake-claude.js", import.meta.url));
@@ -286,4 +287,25 @@ test("a timeout is not a missing command, and a run the laptop slept through is 
   assert.equal(runFailure("queue", ran(1, 30)), "queue FAILED exit=1");
   assert.equal(runFailure("round", ran(TIMED_OUT, 901)), "round TIMED OUT after 901s");
   assert.equal(runFailure("queue", ran(TIMED_OUT, 3604, true)), null, "the laptop slept: nothing for the failures log");
+});
+
+// On 2026-10-23 a queue run's `gh pr list` hung for 3h20m after the laptop slept mid-call, and
+// launchd started no queue run while it was alive.
+test("a watcher's gh call has a bound, and its timeout says so", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gh-hang-"));
+  const hang = join(dir, "gh");
+  writeFileSync(hang, "#!/bin/sh\nexec sleep 5\n");
+  chmodSync(hang, 0o755);
+  const was = process.env.GH_BIN;
+  process.env.GH_BIN = hang;
+  try {
+    const r = watcherGh(["pr", "list", "-R", "o/r"], 0.2);
+    assert.equal(r.status, TIMED_OUT, "killed at its bound: 124");
+    assert.equal(r.stderr, "gh pr list timed out after 0s");
+    assert.equal(r.slept, false);
+  } finally {
+    if (was === undefined) delete process.env.GH_BIN;
+    else process.env.GH_BIN = was;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
