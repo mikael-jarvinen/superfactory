@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { inboxHeld, postMessage, sweep } from "../src/board/inbox.js";
+import { inboxHeld, MAX_CHARS, postMessage, sweep } from "../src/board/inbox.js";
 import { serve } from "../src/board/server.js";
 import { transition } from "../src/state.js";
 import { readTail } from "../src/messages.js";
@@ -102,7 +102,9 @@ test("the server: pages, the snapshot, posting, and only the tail of the log", {
   assert.equal(m.human, "Alex");
   assert.deepEqual(m.messages.map((r: { text: string; from: string; receipt: string }) => [r.text, r.from, r.receipt]),
     [["typed on the page", "human", "sent"], ["from the old kind", "human", "sent"]]);
-  const bad = await fetch(board.url + "/api/messages", { method: "POST", headers: page, body: JSON.stringify({ text: "x".repeat(4001) }) });
+  const full = await fetch(board.url + "/api/messages", { method: "POST", headers: page, body: JSON.stringify({ text: "x".repeat(MAX_CHARS) }) });
+  assert.equal(full.status, 200);
+  const bad = await fetch(board.url + "/api/messages", { method: "POST", headers: page, body: JSON.stringify({ text: "x".repeat(MAX_CHARS + 1) }) });
   assert.equal(bad.status, 400);
 });
 
