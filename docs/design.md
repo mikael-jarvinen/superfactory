@@ -90,6 +90,8 @@ repos = ["web"]
 slots = 3
 reserve = [0]                         # the human's own stack, never allocated
 script = "stacks/web.sh"              # workspace-relative, see the stack contract
+env = { JAVA_HOME = "/opt/java" }     # optional: set in every builder session on this stack
+path_prepend = ["/opt/java/bin"]      # optional: first on those sessions' PATH (env takes no PATH)
 
 [stacks.backend]
 repos = ["api", "web"]                # a slot holds one worktree per repo

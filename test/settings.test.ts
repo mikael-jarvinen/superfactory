@@ -6,12 +6,13 @@ import { after, test } from "node:test";
 import { inboxLock, tryLock } from "../src/board/inbox.js";
 import { agentOrDie } from "../src/fleet.js";
 import { statusFile } from "../src/hooks/status.js";
-import { settingsFile } from "../src/launch.js";
+import { sessionEnv, settingsFile } from "../src/launch.js";
 import { TEMPLATES_DIR } from "../src/settings.js";
 import { openWorkspace } from "../src/workspace.js";
-import { CLI, tempWorkspace } from "./helpers.js";
+import { CLI, TOML, tempWorkspace } from "./helpers.js";
 
 interface Rendered {
+  env?: Record<string, string>;
   permissions?: { deny?: string[]; allow?: string[]; defaultMode?: string };
   hooks: Record<string, { matcher?: string; hooks: { command: string }[] }[]>;
 }
@@ -63,6 +64,23 @@ test("each role renders its own hooks and rules into logs/run/", () => {
   assert.ok(reviewer.permissions?.allow?.includes("Edit(//tmp/**)"));
   assert.ok(!reviewer.permissions?.allow?.some((r) => r.includes("gh api repos/")));
   assert.equal(builder.permissions?.deny, undefined);
+});
+
+// Nomura could not run the functions tests: the Firebase emulators need java, and a builder's
+// PATH had none. A stack's env and path_prepend reach every builder session on it, and no other.
+test("a builder on a stack gets the stack's env, with its directories first on PATH", () => {
+  const toml = TOML.replace("pin = { bea = 1 }\n", 'pin = { bea = 1 }\nenv = { JAVA_HOME = "/opt/java" }\npath_prepend = ["/opt/java/bin"]\n');
+  const dir = tempWorkspace(toml);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const ws = openWorkspace(dir, {});
+
+  assert.deepEqual(sessionEnv(ws, agentOrDie(ws, "bea"), "/usr/bin:/opt/java/bin:/bin"),
+    { JAVA_HOME: "/opt/java", PATH: "/opt/java/bin:/usr/bin:/bin" });
+  const bea = render(dir, "bea");
+  assert.equal(bea.env?.JAVA_HOME, "/opt/java");
+  assert.equal(bea.env?.PATH, ["/opt/java/bin", ...(process.env.PATH ?? "").split(":").filter((d) => d && d !== "/opt/java/bin")].join(":"));
+  // cal builds without a stack; the lead and the reviewer have none
+  for (const name of ["cal", "ada", "rae"]) assert.equal(render(dir, name).env, undefined, name);
 });
 
 // The old guard took its mode from the wrapper script's name, so the lead's session ran as a

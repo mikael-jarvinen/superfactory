@@ -58,6 +58,7 @@ gate_checks = "test"
 repos = ["web", "nope"]
 slots = 0
 pin = { zed = 1 }
+env = { PATH = "/opt/java/bin", JAVA_HOME = 21 }
 
 [roles.lead]
 settings = "lead"
@@ -103,6 +104,8 @@ port = 99999
     "repos.web.gate_checks: must be an array of non-empty strings, got \"test\"",
     "stacks.app.repos: no repo \"nope\"; repos: web",
     "stacks.app.slots: must be a whole number from 1 up, got 0",
+    "stacks.app.env.PATH: give path_prepend instead; a session's PATH is built from it",
+    "stacks.app.env.JAVA_HOME: must be a string, got 21",
     "roles.lead.cwd: missing",
     "roles.builder.cwd: a builder starts in its worktree, so it takes no cwd",
     "roles.boss: unknown role; roles are lead, builder, reviewer, assistant",
