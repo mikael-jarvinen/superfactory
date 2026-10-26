@@ -264,6 +264,28 @@ test("the round: a blocked item whose named blocker has merged is flagged, once"
   assert.doesNotMatch(r.stdout, /WEB-2 .*BLOCKER DONE/, "the cleared blocker is reported once, not every round");
 });
 
+test("the round: an item waiting on the lead over two hours is flagged, once", () => {
+  const { ws, run } = watcherWorkspace();
+  // WEB-2 has sat in pr-open for five days, WEB-3 for an hour.
+  for (const [k, hours] of [["WEB-2", 5 * 24], ["WEB-3", 1]] as const) {
+    assert.equal(factory(ws, ["state", k, "queued"]).status, 0);
+    const f = join(ws, "state", `${k}.json`);
+    const since = new Date(Date.now() - hours * 3600_000).toISOString();
+    writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, "utf8")), state: "pr-open", since }));
+  }
+  const routes = { "pr list -R acme/web --state all": { stdout: [] }, "pr list -R acme/api --state all": { stdout: [] } };
+
+  let r = run(["watch", "round", "--facts"], [], routes);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /WEB-2 .*pr-open .*waiting on the lead over 2 h -- report, review or gate it/);
+  assert.doesNotMatch(r.stdout, /WEB-3 .*waiting on the lead/, "an hour in pr-open is not yet a wait");
+
+  r = run(["watch", "round"], [{ stdout: "QUIET\n" }], routes);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  r = run(["watch", "round", "--facts"], [], routes);
+  assert.match(r.stdout, /WEB-2 .*waiting on the lead \(already reported, not an escalation\)/);
+});
+
 test("with no tracker there is no queue to watch, and the round needs no read", () => {
   const { run, logs } = watcherWorkspace(JIRA.replace('kind = "jira"', 'kind = "none"'));
   let r = run(["watch", "queue"], []);

@@ -12,7 +12,7 @@ import { fleetLines, type Session } from "../fleet.js";
 import { json } from "../gate/github.js";
 import { readTail } from "../messages.js";
 import { loaded } from "../scheduler/launchd.js";
-import { allRecs, BUSY, isLocal, recPrs, WAITING_ON_YOU } from "../state.js";
+import { allRecs, BUSY, isLocal, recPrs, WAITING_ON_LEAD, WAITING_ON_YOU } from "../state.js";
 import { parseRead, trackerOf } from "../tracker/read.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
@@ -31,6 +31,7 @@ export interface Facts {
 
 const WORKING_S = 90 * 60;
 const WAITING_S = 8 * 3600;
+const LEAD_WAITING_S = 2 * 3600;
 const UNREPORTED_COMMIT_S = 3 * 3600;
 // Two hours at the default cadence, not three runs' worth: on a sleeping laptop launchd services a
 // calendar fire about once an hour and never replays a missed one, so a shorter bound cries stale
@@ -97,6 +98,8 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
         flag = firstTime(r.ticket, s, r.since ?? "") ? "  QUEUED -- not dispatched" : "  queued (already reported, not an escalation)";
       if (WAITING_ON_YOU.has(s) && age !== null && age > WAITING_S)
         flag = firstTime(r.ticket, s, r.since!) ? `  waiting on ${human} over a working day` : `  waiting on ${human} (already reported, not an escalation)`;
+      if (WAITING_ON_LEAD.has(s) && age !== null && age > LEAD_WAITING_S)
+        flag = firstTime(r.ticket, s, r.since!) ? "  waiting on the lead over 2 h -- report, review or gate it" : "  waiting on the lead (already reported, not an escalation)";
       const sessions = live as Map<string, Session> | null;
       if (BUSY.has(s) && r.agent && sessions && !sessions.has(r.agent)) flag += `  NO SESSION: ${r.agent} has no live session while ${s}`;
       // Mikael, 2026-10-09: the round must check whether a blocked item is still truly blocked. A
