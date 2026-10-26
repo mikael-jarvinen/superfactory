@@ -9,7 +9,7 @@
 // Environment: DEMO_BASE_URL (the app), DEMO_OUT (where files go), and DEMO_USER and DEMO_PASS
 // from the workspace's demo.env. A login page that comes prefilled needs neither: signIn only
 // clicks the button. Nothing here is committed to a product repo.
-import { test as base, expect, type Frame, type Page } from '@playwright/test';
+import { test as base, expect, type Dialog, type Frame, type Page } from '@playwright/test';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -224,43 +224,68 @@ async function shot(page: Page, name: string) {
 const SESSION = join(dirname(OUT), '.sessions', `${new URL(BASE).host}.json`);
 test.use({ storageState: existsSync(SESSION) ? SESSION : undefined });
 
-// What the sign-in form's fields and buttons say. Add the app's own words if it uses others.
-const LABELS = {
-  user: RegExp('email|username', 'i'),
-  password: RegExp('password', 'i'),
-  next: RegExp('^next$', 'i'),
-  submit: RegExp('log in|sign in', 'i'),
+// The sign-in form by what its parts are, not what they say: Classic's login page speaks the user's
+// own language once a session cookie, even a stale one, has told it who they are. Classic asks for
+// the email, then shows the password after Next; the Modules portal shows both and a Log in button.
+const FORM = {
+  user: 'input[type=email]:visible',
+  password: 'input[type=password]',
+  next: '#next-button:visible',
+  submit: '[data-testid=login]:visible, [type=submit]:visible',
 };
 
 // Playwright's error for a failed fill carries the value in its call log, and the error context
 // file keeps it too. So the password is filled here, and its failure is rethrown without it.
-async function fillSecret(page: Page, label: RegExp, value: string) {
+async function fillSecret(page: Page, selector: string, value: string) {
   try {
-    await page.getByLabel(label).first().fill(value, { timeout: 5_000 });
+    await page.locator(selector).first().fill(value, { timeout: 5_000 });
   } catch {
-    throw new Error(`signIn: could not fill the field labelled ${label} (value withheld)`);
+    throw new Error(`signIn: could not fill ${selector} (value withheld)`);
   }
 }
 
+// The login page itself: Classic's login/ under its origin, the Modules portal's login under its
+// locale. Classic sends someone already signed in on to the event list, so going here is safe.
+const LOGIN = new URL('login/', BASE.endsWith('/') ? BASE : `${BASE}/`).href;
+
 async function signIn(page: Page) {
-  await page.goto(BASE);
-  const emailField = page.getByLabel(LABELS.user);
-  if (await emailField.count()) {
-    const user = process.env.DEMO_USER;
-    const pass = process.env.DEMO_PASS;
-    if (user && pass && !(await emailField.first().inputValue())) {
-      await emailField.first().fill(user);
-      // Classic asks for the email, then shows the password after Next.
-      const next = page.getByRole('button', { name: LABELS.next }).first();
-      if (await next.isVisible()) await next.click();
-      await fillSecret(page, LABELS.password, pass);
+  // When the user has another live session, a saved one gone stale or another demo's, Classic
+  // answers its sign-in probe with 409 and asks confirm() whether to log in anyway. Playwright
+  // dismisses dialogs by default, which leaves the login page where it was.
+  const confirmLogin = (d: Dialog) => (d.type() === 'confirm' ? d.accept() : d.dismiss());
+  page.on('dialog', confirmLogin);
+  try {
+    await page.goto(LOGIN);
+    const emailField = page.locator(FORM.user).first();
+    if (await emailField.count()) {
+      const user = process.env.DEMO_USER;
+      const pass = process.env.DEMO_PASS;
+      // A field that comes filled stays as it is: the Modules portal prefills both locally, and
+      // Classic remembers the last email but never the password.
+      if (user && !(await emailField.inputValue())) await emailField.fill(user);
+      const next = page.locator(FORM.next).first();
+      if (await next.count()) await next.click();
+      const password = page.locator(FORM.password).first();
+      if (pass && !(await password.inputValue({ timeout: 5_000 }).catch(() => ''))) await fillSecret(page, `${FORM.password}:visible`, pass);
+      await page.locator(FORM.submit).first().click();
+      // Signed in once the app has left its login page. A hidden email field is not proof: Classic
+      // hides it at Next.
+      await page.waitForURL((u) => !/\/login\/?$/.test(u.pathname));
     }
-    await page.getByRole('button', { name: LABELS.submit }).first().click();
-    await emailField.first().waitFor({ state: 'hidden' });
+  } finally {
+    page.off('dialog', confirmLogin);
   }
   mkdirSync(dirname(SESSION), { recursive: true });
   await page.context().storageState({ path: SESSION });
 }
+
+// A failed test leaves error-context.md with a snapshot of the page as it ended, field values
+// included, and a login page can come prefilled with the password. So a failure that ends on one
+// leaves a blank page to snapshot instead.
+test.afterEach(async ({ page }, testInfo) => {
+  if (testInfo.status !== testInfo.expectedStatus && (await page.locator('input[type=password]:visible').count().catch(() => 0)))
+    await page.goto('about:blank').catch(() => {});
+});
 
 test('demo', async ({ page, camera }) => {
   // Setup, not filmed: sign in and open the screen the PR changes, by URL or by clicking there.
