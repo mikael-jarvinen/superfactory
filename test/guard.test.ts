@@ -169,3 +169,18 @@ test("no role prints a secret file; checking a key is set, writing and editing o
   assert.deepEqual(["cat .env", "grep KEY lyyti-config.php"].filter((c) => verdict(c, ro) === null), []);
   assert.equal(verdict("grep -q KEY .env", ro), null);
 });
+
+test("a [ in a grep pattern is read as the shell reads it, not as a guard failure", () => {
+  const as = { ...pr, role: "assistant" };
+  const patterns = [
+    `grep -n -I -E "interface Stack|type Stack|stacks\\[|StackConfig" src/config.ts`,
+    `grep -n -B2 -A12 "^\\[stacks" examples/factory.toml`,
+    `git diff | grep -E "^[-+][^-+]"`,
+    `grep -n "= \\[" factory.toml`,
+  ];
+  for (const c of patterns) assert.equal(verdict(c, as), verdict(c.replace(/\\?\[/g, ""), as), c);
+  assert.deepEqual(patterns.map((c) => verdict(c, as)), [null, null, null, null]);
+  // the same words still name a secret when the shell would expand them to one
+  assert.match(verdict("cat .env[^-+]local", as) ?? "", /holds secrets/);
+  assert.equal(verdict("cat .env[", as), null);
+});

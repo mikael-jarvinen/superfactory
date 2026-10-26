@@ -633,8 +633,52 @@ const SECRET_SAMPLES = [".env", ".env.local", "lyyti-config.php", "auth.json", "
 function namesSecret(word: string): boolean {
   const b = posix.basename(word.replace(/\/+$/, ""));
   if (!/[*?[]/.test(b)) return secretFile(word);
-  const re = new RegExp(`^${b.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+  let re: RegExp | null;
+  try {
+    re = new RegExp(`^${b.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+  } catch {
+    re = globRegex(b);
+  }
+  // A glob that matches nothing reaches the command as it was typed.
+  if (re === null) return secretFile(word);
   return SECRET_SAMPLES.some((x) => (!x.startsWith(".") || b.startsWith(".")) && re.test(x));
+}
+
+// The shell's reading of a glob, for the words the translation above cannot compile: a grep pattern
+// such as `stacks\[` or `[^-+]`. A backslash quotes the next character, a `[` with no closing `]` is
+// literal, and `!` or `^` first negates a bracket. null when a bracket's range is out of order, which
+// matches nothing.
+function globRegex(glob: string): RegExp | null {
+  const lit = (c: string) => (/\w/.test(c) ? c : `\\${c}`);
+  let out = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i] as string;
+    if (c === "\\" && i + 1 < glob.length) {
+      out += lit(glob[++i] as string);
+      continue;
+    }
+    if (c === "*" || c === "?") {
+      out += c === "*" ? ".*" : ".";
+      continue;
+    }
+    if (c === "[") {
+      const neg = glob[i + 1] === "!" || glob[i + 1] === "^";
+      let j = i + 1 + Number(neg) + Number(glob[i + 1 + Number(neg)] === "]");
+      while (j < glob.length && glob[j] !== "]") j += glob[j] === "\\" ? 2 : 1;
+      if (j < glob.length) {
+        const body = [...glob.slice(i + 1 + Number(neg), j).replace(/\\(.)/g, "$1")];
+        out += `[${neg ? "^" : ""}${body.map((x, k) => (x === "-" && k > 0 && k < body.length - 1 ? "-" : lit(x))).join("")}]`;
+        i = j;
+        continue;
+      }
+    }
+    out += lit(c);
+  }
+  try {
+    return new RegExp(`^${out}$`);
+  } catch {
+    return null;
+  }
 }
 
 // A path named inside an interpreter's code, `open('.env')`; `process.env.X` is not one.
