@@ -58,7 +58,7 @@ function team(groups){
     <div class="rosters" style="--n:${rest.length || 1}">${rest.map(roster).join('')}</div></section>`;
 }
 
-const stackName = st => st.mine ? `${esc(human)}&rsquo;s ${esc(st.stack)}` : `${esc(cap(st.stack))} ${st.slot}`;
+const stackName = st => st.mine ? `${esc(human)}&rsquo;s ${esc(st.label)}` : `${esc(st.label)} ${st.slot}`;
 
 function owner(st){
   if(st.mine) return `<div class="own"><b>${esc(human)}</b> &middot; reserved</div>`;
