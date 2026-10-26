@@ -184,3 +184,19 @@ test("a [ in a grep pattern is read as the shell reads it, not as a guard failur
   assert.match(verdict("cat .env[^-+]local", as) ?? "", /holds secrets/);
   assert.equal(verdict("cat .env[", as), null);
 });
+
+// Sanchez's form, 2026-10-26: the export ran where Nomura's `PATH=… npm test` was refused.
+test("an exported or declared override is refused as the prefix form is", () => {
+  const sanchez = "export JAVA_HOME=/opt/homebrew/opt/openjdk PATH=/opt/homebrew/opt/openjdk/bin:$PATH && npm test";
+  const prefix = verdict('PATH="/opt/homebrew/opt/openjdk/bin:$PATH" npm test', pr);
+  assert.equal(prefix, "environment override PATH is not allowed");
+  for (const ctx of [pr, ro]) {
+    assert.equal(verdict(sanchez, ctx), prefix);
+    for (const cmd of [
+      "export HOME=/x", "export GIT_DIR=/x/.git && git log", "declare -x PATH=/x", "typeset -gx GIT_WORK_TREE=/x",
+      "declare PATH=/x", "typeset HOME=/x", "readonly PATH=/x", "local GIT_DIR=/x/.git",
+    ])
+      assert.match(verdict(cmd, ctx) ?? "", /^environment override (HOME|GIT_DIR|PATH|GIT_WORK_TREE) is not allowed$/, cmd);
+    for (const cmd of ["export JAVA_HOME=/x && echo ok", "export PATH", "declare PATH_NOTE=x", "typeset -r X=1"]) assert.equal(verdict(cmd, ctx), null, cmd);
+  }
+});
