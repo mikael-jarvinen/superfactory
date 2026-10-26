@@ -224,12 +224,23 @@ async function shot(page: Page, name: string) {
 const SESSION = join(dirname(OUT), '.sessions', `${new URL(BASE).host}.json`);
 test.use({ storageState: existsSync(SESSION) ? SESSION : undefined });
 
-// What the sign-in form's fields and button say. Add the app's own words if it uses others.
+// What the sign-in form's fields and buttons say. Add the app's own words if it uses others.
 const LABELS = {
   user: RegExp('email|username', 'i'),
   password: RegExp('password', 'i'),
+  next: RegExp('^next$', 'i'),
   submit: RegExp('log in|sign in', 'i'),
 };
+
+// Playwright's error for a failed fill carries the value in its call log, and the error context
+// file keeps it too. So the password is filled here, and its failure is rethrown without it.
+async function fillSecret(page: Page, label: RegExp, value: string) {
+  try {
+    await page.getByLabel(label).first().fill(value, { timeout: 5_000 });
+  } catch {
+    throw new Error(`signIn: could not fill the field labelled ${label} (value withheld)`);
+  }
+}
 
 async function signIn(page: Page) {
   await page.goto(BASE);
@@ -239,7 +250,10 @@ async function signIn(page: Page) {
     const pass = process.env.DEMO_PASS;
     if (user && pass && !(await emailField.first().inputValue())) {
       await emailField.first().fill(user);
-      await page.getByLabel(LABELS.password).first().fill(pass);
+      // Classic asks for the email, then shows the password after Next.
+      const next = page.getByRole('button', { name: LABELS.next }).first();
+      if (await next.isVisible()) await next.click();
+      await fillSecret(page, LABELS.password, pass);
     }
     await page.getByRole('button', { name: LABELS.submit }).first().click();
     await emailField.first().waitFor({ state: 'hidden' });
