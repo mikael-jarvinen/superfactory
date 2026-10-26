@@ -20,6 +20,9 @@ export const TRANSITIONS: Record<State, ReadonlySet<State>> = {
 };
 export const BUSY: ReadonlySet<string> = new Set(["building", "fixing"]);
 export const WAITING_ON_YOU: ReadonlySet<string> = new Set(["your-review", "blocked"]);
+// States that move only when the lead moves them. LOCAL-eventapi-form-spike sat in pr-open for five
+// days because nothing aged these.
+export const WAITING_ON_LEAD: ReadonlySet<string> = new Set(["pr-open", "agent-review", "gate"]);
 // Mikael, 2026-10-20: "Tickets that are already in review should not reserve a stack and agent, let
 // the stack and agent work on something else." An item here frees its builder and its stack slot.
 export const IN_REVIEW: ReadonlySet<string> = new Set(["your-review", "colleague-review"]);

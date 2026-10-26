@@ -18,6 +18,7 @@ these hold:
 - A queue key has no store line, or a store line says QUEUED -- not dispatched.
 - The gates section printed anything.
 - A store line says OVER 90 MIN or NO SESSION.
+- A store line says "waiting on the lead over 2 h".
 - The branches section printed a commit nobody reported, or uncommitted changes.
 - The watcher failures section printed anything but "none".
 - Anything says CANNOT, MISSING, STALE, FAILED or NOT LOADED, or the lead is not running.
