@@ -199,12 +199,13 @@ function checkEnvName(n: string) {
     refuse(`environment override ${n} is not allowed`);
 }
 
-// `export PATH=…` overrides the environment as surely as the `PATH=…` prefix does, and so do
-// `declare -x` and `typeset -x`. Sanchez's tests ran through the export form on 2026-10-26 while
-// Nomura's prefix form was refused.
+// `export PATH=…` overrides the environment as surely as the `PATH=…` prefix does. Sanchez's tests
+// ran through the export form on 2026-10-26 while Nomura's prefix form was refused. The other
+// builtins that assign change PATH, HOME and GIT_* just the same, since those are already exported.
+const ASSIGNERS = new Set(["export", "declare", "typeset", "readonly", "local"]);
 function checkExport(words: string[]) {
   const [w, ...args] = words;
-  if (w !== "export" && !((w === "declare" || w === "typeset") && args.some((a) => /^-[a-zA-Z]*x/.test(a)))) return;
+  if (!ASSIGNERS.has(w as string)) return;
   for (const a of args) if (/^[A-Za-z_]\w*=/.test(a)) checkEnvName(a.split("=", 1)[0] as string);
 }
 
