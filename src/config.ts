@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse, TomlError } from "smol-toml";
-import { FactoryError } from "./util.js";
+import { capitalize, FactoryError } from "./util.js";
 
 export const ROLES = ["lead", "builder", "reviewer", "assistant"] as const;
 export type RoleName = (typeof ROLES)[number];
@@ -24,6 +24,7 @@ export interface Repo {
 
 export interface Stack {
   key: string;
+  label: string;
   repos: string[];
   slots: number;
   reserve: number[];
@@ -262,7 +263,7 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
       if (reserve.includes(n)) problems.push(`${where}.pin.${name}: slot ${n} is reserved`);
       pin[name] = n;
     }
-    stacks[key] = { key, repos: stackRepos, slots, reserve, pin, script: path(r, "script", r.str("script")) };
+    stacks[key] = { key, label: r.str("label") ?? capitalize(key), repos: stackRepos, slots, reserve, pin, script: path(r, "script", r.str("script")) };
     r.done();
   }
 

@@ -209,7 +209,7 @@ class StackChecks {
         const sites = rows.map((r) => ({ name: r.name, link: r.url, web: r.web, up: r.up, code: r.code, owner: mine ? null : owner(r.worktree) }));
         // Up/of count only web sites, so a slot with none never reads as "down".
         const webSites = sites.filter((s) => s.web);
-        out.push({ stack, slot, mine, web, host, up: webSites.filter((s) => s.up).length, of: webSites.length, sites });
+        out.push({ stack, label: ws.config.stacks[stack]?.label ?? capitalize(stack), slot, mine, web, host, up: webSites.filter((s) => s.up).length, of: webSites.length, sites });
       }
     }
     return { present: this.present, checked_s: this.at === null ? null : Math.floor((Date.now() - this.at) / 1000), stacks: out };
@@ -241,7 +241,7 @@ function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>) {
       a.role === "lead" ? ["lead", "Lead", ""]
       : a.role === "assistant" ? ["assistants", "Assistants", ""]
       : a.role === "reviewer" ? ["reviewers", "Reviewers", reviewerRepos.join(", ")]
-      : a.stack ? [`stack:${a.stack}`, capitalize(a.stack), a.repos.join(", ")]
+      : a.stack ? [`stack:${a.stack}`, ws.config.stacks[a.stack]?.label ?? capitalize(a.stack), a.repos.join(", ")]
       : [`repos:${a.repos.join(",")}`, a.repos.length === 1 ? capitalize(a.repos[0] as string) : "Builders", a.repos.join(", ")];
     let g = groups.get(key);
     if (!g) groups.set(key, (g = { key, title, scope, members: [] }));

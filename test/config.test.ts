@@ -26,6 +26,19 @@ test("the example config and the test config are valid", () => {
   assert.deepEqual(problems(TOML), []);
 });
 
+test("a stack's label is its capitalised key unless it names one", () => {
+  const label = (toml: string) => {
+    const ws = tempWorkspace(toml);
+    try {
+      return loadConfig(join(ws, "factory.toml"), {}).stacks.app?.label;
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  };
+  assert.equal(label(TOML), "App");
+  assert.equal(label(TOML.replace("[stacks.app]\n", "[stacks.app]\nlabel = \"Lyyti Event\"\n")), "Lyyti Event");
+});
+
 test("one message per bad key, naming the key", () => {
   assert.deepEqual(problems(`
 [human]

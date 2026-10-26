@@ -34,6 +34,7 @@ tool_written = ["schema.gen.ts"]          # files tools rewrite by running, not 
                                           # a trailing / makes an entry a directory prefix
 
 [stacks.app]                              # a local environment builders run, one per slot
+label = "Web app"                         # the board's name for it; the capitalised key when left out
 repos = ["web", "api"]                    # the repos a stack serves; the first is dispatch's default
 slots = 2                                 # slot numbers run 0..slots
 reserve = [0]                             # slots never allocated, such as the human's own
