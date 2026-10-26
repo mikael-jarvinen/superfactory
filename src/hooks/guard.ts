@@ -199,6 +199,15 @@ function checkEnvName(n: string) {
     refuse(`environment override ${n} is not allowed`);
 }
 
+// `export PATH=…` overrides the environment as surely as the `PATH=…` prefix does, and so do
+// `declare -x` and `typeset -x`. Sanchez's tests ran through the export form on 2026-10-26 while
+// Nomura's prefix form was refused.
+function checkExport(words: string[]) {
+  const [w, ...args] = words;
+  if (w !== "export" && !((w === "declare" || w === "typeset") && args.some((a) => /^-[a-zA-Z]*x/.test(a)))) return;
+  for (const a of args) if (/^[A-Za-z_]\w*=/.test(a)) checkEnvName(a.split("=", 1)[0] as string);
+}
+
 // Drop shell keywords, env assignments and wrappers so the real command name is first. A wrapper
 // whose command cannot be read off the line is refused; timeout's command can, so it is checked.
 function stripPrefixes(words: string[]): string[] {
@@ -223,7 +232,10 @@ function stripPrefixes(words: string[]): string[] {
       for (; j < words.length && (words[j] as string).startsWith("-"); j++) if (["-s", "-k", "--signal", "--kill-after"].includes(words[j] as string)) j++;
       words = words.slice(j + 1);
     } else if (REFUSED_WRAPPERS.has(w)) refuse(`'${w}' is not allowed in this session`);
-    else return words;
+    else {
+      checkExport(words);
+      return words;
+    }
   }
 }
 
