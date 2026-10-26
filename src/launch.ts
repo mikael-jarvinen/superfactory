@@ -17,11 +17,25 @@ export function roleOf(ws: Workspace, agent: Agent): Role {
   return role;
 }
 
+// A builder's stack environment. Claude Code takes a settings env value literally and sets it on the
+// session's own process too, so PATH is written out whole: the stack's directories, then the PATH of
+// the factory that launches the session. A PATH that lost the launcher's entries would cost the
+// session its keychain, and with it its login.
+export function sessionEnv(ws: Workspace, agent: Agent, path = process.env.PATH ?? ""): Record<string, string> | undefined {
+  const stack = agent.stack ? ws.config.stacks[agent.stack] : undefined;
+  if (!stack) return undefined;
+  const env = { ...stack.env };
+  if (stack.pathPrepend.length)
+    env.PATH = [...stack.pathPrepend, ...path.split(":").filter((d) => d && !stack.pathPrepend.includes(d))].join(":");
+  return Object.keys(env).length ? env : undefined;
+}
+
 // Rendered at every launch from the role's template and config, into logs/run/.
 export function settingsFile(ws: Workspace, agent: Agent): string {
   const role = roleOf(ws, agent);
   return renderSettings(ws, {
     name: agent.name, role: agent.role, template: role.settings, extraHooks: role.extraHooks, permissionMode: role.permissionMode,
+    env: sessionEnv(ws, agent),
   });
 }
 

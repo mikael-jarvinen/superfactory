@@ -30,6 +30,9 @@ export interface Stack {
   reserve: number[];
   pin: Record<string, number>;
   script?: string;
+  // What a builder session on this stack gets in its environment, through its settings' env
+  env: Record<string, string>;
+  pathPrepend: string[];
 }
 
 export interface Role {
@@ -263,7 +266,17 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
       if (reserve.includes(n)) problems.push(`${where}.pin.${name}: slot ${n} is reserved`);
       pin[name] = n;
     }
-    stacks[key] = { key, label: r.str("label") ?? capitalize(key), repos: stackRepos, slots, reserve, pin, script: path(r, "script", r.str("script")) };
+    const env: Record<string, string> = {};
+    for (const [name, value] of Object.entries(r.table("env") ?? {})) {
+      if (name === "PATH") problems.push(`${where}.env.PATH: give path_prepend instead; a session's PATH is built from it`);
+      else if (typeof value !== "string") problems.push(`${where}.env.${name}: must be a string, got ${show(value)}`);
+      else env[name] = value;
+    }
+    const pathPrepend = (r.strs("path_prepend") ?? []).flatMap((d) => path(r, "path_prepend", d) ?? []);
+    stacks[key] = {
+      key, label: r.str("label") ?? capitalize(key), repos: stackRepos, slots, reserve, pin, script: path(r, "script", r.str("script")),
+      env, pathPrepend,
+    };
     r.done();
   }
 

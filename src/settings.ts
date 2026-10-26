@@ -107,6 +107,7 @@ export interface SessionSettings {
   template: string;
   extraHooks?: string[];
   permissionMode?: string;
+  env?: Record<string, string>;
 }
 
 // Renders one session's settings into logs/run/settings-<name>.json and returns the path. Every
@@ -141,6 +142,7 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
   // --permission-mode does not survive every restart path; the settings file does
   if (s.permissionMode) perms.defaultMode = s.permissionMode;
   if (Object.keys(perms).length) out.permissions = perms;
+  if (s.env && Object.keys(s.env).length) out.env = { ...(out.env as Record<string, string> | undefined), ...s.env };
 
   const hooks = (out.hooks ?? {}) as Record<string, HookEntry[]>;
   const add = (event: string, matcher: string | undefined, args: string[], timeout: number) =>
