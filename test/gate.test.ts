@@ -245,7 +245,7 @@ test("a required review bot must have reviewed the head: pr-ready refuses, pr-wa
   assert.equal(r.status, 0, r.stdout);
   assert.ok(!r.calls.includes(rv), "a completed review at this head needs nothing more");
 
-  for (const desc of ["Review skipped: draft pull request", "Review rate limited"]) {
+  for (const desc of ["Review skipped: draft pull request"]) {
     r = ready({ [st]: rabbit("success", desc), [rv]: { stdout: [review("b".repeat(40))] } });
     assert.equal(r.status, 1, r.stdout);
     assert.match(r.stdout, new RegExp(`CodeRabbit has not reviewed aaaaaaa: its status here says "${desc}"`));
@@ -277,6 +277,52 @@ test("a required review bot must have reviewed the head: pr-ready refuses, pr-wa
   assert.equal(r.status, 1);
   assert.match(r.stderr, /waiting will not clear it:\n {2}- CodeRabbit has not reviewed aaaaaaa/);
   assert.match(r.stderr, ASK);
+});
+
+// Mikael, 2026-10-27: "we should be able to work without coderabbit when the limits are hit." The
+// check-run is CodeRabbit's own, as read off lyyti-classic#8447: neutral, titled "Review rate limited".
+const rabbitRun = (title: string, o: Record<string, unknown> = {}) =>
+  check("CodeRabbit", { conclusion: "neutral", output: { title }, app: { slug: "coderabbitai" }, details_url: null, ...o });
+
+test("a rate-limited review bot lets the PR go without its review, said as a remark", () => {
+  const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
+  const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
+  const rv = `api repos/${REMOTE}/pulls/${N}/reviews?per_page=100&page=1`;
+  const cr = `api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`;
+  const REMARK = "CodeRabbit is rate limited and has not reviewed aaaaaaa; sent without its review";
+  const limited = { [st]: { stdout: { statuses: [] } }, [rv]: { stdout: [] }, [cr]: checkRuns(check("test"), rabbitRun("Review rate limited")) };
+
+  let r = run(green(limited), ["pr-ready", "web", String(N)]);
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, new RegExp(`REMARKS \\(not blocking\\):[\\s\\S]*- ${REMARK}`));
+  assert.doesNotMatch(r.stdout, /check 'CodeRabbit' concluded neutral/);
+
+  r = run(green({ [st]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review rate limited" }] } }, [rv]: { stdout: [] } }), ["pr-ready", "web", String(N)]);
+  assert.equal(r.status, 0, r.stdout);
+  assert.ok(r.stdout.includes(REMARK), "its status alone says it too");
+
+  r = run(green(limited), ["pr-send", "web", String(N), HEAD]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes(REMARK), `pr-send shows the remark:\n${r.stdout}`);
+
+  // an older rate limit under a later run still in progress is waited out, not sent
+  r = run(green({ ...limited, [cr]: checkRuns(check("test"), rabbitRun("Review rate limited"), rabbitRun("Review in progress", { status: "in_progress", conclusion: null, started_at: "2026-01-01T10:05:00Z" })) }), ["pr-ready", "web", String(N)]);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /check 'CodeRabbit' is in_progress, not completed/);
+});
+
+test("a review bot that skipped the draft still refuses the PR, its neutral check-run included", () => {
+  const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
+  const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
+  const r = run(green({
+    [st]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review skipped: draft pull request" }] } },
+    [`api repos/${REMOTE}/pulls/${N}/reviews?per_page=100&page=1`]: { stdout: [] },
+    [`api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`]: checkRuns(check("test"), rabbitRun("Review skipped")),
+  }), ["pr-ready", "web", String(N)]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /check 'CodeRabbit' concluded neutral/);
+  assert.match(r.stdout, /CodeRabbit has not reviewed aaaaaaa: its status here says "Review skipped: draft pull request" -- comment "@coderabbitai review" on the PR, then run this again/);
+  assert.doesNotMatch(r.stdout, /rate limited/);
 });
 
 // On 2026-10-20 pr-wait refused a lyyti-api PR whose gate jobs had simply not started yet.
