@@ -50,7 +50,11 @@ const DESCRIPTIONS: Record<string, string> = {
     "until the merge lands.",
   "blocked": "{lead} asked {human} something and has no answer yet. The state underneath is kept, so " +
     "the work resumes where it stopped rather than starting again.",
+  "waiting": "Another PR or item has to merge first, named on the card. Nothing here is {human}'s; the " +
+    "state underneath is kept, and the hourly round says when the dependency merges.",
 };
+// A column whose state name says less than its heading should.
+const LABELS: Record<string, string> = { waiting: "Waiting on a merge" };
 
 const ageMinutes = (iso: string | null | undefined): number | null => {
   const t = iso ? Date.parse(iso) : NaN;
@@ -317,7 +321,7 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
     jira: r.jira,
     local: isLocal(r.ticket),
     age_min: ageMinutes(r.since),
-    question: r.asked_you?.question ?? null,
+    question: r.asked_you?.question ?? r.waiting_on?.note ?? null,
     line: lines.get(r.ticket) ?? null,
     prs: recPrs(r).map((p) => ({
       repo: (p.repo ?? "").split("/").pop(),
@@ -334,6 +338,7 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
     human,
     lead: lead(ws).name,
     columns: STATES.filter((s) => s !== "done"),
+    labels: LABELS,
     descriptions,
     waiting_on_you: [...WAITING_ON_YOU].sort(),
     teams: teams(ws, recs, sessions.background()),

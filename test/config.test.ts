@@ -116,7 +116,7 @@ port = 99999
     "roles.reviewer: missing, and agent \"bea\" has that role",
     "stacks.app.pin.zed: no builder \"zed\" on stack \"app\"",
     "tracker.key_pattern: not a valid regular expression: Invalid regular expression: /([/: Unterminated character class",
-    "tracker.status.shipping: unknown state; states: queued, building, pr-open, agent-review, fixing, gate, your-review, colleague-review, done, blocked",
+    "tracker.status.shipping: unknown state; states: queued, building, pr-open, agent-review, fixing, gate, your-review, colleague-review, done, blocked, waiting",
     "tracker.status.queued: missing; the tracker needs a status for it",
     "tracker.status.colleague-review: missing; the tracker needs a status for it",
     "tracker.status.done: missing; the tracker needs a status for it",

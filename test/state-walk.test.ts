@@ -62,6 +62,31 @@ test("state walk", () => {
   assert.ok(events.length >= 18, `events count ${events.length}`);
 });
 
+// Mikael, 2026-10-27: waiting on a merge is its own state, not blocked on him.
+test("waiting on a merge keeps the state underneath and its note, and goes back to it", () => {
+  const ws = tempWorkspace();
+  after(() => rmSync(ws, { recursive: true, force: true }));
+  const T = "TEST-3";
+  const rec = () => JSON.parse(readFileSync(join(ws, "state", `${T}.json`), "utf8"));
+  for (const args of [["building"], ["pr-open", "--pr", "acme/web#4", "--head", "abc1234abc1234"], ["gate", "--force"], ["your-review", "--reviewed", "abc1234abc1234"]])
+    assert.equal(factory(ws, ["state", T, ...args]).status, 0);
+
+  let r = factory(ws, ["state", T, "blocked", "--note", "asked Alex about X"]);
+  r = factory(ws, ["state", T, "waiting", "--note", "waits for acme/web#3 (TEST-2)"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /TEST-3: blocked -> waiting .* jira should read: In Progress/);
+  assert.deepEqual([rec().blocked_from, rec().asked_you, rec().waiting_on.note], ["your-review", null, "waits for acme/web#3 (TEST-2)"],
+    "a pause after a pause keeps the state under both");
+  assert.match(factory(ws, ["state", "--list"]).stdout, /waiting on: a merge\n.*waits for: waits for acme\/web#3 \(TEST-2\)/);
+
+  r = factory(ws, ["state", T, "your-review"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual([rec().state, rec().blocked_from, rec().waiting_on], ["your-review", null, null]);
+
+  r = factory(ws, ["state", T, "waiting"]);
+  assert.match(r.stdout, /warning: waiting without --note: name the PR or ticket it waits for/);
+});
+
 test("transition output and refusal messages", () => {
   const ws = tempWorkspace();
   after(() => rmSync(ws, { recursive: true, force: true }));
@@ -70,7 +95,7 @@ test("transition output and refusal messages", () => {
   r = factory(ws, ["state", "TEST-2", "done"]);
   assert.equal(r.status, 1);
   assert.equal(r.stderr, "factory: TEST-2: building -> done is not a valid transition. From building you can go to: " +
-    "blocked, pr-open, queued. Use --force if you mean it.\n");
+    "blocked, pr-open, queued, waiting. Use --force if you mean it.\n");
   r = factory(ws, ["state", "TEST-2", "blocked"]);
   assert.match(r.stdout, /warning: blocked without --note: record the question you asked Alex/);
   r = factory(ws, ["state", "nope", "queued"]);

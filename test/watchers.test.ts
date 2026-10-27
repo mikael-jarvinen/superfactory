@@ -260,6 +260,33 @@ test("the round: flags said once, the failures cursor, and its heartbeat", () =>
   assert.match(read("watcher-failures.log"), /round FAILED exit=1\n$/);
 });
 
+test("the round: a waiting item is not on the human, and its merged dependency is flagged", () => {
+  const { ws, run } = watcherWorkspace();
+  // WEB-9 is done; WEB-5 is open with PR #5; WEB-6 is open with PR #6, which has merged.
+  assert.equal(factory(ws, ["state", "WEB-9", "queued"]).status, 0);
+  const web9 = join(ws, "state", "WEB-9.json");
+  writeFileSync(web9, JSON.stringify({ ...JSON.parse(readFileSync(web9, "utf8")), state: "done" }));
+  for (const [k, n] of [["WEB-5", 5], ["WEB-6", 6]] as const)
+    for (const args of [["building"], ["pr-open", "--pr", `acme/web#${n}`, "--head", "abc1234"]]) assert.equal(factory(ws, ["state", k, ...args]).status, 0);
+  const old = new Date(Date.now() - 24 * 3600_000).toISOString();
+  for (const [k, note] of [["WEB-1", "waits for WEB-9 to merge"], ["WEB-2", "waits for WEB-5 (#5) to merge"], ["WEB-3", "held behind web#6"]] as const) {
+    assert.equal(factory(ws, ["state", k, "queued"]).status, 0);
+    assert.equal(factory(ws, ["state", k, "waiting", "--note", note]).status, 0);
+    const f = join(ws, "state", `${k}.json`);
+    writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, "utf8")), since: old }));
+  }
+  const r = run(["watch", "round", "--facts"], [], {
+    "pr list": { stdout: [] },
+    "pr view 5 -R acme/web --json state": { stdout: { state: "OPEN" } },
+    "pr view 6 -R acme/web --json state": { stdout: { state: "MERGED" } },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /WEB-1 +waiting .*DEPENDENCY MERGED: WEB-9 -- WEB-1 can resume/);
+  assert.match(r.stdout, /WEB-3 +waiting .*DEPENDENCY MERGED: web#6 -- WEB-3 can resume/);
+  assert.match(r.stdout, /WEB-2 +waiting +\d+m .*pr=$/m, "a dependency still open is not flagged");
+  assert.doesNotMatch(r.stdout, /waiting on Alex/, "a day of waiting on a merge is not waiting on the human");
+});
+
 test("the round: a blocked item whose named blocker has merged is flagged, once", () => {
   const { ws, run, read } = watcherWorkspace();
   // WEB-9 is merged (done); WEB-5 is still open. WEB-2 waits on WEB-9, WEB-3 waits on WEB-5.

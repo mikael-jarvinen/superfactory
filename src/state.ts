@@ -7,17 +7,22 @@ import { die, now, pyDumps, pyRepr, pyStr, squash } from "./util.js";
 export { STATES, type State };
 
 export const TRANSITIONS: Record<State, ReadonlySet<State>> = {
-  "queued": new Set(["building", "blocked"]),
-  "building": new Set(["pr-open", "queued", "blocked"]),
-  "pr-open": new Set(["pr-open", "agent-review", "blocked"]),
-  "agent-review": new Set(["fixing", "gate", "blocked"]),
-  "fixing": new Set(["agent-review", "gate", "blocked"]),
-  "gate": new Set(["your-review", "fixing", "blocked"]),
-  "your-review": new Set(["colleague-review", "done", "fixing", "queued", "blocked"]),
-  "colleague-review": new Set(["done", "fixing", "queued", "blocked"]),
+  "queued": new Set(["building", "blocked", "waiting"]),
+  "building": new Set(["pr-open", "queued", "blocked", "waiting"]),
+  "pr-open": new Set(["pr-open", "agent-review", "blocked", "waiting"]),
+  "agent-review": new Set(["fixing", "gate", "blocked", "waiting"]),
+  "fixing": new Set(["agent-review", "gate", "blocked", "waiting"]),
+  "gate": new Set(["your-review", "fixing", "blocked", "waiting"]),
+  "your-review": new Set(["colleague-review", "done", "fixing", "queued", "blocked", "waiting"]),
+  "colleague-review": new Set(["done", "fixing", "queued", "blocked", "waiting"]),
   "done": new Set(),
   "blocked": new Set(STATES.filter((s) => s !== "blocked")),
+  // Mikael, 2026-10-27: waiting on a merge is not waiting on him. It pauses an item like blocked does,
+  // with a note naming the PR or ticket it waits for.
+  "waiting": new Set(STATES.filter((s) => s !== "waiting")),
 };
+// The two pauses: each keeps the state underneath in blocked_from.
+const PAUSED: ReadonlySet<string | null> = new Set(["blocked", "waiting"]);
 export const BUSY: ReadonlySet<string> = new Set(["building", "fixing"]);
 export const WAITING_ON_YOU: ReadonlySet<string> = new Set(["your-review", "blocked"]);
 // States that move only when the lead moves them. LOCAL-eventapi-form-spike sat in pr-open for five
@@ -50,6 +55,7 @@ export interface Rec {
   since: string | null;
   created: string;
   blocked_from: State | null;
+  waiting_on?: { note: string | null; at: string } | null;
   title?: string;
   [k: string]: unknown;
 }
@@ -74,7 +80,7 @@ const untracked = (ws: Workspace, k: string) => isLocal(k) || ws.config.tracker.
 
 export function trackerFor(ws: Workspace, s: State): string {
   const st = ws.config.tracker.status;
-  return st[s] ?? (s === "blocked" ? "unchanged" : (st.building ?? "unchanged"));
+  return st[s] ?? (PAUSED.has(s) ? "unchanged" : (st.building ?? "unchanged"));
 }
 
 export const recPath = (ws: Workspace, ticket: string) => join(ws.stateDir, `${ticket}.json`);
@@ -151,7 +157,7 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
     const cur = rec.pr ?? {};
     if (!rec.pr || Object.keys(cur).length === 0) die("your-review with no PR recorded; record pr-open with --pr and --head first");
     const head = c.head || cur.head || "";
-    const reviewed = c.reviewed || (old === "blocked" ? cur.reviewed_sha : undefined);
+    const reviewed = c.reviewed || (PAUSED.has(old) ? cur.reviewed_sha : undefined);
     if (!reviewed) die("your-review needs --reviewed <sha>: the sha the reviewer reviewed, which the gate also checked");
     if (head && !(head.startsWith(reviewed) || reviewed.startsWith(head.slice(0, 7))))
       die(`reviewed sha ${reviewed} does not match the head ${head}. Pass --head if it moved, and get the delta reviewed first.`);
@@ -164,13 +170,19 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
     rec.pr = null;
     rec.prs = [];
   }
+  if (PAUSED.has(to)) rec.blocked_from = PAUSED.has(old) ? rec.blocked_from : old;
+  else if (PAUSED.has(old)) rec.blocked_from = null;
   if (to === "blocked") {
-    rec.blocked_from = old !== "blocked" ? old : rec.blocked_from;
     if (!c.note) warnings.push(`blocked without --note: record the question you asked ${human} so nobody re-asks it`);
     rec.asked_you = { question: c.note ?? null, at: now() };
   } else if (old === "blocked") {
-    rec.blocked_from = null;
     rec.asked_you = null;
+  }
+  if (to === "waiting") {
+    if (!c.note) warnings.push("waiting without --note: name the PR or ticket it waits for, so the round can tell when it merges");
+    rec.waiting_on = { note: c.note ?? null, at: now() };
+  } else if (old === "waiting") {
+    rec.waiting_on = null;
   }
   if (c.agent) rec.agent = c.agent;
   if (c.stack) rec.stack = c.stack;
@@ -216,7 +228,7 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   if (untracked(ws, ticket)) {
     out(`${head}  no ${TRACKER_LABEL[kind]} ticket`);
   } else {
-    const should = to === "blocked" || (to === "queued" && old !== null) ? rec.jira : trackerFor(ws, to);
+    const should = PAUSED.has(to) || (to === "queued" && old !== null) ? rec.jira : trackerFor(ws, to);
     out(`${head}  ${kind} should read: ${pyStr(should)}`);
   }
   for (const w of warnings) out(`  warning: ${w}`);
@@ -240,6 +252,7 @@ export function showRec(ws: Workspace, rec: Rec, at = new Date()): string[] {
     : s === "agent-review" ? (rec["reviewer"] as string | undefined) || "a reviewer"
     : s === "queued" || s === "pr-open" || s === "gate" ? lead
     : s === "colleague-review" ? "colleagues"
+    : s === "waiting" ? "a merge"
     : "-";
   const jira = isLocal(rec.ticket) ? "none" : rec.jira || "?";
   const lines = [
@@ -247,5 +260,6 @@ export function showRec(ws: Workspace, rec: Rec, at = new Date()): string[] {
     `jira=${jira.padEnd(12)} pr=${prs.padEnd(40)} waiting on: ${wait}`,
   ];
   if (rec.asked_you?.question) lines.push(`  ${"".padEnd(12)} asked you: ${rec.asked_you.question} (${rec.asked_you.at})`);
+  if (rec.waiting_on?.note) lines.push(`  ${"".padEnd(12)} waits for: ${rec.waiting_on.note} (${rec.waiting_on.at})`);
   return lines;
 }

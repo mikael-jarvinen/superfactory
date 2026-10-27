@@ -121,7 +121,7 @@ ${STACK_USAGE}
 The workspace is --workspace, else $FACTORY_WORKSPACE, else the nearest factory.toml above the
 current directory. Only this program writes the state store.
 
-states: queued building pr-open agent-review fixing gate your-review colleague-review done blocked`;
+states: queued building pr-open agent-review fixing gate your-review colleague-review done blocked waiting`;
 
 class UsageError extends FactoryError {
   constructor(message: string) {

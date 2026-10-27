@@ -12,7 +12,7 @@ import { fleetLines, type Session } from "../fleet.js";
 import { json } from "../gate/github.js";
 import { readTail } from "../messages.js";
 import { loaded } from "../scheduler/launchd.js";
-import { allRecs, BUSY, isLocal, recPrs, WAITING_ON_LEAD, WAITING_ON_YOU } from "../state.js";
+import { allRecs, BUSY, isLocal, type Rec, recPrs, WAITING_ON_LEAD, WAITING_ON_YOU } from "../state.js";
 import { parseRead, trackerOf } from "../tracker/read.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
@@ -82,6 +82,13 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
   // looked up even after it has reached done and left the open set below.
   const stateByTicket = new Map(allItems.map((r) => [r.ticket, r.state ?? ""]));
   const recs = allItems.filter((r) => r.state !== "done");
+  // One read per PR per round, however many waiting items name it.
+  const prStates = new Map<string, string | null>();
+  const prState = (remote: string, n: number) => {
+    const key = `${remote}#${n}`;
+    if (!prStates.has(key)) prStates.set(key, json<{ state?: string }>(watcherGh(["pr", "view", String(n), "-R", remote, "--json", "state"]))?.state ?? null);
+    return prStates.get(key) ?? null;
+  };
   section("state store", () => {
     if (!recs.length) out.push("  no open items");
     for (const r of recs) {
@@ -115,6 +122,17 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
         const cleared = refs.filter((k) => stateByTicket.get(k) === "done");
         if (cleared.length && firstTime(r.ticket, `blocker-done:${cleared.join(",")}`, r.since ?? ""))
           flag += `  BLOCKER DONE: ${cleared.join(", ")} merged -- ${r.ticket} may no longer be blocked`;
+      }
+      // A waiting item is on a merge, not on the human: say once when what it waits for has merged,
+      // or closed without merging.
+      if (s === "waiting" && r.waiting_on?.note) {
+        const ended = waitedOn(ws, r, allItems, prState);
+        const merged = ended.filter((e) => e.how === "merged").map((e) => e.what);
+        const closed = ended.filter((e) => e.how === "closed").map((e) => e.what);
+        if (merged.length && firstTime(r.ticket, `dependency-merged:${merged.join(",")}`, r.since ?? ""))
+          flag += `  DEPENDENCY MERGED: ${merged.join(", ")} -- ${r.ticket} can resume`;
+        if (closed.length && firstTime(r.ticket, `dependency-closed:${closed.join(",")}`, r.since ?? ""))
+          flag += `  DEPENDENCY CLOSED unmerged: ${closed.join(", ")} -- what is ${r.ticket} waiting for now?`;
       }
       const pr = recPrs(r).map((p) => `${p.repo ?? ""}#${p.number ?? ""}`).join(",");
       out.push(`  ${r.ticket.padEnd(12)} ${s.padEnd(17)} ${(age === null ? "?" : `${Math.floor(age / 60)}m`).padStart(6)} ` +
@@ -228,6 +246,35 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
 // lead cannot fix is noise. Said by the courier from here, not by the session, which has no memory
 // of whether it said it last hour. A message that was not delivered leaves the marker as it was, so
 // the next round says it again.
+// What a waiting item's note names that has ended: a tracked ticket that reached done, or a PR that
+// merged or closed. A ticket still open is checked through the PRs on its record. A PR is named as
+// repo#N, or as a bare #N when the item's own PRs and the tickets the note names share one repo.
+function waitedOn(ws: Workspace, rec: Rec, all: Rec[], prState: (remote: string, n: number) => string | null): { what: string; how: "merged" | "closed" }[] {
+  const note = rec.waiting_on?.note ?? "";
+  const byTicket = new Map(all.map((r) => [r.ticket, r]));
+  const keys = [...new Set(note.match(/\b(?:LOCAL-[a-z0-9][a-z0-9-]*|[A-Z][A-Z0-9]*-\d+)\b/g) ?? [])]
+    .filter((k) => k !== rec.ticket && byTicket.has(k));
+  const ended: { what: string; how: "merged" | "closed" }[] = [];
+  const prs = new Map<string, { remote: string; n: number }>();
+  for (const k of keys) {
+    const dep = byTicket.get(k) as Rec;
+    if (dep.state === "done") ended.push({ what: k, how: "merged" });
+    else for (const p of recPrs(dep)) if (p.repo && p.number) prs.set(`${p.repo}#${p.number}`, { remote: p.repo, n: p.number });
+  }
+  const repos = Object.values(ws.config.repos);
+  const near = [...new Set([...recPrs(rec), ...keys.flatMap((k) => recPrs(byTicket.get(k) as Rec))].map((p) => p.repo).filter((x): x is string => !!x))];
+  for (const m of note.matchAll(/(?:\b([\w.-]+\/)?([\w.-]+))?#(\d+)\b/g)) {
+    const [, owner = "", name] = m;
+    const remote = name ? repos.find((x) => x.remote === owner + name || x.remote.endsWith(`/${name}`) || x.key === name)?.remote : near.length === 1 ? near[0] : undefined;
+    if (remote) prs.set(`${remote}#${m[3]}`, { remote, n: Number(m[3]) });
+  }
+  for (const [what, p] of prs) {
+    const st = prState(p.remote, p.n);
+    if (st === "MERGED" || st === "CLOSED") ended.push({ what: what.split("/").pop() as string, how: st === "MERGED" ? "merged" : "closed" });
+  }
+  return ended;
+}
+
 function outage(ws: Workspace, read: string): void {
   const told = join(ws.logsDir, ".tracker-outage.told");
   if (read === "unavailable" && !existsSync(told)) {

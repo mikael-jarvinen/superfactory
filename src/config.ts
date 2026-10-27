@@ -9,7 +9,7 @@ export type RoleName = (typeof ROLES)[number];
 
 export const STATES = [
   "queued", "building", "pr-open", "agent-review",
-  "fixing", "gate", "your-review", "colleague-review", "done", "blocked",
+  "fixing", "gate", "your-review", "colleague-review", "done", "blocked", "waiting",
 ] as const;
 export type State = (typeof STATES)[number];
 

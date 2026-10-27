@@ -157,7 +157,7 @@ function work(d){
         ${t.line && t.line !== t.question ? `<div class="line">${esc(t.line)}</div>` : ''}
       </div>`).join('');
     return `<div class="col ${mine ? 'you' : ''} ${here.length ? '' : 'none'}">
-      <div class="colhead"><h3>${esc(col)}</h3><span class="count">${here.length}</span></div>
+      <div class="colhead"><h3>${esc((d.labels || {})[col] || col)}</h3><span class="count">${here.length}</span></div>
       <p class="why">${esc(d.descriptions[col] || '')}</p>
       ${cards || '<div class="empty">empty</div>'}</div>`;
   }).join('');
