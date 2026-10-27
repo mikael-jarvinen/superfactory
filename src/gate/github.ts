@@ -74,6 +74,8 @@ export interface CheckRun {
   conclusion: string | null;
   started_at: string | null;
   details_url: string | null;
+  output?: { title?: string | null };
+  app?: { slug?: string };
 }
 
 // Check-runs at one commit, every page. This is the source the gate trusts: `gh pr checks` and

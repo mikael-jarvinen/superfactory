@@ -60,6 +60,7 @@ const reviewBotOf = (login: string) => KNOWN_BOTS[login] ?? { status: login, ask
 
 // A green status that reviewed nothing: a skipped draft, a rate limit.
 const NOT_A_REVIEW = /rate limit|skipped|no review|not run/i;
+const RATE_LIMITED = /rate limit/i;
 
 export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
   const pr = prView(repo, n);
@@ -100,6 +101,11 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
   // run, and the human rebases before merging. A conflict still fails, through mergeable above.
   else if (cmp.behind_by !== 0) remarks.push(`${cmp.behind_by} commits behind ${base} -- rebase before merging`);
 
+  const botLogin = ws.config.gate.reviewBot;
+  const bot = botLogin ? reviewBotOf(botLogin) : null;
+  const isBotRun = (c: CheckRun) => !!bot && (c.app?.slug === botLogin || c.name.toLowerCase() === bot.status.toLowerCase());
+  const rateLimitedRun = (c: CheckRun) => isBotRun(c) && c.status === "completed" && RATE_LIMITED.test(c.output?.title ?? "");
+
   // CHECK-RUNS AT THIS SHA. Absence is the failure this whole gate exists for.
   const runs = checkRuns(repo, sha);
   let realCheckProblem = false;
@@ -119,6 +125,8 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
       }
       const concl = c.conclusion ?? "-";
       if (concl === "success") continue;
+      // Its neutral run says only that it reviewed nothing; the review bot check below speaks for it.
+      if (rateLimitedRun(c)) continue;
       if (concl === "skipped") {
         remarks.push(`check '${c.name}' was skipped (path filter or condition) -- not a pass, not a fail`);
       } else if (superseded(c, runs)) {
@@ -155,8 +163,6 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
 
   // COMMIT STATUSES: a separate API. Reported, not interpreted, except a green that read nothing.
   // The required review bot's own status is read below, as the question whether it reviewed.
-  const botLogin = ws.config.gate.reviewBot;
-  const bot = botLogin ? reviewBotOf(botLogin) : null;
   const isBot = (s: CommitStatus) => !!bot && s.context.toLowerCase() === bot.status.toLowerCase();
   const sts = statuses(repo, sha);
   if (sts === undefined) {
@@ -192,8 +198,14 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
       const rs = reviews(repo, n);
       if (rs === undefined) fail(`COULD NOT READ the reviews of #${n} -- cannot say whether ${bot.status} reviewed ${short}`, "unreadable");
       else if (!rs.some((r) => (r.user?.login ?? "").replace(/\[bot\]$/, "") === botLogin && r.commit_id === sha)) {
+        // Mikael, 2026-10-27: "we should be able to work without coderabbit when the limits are hit."
+        // Its latest word at this head, status or check-run, saying it is rate limited lets the PR go
+        // without its review, said every time.
+        const latestRun = (runs ?? []).filter(isBotRun).sort((a, b) => (a.started_at ?? "").localeCompare(b.started_at ?? "")).at(-1);
         const age = Math.round(sinceHead([...(runs ?? []).map((c) => c.started_at), ...sts.map((x) => x.created_at)]));
-        if (!st && age < graceS()) fail(`${bot.status} has posted nothing at ${short} yet, ${age}s after its first check -- waiting up to ${graceS()}s`, "waits");
+        if ((st && RATE_LIMITED.test(desc)) || (latestRun && rateLimitedRun(latestRun)))
+          remarks.push(`${bot.status} is rate limited and has not reviewed ${short}; sent without its review`);
+        else if (!st && age < graceS()) fail(`${bot.status} has posted nothing at ${short} yet, ${age}s after its first check -- waiting up to ${graceS()}s`, "waits");
         else fail(`${bot.status} has not reviewed ${short}: ${st ? `its status here says "${desc}"` : "it has posted nothing at this head"} -- ${ask}`);
       }
     }
