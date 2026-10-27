@@ -62,28 +62,41 @@ export function belongs(rec: Rec, remote: string, pr: GhPr): { known: boolean; m
   return { known, match: known || named };
 }
 
-const MERGE_WINDOW_MS = 3 * 3600_000;
+// `gh pr list` returns the newest PRs by creation, so in a busy repo a PR opened days before it
+// merged is never among them: lyyti-classic#8428 and #8429 merged on 2026-10-26 behind 52 newer
+// PRs, and neither watcher said so. Every PR the store records for these records is read by number.
+export function withRecorded(remote: string, recs: Rec[], listed: GhPr[], fields: string): GhPr[] {
+  const have = new Set(listed.map((p) => p.number));
+  const numbers = new Set(recs.flatMap(recPrs).filter((p) => p.repo === remote && typeof p.number === "number" && !have.has(p.number)).map((p) => p.number as number));
+  const read = [...numbers].map((n) => json<GhPr>(watcherGh(["pr", "view", String(n), "-R", remote, "--json", fields])));
+  return [...listed, ...read.filter((p): p is GhPr => typeof p?.number === "number")];
+}
 
-// Merges in the last three hours that belong to an open record and were not reported before.
+const MERGE_WINDOW_MS = 3 * 3600_000;
+const MERGED_FIELDS = "number,title,url,mergedAt,headRefName";
+
+// Merges that belong to an open record and were not reported before: a recorded PR's until the
+// record moves past it, a PR matched only by name in the last three hours.
 function merges(ws: Workspace, recs: Rec[], reported: string[], log: string): { lines: string[]; urls: string[] } {
   const lines: string[] = [];
   const urls: string[] = [];
   const open = recs.filter((r) => r.state !== "done");
   if (!open.length) return { lines, urls };
   for (const repo of Object.values(ws.config.repos)) {
-    const r = watcherGh(["pr", "list", "-R", repo.remote, "--state", "merged", "--limit", "10", "--json", "number,title,url,mergedAt,headRefName"]);
+    const r = watcherGh(["pr", "list", "-R", repo.remote, "--state", "merged", "--limit", "10", "--json", MERGED_FIELDS]);
     const prs = json<GhPr[]>(r);
     if (!Array.isArray(prs)) {
       const timedOut = r.status === TIMED_OUT;
       if (timedOut) logTo(log, `${repo.remote}: ${r.stderr}`);
       if (!r.slept) failure(ws, `queue: cannot read the merged PRs of ${repo.remote}${timedOut ? `: ${r.stderr}` : ""}`);
-      continue;
     }
-    for (const pr of prs) {
+    for (const pr of withRecorded(repo.remote, open, Array.isArray(prs) ? prs : [], MERGED_FIELDS)) {
       const at = Date.parse(pr.mergedAt ?? "");
-      if (!pr.url || reported.includes(pr.url) || urls.includes(pr.url) || !(Date.now() - at <= MERGE_WINDOW_MS)) continue;
-      const rec = open.find((r) => belongs(r, repo.remote, pr).match);
+      if (!pr.url || reported.includes(pr.url) || urls.includes(pr.url) || Number.isNaN(at)) continue;
+      const rec = open.find((r) => belongs(r, repo.remote, pr).known) ?? open.find((r) => belongs(r, repo.remote, pr).match);
       if (!rec) continue;
+      const judged = !!rec.since && Date.parse(rec.since) >= at;
+      if (belongs(rec, repo.remote, pr).known ? judged : Date.now() - at > MERGE_WINDOW_MS) continue;
       lines.push(`merged: ${rec.ticket} ${repo.remote.split("/").pop()}#${pr.number} ${pr.url}`);
       urls.push(pr.url);
     }

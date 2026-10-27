@@ -143,6 +143,27 @@ test("the queue says what is new once, and says it again when the courier failed
   assert.equal(r.calls.length, 1, "nothing is new the third time, so no courier");
 });
 
+test("a recorded PR's merge is reported when no listing of the newest PRs reaches it", () => {
+  const { ws, run, read } = watcherWorkspace();
+  for (const [to, extra] of [["building", []], ["pr-open", ["--pr", "acme/web#7", "--head", "abc1234"]]] as const)
+    assert.equal(factory(ws, ["state", "WEB-2", to, ...extra]).status, 0);
+  // In review for a day, then merged five hours ago, which the name-matched window would drop too.
+  const file = join(ws, "state", "WEB-2.json");
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), since: new Date(Date.now() - 24 * 3600_000).toISOString() }));
+  const view = { number: 7, title: "Change", headRefName: "WEB-2", state: "MERGED", isDraft: false, mergedAt: new Date(Date.now() - 5 * 3600_000).toISOString(), headRefOid: "abc1234", url: "https://github.com/acme/web/pull/7" };
+  const routes = { "pr list": { stdout: [] }, "pr view 7 -R acme/web": { stdout: view } };
+
+  let r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }, { stdout: "" }], routes);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^merged: WEB-2 web#7 https:\/\/github\.com\/acme\/web\/pull\/7$/m);
+  assert.deepEqual((JSON.parse(read("queue.state")) as { merged: string[] }).merged, ["https://github.com/acme/web/pull/7"]);
+  r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes);
+  assert.doesNotMatch(r.stdout, /merged:/, "reported once");
+
+  r = run(["watch", "round", "--facts"], [], routes);
+  assert.match(r.stdout, /WEB-2: acme\/web#7 is MERGED but the store says pr-open -- done judgement owed/);
+});
+
 test("the round: a merge the record moved after is judged, one it did not is owed", () => {
   const { ws, run } = watcherWorkspace();
   assert.equal(factory(ws, ["state", "WEB-2", "queued"]).status, 0);

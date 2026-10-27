@@ -18,7 +18,7 @@ import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
 import { git, worktreeDirty } from "../worktree.js";
 import { beat, failure, failuresLog, heartbeatAge, loadPrompt, logTo, openLog, runClaude, runFailure, watcherGh } from "./job.js";
-import { belongs, type GhPr, loadQueueState } from "./queue.js";
+import { belongs, type GhPr, loadQueueState, withRecorded } from "./queue.js";
 import { deliver } from "./relay.js";
 
 export interface Facts {
@@ -130,13 +130,14 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
     const withColleagues = new Set((readTail(ws.events) as Record<string, unknown>[])
       .filter((e) => e.to === "colleague-review").map((e) => e.ticket));
     for (const repo of Object.values(ws.config.repos)) {
-      const r = watcherGh(["pr", "list", "-R", repo.remote, "--state", "all", "--limit", "40", "--json", "number,title,headRefName,state,isDraft,mergedAt,headRefOid,baseRefName"]);
+      const fields = "number,title,headRefName,state,isDraft,mergedAt,headRefOid,baseRefName";
+      const r = watcherGh(["pr", "list", "-R", repo.remote, "--state", "all", "--limit", "40", "--json", fields]);
       const prs = json<GhPr[]>(r);
       if (!Array.isArray(prs)) {
         out.push(`  ${repo.remote}: CANNOT read PRs (${r.stderr.trim().slice(0, 80)})`);
         continue;
       }
-      for (const pr of prs)
+      for (const pr of withRecorded(repo.remote, recs, prs, fields))
         for (const rec of recs) {
           const { known, match } = belongs(rec, repo.remote, pr);
           if (!match) continue;
