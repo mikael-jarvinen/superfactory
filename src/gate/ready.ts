@@ -193,15 +193,20 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
     const st = sts.find(isBot);
     const desc = st?.description ?? "-";
     const ask = `${bot.ask}, then run this again`;
+    const latestRun = (runs ?? []).filter(isBotRun).sort((a, b) => (a.started_at ?? "").localeCompare(b.started_at ?? "")).at(-1);
+    // With no status of its own, its finished check-run is its review: after a rebase that carries
+    // over a diff it already reviewed, it says "Already reviewed the last commit" and posts no
+    // review object (lyyti-events#847, 2026-10-27).
+    const reviewedRun = !st && latestRun?.status === "completed" && latestRun.conclusion === "success" &&
+      /^(finished|review completed)$/i.test(latestRun.output?.title ?? "");
     if (st?.state === "pending") fail(`${bot.status} is reviewing ${short} (${desc})`, "waits");
-    else if (!(st?.state === "success" && !NOT_A_REVIEW.test(desc))) {
+    else if (!reviewedRun && !(st?.state === "success" && !NOT_A_REVIEW.test(desc))) {
       const rs = reviews(repo, n);
       if (rs === undefined) fail(`COULD NOT READ the reviews of #${n} -- cannot say whether ${bot.status} reviewed ${short}`, "unreadable");
       else if (!rs.some((r) => (r.user?.login ?? "").replace(/\[bot\]$/, "") === botLogin && r.commit_id === sha)) {
         // Mikael, 2026-10-27: "we should be able to work without coderabbit when the limits are hit."
         // Its latest word at this head, status or check-run, saying it is rate limited lets the PR go
         // without its review, said every time.
-        const latestRun = (runs ?? []).filter(isBotRun).sort((a, b) => (a.started_at ?? "").localeCompare(b.started_at ?? "")).at(-1);
         const age = Math.round(sinceHead([...(runs ?? []).map((c) => c.started_at), ...sts.map((x) => x.created_at)]));
         if ((st && RATE_LIMITED.test(desc)) || (latestRun && rateLimitedRun(latestRun)))
           remarks.push(`${bot.status} is rate limited and has not reviewed ${short}; sent without its review`);

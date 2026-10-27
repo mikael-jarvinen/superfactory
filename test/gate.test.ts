@@ -311,6 +311,28 @@ test("a rate-limited review bot lets the PR go without its review, said as a rem
   assert.match(r.stdout, /check 'CodeRabbit' is in_progress, not completed/);
 });
 
+// lyyti-events#847, 2026-10-27: after a rebase CodeRabbit said "Already reviewed the last commit",
+// finished its check-run green, and set no status and no review object.
+test("a review bot's own finished check-run at the head counts as its review", () => {
+  const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
+  const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
+  const rv = `api repos/${REMOTE}/pulls/${N}/reviews?per_page=100&page=1`;
+  const cr = `api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`;
+  for (const title of ["Finished", "Review completed"]) {
+    const r = run(green({ [st]: { stdout: { statuses: [] } }, [rv]: { stdout: [] }, [cr]: checkRuns(check("test"), rabbitRun(title, { conclusion: "success" })) }), ["pr-ready", "web", String(N)]);
+    assert.equal(r.status, 0, r.stdout);
+    assert.doesNotMatch(r.stdout, /CodeRabbit/, `${title}: nothing to say about it`);
+    assert.ok(!r.calls.includes(rv), "its finished run needs no review object");
+  }
+  // its own status still speaks first: a skipped draft refuses whatever the run says
+  const r = run(green({
+    [st]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review skipped: draft pull request" }] } },
+    [rv]: { stdout: [] }, [cr]: checkRuns(check("test"), rabbitRun("Finished", { conclusion: "success" })),
+  }), ["pr-ready", "web", String(N)]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /CodeRabbit has not reviewed aaaaaaa: its status here says "Review skipped: draft pull request"/);
+});
+
 test("a review bot that skipped the draft still refuses the PR, its neutral check-run included", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
