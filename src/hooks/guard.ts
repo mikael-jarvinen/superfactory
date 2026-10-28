@@ -743,10 +743,11 @@ function checkSecrets({ words: raw, reads }: Simple): void {
 const HEREDOC = /<<-?\s*['"]?(\w+)['"]?\s*\n([\s\S]*?)\n\1\s*(\n|$)/;
 
 function checkCommand(cmd: string, ctx: GuardContext): void {
-  // heredocs: keep the header, drop the body so its lines are not parsed as commands
+  // heredocs: keep the header, drop the body so its lines are not parsed as commands. The newline
+  // after the closing delimiter stays: without it the next line was read as the header's arguments.
   let text = cmd;
   for (let m = HEREDOC.exec(text); m; m = HEREDOC.exec(text))
-    text = text.slice(0, m.index) + (m[0].split("\n", 1)[0] as string) + " HEREDOC " + text.slice(m.index + m[0].length);
+    text = text.slice(0, m.index) + (m[0].split("\n", 1)[0] as string) + " HEREDOC\n" + text.slice(m.index + m[0].length);
   for (const s of simpleCommands(tokenize(text))) {
     const simple = { ...s, words: s.words.filter((w) => w !== "HEREDOC") };
     checkSecrets({ ...simple, words: stripPrefixes(simple.words) });
