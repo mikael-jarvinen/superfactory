@@ -22,6 +22,9 @@ export type FailureKind = "fatal" | "waits" | "unreadable";
 export interface Failure {
   text: string;
   kind: FailureKind;
+  // The comment that asks a review bot which skipped this head to review it. `pr-wait` posts it once
+  // and waits; everything else reads the failure as it is.
+  trigger?: string;
 }
 
 export interface Verdict {
@@ -53,14 +56,16 @@ function sinceHead(times: (string | null | undefined)[]): number {
 }
 
 // The review bots the gate knows by name: the commit status each posts, and how to ask it to review.
-const KNOWN_BOTS: Record<string, { status: string; ask: string }> = {
-  coderabbitai: { status: "CodeRabbit", ask: 'comment "@coderabbitai review" on the PR' },
+const KNOWN_BOTS: Record<string, { status: string; ask: string; trigger?: string }> = {
+  coderabbitai: { status: "CodeRabbit", ask: 'comment "@coderabbitai review" on the PR', trigger: "@coderabbitai review" },
 };
 const reviewBotOf = (login: string) => KNOWN_BOTS[login] ?? { status: login, ask: `ask ${login} for a review of this head` };
 
 // A green status that reviewed nothing: a skipped draft, a rate limit.
 const NOT_A_REVIEW = /rate limit|skipped|no review|not run/i;
 const RATE_LIMITED = /rate limit/i;
+// A draft it did not review: "Review skipped" or "Review paused", as its status or its check-run.
+const SKIPPED = /skipped|paused/i;
 
 export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
   const pr = prView(repo, n);
@@ -208,8 +213,11 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
         // Its latest word at this head, status or check-run, saying it is rate limited lets the PR go
         // without its review, said every time.
         const age = Math.round(sinceHead([...(runs ?? []).map((c) => c.started_at), ...sts.map((x) => x.created_at)]));
+        const runTitle = latestRun?.status === "completed" ? (latestRun.output?.title ?? "") : "";
+        const skipped = st ? (SKIPPED.test(desc) ? `its status here says "${desc}"` : "") : SKIPPED.test(runTitle) ? `its check here says "${runTitle}"` : "";
         if ((st && RATE_LIMITED.test(desc)) || (latestRun && rateLimitedRun(latestRun)))
           remarks.push(`${bot.status} is rate limited and has not reviewed ${short}; sent without its review`);
+        else if (skipped) failures.push({ text: `${bot.status} has not reviewed ${short}: ${skipped} -- ${ask}`, kind: "fatal", trigger: bot.trigger });
         else if (!st && age < graceS()) fail(`${bot.status} has posted nothing at ${short} yet, ${age}s after its first check -- waiting up to ${graceS()}s`, "waits");
         else fail(`${bot.status} has not reviewed ${short}: ${st ? `its status here says "${desc}"` : "it has posted nothing at this head"} -- ${ask}`);
       }

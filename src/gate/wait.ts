@@ -9,12 +9,15 @@
 // a comment-heavy PR straight to the human. FACTORY_ACCEPT_PROSE=1 sends anyway, for when the
 // volume is right.
 //
+// A review bot that skipped or paused a draft reviews nothing until asked, so it asks: it posts the
+// gate's trigger comment once per head, then waits for the review like any other.
+//
 // Exit codes: 1 not sendable, 2 the gate could not be read, 3 still waiting at the limit, 4 green
 // but held on prose.
 import type { Repo } from "../config.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError, sleep } from "../util.js";
-import { Unreadable } from "./github.js";
+import { api, gh, Unreadable } from "./github.js";
 import { ready } from "./ready.js";
 import { checkReviewed, seconds, send } from "./send.js";
 
@@ -41,8 +44,9 @@ export function waitAndSend(ws: Workspace, repo: Repo, n: number, reviewed: stri
           throw stop(4, `gate is green but not sending:\n  - ${v.prose}\n  trim the comments, or rerun with ${ACCEPT_PROSE}=1 if the volume is right`);
         break;
       }
-      const fatal = v.failures.filter((f) => f.kind === "fatal");
+      const fatal = v.failures.filter((f) => f.kind === "fatal" && !f.trigger);
       if (fatal.length) throw stop(1, `NOT SENDABLE, and waiting will not clear it:\n${fatal.map((f) => `  - ${f.text}`).join("\n")}`);
+      for (const f of v.failures) if (f.trigger) askOnce(repo, n, v.head, f.trigger, err);
       unread = v.failures.find((f) => f.kind === "unreadable")?.text ?? "";
       waiting = v.failures.map((f) => f.text);
     } catch (e) {
@@ -64,4 +68,16 @@ export function waitAndSend(ws: Workspace, repo: Repo, n: number, reviewed: stri
   // Outside the loop's catch: a send that fails part way must not be retried as though it were a
   // read that failed.
   send(ws, repo, n, reviewed);
+}
+
+// Posts the trigger unless a comment saying it already came after the head commit, from an earlier
+// run or by hand.
+function askOnce(repo: Repo, n: number, head: string, body: string, err: (line: string) => void): void {
+  const at = api<{ commit?: { committer?: { date?: string } } }>(`repos/${repo.remote}/commits/${head}`)?.commit?.committer?.date;
+  const comments = at ? api<{ body?: string; created_at?: string }[]>(`repos/${repo.remote}/issues/${n}/comments?since=${at}&per_page=100`) : undefined;
+  if (!at || !Array.isArray(comments)) throw new Unreadable(`cannot read whether "${body}" was already asked at ${head.slice(0, 7)}`);
+  if (comments.some((c) => c.body?.trim() === body && (c.created_at ?? "") > at)) return;
+  const r = gh("pr", "comment", String(n), "--repo", repo.remote, "--body", body);
+  if (r.status !== 0) throw stop(1, `could not post "${body}" -- ${r.stderr.trim() || r.stdout.trim()}`);
+  err(`pr-wait: posted "${body}" to ask for a review of ${head.slice(0, 7)}`);
 }

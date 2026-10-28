@@ -229,6 +229,15 @@ test("a review bot that skipped the draft is named as having reviewed nothing", 
   assert.match(r.stdout, /status 'CodeRabbit' is green only because it skipped a draft and reviewed nothing -- comment "@coderabbitai review" on the PR/);
 });
 
+// The head commit, the PR's comments since it (one reply per read), and posting the trigger.
+const POST = `pr comment ${N} --repo ${REMOTE} --body @coderabbitai review`;
+const TRIGGER = { body: "@coderabbitai review", created_at: "2026-01-01T10:01:00Z" };
+const asking = (...reads: unknown[][]): Routes => ({
+  [`api repos/${REMOTE}/commits/${HEAD}`]: { stdout: { commit: { committer: { date: "2026-01-01T09:59:00Z" } } } },
+  [`api repos/${REMOTE}/issues/${N}/comments`]: reads.map((stdout) => ({ stdout })),
+  [POST]: { stdout: `https://github.com/${REMOTE}/pull/${N}#issuecomment-1\n` },
+});
+
 // Mikael, 2026-10-20: "Coderabbit should review before you even give the PR to me?" The statuses
 // are CodeRabbit's own, as read off lyyti-api#3270 and #3271, lyyti-classic#8350 and lyyti-public#1740.
 test("a required review bot must have reviewed the head: pr-ready refuses, pr-wait waits while it reviews", () => {
@@ -272,11 +281,45 @@ test("a required review bot must have reviewed the head: pr-ready refuses, pr-wa
   assert.match(r.stderr, /waiting \(\d+s\) on: CodeRabbit is reviewing aaaaaaa \(Review in progress\)/);
   assert.equal(r.calls.filter((c) => c === st).length, 3, "read while waiting, then by pr-send's own gate");
 
-  // and stops at once on a head it skipped, with the line that asks for the review
-  r = run(green({ [st]: rabbit("success", "Review skipped: draft pull request"), [rv]: { stdout: [] } }), ["pr-wait", "web", String(N), HEAD]);
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /waiting will not clear it:\n {2}- CodeRabbit has not reviewed aaaaaaa/);
-  assert.match(r.stderr, ASK);
+  // and on a head it skipped asks for the review itself, then waits for it
+  r = run(green({ [st]: rabbit("success", "Review skipped: draft pull request"), [rv]: { stdout: [] }, ...asking([]) }), ["pr-wait", "web", String(N), HEAD], { FACTORY_WAIT_LIMIT: "0" });
+  assert.equal(r.status, 3, r.stderr);
+  assert.equal(r.calls.filter((c) => c === POST).length, 1);
+  assert.match(r.stderr, /still waiting after \d+s on:\n {2}- CodeRabbit has not reviewed aaaaaaa/);
+});
+
+// On 2026-10-28 CodeRabbit skipped seven drafts, and each time the lead asked for the review by hand
+// and polled. Its check-runs are its own, as read off lyyti-classic#8509 and lyyti-api#3278.
+test("pr-wait asks a review bot that skipped the head, once, and waits for it", () => {
+  const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
+  const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
+  const rv = `api repos/${REMOTE}/pulls/${N}/reviews?per_page=100&page=1`;
+  const cr = `api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`;
+  const skipped = (title: string) => checkRuns(check("test"), rabbitRun(title, { conclusion: "skipped" }));
+  const review = { user: { login: "coderabbitai[bot]" }, commit_id: HEAD, state: "COMMENTED" };
+  const wait = (over: Routes) => run(green({ [st]: { stdout: { statuses: [] } }, ...over }), ["pr-wait", "web", String(N), HEAD]);
+
+  // it skipped: asked once, then its review lands and the PR is sent
+  let r = wait({ [cr]: skipped("Review skipped"), [rv]: [{ stdout: [] }, { stdout: [] }, { stdout: [review] }], ...asking([], [TRIGGER]) });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.calls.filter((c) => c === POST).length, 1, "asked once, not on every poll");
+  assert.match(r.stderr, /posted "@coderabbitai review" to ask for a review of aaaaaaa/);
+  assert.match(r.stdout, /^SENDABLE/m);
+
+  // asked, and then rate limited: sent with the remark
+  const limited = checkRuns(check("test"), rabbitRun("Review skipped", { conclusion: "skipped" }), rabbitRun("Review rate limited", { started_at: "2026-01-01T10:05:00Z" }));
+  r = wait({ [cr]: [skipped("Review skipped"), limited], [rv]: { stdout: [] }, ...asking([], [TRIGGER]) });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.calls.filter((c) => c === POST).length, 1);
+  assert.ok(r.stdout.includes("CodeRabbit is rate limited and has not reviewed aaaaaaa; sent without its review"), r.stdout);
+
+  // a second run at the same head finds the ask already made and does not post it again
+  r = wait({ [cr]: skipped("Review paused"), [rv]: [{ stdout: [] }, { stdout: [review] }], ...asking([TRIGGER]) });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.calls.filter((c) => c === POST).length, 0);
+  // an ask from before the head was pushed was for another head
+  r = wait({ [cr]: skipped("Review paused"), [rv]: [{ stdout: [] }, { stdout: [review] }], ...asking([{ ...TRIGGER, created_at: "2026-01-01T09:00:00Z" }]) });
+  assert.equal(r.calls.filter((c) => c === POST).length, 1);
 });
 
 // Mikael, 2026-10-27: "we should be able to work without coderabbit when the limits are hit." The
