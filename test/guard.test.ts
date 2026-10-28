@@ -200,3 +200,12 @@ test("an exported or declared override is refused as the prefix form is", () => 
     for (const cmd of ["export JAVA_HOME=/x && echo ok", "export PATH", "declare PATH_NOTE=x", "typeset -r X=1"]) assert.equal(verdict(cmd, ctx), null, cmd);
   }
 });
+
+// A heredoc's body is dropped, but the line after its closing delimiter is a command of its own. On
+// 2026-10-28 a `gh pr close` on a product repo went through because it was read as cat's argument.
+test("the command after a heredoc is checked", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const write = "cat > /tmp/close3374.md <<'EOF'\n> Written by agent.\nClosing: superseded.\nEOF\n";
+  for (const c of [`${write}gh pr close 3374 -R acme/api --comment "$(cat /tmp/close3374.md)"`, `${write}gh pr merge 3374 -R acme/api`])
+    assert.notEqual(verdict(c, lead), null, c);
+});
