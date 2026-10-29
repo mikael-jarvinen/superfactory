@@ -25,6 +25,9 @@ export interface Failure {
   // The comment that asks a review bot which skipped this head to review it. `pr-wait` posts it once
   // and waits; everything else reads the failure as it is.
   trigger?: string;
+  // The trigger that, once asked at this head, makes this failure a wait: the bot was asked and has
+  // not answered yet. `pr-wait` times it from the ask.
+  asked?: string;
 }
 
 export interface Verdict {
@@ -47,7 +50,7 @@ export const DEFAULT_PROSE_REMARK = 30;
 
 // What a missing answer gets right after a push: GitHub starts the jobs and the review bot posts its
 // status a little after the head lands, so for this long their absence is waited out, not refused.
-const graceS = () => seconds("FACTORY_GATE_GRACE", 600);
+export const graceS = () => seconds("FACTORY_GATE_GRACE", 600);
 
 // Seconds since the first check-run or status at the head, the nearest thing to when it was pushed.
 function sinceHead(times: (string | null | undefined)[]): number {
@@ -219,7 +222,8 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
           remarks.push(`${bot.status} is rate limited and has not reviewed ${short}; sent without its review`);
         else if (skipped) failures.push({ text: `${bot.status} has not reviewed ${short}: ${skipped} -- ${ask}`, kind: "fatal", trigger: bot.trigger });
         else if (!st && age < graceS()) fail(`${bot.status} has posted nothing at ${short} yet, ${age}s after its first check -- waiting up to ${graceS()}s`, "waits");
-        else fail(`${bot.status} has not reviewed ${short}: ${st ? `its status here says "${desc}"` : "it has posted nothing at this head"} -- ${ask}`);
+        else if (st) fail(`${bot.status} has not reviewed ${short}: its status here says "${desc}" -- ${ask}`);
+        else failures.push({ text: `${bot.status} has not reviewed ${short}: it has posted nothing at this head -- ${ask}`, kind: "fatal", asked: bot.trigger });
       }
     }
   }

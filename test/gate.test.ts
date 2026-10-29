@@ -322,6 +322,35 @@ test("pr-wait asks a review bot that skipped the head, once, and waits for it", 
   assert.equal(r.calls.filter((c) => c === POST).length, 1);
 });
 
+// lyyti-classic#8522 and #8524, 2026-10-29: after the ask CodeRabbit's skipped check-run was gone and
+// the grace since the head's first check long past, so pr-wait refused minutes before the review came.
+test("pr-wait waits on a review bot it asked, timed from the ask, not the head", () => {
+  const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
+  const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
+  const rv = `api repos/${REMOTE}/pulls/${N}/reviews?per_page=100&page=1`;
+  const cr = `api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`;
+  const review = { user: { login: "coderabbitai[bot]" }, commit_id: HEAD, state: "COMMENTED" };
+  const over = (...comments: unknown[][]) => green({
+    [st]: { stdout: { statuses: [] } },
+    [cr]: [checkRuns(check("test"), rabbitRun("Review skipped", { conclusion: "skipped" })), checkRuns(check("test"))],
+    [rv]: [{ stdout: [] }, { stdout: [] }, { stdout: [review] }],
+    ...asking(...comments),
+  });
+
+  // skipped, asked; then nothing from it at all, long after the first check; then its review lands
+  let r = run(over([], [{ ...TRIGGER, created_at: new Date().toISOString() }]), ["pr-wait", "web", String(N), HEAD]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.calls.filter((c) => c === POST).length, 1);
+  assert.match(r.stderr, /waiting \(\d+s\) on: CodeRabbit has not reviewed aaaaaaa: it has posted nothing at this head/);
+  assert.match(r.stdout, /^SENDABLE/m);
+
+  // asked longer ago than the grace: refused as before
+  r = run(over([TRIGGER]), ["pr-wait", "web", String(N), HEAD]);
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(r.calls.filter((c) => c === POST).length, 0);
+  assert.match(r.stderr, /waiting will not clear it:\n {2}- CodeRabbit has not reviewed aaaaaaa: it has posted nothing at this head/);
+});
+
 // Mikael, 2026-10-27: "we should be able to work without coderabbit when the limits are hit." The
 // check-run is CodeRabbit's own, as read off lyyti-classic#8447: neutral, titled "Review rate limited".
 const rabbitRun = (title: string, o: Record<string, unknown> = {}) =>
