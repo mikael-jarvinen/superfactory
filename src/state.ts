@@ -7,7 +7,11 @@ import { die, now, pyDumps, pyRepr, pyStr, squash } from "./util.js";
 export { STATES, type State };
 
 export const TRANSITIONS: Record<State, ReadonlySet<State>> = {
-  "queued": new Set(["building", "blocked"]),
+  "queued": new Set(["designing", "building", "blocked"]),
+  // A ticket that changes the UI and has no design is designed first: a designer draws it, the
+  // human approves it, and only then is it queued for a builder.
+  "designing": new Set(["design-review", "queued", "blocked"]),
+  "design-review": new Set(["designing", "queued", "blocked"]),
   "building": new Set(["pr-open", "queued", "blocked"]),
   "pr-open": new Set(["pr-open", "agent-review", "blocked"]),
   "agent-review": new Set(["fixing", "gate", "blocked"]),
@@ -18,8 +22,9 @@ export const TRANSITIONS: Record<State, ReadonlySet<State>> = {
   "done": new Set(),
   "blocked": new Set(STATES.filter((s) => s !== "blocked")),
 };
-export const BUSY: ReadonlySet<string> = new Set(["building", "fixing"]);
-export const WAITING_ON_YOU: ReadonlySet<string> = new Set(["your-review", "blocked"]);
+export const BUSY: ReadonlySet<string> = new Set(["designing", "building", "fixing"]);
+// A design sent for approval frees its designer, as a PR in review frees its builder.
+export const WAITING_ON_YOU: ReadonlySet<string> = new Set(["design-review", "your-review", "blocked"]);
 // States that move only when the lead moves them. LOCAL-eventapi-form-spike sat in pr-open for five
 // days because nothing aged these.
 export const WAITING_ON_LEAD: ReadonlySet<string> = new Set(["pr-open", "agent-review", "gate"]);
@@ -28,6 +33,17 @@ export const WAITING_ON_LEAD: ReadonlySet<string> = new Set(["pr-open", "agent-r
 export const IN_REVIEW: ReadonlySet<string> = new Set(["your-review", "colleague-review"]);
 // Where a dispatch makes sense without argument. Anywhere else is a judgement, so it needs --force.
 export const DISPATCHABLE: ReadonlySet<string | null> = new Set([null, "queued", "building", "fixing"]);
+// The same for a designer: a new design, or another round on one the human sent back.
+export const DESIGN_DISPATCHABLE: ReadonlySet<string | null> = new Set([null, "queued", "designing", "design-review"]);
+
+// The design a ticket was drawn to. `approved` is the human's own words, and a builder's brief
+// carries the design only once it is set.
+export interface Design {
+  canvas: string | null;
+  slides: string | null;
+  approved: string | null;
+  approved_at: string | null;
+}
 
 export interface Pr {
   repo?: string;
@@ -51,6 +67,9 @@ export interface Rec {
   created: string;
   blocked_from: State | null;
   title?: string;
+  design?: Design;
+  // the designer session this item was last dispatched to, so a second round can keep its context
+  session?: string;
   [k: string]: unknown;
 }
 
@@ -120,7 +139,12 @@ export interface Change {
   note?: string;
   force?: boolean;
   title?: string;
+  canvas?: string;
+  slides?: string;
+  approved?: string;
 }
+
+const isUrl = (s: string | undefined) => !!s && /^https?:\/\/\S+$/.test(s);
 
 export function transition(ws: Workspace, ticket: string, next: string, c: Change = {}, out: (line: string) => void = console.log): Rec {
   const human = ws.config.human.name;
@@ -129,7 +153,8 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   const to = next as State;
   let rec = loadRec(ws, ticket);
   if (rec === null) {
-    if (to !== "queued" && to !== "building") die(`${ticket} has no record; the first state must be queued or building`);
+    if (to !== "queued" && to !== "building" && to !== "designing")
+      die(`${ticket} has no record; the first state must be queued, designing or building`);
     rec = {
       ticket, state: null, stack: c.stack ?? null, agent: c.agent ?? null,
       jira: untracked(ws, ticket) ? null : trackerFor(ws, "queued"),
@@ -156,6 +181,17 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
     if (head && !(head.startsWith(reviewed) || reviewed.startsWith(head.slice(0, 7))))
       die(`reviewed sha ${reviewed} does not match the head ${head}. Pass --head if it moved, and get the delta reviewed first.`);
   }
+  // A design goes to the human as two links, and only the human's own words approve it.
+  const design: Design = rec.design ?? { canvas: null, slides: null, approved: null, approved_at: null };
+  for (const [flag, v] of [["--canvas", c.canvas], ["--slides", c.slides]] as const)
+    if (v !== undefined && !isUrl(v)) die(`${flag} must be the artifact's URL, got ${pyRepr(v)}`);
+  if (to === "design-review" && !((c.canvas || design.canvas) && (c.slides || design.slides)))
+    die(`design-review needs --canvas <url> and --slides <url>: the published design and the slideset ${human} reads`);
+  if (c.approved !== undefined && !(old === "design-review" && to === "queued"))
+    die(`--approved records ${human}'s approval of a design, so it belongs on design-review -> queued`);
+  if (old === "design-review" && to === "queued" && !c.approved && !c.force)
+    die(`design-review -> queued is ${human}'s approval: pass --approved "<${human}'s words>". ` +
+      `To send the design back for changes, go to designing.`);
   if (to === "done" && !c.evidence) warnings.push("done without --evidence (merge sha or PR url). Recorded, but say what you looked at.");
   if ((to === "agent-review" || to === "gate" || to === "colleague-review") && !c.evidence && !c.force)
     warnings.push(`${to} without --evidence. A sha, PR or message reference is what survives a compaction.`);
@@ -201,15 +237,22 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   }
   if (untracked(ws, ticket)) rec.jira = null;
   else if (c.jira) rec.jira = c.jira;
-  else if (to === "done" || to === "colleague-review" || (to === "building" && (old === null || old === "queued")))
+  else if (to === "done" || to === "colleague-review" || ((to === "building" || to === "designing") && (old === null || old === "queued")))
     rec.jira = trackerFor(ws, to);
   if (c.title) rec.title = squash(c.title, 90);
+  if (c.canvas) design.canvas = c.canvas;
+  if (c.slides) design.slides = c.slides;
+  // a design drawn again is not the design that was approved
+  if (to === "designing") [design.approved, design.approved_at] = [null, null];
+  if (c.approved) [design.approved, design.approved_at] = [c.approved, now()];
+  if (rec.design || to === "designing" || c.canvas || c.slides) rec.design = design;
   rec.state = to;
   rec.since = now();
   saveRec(ws, rec);
   appendEvent(ws, {
     t: now(), ticket, from: old, to, agent: rec.agent ?? null,
-    evidence: c.evidence ?? null, note: c.note ?? null, pr: rec.pr ?? null,
+    evidence: c.evidence ?? c.approved ?? null, note: c.note ?? null, pr: rec.pr ?? null,
+    ...(rec.design && (c.canvas || c.slides || c.approved) ? { design: rec.design } : {}),
   });
   const kind = ws.config.tracker.kind;
   const head = `${ticket}: ${old ?? "(new)"} -> ${to}  agent=${pyStr(rec.agent)}`;
@@ -241,11 +284,15 @@ export function showRec(ws: Workspace, rec: Rec, at = new Date()): string[] {
     : s === "queued" || s === "pr-open" || s === "gate" ? lead
     : s === "colleague-review" ? "colleagues"
     : "-";
+  const d = rec.design;
   const jira = isLocal(rec.ticket) ? "none" : rec.jira || "?";
   const lines = [
     `  ${rec.ticket.padEnd(12)} ${pyStr(s).padEnd(17)} ${age.padStart(6)}  agent=${(rec.agent || "-").padEnd(8)} ` +
     `jira=${jira.padEnd(12)} pr=${prs.padEnd(40)} waiting on: ${wait}`,
   ];
   if (rec.asked_you?.question) lines.push(`  ${"".padEnd(12)} asked you: ${rec.asked_you.question} (${rec.asked_you.at})`);
+  if (d && (d.slides || d.canvas))
+    lines.push(`  ${"".padEnd(12)} design: slides ${d.slides ?? "-"} canvas ${d.canvas ?? "-"} ` +
+      (d.approved ? `approved: ${d.approved} (${d.approved_at})` : "not approved"));
   return lines;
 }

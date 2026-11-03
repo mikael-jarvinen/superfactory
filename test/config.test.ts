@@ -108,7 +108,7 @@ port = 99999
     "stacks.app.env.JAVA_HOME: must be a string, got 21",
     "roles.lead.cwd: missing",
     "roles.builder.cwd: a builder starts in its worktree, so it takes no cwd",
-    "roles.boss: unknown role; roles are lead, builder, reviewer, assistant",
+    "roles.boss: unknown role; roles are lead, builder, reviewer, assistant, designer",
     "agents[0].name: must be lower case letters, digits and dashes, got \"Ada\"",
     "agents[1].stack: no stack \"ap\"; stacks: app",
     "agents[2].name: \"bea\" is used by another agent",
@@ -116,7 +116,7 @@ port = 99999
     "roles.reviewer: missing, and agent \"bea\" has that role",
     "stacks.app.pin.zed: no builder \"zed\" on stack \"app\"",
     "tracker.key_pattern: not a valid regular expression: Invalid regular expression: /([/: Unterminated character class",
-    "tracker.status.shipping: unknown state; states: queued, building, pr-open, agent-review, fixing, gate, your-review, colleague-review, done, blocked",
+    "tracker.status.shipping: unknown state; states: queued, designing, design-review, building, pr-open, agent-review, fixing, gate, your-review, colleague-review, done, blocked",
     "tracker.status.queued: missing; the tracker needs a status for it",
     "tracker.status.colleague-review: missing; the tracker needs a status for it",
     "tracker.status.done: missing; the tracker needs a status for it",
@@ -131,7 +131,7 @@ test("the CLI prints every problem at once and exits 1", () => {
   const r = factory(ws, ["state", "--list"]);
   assert.equal(r.status, 1);
   assert.equal(r.stderr, `factory: ${join(ws, "factory.toml")} has 2 problems:\n` +
-    `  agents[0].role: must be one of lead, builder, reviewer, assistant, got "boss"\n` +
+    `  agents[0].role: must be one of lead, builder, reviewer, assistant, designer, got "boss"\n` +
     `  agents: exactly one agent needs role = "lead", found 0\n`);
   writeFileSync(join(ws, "factory.toml"), "[human\n");
   assert.match(factory(ws, ["status"]).stderr, /has 1 problem:\n {2}not valid TOML: /);

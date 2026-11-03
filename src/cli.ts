@@ -6,7 +6,8 @@ import { followInbox } from "./board/inbox.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
 import { agentOrDie, byRole, claudeBin, findSession, fleetLines, lead, leftWork, type Session, sessionAlive, sessions, stopSession, waitForName } from "./fleet.js";
-import { assistantPrompt, buildAppendix, buildingPrompt, launch, leadPrompt, reviewerPrompt, roleOf } from "./launch.js";
+import type { Agent } from "./config.js";
+import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleOf } from "./launch.js";
 import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
 import { hook as noSideChannelsHook } from "./hooks/no-side-channels.js";
@@ -27,7 +28,7 @@ import { install, render, status as scheduleStatus, uninstall } from "./schedule
 import { cmdStack, STACK_USAGE } from "./stacks/command.js";
 import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/engine.js";
 import {
-  allRecs, appendEvent, BUSY, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, removeRec, saveRec, showRec, transition, validKey,
+  allRecs, appendEvent, BUSY, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
 import { FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.js";
 import { failure } from "./watchers/job.js";
@@ -55,6 +56,9 @@ usage: factory [--workspace <dir>] <command> [options]
                                   fresh building session for one item in a per-item worktree.
                                   Dispatch from queued, building or fixing; anywhere else needs
                                   --force. A live session already on KEY keeps its context.
+                                  For a designer: a design session in the designers' cwd, no
+                                  worktree, from queued (records designing) or design-review
+                                  (another round).
   stop <agent> [--force] [--remove-worktree]
                                   stop a teammate; refuses on uncommitted or unpushed work. Keeps
                                   the worktree unless --remove-worktree.
@@ -67,7 +71,9 @@ usage: factory [--workspace <dir>] <command> [options]
   state <KEY> --title "<words>"   what it is about, for the board. No transition.
   state <KEY> <new-state> [--agent A] [--stack S] [--evidence E] [--note N] [--title T]
         [--pr owner/repo#N] [--head SHA] [--reviewed SHA] [--jira STATUS] [--force]
-                                  transition
+        [--canvas URL] [--slides URL] [--approved "<the human's words>"]
+                                  transition. design-review needs the canvas and slides links;
+                                  design-review -> queued is the approval and needs --approved
   state --list [--all]            every open item
   drop <LOCAL-key>... [--note N] [--force]
                                   delete a LOCAL record; tracker tickets are never droppable
@@ -121,7 +127,7 @@ ${STACK_USAGE}
 The workspace is --workspace, else $FACTORY_WORKSPACE, else the nearest factory.toml above the
 current directory. Only this program writes the state store.
 
-states: queued building pr-open agent-review fixing gate your-review colleague-review done blocked`;
+states: queued designing design-review building pr-open agent-review fixing gate your-review colleague-review done blocked`;
 
 class UsageError extends FactoryError {
   constructor(message: string) {
@@ -181,7 +187,7 @@ function cmdState(ws: Workspace, argv: string[]) {
   const s = { type: "string" } as const;
   const { v, p } = args("state", argv, {
     list: { type: "boolean" }, all: { type: "boolean" }, force: { type: "boolean" },
-    agent: s, stack: s, evidence: s, note: s, title: s, pr: s, head: s, reviewed: s, jira: s,
+    agent: s, stack: s, evidence: s, note: s, title: s, pr: s, head: s, reviewed: s, jira: s, canvas: s, slides: s, approved: s,
   }, [0, 2]);
   const [ticket, next] = p;
   if (v.list) {
@@ -206,6 +212,7 @@ function cmdState(ws: Workspace, argv: string[]) {
   transition(ws, ticket, next, {
     agent: str(v.agent), evidence: str(v.evidence), pr: str(v.pr), head: str(v.head), reviewed: str(v.reviewed),
     jira: str(v.jira), stack: str(v.stack), note: str(v.note), force: !!v.force, title: str(v.title),
+    canvas: str(v.canvas), slides: str(v.slides), approved: str(v.approved),
   });
   if (IN_REVIEW.has(next)) releaseForReview(ws, ticket);
 }
@@ -215,8 +222,12 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   const [name, ticket] = p as [string, string];
   const force = !!v.force;
   const ag = agentOrDie(ws, name);
-  if (ag.role !== "builder") throw new FactoryError(`${name} is a ${ag.role}, not a builder. Reviewers are started per review with \`factory review\`.`);
   if (!validKey(ws, ticket)) throw new FactoryError(`${pyRepr(ticket)} is ${KEY_HINT}`);
+  if (ag.role === "designer") {
+    if (str(v.repo)) throw new FactoryError(`a designer reads every repo and works in none, so it takes no --repo`);
+    return dispatchDesigner(ws, ag, ticket, force, str(v["prompt-file"]));
+  }
+  if (ag.role !== "builder") throw new FactoryError(`${name} is a ${ag.role}, not a builder or a designer. Reviewers are started per review with \`factory review\`.`);
   const allowed = ag.repos;
   const repoKey = str(v.repo) ?? (allowed[0] as string);
   if (!allowed.includes(repoKey)) throw new FactoryError(`${name} works in [${allowed.map(pyRepr).join(", ")}]; --repo ${repoKey} is another stack`);
@@ -280,7 +291,57 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   console.log(`${name} started (${started.id}) for ${ticket} as a BUILDING session`);
   console.log(`  worktree ${wt} (${how})`);
   console.log(`  appendix ${appendix ?? "-"}`);
+  const d = rec?.design;
+  if (d?.approved) console.log(`  design approved by ${ws.config.human.name} (${d.approved_at}): slides ${d.slides} canvas ${d.canvas}. The brief carries it.`);
+  else if (d) console.log(`  warning: ${ticket} has a design ${ws.config.human.name} has not approved (${d.slides ?? d.canvas ?? "no link"})`);
   console.log(`  next: SendMessage to ${name}: what to build or fix, the scope, and notify_when_idle`);
+}
+
+// A designer reads every repo and writes none, so it has no worktree or stack: one session in the
+// designers' shared cwd per item. Another round on the same item, after the human sent the design
+// back, goes to the live session if it is still the one that drew it, so it keeps its context.
+function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boolean, promptFile: string | undefined) {
+  const name = ag.name;
+  const rec = loadRec(ws, ticket);
+  const cur = rec?.state ?? null;
+  if (!DESIGN_DISPATCHABLE.has(cur) && !force)
+    throw new FactoryError(`${ticket} is ${cur}; a design starts from queued, or goes another round from design-review. ` +
+      `Use \`factory state\` first, or --force if you mean it.`);
+  for (const r of allRecs(ws))
+    if (r.agent === name && r.state === "designing" && r.ticket !== ticket)
+      throw new FactoryError(`${name} is recorded as designing ${r.ticket}. Finish or re-state that first.`);
+  const human = ws.config.human.name;
+  const d = rec?.design;
+  const links = d && (d.canvas || d.slides) ? `  the last round: canvas ${d.canvas ?? "-"} slides ${d.slides ?? "-"}` : "";
+  const s = findSession(name);
+  if (sessionAlive(s)) {
+    const on = allRecs(ws).find((r) => r.agent === name && r.session === s.id);
+    if (on?.ticket === ticket && !force) {
+      if (cur !== "designing") transition(ws, ticket, "designing", { agent: name, evidence: `another round sent to the live session ${s.id}, context kept` });
+      console.log(`${name} is still on ${ticket} (${s.id}), so it keeps its context.`);
+      if (links) console.log(links);
+      console.log(`  next: SendMessage to ${name}: what ${human} asked to change, word for word`);
+      return;
+    }
+    if (on?.state === "designing" && !force)
+      throw new FactoryError(`${name} is still designing ${on.ticket} (${s.id}). Use another designer, or --force.`);
+    stopSession(s);
+    console.log(`${name} stopped (${s.id})${on ? `: ${on.ticket} is ${on.state}, so ${name} is free` : ""}`);
+  }
+  const prompt = promptFile ? readFileSync(promptFile, "utf8") : designerPrompt(ws, ag, ticket);
+  const started = launch(ws, ag, roleOf(ws, ag).cwd as string, prompt);
+  if (cur === "designing") {
+    const r = rec as Rec;
+    r.agent = name;
+    saveRec(ws, r);
+    appendEvent(ws, { t: now(), ticket, from: cur, to: cur, agent: name, evidence: `re-dispatched (design session ${started.id})`, note: null, pr: null });
+  } else transition(ws, ticket, "designing", { agent: name, evidence: `design session ${started.id}`, force });
+  const after = loadRec(ws, ticket) as Rec;
+  after.session = started.id;
+  saveRec(ws, after);
+  console.log(`${name} started (${started.id}) for ${ticket} as a DESIGN session`);
+  if (links) console.log(links);
+  console.log(`  next: SendMessage to ${name}: the design brief (the delegate-design skill), and notify_when_idle`);
 }
 
 const isDir = (p: string) => existsSync(p) && statSync(p).isDirectory();
@@ -472,7 +533,7 @@ function cmdDrop(ws: Workspace, argv: string[]) {
       console.log(`  ${ticket}: no record`);
       continue;
     }
-    if ((rec.state === "building" || rec.state === "fixing") && !v.force)
+    if (rec.state && BUSY.has(rec.state) && !v.force)
       throw new FactoryError(`${ticket} is ${rec.state} with agent=${rec.agent ?? "None"}. Stop the teammate first, or pass --force.`);
     appendEvent(ws, { ticket, at: now(), event: "dropped", from_state: rec.state, note: str(v.note) ?? null });
     removeRec(ws, ticket);

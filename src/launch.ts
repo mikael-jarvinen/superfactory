@@ -34,7 +34,7 @@ export function sessionEnv(ws: Workspace, agent: Agent, path = process.env.PATH 
 export function settingsFile(ws: Workspace, agent: Agent): string {
   const role = roleOf(ws, agent);
   return renderSettings(ws, {
-    name: agent.name, role: agent.role, template: role.settings, extraHooks: role.extraHooks, permissionMode: role.permissionMode,
+    name: agent.name, role: agent.role, template: role.settings, cwd: role.cwd, extraHooks: role.extraHooks, permissionMode: role.permissionMode,
     env: sessionEnv(ws, agent),
   });
 }
@@ -78,7 +78,8 @@ export function commonFlags(ws: Workspace, agent: Agent, phase: Phase): string[]
   for (const d of addDirs(ws, agent)) flags.push("--add-dir", d);
   if (agent.remoteControl) flags.push("--remote-control", agent.name);
   if (agent.role === "builder") flags.push(...settings);
-  if (phase === "build" && agent.role === "builder" && role.mcpConfig) flags.push("--mcp-config", role.mcpConfig);
+  // A builder's browser is for its build; a designer's is how it renders frames and today's screens.
+  if (role.mcpConfig && (agent.role !== "builder" || phase === "build")) flags.push("--mcp-config", role.mcpConfig);
   flags.push("--name", agent.name);
   if (role.model) flags.push("--model", role.model);
   if (role.effort) flags.push("--effort", role.effort);
@@ -130,6 +131,10 @@ export const reviewerPrompt = (ws: Workspace) =>
 
 export const assistantPrompt = (ws: Workspace) =>
   `You are one of ${leadName(ws)}'s assistants. Read CLAUDE.md, reply exactly READY, and wait for a task from ${leadName(ws)}.`;
+
+export const designerPrompt = (ws: Workspace, agent: Agent, ticket: string) =>
+  `You are ${capitalize(agent.name)}, one of ${leadName(ws)}'s designers. Your work item is ${ticket}. Read ` +
+  `CLAUDE.md, reply exactly READY, and wait for ${leadName(ws)}'s design brief. Do not start before it arrives.`;
 
 export const leadPrompt = (ws: Workspace) =>
   `You are ${leadName(ws)}. Read CLAUDE.md, then run \`factory status\` and read every record in ` +

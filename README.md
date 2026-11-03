@@ -42,6 +42,7 @@ A workspace contains:
 | `factory.toml` | Always. |
 | `CLAUDE.md` in `roles.lead.cwd` | Always. The lead reads it first. Skills in `.claude/skills/` next to it load too. |
 | `CLAUDE.md` in `roles.reviewer.cwd` | When config has a reviewer. |
+| `CLAUDE.md` in `roles.designer.cwd` | When config has a designer. The `designer` settings template lets it write only in `work/` there, which the launch creates; ignore that directory in git. |
 | `prompts/round.md`, `prompts/relay.md` | Always. The relay prompt must contain `{text}`. |
 | `prompts/queue.md` | When `tracker.kind` is not `"none"`. |
 | Each file in an agent's `appendix` | When an agent names it. A `repo:` entry lives in the repo checkout instead. |
