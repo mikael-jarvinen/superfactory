@@ -37,6 +37,10 @@ const url = (ws: Workspace) => `http://${ws.config.board.host}:${ws.config.board
 const DESCRIPTIONS: Record<string, string> = {
   "queued": "Ready to start and waiting for a free teammate: a ticket assigned to {human}, or an " +
     "ad-hoc task {human} asked for that has no ticket at all.",
+  "designing": "The ticket changes the UI and had no design, so a designer is drawing one: a canvas of " +
+    "the screens it changes, then a slideset that walks {human} through them.",
+  "design-review": "{human}'s. The slideset and its canvas are sent and frozen. Nothing is built until " +
+    "{human} approves the design, and a change {human} asks for goes back to the designer.",
   "building": "A teammate is writing the code in a worktree of its own. There is no plan to approve " +
     "first, so {lead}'s brief is the whole specification and the first thing {human} sees is the PR.",
   "pr-open": "A draft PR exists against the base branch, with its number and head sha recorded.",
@@ -241,6 +245,7 @@ function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>) {
       a.role === "lead" ? ["lead", "Lead", ""]
       : a.role === "assistant" ? ["assistants", "Assistants", ""]
       : a.role === "reviewer" ? ["reviewers", "Reviewers", reviewerRepos.join(", ")]
+      : a.role === "designer" ? ["designers", "Designers", (ws.config.roles.designer?.addDirs ?? []).join(", ")]
       : a.stack ? [`stack:${a.stack}`, ws.config.stacks[a.stack]?.label ?? capitalize(a.stack), a.repos.join(", ")]
       : [`repos:${a.repos.join(",")}`, a.repos.length === 1 ? capitalize(a.repos[0] as string) : "Builders", a.repos.join(", ")];
     let g = groups.get(key);
@@ -259,7 +264,7 @@ function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>) {
       in_review: a.role === "builder" ? reviewOnly(recs, a.name).map((r) => r.ticket) : [],
     });
   }
-  const rank = (k: string) => (k === "lead" ? 0 : k === "assistants" ? 1 : k === "reviewers" ? 3 : 2);
+  const rank = (k: string) => (k === "lead" ? 0 : k === "assistants" ? 1 : k === "designers" ? 1.5 : k === "reviewers" ? 3 : 2);
   return [...groups.values()].sort((a, b) => rank(a.key) - rank(b.key));
 }
 

@@ -146,7 +146,7 @@ function workspaceFiles(ws: Workspace): Check[] {
     if (!role || !cfg.agents.some((a) => a.role === name)) continue;
     // The lead's and the reviewers' launch prompts both begin with reading CLAUDE.md in their cwd.
     if (role.cwd) {
-      const whose = name === "reviewer" ? "the reviewers'" : `the ${name}'s`;
+      const whose = name === "reviewer" || name === "designer" ? `the ${name}s'` : `the ${name}'s`;
       const md = join(role.cwd, "CLAUDE.md");
       checks.push({
         ok: nonEmpty(md),

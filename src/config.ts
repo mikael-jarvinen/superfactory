@@ -4,11 +4,11 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse, TomlError } from "smol-toml";
 import { capitalize, FactoryError } from "./util.js";
 
-export const ROLES = ["lead", "builder", "reviewer", "assistant"] as const;
+export const ROLES = ["lead", "builder", "reviewer", "assistant", "designer"] as const;
 export type RoleName = (typeof ROLES)[number];
 
 export const STATES = [
-  "queued", "building", "pr-open", "agent-review",
+  "queued", "designing", "design-review", "building", "pr-open", "agent-review",
   "fixing", "gate", "your-review", "colleague-review", "done", "blocked",
 ] as const;
 export type State = (typeof STATES)[number];

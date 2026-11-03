@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,12 +30,15 @@ export const factoryCommand = () => `${shq(process.execPath)} ${shq(CLI)}`;
 //   guard           the guard's policy, when hooks has guard
 //   tracker_writes  true for the one role that moves tickets; everyone else is refused them
 //   write_dirs      "logs" or "state": where a readonly guard also lets a redirect write
+//   work_dir        a readonly role's own scratch directory under its cwd, where Edit and Write
+//                   and the guard's redirects are allowed: what a designer publishes is written there
 //   settings        Claude Code settings, passed through, with the computed parts below added
 interface Template {
   hooks: HookName[];
   guard?: Policy;
   trackerWrites: boolean;
   writeDirs: (keyof typeof WRITE_DIRS)[];
+  workDir?: string;
   settings: Record<string, unknown>;
 }
 
@@ -53,7 +56,7 @@ function loadTemplate(file: string): Template {
     return die(`settings template ${file}: ${(e as Error).message}`);
   }
   const problems: string[] = [];
-  const known = ["hooks", "guard", "tracker_writes", "write_dirs", "settings"];
+  const known = ["hooks", "guard", "tracker_writes", "write_dirs", "work_dir", "settings"];
   for (const k of Object.keys(doc)) if (!known.includes(k)) problems.push(`${k}: unknown key; keys are ${known.join(", ")}`);
   const hooks = doc.hooks ?? [];
   if (!Array.isArray(hooks) || hooks.some((h) => !(HOOKS as readonly unknown[]).includes(h))) problems.push(`hooks: must be an array of ${HOOKS.join(", ")}`);
@@ -62,12 +65,16 @@ function loadTemplate(file: string): Template {
   if (Array.isArray(hooks) && hooks.includes("guard") && guard === undefined) problems.push("guard: missing, and hooks has guard");
   const writeDirs = doc.write_dirs ?? [];
   if (!Array.isArray(writeDirs) || writeDirs.some((d) => !Object.hasOwn(WRITE_DIRS, d as string))) problems.push(`write_dirs: must be an array of ${Object.keys(WRITE_DIRS).join(", ")}`);
+  const workDir = doc.work_dir;
+  if (workDir !== undefined && (typeof workDir !== "string" || !/^[\w.-]+$/.test(workDir) || workDir === "." || workDir === ".."))
+    problems.push("work_dir: must be one directory name under the role's cwd");
+  if (workDir !== undefined && guard !== "readonly") problems.push("work_dir: only a readonly guard needs one");
   const settings = doc.settings ?? {};
   if (typeof settings !== "object" || settings === null || Array.isArray(settings)) problems.push("settings: must be an object");
   if (problems.length) die(`settings template ${file} has ${problems.length} problem${problems.length === 1 ? "" : "s"}:\n` + problems.map((p) => `  ${p}`).join("\n"));
   return {
     hooks: hooks as HookName[], guard: guard as Policy | undefined, trackerWrites: doc.tracker_writes === true,
-    writeDirs: writeDirs as Template["writeDirs"], settings: settings as Record<string, unknown>,
+    writeDirs: writeDirs as Template["writeDirs"], workDir: workDir as string | undefined, settings: settings as Record<string, unknown>,
   };
 }
 
@@ -96,6 +103,37 @@ function editDenyRoots(ws: Workspace): string[] {
   return all.filter((p) => !all.some((q) => q !== p && p.startsWith(q + "/")));
 }
 
+// The deny rules with `keep` left editable. Deny beats allow, so a root above `keep` cannot be
+// denied whole: it is replaced by what is in it, level by level down to `keep`. Each checkout stays
+// denied whole, and so does everything beside the path to `keep`. Something created beside that
+// path after the render is not covered until the next launch; the readonly guard still refuses
+// every write to it through Bash.
+export function editDenyRules(roots: string[], keep?: string): string[] {
+  const rule = (p: string) => {
+    let dir = true;
+    try {
+      dir = statSync(p).isDirectory();
+    } catch {
+      dir = true;
+    }
+    return dir ? `Edit(/${p}/**)` : `Edit(/${p})`;
+  };
+  const out: string[] = [];
+  const carve = (dir: string) => {
+    for (const e of readdirSync(dir).sort()) {
+      const p = join(dir, e);
+      if (p === keep) continue;
+      if (keep!.startsWith(p + "/")) carve(p);
+      else out.push(rule(p));
+    }
+  };
+  for (const r of roots) {
+    if (!keep || (keep !== r && !keep.startsWith(r + "/"))) out.push(rule(r));
+    else if (keep !== r) carve(r);
+  }
+  return out;
+}
+
 interface HookEntry {
   matcher?: string;
   hooks: { type: "command"; command: string; timeout: number }[];
@@ -105,6 +143,7 @@ export interface SessionSettings {
   name: string;
   role: string;
   template: string;
+  cwd?: string;
   extraHooks?: string[];
   permissionMode?: string;
   env?: Record<string, string>;
@@ -131,9 +170,15 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
   const fill = (rules: string[] = []) => rules.flatMap((r) => (!r.includes("{org}") ? [r] : org ? [r.replaceAll("{org}", org)] : []));
   const deny = fill(perms.deny);
   const allow = fill(perms.allow);
+  let work: string | undefined;
+  if (t.workDir) {
+    if (!s.cwd) die(`settings for ${s.name}: the template has a work_dir, and the role has no cwd`);
+    work = join(s.cwd, t.workDir);
+    mkdirSync(work, { recursive: true });
+  }
   if (t.guard === "readonly") {
-    deny.push(...editDenyRoots(ws).map((p) => `Edit(/${p}/**)`));
-    allow.unshift(...TMP_ROOTS.map((p) => `Edit(/${p}/**)`));
+    deny.push(...editDenyRules(editDenyRoots(ws), work));
+    allow.unshift(...TMP_ROOTS.map((p) => `Edit(/${p}/**)`), ...(work ? [`Edit(/${work}/**)`] : []));
   }
   if (deny.length) perms.deny = deny;
   else delete perms.deny;
@@ -150,7 +195,7 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
   const leadName = lead(ws).name;
   for (const h of names) {
     if (h === "guard") {
-      const dirs = t.writeDirs.flatMap((d) => ["--write-dir", WRITE_DIRS[d](ws)]);
+      const dirs = [...t.writeDirs.map((d) => WRITE_DIRS[d](ws)), ...(work ? [work] : [])].flatMap((d) => ["--write-dir", d]);
       const repos = t.guard === "protect" ? [...(org ? ["--org", org] : []), ...ws.config.github.ownRepos.flatMap((r) => ["--own-repo", r])] : [];
       add("PreToolUse", "Bash|Read|Grep", ["hook", "guard", "--role", s.role, "--policy", t.guard as Policy, ...dirs, ...repos], 10);
     } else if (h === "no-dialogs") {
