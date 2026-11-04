@@ -36,7 +36,7 @@ function render(d){
         <span class="when">${esc(when(m.age_min))}</span>
       </div>
       ${m.text ? `<div class="body">${esc(m.text)}</div>` : ''}
-      ${m.image ? `<div class="shot"><a href="/attachments/${esc(m.image)}" target="_blank" rel="noopener"><img src="/attachments/${esc(m.image)}" alt="screenshot" loading="lazy"></a></div>` : ''}
+      ${(m.images || (m.image ? [m.image] : [])).map(f => `<div class="shot"><a href="/attachments/${esc(f)}" target="_blank" rel="noopener"><img src="/attachments/${esc(f)}" alt="screenshot" loading="lazy"></a></div>`).join('')}
       ${m.link ? `<div class="link"><a href="${esc(m.link)}" target="_blank" rel="noopener">${esc(m.link)}</a></div>` : ''}
     </div></div>`;
   }).join('') : '<div class="none">nothing yet</div>';
@@ -45,35 +45,47 @@ function render(d){
 const tick = poll('/api/messages', render);
 
 const t = document.getElementById('t'), b = document.getElementById('b'), err = document.getElementById('err');
-const preview = document.getElementById('preview'), previewImg = document.getElementById('previewImg');
-let pendingImage = null;
-function showPreview(dataUrl){ pendingImage = dataUrl; previewImg.src = dataUrl; preview.hidden = false; }
-function clearPreview(){ pendingImage = null; previewImg.removeAttribute('src'); preview.hidden = true; }
-document.getElementById('previewX').addEventListener('click', clearPreview);
+const preview = document.getElementById('preview');
+// The screenshots pasted since the last send, in the order pasted. Each holds its place from the
+// paste on, so one that reads slower than the next still goes in its turn.
+let pending = [];
+function drawPreview(){
+  preview.innerHTML = '';
+  for(const p of pending){
+    if(!p.url) continue;
+    const box = document.createElement('div'), img = document.createElement('img'), x = document.createElement('button');
+    box.className = 'thumb'; img.src = p.url; img.alt = 'pasted screenshot';
+    x.type = 'button'; x.title = 'remove'; x.innerHTML = '&times;';
+    x.addEventListener('click', () => { pending = pending.filter(q => q !== p); drawPreview(); });
+    box.append(img, x); preview.append(box);
+  }
+  preview.hidden = !preview.childElementCount;
+}
+function clearPreview(){ pending = []; drawPreview(); }
 
-// A pasted screenshot rides along with the text, or stands in for it.
+// Pasted screenshots ride along with the text, or stand in for it. Every image on the clipboard is
+// taken, and each paste adds to those already waiting.
 t.addEventListener('paste', e => {
   const items = (e.clipboardData && e.clipboardData.items) || [];
   for(const it of items){
-    if(it.type && it.type.indexOf('image/') === 0){
-      const file = it.getAsFile();
-      if(!file) continue;
-      const reader = new FileReader();
-      reader.onload = () => showPreview(reader.result);
-      reader.readAsDataURL(file);
-      e.preventDefault();
-      return;
-    }
+    if(!it.type || it.type.indexOf('image/') !== 0) continue;
+    const file = it.getAsFile();
+    if(!file) continue;
+    const p = {url: null}, reader = new FileReader();
+    pending.push(p);
+    reader.onload = () => { p.url = reader.result; drawPreview(); };
+    reader.readAsDataURL(file);
+    e.preventDefault();
   }
 });
 
 async function send(){
-  const text = t.value.trim();
-  if(!text && !pendingImage) return;
+  const text = t.value.trim(), images = pending.filter(p => p.url).map(p => p.url);
+  if(!text && !images.length) return;
   b.disabled = true; b.textContent = 'sending'; err.textContent = '';
   try {
     const r = await (await fetch('/api/messages', {method:'POST', headers:{'Content-Type':'application/json'},
-                                                   body: JSON.stringify({text, image: pendingImage})})).json();
+                                                   body: JSON.stringify({text, images})})).json();
     if(r.ok){ t.value = ''; clearPreview(); await tick(); } else { err.textContent = r.error || 'not sent'; }
   } catch { err.textContent = 'not sent: the board is not answering'; }
   b.disabled = false; b.textContent = 'send'; t.focus();

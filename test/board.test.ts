@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { inboxHeld, MAX_CHARS, postMessage, sweep } from "../src/board/inbox.js";
+import { attachmentsDir, inboxHeld, MAX_CHARS, pageText, postMessage, sweep } from "../src/board/inbox.js";
 import { serve } from "../src/board/server.js";
 import { transition } from "../src/state.js";
 import { readTail } from "../src/messages.js";
@@ -106,6 +106,21 @@ test("the server: pages, the snapshot, posting, and only the tail of the log", {
   assert.equal(full.status, 200);
   const bad = await fetch(board.url + "/api/messages", { method: "POST", headers: page, body: JSON.stringify({ text: "x".repeat(MAX_CHARS + 1) }) });
   assert.equal(bad.status, 400);
+
+  // Several pasted screenshots in one message: each is stored, and the row and the inbox line name
+  // every one in the order pasted. A page from before still posts a single `image`.
+  const png = (s: string) => "data:image/png;base64," + Buffer.from(s).toString("base64");
+  const three = await fetch(board.url + "/api/messages", { method: "POST", headers: page, body: JSON.stringify({ text: "look", images: ["one", "two", "three"].map(png) }) });
+  assert.equal(three.status, 200);
+  const one = await fetch(board.url + "/api/messages", { method: "POST", headers: page, body: JSON.stringify({ image: png("solo") }) });
+  assert.equal(one.status, 200);
+  const [look, solo] = readTail(ws.messages).slice(-2);
+  assert.deepEqual(look?.images?.map((f) => readFileSync(join(attachmentsDir(ws), f), "utf8")), ["one", "two", "three"]);
+  assert.deepEqual(pageText(ws, look!).split("\n").slice(1), look?.images?.map((f) => `[image saved at: ${join(attachmentsDir(ws), f)}]`));
+  assert.equal(readFileSync(join(attachmentsDir(ws), solo!.images![0]!), "utf8"), "solo");
+  const broken = await fetch(board.url + "/api/messages", { method: "POST", headers: page, body: JSON.stringify({ images: [png("ok"), "not an image"] }) });
+  assert.equal(broken.status, 400);
+  assert.equal(readdirSync(attachmentsDir(ws)).length, 4, "a message refused leaves none of its images behind");
 });
 
 // An agent with a file in portraits/avatars/ gets its URL on both pages; the route serves only a plain
