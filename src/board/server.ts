@@ -11,7 +11,7 @@ import { isHuman, readTail } from "../messages.js";
 import { allRecs, BUSY, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { capitalize, run, sleep } from "../util.js";
-import { attachmentsDir, postMessage, Receipts, type Relay, saveAttachment, sweep } from "./inbox.js";
+import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, type Relay, saveAttachment, sweep } from "./inbox.js";
 import { type Fetch, ReviewCache } from "./reviews.js";
 
 // The board: a read-only picture of the fleet at `/`, and the thread between the human and the lead
@@ -385,8 +385,8 @@ const TYPES: Record<string, string> = {
   ".ico": "image/x-icon",
 };
 const PAGES: Record<string, string> = { "/": "board.html", "/messages": "messages.html" };
-// Large enough for a pasted screenshot; the POST is same-site only, so this is not a public surface.
-const MAX_BODY = 12 * 1024 * 1024;
+// Large enough for several pasted screenshots; the POST is same-site only, so this is not a public surface.
+const MAX_BODY = 40 * 1024 * 1024;
 
 function send(res: ServerResponse, code: number, body: string | Buffer, type: string, cache = "no-store"): void {
   const raw = typeof body === "string" ? Buffer.from(body) : body;
@@ -480,18 +480,25 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
         else chunks.push(c);
       });
       req.on("end", () => {
-        let body: { text?: unknown; image?: unknown };
+        let body: { text?: unknown; image?: unknown; images?: unknown };
         try {
           body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
         } catch {
           return json(res, 400, { ok: false, error: "bad json" });
         }
-        let image: string | null = null;
-        if (typeof body?.image === "string" && body.image !== "") {
-          image = saveAttachment(ws, body.image);
-          if (image === null) return json(res, 400, { ok: false, error: "that image could not be read (png, jpeg, gif or webp, up to 10MB)" });
+        // `images` in the order pasted; a page loaded before the board learned it still posts one `image`.
+        const posted = Array.isArray(body?.images) ? body.images : typeof body?.image === "string" && body.image !== "" ? [body.image] : [];
+        if (posted.length > MAX_IMAGES) return json(res, 400, { ok: false, error: `${posted.length} images, over the ${MAX_IMAGES} a message takes` });
+        const images: string[] = [];
+        for (const p of posted) {
+          const name = saveAttachment(ws, p);
+          if (name === null) {
+            for (const f of images) unlinkSync(join(attachmentsDir(ws), f));
+            return json(res, 400, { ok: false, error: "that image could not be read (png, jpeg, gif or webp, up to 10MB)" });
+          }
+          images.push(name);
         }
-        const r = postMessage(ws, body?.text, image);
+        const r = postMessage(ws, body?.text, images);
         json(res, r.ok ? 200 : 400, r);
       });
       return;

@@ -23,9 +23,13 @@ export interface Message {
   ticket?: string | null;
   kind?: string;
   link?: string | null;
-  // File name (never a path) of a screenshot pasted on the page, stored under the attachments dir.
+  // File names (never paths) of the screenshots pasted on the page, in the order pasted, stored
+  // under the attachments dir. Rows written before a message could carry several hold one `image`.
+  images?: string[];
   image?: string | null;
 }
+
+export const rowImages = (row: Message): string[] => row.images ?? (row.image ? [row.image] : []);
 
 export function isHuman(ws: Workspace, kind: string | undefined): boolean {
   return kind === HUMAN_KIND || (kind !== undefined && kind === ws.config.human.legacyMessageKind);

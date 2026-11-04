@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { appendFileSync, closeSync, constants, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { HUMAN_KIND, isHuman, type Message } from "../messages.js";
+import { HUMAN_KIND, isHuman, type Message, rowImages } from "../messages.js";
 import type { Workspace } from "../workspace.js";
 import { chars, die, now, pyDumps, sleep } from "../util.js";
 
@@ -17,15 +17,14 @@ const cursorFile = (ws: Workspace) => join(ws.runDir, "inbox.cursor");
 
 // The human's side of the thread. Appended here rather than through `say`, which is the lead's
 // voice; the kind keeps the two apart on the page and in the log.
-export function postMessage(ws: Workspace, text: unknown, image: string | null = null): { ok: boolean; error: string | null } {
+export function postMessage(ws: Workspace, text: unknown, images: string[] = []): { ok: boolean; error: string | null } {
   const t = typeof text === "string" ? text.trim() : "";
-  const img = typeof image === "string" && image !== "" ? image : null;
   // A pasted screenshot is a message on its own; a caption is optional.
-  if (!t && !img) return { ok: false, error: "nothing to send" };
+  if (!t && images.length === 0) return { ok: false, error: "nothing to send" };
   const n = chars(t).length;
   if (n > MAX_CHARS) return { ok: false, error: `${n} characters, over the ${MAX_CHARS} the page takes` };
   mkdirSync(ws.stateDir, { recursive: true });
-  const row = { t: now(), id: randomBytes(3).toString("hex"), text: t, ticket: null, kind: HUMAN_KIND, link: null, image: img };
+  const row = { t: now(), id: randomBytes(3).toString("hex"), text: t, ticket: null, kind: HUMAN_KIND, link: null, images };
   appendFileSync(ws.messages, pyDumps(row) + "\n");
   return { ok: true, error: null };
 }
@@ -35,6 +34,7 @@ export const attachmentsDir = (ws: Workspace): string => join(ws.stateDir, "atta
 
 const IMAGE_EXT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+export const MAX_IMAGES = 10;
 
 // Decode a `data:image/...;base64,...` payload from the page and store it, returning the file name
 // to record on the row, or null when it is not an image we accept. The name is random and never
@@ -53,11 +53,11 @@ export function saveAttachment(ws: Workspace, dataUrl: unknown): string | null {
 }
 
 // What reaches the session. The id tag is how the receipts find it again in the transcript. A
-// pasted screenshot is named by its on-disk path on a second line, so the session can open it.
-export const pageText = (ws: Workspace, row: Message): string => {
-  const base = `[from the message page] [m:${row.id}] ${row.text ?? ""}`.trimEnd();
-  return row.image ? `${base}\n[image saved at: ${join(attachmentsDir(ws), row.image)}]` : base;
-};
+// pasted screenshot is named by its on-disk path on a line of its own, in the order pasted, so the
+// session can open each one.
+export const pageText = (ws: Workspace, row: Message): string =>
+  [`[from the message page] [m:${row.id}] ${row.text ?? ""}`.trimEnd(),
+    ...rowImages(row).map((f) => `[image saved at: ${join(attachmentsDir(ws), f)}]`)].join("\n");
 
 // The inbox has one owner at a time, and the owner holds the lock: `factory board --inbox`, run as
 // a monitor in the lead's session, or failing that the board's courier sweep. The lock dies with its
