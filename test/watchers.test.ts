@@ -164,6 +164,66 @@ test("a recorded PR's merge is reported when no listing of the newest PRs reache
   assert.match(r.stdout, /WEB-2: acme\/web#7 is MERGED but the store says pr-open -- done judgement owed/);
 });
 
+test("a recorded PR that conflicts is reported once, when it starts to, and never once merged", () => {
+  const { ws, run, read } = watcherWorkspace();
+  // Records with their PRs written straight into the store: the state machine is not under test.
+  const put = (key: string, state: string, prs: { repo: string; number: number }[], title?: string) => {
+    assert.equal(factory(ws, ["state", key, "queued"]).status, 0);
+    const file = join(ws, "state", `${key}.json`);
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state, pr: prs[0] ?? null, prs, ...(title ? { title } : {}) }));
+  };
+  put("WEB-2", "colleague-review", [{ repo: "acme/web", number: 7 }], "Fix login");
+  put("WEB-3", "fixing", [{ repo: "acme/web", number: 8 }]);
+  put("WEB-4", "blocked", [{ repo: "acme/api", number: 3 }], "Retire the old page");
+  put("WEB-5", "building", [{ repo: "acme/web", number: 9 }]);
+  const FIELDS = "number,title,url,state,mergeable,mergeStateStatus,baseRefName,headRefName";
+  const pr = (n: number, mergeable: string, state = "OPEN") => ({
+    number: n, title: `PR ${n}`, headRefName: `b${n}`, state, baseRefName: "main", url: `https://github.com/acme/x/pull/${n}`,
+    mergeable, mergeStateStatus: mergeable === "CONFLICTING" ? "DIRTY" : mergeable === "MERGEABLE" ? "BLOCKED" : "UNKNOWN",
+  });
+  // web#8 is merged and beyond the open listing, so it is read by number, and GitHub goes on saying
+  // CONFLICTING for it. web#9 conflicts but its item is still being built.
+  const routes = (web7: string, api3: string) => ({
+    "pr list": { stdout: [] },
+    [`pr list -R acme/web --state open --limit 100 --json ${FIELDS}`]: { stdout: [pr(7, web7), pr(9, "CONFLICTING")] },
+    [`pr list -R acme/api --state open --limit 100 --json ${FIELDS}`]: { stdout: [pr(3, api3)] },
+    "pr view 8 -R acme/web": { stdout: { ...pr(8, "CONFLICTING", "MERGED"), mergedAt: new Date(Date.now() - 30 * 86400_000).toISOString() } },
+  });
+  const conflicting = () => (JSON.parse(read("queue.state")) as { conflicting: string[] }).conflicting;
+  const said = (out: string) => out.split("\n").filter((l) => l.startsWith("conflict:"));
+  const web7 = "conflict: WEB-2 web#7 Fix login -- CONFLICTING with main (colleague-review); rebase it https://github.com/acme/x/pull/7";
+  const api3 = "conflict: WEB-4 api#3 Retire the old page -- CONFLICTING with main (blocked); rebase it https://github.com/acme/x/pull/3";
+
+  // A courier that failed: nothing is recorded as told, so the next run says it again.
+  let r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }, { status: 1 }], routes("CONFLICTING", "UNKNOWN"));
+  assert.equal(r.status, 1);
+  assert.deepEqual(said(r.stdout), [web7], "only the watched open PR; UNKNOWN is not news, merged and building are skipped");
+  assert.deepEqual(conflicting(), []);
+
+  r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }, { stdout: "" }], routes("CONFLICTING", "UNKNOWN"));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.ok((r.calls[1] as Call).prompt.includes(`[queue watcher]\n${web7}`), "the courier carries the line to the lead");
+  assert.deepEqual(conflicting(), ["acme/web#7"]);
+
+  r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes("CONFLICTING", "UNKNOWN"));
+  assert.deepEqual(said(r.stdout), [], "said once, not every run while it stays so");
+  assert.equal(r.calls.length, 1, "nothing new, so no courier");
+
+  // UNKNOWN on a PR already reported keeps it reported; api#3 has come in as conflicting.
+  r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }, { stdout: "" }], routes("UNKNOWN", "CONFLICTING"));
+  assert.deepEqual(said(r.stdout), [api3]);
+  assert.deepEqual(conflicting().sort(), ["acme/api#3", "acme/web#7"]);
+
+  // Rebased clean, then conflicting again: that is a new conflict.
+  r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes("MERGEABLE", "CONFLICTING"));
+  assert.deepEqual(said(r.stdout), []);
+  assert.deepEqual(conflicting(), ["acme/api#3"]);
+  r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }, { stdout: "" }], routes("CONFLICTING", "CONFLICTING"));
+  assert.deepEqual(said(r.stdout), [web7]);
+  assert.match(read("watcher-failures.log"), /relay FAILED/, "only the first run's courier failed");
+  assert.doesNotMatch(read("watcher-failures.log"), /conflict/);
+});
+
 test("the round: a merge the record moved after is judged, one it did not is owed", () => {
   const { ws, run } = watcherWorkspace();
   assert.equal(factory(ws, ["state", "WEB-2", "queued"]).status, 0);
