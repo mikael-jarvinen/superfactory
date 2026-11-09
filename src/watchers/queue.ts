@@ -3,8 +3,8 @@
 //
 // The model does the one thing only a session can: read the tracker through the connector. It is
 // handed no state, runs no commands and messages nobody. Everything after the read is here: the
-// set difference against the last run and the state store, the merged PRs from fixed `gh` calls,
-// and the delivery, which goes by the courier and only when something is new.
+// set difference against the last run and the state store, the merged and conflicting PRs from
+// fixed `gh` calls, and the delivery, which goes by the courier and only when something is new.
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { json } from "../gate/github.js";
@@ -16,11 +16,13 @@ import { dockerWatchdog } from "./docker.js";
 import { beat, failure, heartbeatAge, heartbeatPath, loadPrompt, logTo, openLog, runClaude, runFailure, TIMED_OUT, watcherGh } from "./job.js";
 import { deliver } from "./relay.js";
 
-// What the last runs left: the queue keys already seen, the merge urls already reported, and the
-// last few outcomes, which the round reads to tell a failing connector from a stopped schedule.
+// What the last runs left: the queue keys already seen, the merge urls already reported, the PRs
+// already reported as conflicting (owner/repo#n), and the last few outcomes, which the round reads
+// to tell a failing connector from a stopped schedule.
 export interface QueueState {
   known: string[];
   merged: string[];
+  conflicting: string[];
   outcomes: string[];
 }
 
@@ -30,9 +32,9 @@ export function loadQueueState(ws: Workspace): QueueState {
   try {
     const d = JSON.parse(readFileSync(queueStateFile(ws), "utf8")) as Partial<QueueState>;
     const list = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
-    return { known: list(d.known), merged: list(d.merged), outcomes: list(d.outcomes) };
+    return { known: list(d.known), merged: list(d.merged), conflicting: list(d.conflicting), outcomes: list(d.outcomes) };
   } catch {
-    return { known: [], merged: [], outcomes: [] };
+    return { known: [], merged: [], conflicting: [], outcomes: [] };
   }
 }
 
@@ -46,6 +48,8 @@ export interface GhPr {
   mergedAt?: string | null;
   headRefOid?: string;
   baseRefName?: string;
+  mergeable?: string;
+  mergeStateStatus?: string;
 }
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -102,6 +106,58 @@ function merges(ws: Workspace, recs: Rec[], reported: string[], log: string): { 
     }
   }
   return { lines, urls };
+}
+
+// The states in which an item's PR is open work the factory still owes a merge to. Mikael asked
+// "how come you don't get alerted of conflicts? I have to always say." after pointing out
+// lyyti-classic#8587 and #8641 himself, while #8589 conflicted with nobody saying so.
+export const CONFLICT_WATCHED: ReadonlySet<string> = new Set(["pr-open", "agent-review", "fixing", "gate", "your-review", "colleague-review", "blocked"]);
+const CONFLICT_FIELDS = "number,title,url,state,mergeable,mergeStateStatus,baseRefName,headRefName";
+const conflicted = (pr: GhPr) => pr.mergeable === "CONFLICTING" || pr.mergeStateStatus === "DIRTY";
+
+// Recorded PRs of watched items that conflict with their base, said once when a PR becomes
+// conflicting and not again while it stays so. `keep` is what the state carries whatever the
+// courier does: the PRs already reported that still conflict, or whose answer is not in yet. A PR
+// GitHub answers UNKNOWN for is still computing, so it is neither news nor cleared: the next run
+// asks again. A merged or closed PR is skipped first: GitHub goes on saying CONFLICTING for a
+// merged one (lyyti-classic#8334, merged 2026-10-14, still did on 2026-11-09). A PR that came
+// clean, closed, or left a watched item is dropped, so a later conflict is news again.
+export function conflicts(recs: Rec[], reported: string[], log: string): { lines: string[]; fresh: string[]; keep: string[] } {
+  const lines: string[] = [];
+  const fresh: string[] = [];
+  const keep: string[] = [];
+  const watched = recs.filter((r) => CONFLICT_WATCHED.has(r.state ?? ""));
+  const remotes = [...new Set(watched.flatMap(recPrs).filter((p) => p.repo && typeof p.number === "number").map((p) => p.repo as string))];
+  for (const remote of remotes) {
+    const r = watcherGh(["pr", "list", "-R", remote, "--state", "open", "--limit", "100", "--json", CONFLICT_FIELDS]);
+    const listed = json<GhPr[]>(r);
+    if (!Array.isArray(listed)) logTo(log, `conflicts: cannot list the open PRs of ${remote}${r.stderr.trim() ? `: ${r.stderr.trim()}` : ""}`);
+    const prs = withRecorded(remote, watched, Array.isArray(listed) ? listed : [], CONFLICT_FIELDS);
+    for (const rec of watched)
+      for (const p of recPrs(rec)) {
+        if (p.repo !== remote || typeof p.number !== "number") continue;
+        const id = `${remote}#${p.number}`;
+        if (fresh.includes(id) || keep.includes(id)) continue;
+        const pr = prs.find((x) => x.number === p.number);
+        const was = reported.includes(id);
+        if (!pr || !pr.state) {
+          if (was) keep.push(id);
+          continue;
+        }
+        if (pr.state !== "OPEN") continue;
+        if (conflicted(pr)) {
+          if (was) keep.push(id);
+          else {
+            fresh.push(id);
+            const title = squash(rec.title || pr.title, 90);
+            lines.push(`conflict: ${rec.ticket} ${remote.split("/").pop()}#${p.number} ${title} -- CONFLICTING with ${pr.baseRefName || "its base"} (${rec.state}); rebase it${pr.url ? ` ${pr.url}` : ""}`);
+          }
+        } else if (pr.mergeable === "UNKNOWN" || !pr.mergeable) {
+          if (was) keep.push(id);
+        }
+      }
+  }
+  return { lines, fresh, keep };
 }
 
 // Three hours, not two. The round is an hourly calendar job and launchd never replays a fire it
@@ -161,6 +217,8 @@ export function runQueue(ws: Workspace, out: (line: string) => void = console.lo
   }
   const m = merges(ws, recs, prev.merged, log);
   lines.push(...m.lines);
+  const c = conflicts(recs, prev.conflicting, log);
+  lines.push(...c.lines);
   const stale = roundStale(ws);
   if (stale) lines.push(stale.line);
   const docker = dockerWatchdog(ws);
@@ -173,6 +231,7 @@ export function runQueue(ws: Workspace, out: (line: string) => void = console.lo
   const state: QueueState = {
     known: read?.outcome === "read" ? read.keys.filter((k) => delivered || !fresh.includes(k)) : prev.known,
     merged: delivered ? [...prev.merged, ...m.urls].slice(-50) : prev.merged,
+    conflicting: delivered ? [...c.keep, ...c.fresh] : c.keep,
     outcomes: [...prev.outcomes, outcome].slice(-8),
   };
   writeFileSync(queueStateFile(ws), JSON.stringify(state) + "\n");
