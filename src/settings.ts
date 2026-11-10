@@ -84,10 +84,16 @@ const BASE = { autoMemoryEnabled: false, crossSessionInbound: "accept", isolateP
 
 const DIALOGS = "EnterPlanMode|ExitPlanMode|AskUserQuestion";
 const CHAT = "mcp__claude_ai_Slack__.*";
-// The tracker's write tools, by tracker kind. Reads stay open to everyone.
+// The tracker's write tools, by tracker kind. Reads stay open to everyone. Jira comes through the
+// "claude.ai Atlassian MCP" connector (mcp__claude_ai_Atlassian_MCP__*), whose execute-family tools
+// run any discovered operation; the older "claude.ai Atlassian" connector's names stay covered in
+// case it comes back.
 const TRACKER_WRITES: Record<string, string> = {
-  jira: "mcp__claude_ai_Atlassian__(transitionJiraIssue|editJiraIssue|createJiraIssue|addCommentToJiraIssue|addWorklogToJiraIssue|" +
-    "createIssueLink|createConfluencePage|updateConfluencePage|createConfluenceFooterComment|createConfluenceInlineComment)",
+  jira: "mcp__claude_ai_Atlassian(_MCP)?__(" +
+    "transitionJiraIssue|editJiraIssue|createJiraIssue|addOrEditJiraIssueComment|createConfluenceContent|updateConfluenceContent|" +
+    "executeWrite|executeDestructive|addGraphContext|" +
+    "addCommentToJiraIssue|addWorklogToJiraIssue|createIssueLink|createConfluencePage|updateConfluencePage|" +
+    "createConfluenceFooterComment|createConfluenceInlineComment)",
 };
 const STATUS_EVENTS = ["UserPromptSubmit", "Stop", "SessionStart", "PreCompact", "SessionEnd"];
 

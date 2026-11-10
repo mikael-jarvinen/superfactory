@@ -11,7 +11,7 @@ import { factory, TOML, tempWorkspace } from "./helpers.js";
 const FAKE_CLAUDE = fileURLToPath(new URL("./fake-claude.js", import.meta.url));
 const FAKE_GH = fileURLToPath(new URL("./fake-gh.js", import.meta.url));
 const PROMPTS = fileURLToPath(new URL("../../examples/prompts/", import.meta.url));
-const SEARCH = "mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql";
+const SEARCH = "mcp__claude_ai_Atlassian_MCP__searchJiraIssuesUsingJql";
 const JQL = 'assignee = currentUser() AND statusCategory = "To Do"';
 const MERGED = "number,title,url,mergedAt,headRefName";
 
@@ -76,7 +76,7 @@ test("the queue heartbeat is written only on evidence that the tracker was read"
   assert.ok(existsSync(logs("queue.heartbeat")), "a read writes the heartbeat");
   assert.equal(r.calls.length, 1, "nothing new, so no courier");
   const [reader] = r.calls as [Call];
-  assert.equal(flag(reader.args, "--allowedTools"), `ToolSearch,${SEARCH},mcp__claude_ai_Atlassian__getJiraIssue`, "the reader runs no commands and messages nobody");
+  assert.equal(flag(reader.args, "--allowedTools"), `ToolSearch,${SEARCH},mcp__claude_ai_Atlassian_MCP__getJiraIssue`, "the reader runs no commands and messages nobody");
   assert.ok(reader.prompt.includes("You are the queue watcher") && reader.prompt.includes("cloudId example.atlassian.net") && reader.prompt.includes(JQL));
   assert.ok(!reader.prompt.includes("{lead}"), "placeholders are filled in");
 

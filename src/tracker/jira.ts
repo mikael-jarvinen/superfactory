@@ -1,12 +1,12 @@
-// Jira, through the claude.ai Atlassian connector. Its tools are deferred, so a session finds the
+// Jira, through the claude.ai Atlassian MCP connector. Its tools are deferred, so a session finds the
 // search with ToolSearch before calling it. Everything particular to a team is in [tracker]: the
 // site and the query that defines the queue.
 import type { Workspace } from "../workspace.js";
 import { die } from "../util.js";
 import { CONTRACT, type Tracker } from "./read.js";
 
-const SEARCH = "mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql";
-const GET = "mcp__claude_ai_Atlassian__getJiraIssue";
+const SEARCH = "mcp__claude_ai_Atlassian_MCP__searchJiraIssuesUsingJql";
+const GET = "mcp__claude_ai_Atlassian_MCP__getJiraIssue";
 
 export const jira: Tracker = {
   kind: "jira",

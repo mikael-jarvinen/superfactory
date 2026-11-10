@@ -44,7 +44,7 @@ test("each role renders its own hooks and rules into logs/run/", () => {
   const lead = render(dir, "ada");
   const builder = render(dir, "bea");
   const reviewer = render(dir, "rae");
-  const tracker = (r: Rendered) => r.hooks.PreToolUse?.some((e) => e.matcher?.startsWith("mcp__claude_ai_Atlassian__"));
+  const tracker = (r: Rendered) => r.hooks.PreToolUse?.some((e) => e.matcher?.startsWith("mcp__claude_ai_Atlassian"));
 
   // the lead moves tickets and holds the inbox; nobody else does either
   assert.equal(tracker(lead), false);
@@ -64,6 +64,28 @@ test("each role renders its own hooks and rules into logs/run/", () => {
   assert.ok(reviewer.permissions?.allow?.includes("Edit(//tmp/**)"));
   assert.ok(!reviewer.permissions?.allow?.some((r) => r.includes("gh api repos/")));
   assert.equal(builder.permissions?.deny, undefined);
+});
+
+// Jira moved to the "claude.ai Atlassian MCP" connector, and a matcher written for the old one let
+// a builder transition a ticket. Claude Code tests a regex matcher against the tool name unanchored.
+test("a builder's tracker hook catches Jira writes on the new connector and the old, and no reads", () => {
+  const dir = tempWorkspace();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const builder = render(dir, "bea");
+  const entry = builder.hooks.PreToolUse?.find((e) => e.matcher?.startsWith("mcp__claude_ai_Atlassian"));
+  assert.ok(entry, "the builder has a tracker hook");
+  assert.match(entry.hooks[0]?.command ?? "", / hook no-side-channels --lead ada$/);
+  const matches = (tool: string) => new RegExp(entry.matcher as string).test(tool);
+
+  const writes = ["transitionJiraIssue", "editJiraIssue", "createJiraIssue", "addOrEditJiraIssueComment",
+    "createConfluenceContent", "updateConfluenceContent", "executeWrite", "executeDestructive", "addGraphContext"];
+  for (const w of writes) assert.ok(matches(`mcp__claude_ai_Atlassian_MCP__${w}`), w);
+  for (const w of ["transitionJiraIssue", "addCommentToJiraIssue", "createConfluencePage"])
+    assert.ok(matches(`mcp__claude_ai_Atlassian__${w}`), `old connector: ${w}`);
+
+  const reads = ["searchJiraIssuesUsingJql", "getJiraIssue", "listJiraIssueComments", "getConfluenceContent",
+    "searchConfluence", "executeRead", "discover", "search", "atlassianUserInfo", "getAccessibleAtlassianResources"];
+  for (const r of reads) assert.ok(!matches(`mcp__claude_ai_Atlassian_MCP__${r}`), r);
 });
 
 // Nomura could not run the functions tests: the Firebase emulators need java, and a builder's
