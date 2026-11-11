@@ -3,6 +3,7 @@
   "guard": "readonly",
   "work_dir": "work",
   "settings": {
+    "worktree": { "bgIsolation": "none" },
     "permissions": {
       "deny": [
         "Bash(> *)",
