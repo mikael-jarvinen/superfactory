@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { agentOrDie } from "../src/fleet.js";
 import { designerPrompt, launchArgs, settingsFile } from "../src/launch.js";
-import { editDenyRules } from "../src/settings.js";
+import { editDenyRules, templateNames, TEMPLATES_DIR } from "../src/settings.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, TOML, tempDir, tempWorkspace } from "./helpers.js";
 
@@ -133,6 +133,14 @@ test("the designer's settings: edits only in its work dir, the guard's redirects
     assert.ok(deny.some((x) => x === `Edit(/${p}/**)` || x === `Edit(/${p})`), `${p} stays denied`);
   const guard = r.hooks.PreToolUse.find((e: { matcher?: string }) => e.matcher === "Bash|Read|Grep").hooks[0].command as string;
   assert.match(guard, /--role designer --policy readonly --write-dir \S*designers\/work/);
+  assert.deepEqual(r.worktree, { bgIsolation: "none" }, "the work dir is in the factory's own checkout, where a background session may not edit until it isolates");
+});
+
+test("only the designer turns off the background-isolation guard", () => {
+  for (const t of templateNames()) {
+    const doc = JSON.parse(readFileSync(join(TEMPLATES_DIR, `${t}.json`), "utf8"));
+    if (t !== "designer") assert.equal(doc.settings?.worktree, undefined, `${t} keeps the guard`);
+  }
 });
 
 test("editDenyRules leaves only the kept path, and denies a root with nothing kept whole", () => {
