@@ -43,8 +43,8 @@ const DESCRIPTIONS: Record<string, string> = {
     "{human} approves the design, and a change {human} asks for goes back to the designer.",
   "building": "A teammate is writing the code in a worktree of its own. There is no plan to approve " +
     "first, so {lead}'s brief is the whole specification and the first thing {human} sees is the PR.",
-  "pr-open": "A draft PR exists against the base branch, with its number and head sha recorded.",
-  "agent-review": "A reviewer is reading the diff in a fresh session that has seen nothing before it.",
+  "agent-review": "A draft PR exists against the base branch, and a reviewer reads the diff in a fresh " +
+    "session that has seen nothing before it.",
   "fixing": "The builder is back on the same item, closing every finding the review reported.",
   "gate": "The gate is asking every question about the current head and treating any absence as a " +
     "failure. The PR stays a draft: it opens only when it goes to colleagues.",
@@ -55,6 +55,13 @@ const DESCRIPTIONS: Record<string, string> = {
   "blocked": "{lead} asked {human} something and has no answer yet. The state underneath is kept, so " +
     "the work resumes where it stopped rather than starting again.",
 };
+
+// The board's columns are the states less two: done, which leaves the board, and pr-open, the moment
+// between a builder opening its PR and the review starting, which shows in agent-review. The state
+// machine keeps pr-open; only the picture folds it in.
+const FOLDED: Record<string, string> = { "pr-open": "agent-review" };
+const COLUMNS: readonly string[] = STATES.filter((s) => s !== "done" && !(s in FOLDED));
+const columnOf = (s: string | null): string | null => (s !== null && FOLDED[s]) || s;
 
 const ageMinutes = (iso: string | null | undefined): number | null => {
   const t = iso ? Date.parse(iso) : NaN;
@@ -317,6 +324,7 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
     ticket: r.ticket,
     title: r.title ?? null,
     state: r.state,
+    column: columnOf(r.state),
     agent: r.agent,
     stack: r.stack,
     jira: r.jira,
@@ -331,14 +339,14 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
       review: r.state !== null && IN_REVIEW.has(r.state) ? reviews.get(prKey(p)) : null,
     })),
   }));
-  const idx = (s: string | null) => (s !== null && (STATES as readonly string[]).includes(s) ? STATES.indexOf(s as (typeof STATES)[number]) : 99);
-  tickets.sort((a, b) => idx(a.state) - idx(b.state) || (b.age_min ?? 0) - (a.age_min ?? 0));
+  const idx = (s: string | null) => (s !== null && COLUMNS.includes(s) ? COLUMNS.indexOf(s) : 99);
+  tickets.sort((a, b) => idx(a.column) - idx(b.column) || (b.age_min ?? 0) - (a.age_min ?? 0));
   const descriptions = Object.fromEntries(Object.entries(DESCRIPTIONS).map(([k, v]) => [k, v.replaceAll("{human}", human).replaceAll("{lead}", leadName)]));
   return {
     at: clock(),
     human,
     lead: lead(ws).name,
-    columns: STATES.filter((s) => s !== "done"),
+    columns: COLUMNS,
     descriptions,
     waiting_on_you: [...WAITING_ON_YOU].sort(),
     teams: teams(ws, recs, sessions.background()),
