@@ -145,7 +145,7 @@ function review(r){
 function work(d){
   const cols = d.columns.map(col => {
     const mine = d.waiting_on_you.includes(col);
-    const here = d.tickets.filter(t => t.state === col);
+    const here = d.tickets.filter(t => t.column === col);
     const cards = here.map(t => `
       <div class="card">
         <div class="k">${esc(t.ticket)}${t.local ? '<span class="tag">local</span>' : ''}</div>
