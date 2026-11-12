@@ -53,7 +53,7 @@ test("each role renders its own hooks and rules into logs/run/", () => {
   assert.match(commandFor(lead, "Stop", undefined), / hook status --agent ada --inbox$/);
   assert.equal(builder.hooks.Stop, undefined);
 
-  assert.match(commandFor(lead, "PreToolUse", "Bash|Read|Grep"), / hook guard --role lead --policy protect$/);
+  assert.match(commandFor(lead, "PreToolUse", "Bash|Read|Grep"), / hook guard --role lead --policy protect --allow-close \S+\/allow-close\.jsonl$/);
   assert.match(commandFor(builder, "PreToolUse", "Bash|Read|Grep"), / hook guard --role builder --policy protect$/);
   assert.match(commandFor(reviewer, "PreToolUse", "Bash|Read|Grep"), / hook guard --role reviewer --policy readonly$/);
   assert.equal(lead.permissions?.defaultMode, "bypassPermissions");

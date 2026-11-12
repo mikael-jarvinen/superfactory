@@ -11,7 +11,8 @@
 //
 // protect (sessions in bypass permissions, where deny rules do not apply): default allow, but no
 // push to a protected branch by any spelling, no force push without a lease, no wholesale pushes,
-// no branch deletes on origin, no merging through gh, no undrafting through gh except by the lead on
+// no branch deletes on origin, no merging through gh, no closing through gh except by the lead on a
+// product PR the human named (the --allow-close list), no undrafting through gh except by the lead on
 // a PR of the --org, no checkout of a protected branch. The --own-repo repos have main as their only branch and no PRs: a push to main is allowed
 // when it names one of them by URL, and so is renaming a branch of one to main. Deleting a branch
 // through the API is allowed outside the --org, and for the lead in an --own-repo when GitHub says
@@ -23,6 +24,7 @@
 // audited; test/guard.test.ts is the contract.
 import { posix } from "node:path";
 import { parseArgs } from "node:util";
+import { closable } from "../allow-close.js";
 import type { HookResult } from "../settings.js";
 import { chars, run } from "../util.js";
 
@@ -37,6 +39,8 @@ export interface GuardContext {
   ownRepos: string[];
   // Whether a branch of owner/repo is merged into the default branch. Tests stub it; the hook asks GitHub.
   isMerged?: (repo: string, branch: string) => boolean;
+  // state/allow-close.jsonl: the product PRs the human has named for the lead to close.
+  allowClose?: string;
 }
 
 export const PROTECTED = new Set(["main", "master", "staging", "production", "dev"]);
@@ -474,14 +478,42 @@ function ghPrRepo(args: string[]): string | null {
   return null;
 }
 
+// The PR number a `gh pr close` names, by a number or a PR URL of the repo it targets. null for a
+// branch name, a second selector, a flag the guard does not know, or a URL and --repo that disagree.
+function ghCloseNumber(args: string[], repo: string): number | null {
+  const sel: string[] = [];
+  for (let i = 2; i < args.length; i++) {
+    const a = args[i] as string;
+    if (["--repo", "-R", "--comment", "-c"].includes(a)) i++;
+    else if (a.startsWith("--repo=") || a.startsWith("--comment=") || /^-[Rc]./.test(a)) continue;
+    else if (a.startsWith("-")) return null; // --delete-branch among them: a product branch is not the lead's to delete
+    else sel.push(a);
+  }
+  if (sel.length !== 1) return null;
+  const s = sel[0] as string;
+  if (/^[1-9]\d*$/.test(s)) return Number(s);
+  const m = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/([1-9]\d*)(\/.*)?$/.exec(s);
+  return m && (m[1] as string).toLowerCase() === repo.toLowerCase() ? Number(m[2]) : null;
+}
+
+const HOW_TO_CLOSE = "a product PR closes only once the human has named that exact PR and the lead has recorded it with " +
+  "`factory allow-close <repo-key> <n> --words \"<the human's words>\"`";
+
 function checkGhProtect(words: string[], ctx: GuardContext): void {
   const args = words.slice(1);
   if (args[0] === "pr" && ["merge", "close", "lock", "unlock"].includes(args[1] ?? "")) {
     const repo = ghPrRepo(args);
-    if (repo === null) refuse("merging or closing a PR needs an explicit --repo owner/name (or a PR URL) so the guard can confirm it is a factory-own repo");
+    if (repo === null) refuse("merging or closing a PR needs an explicit --repo owner/name (or a PR URL) so the guard can confirm whose repo it is");
     const target = (repo as string).toLowerCase();
-    if (!ctx.ownRepos.some((r) => r.toLowerCase() === target)) refuse("merging or closing a PR on a product repo is the human's and colleagues' call");
     // a factory-own repo (lyyti-factory / superfactory): the lead and its assistants may merge or close it.
+    if (!ctx.ownRepos.some((r) => r.toLowerCase() === target)) {
+      if (args[1] !== "close") refuse(`${args[1]} of a PR on a product repo is the human's and colleagues' call, always`);
+      const n = ghCloseNumber(args, repo as string);
+      if (n === null) refuse(`closing a product PR needs its number or URL in the command, one selector and no --delete-branch, so the guard can check it; ${HOW_TO_CLOSE}`);
+      if (ctx.role !== "lead") refuse(`closing a product PR is the lead's; ${HOW_TO_CLOSE}`);
+      if (!ctx.allowClose || !closable(ctx.allowClose, repo as string, n as number))
+        refuse(`${repo}#${n} is not on the allow-close list; ${HOW_TO_CLOSE}`);
+    }
   }
   if (args[0] === "pr" && args[1] === "ready" && !args.includes("--undo")) {
     const repo = ghPrRepo(args);
@@ -771,12 +803,13 @@ function context(argv: string[]): GuardContext {
     args: argv, strict: true, allowPositionals: false,
     options: {
       "role": { type: "string" }, "policy": { type: "string" }, "write-dir": { type: "string", multiple: true },
-      "org": { type: "string" }, "own-repo": { type: "string", multiple: true },
+      "org": { type: "string" }, "own-repo": { type: "string", multiple: true }, "allow-close": { type: "string" },
     },
   });
   if (!values.role) throw new Error("--role is missing");
   if (!(POLICIES as readonly string[]).includes(values.policy ?? "")) throw new Error(`--policy must be one of ${POLICIES.join(", ")}`);
-  return { role: values.role, policy: values.policy as Policy, writeDirs: values["write-dir"] ?? [], org: values.org, ownRepos: values["own-repo"] ?? [] };
+  return { role: values.role, policy: values.policy as Policy, writeDirs: values["write-dir"] ?? [], org: values.org, ownRepos: values["own-repo"] ?? [],
+    allowClose: values["allow-close"] };
 }
 
 export function hook(argv: string[], input: string): HookResult {
