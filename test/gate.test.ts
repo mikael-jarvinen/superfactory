@@ -359,6 +359,31 @@ test("pr-wait waits on a review bot it asked, timed from the ask, not the head",
   assert.match(r.stderr, /waiting will not clear it:\n {2}- CodeRabbit has not reviewed aaaaaaa: it has posted nothing at this head/);
 });
 
+// lyyti-classic#8641, 2026-11-12: asked at 10:54:12, CodeRabbit's check-run went in_progress at 10:54:53
+// and was still running when the grace from the ask ran out at 11:04, so pr-wait refused it as having
+// posted nothing. A bot whose check is running is reviewing, whatever the clock says.
+test("pr-wait waits on a review bot whose check is still running, past the grace from the ask", () => {
+  const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
+  const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
+  const rv = `api repos/${REMOTE}/pulls/${N}/reviews?per_page=100&page=1`;
+  const cr = `api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`;
+  const review = { user: { login: "coderabbitai[bot]" }, commit_id: HEAD, state: "COMMENTED", body: REVIEW_BODY };
+  const reviewing = checkRuns(check("test"), rabbitRun("Review in progress", { status: "in_progress", conclusion: null, started_at: "2026-01-01T10:01:41Z" }));
+  const r = run(green({
+    [st]: { stdout: { statuses: [] } },
+    [cr]: [checkRuns(check("test"), rabbitRun("Review skipped: draft pull request", { conclusion: "skipped" })), reviewing, reviewing,
+      checkRuns(check("test"), rabbitRun("Review completed", { conclusion: "success", started_at: "2026-01-01T10:01:41Z" }))],
+    [rv]: [{ stdout: [] }, { stdout: [] }, { stdout: [] }, { stdout: [review] }],
+    // the ask, long older than the grace by the time the bot is still reviewing
+    ...asking([], [TRIGGER]),
+  }), ["pr-wait", "web", String(N), HEAD]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.calls.filter((c) => c === POST).length, 1);
+  assert.match(r.stderr, /waiting \(\d+s\) on: check 'CodeRabbit' is in_progress, not completed; CodeRabbit is reviewing aaaaaaa \(its check here is in_progress: Review in progress\)/);
+  assert.doesNotMatch(r.stderr, /posted nothing|will not clear/);
+  assert.match(r.stdout, /^SENDABLE/m);
+});
+
 // The check-run is CodeRabbit's own, as read off lyyti-classic#8447: neutral, titled "Review rate limited".
 const rabbitRun = (title: string, o: Record<string, unknown> = {}) =>
   check("CodeRabbit", { conclusion: "neutral", output: { title }, app: { slug: "coderabbitai" }, details_url: null, ...o });
