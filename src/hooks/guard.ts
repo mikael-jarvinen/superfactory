@@ -24,9 +24,10 @@
 // audited; test/guard.test.ts is the contract.
 import { posix } from "node:path";
 import { parseArgs } from "node:util";
-import { closable } from "../allow-close.js";
+import { allowClosePath, closable } from "../allow-close.js";
 import type { HookResult } from "../settings.js";
 import { chars, run } from "../util.js";
+import { openWorkspace, resolveWorkspace } from "../workspace.js";
 
 export const POLICIES = ["readonly", "protect"] as const;
 export type Policy = (typeof POLICIES)[number];
@@ -39,8 +40,12 @@ export interface GuardContext {
   ownRepos: string[];
   // Whether a branch of owner/repo is merged into the default branch. Tests stub it; the hook asks GitHub.
   isMerged?: (repo: string, branch: string) => boolean;
-  // state/allow-close.jsonl: the product PRs the human has named for the lead to close.
+  // state/allow-close.jsonl: the product PRs the human has named for the lead to close. Without it the
+  // lead's guard finds the file through its workspace, so a lead launched before the flag existed
+  // needs no restart.
   allowClose?: string;
+  // The workspace `factory --workspace` named, if any.
+  workspace?: string;
 }
 
 export const PROTECTED = new Set(["main", "master", "staging", "production", "dev"]);
@@ -496,6 +501,17 @@ function ghCloseNumber(args: string[], repo: string): number | null {
   return m && (m[1] as string).toLowerCase() === repo.toLowerCase() ? Number(m[2]) : null;
 }
 
+// The allow-close list of the workspace this session works in: --workspace, then FACTORY_WORKSPACE,
+// then the nearest factory.toml above the session's project directory or the cwd. Read only when a
+// product PR is closed; undefined when there is no workspace or its config does not load.
+function workspaceAllowClose(flag: string | undefined): string | undefined {
+  try {
+    return allowClosePath(openWorkspace(resolveWorkspace({ flag, cwd: process.env.CLAUDE_PROJECT_DIR || process.cwd() })).stateDir);
+  } catch {
+    return undefined;
+  }
+}
+
 const HOW_TO_CLOSE = "a product PR closes only once the human has named that exact PR and the lead has recorded it with " +
   "`factory allow-close <repo-key> <n> --words \"<the human's words>\"`";
 
@@ -511,7 +527,9 @@ function checkGhProtect(words: string[], ctx: GuardContext): void {
       const n = ghCloseNumber(args, repo as string);
       if (n === null) refuse(`closing a product PR needs its number or URL in the command, one selector and no --delete-branch, so the guard can check it; ${HOW_TO_CLOSE}`);
       if (ctx.role !== "lead") refuse(`closing a product PR is the lead's; ${HOW_TO_CLOSE}`);
-      if (!ctx.allowClose || !closable(ctx.allowClose, repo as string, n as number))
+      const list = ctx.allowClose ?? workspaceAllowClose(ctx.workspace);
+      if (list === undefined) refuse(`the guard found no workspace, so no allow-close list, to check ${repo}#${n} against; ${HOW_TO_CLOSE}`);
+      if (!closable(list as string, repo as string, n as number))
         refuse(`${repo}#${n} is not on the allow-close list; ${HOW_TO_CLOSE}`);
     }
   }
@@ -798,7 +816,7 @@ export function verdict(cmd: string, ctx: GuardContext): string | null {
   }
 }
 
-function context(argv: string[]): GuardContext {
+function context(argv: string[], workspace: string | undefined): GuardContext {
   const { values } = parseArgs({
     args: argv, strict: true, allowPositionals: false,
     options: {
@@ -809,13 +827,13 @@ function context(argv: string[]): GuardContext {
   if (!values.role) throw new Error("--role is missing");
   if (!(POLICIES as readonly string[]).includes(values.policy ?? "")) throw new Error(`--policy must be one of ${POLICIES.join(", ")}`);
   return { role: values.role, policy: values.policy as Policy, writeDirs: values["write-dir"] ?? [], org: values.org, ownRepos: values["own-repo"] ?? [],
-    allowClose: values["allow-close"] };
+    allowClose: values["allow-close"], workspace };
 }
 
-export function hook(argv: string[], input: string): HookResult {
+export function hook(argv: string[], input: string, workspace?: string): HookResult {
   let ctx: GuardContext;
   try {
-    ctx = context(argv);
+    ctx = context(argv, workspace);
   } catch (e) {
     return { code: 2, stderr: `guard: refused. ${(e as Error).message}. The session's settings were rendered wrong, so every command is refused until it is relaunched.\n` };
   }
