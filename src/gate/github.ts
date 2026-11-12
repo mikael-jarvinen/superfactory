@@ -106,6 +106,7 @@ export interface Review {
   user: { login: string } | null;
   commit_id: string | null;
   state: string;
+  body: string | null;
 }
 
 // Every review on a PR, every page.

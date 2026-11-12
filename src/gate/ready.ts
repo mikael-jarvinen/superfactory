@@ -28,6 +28,9 @@ export interface Failure {
   // The trigger that, once asked at this head, makes this failure a wait: the bot was asked and has
   // not answered yet. `pr-wait` times it from the ask.
   asked?: string;
+  // Ask the trigger again once the last ask at this head is older than the gate's grace: a
+  // rate-limited bot answers an ask with the limit and nothing more.
+  again?: boolean;
 }
 
 export interface Verdict {
@@ -211,15 +214,19 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
     else if (!reviewedRun && !(st?.state === "success" && !NOT_A_REVIEW.test(desc))) {
       const rs = reviews(repo, n);
       if (rs === undefined) fail(`COULD NOT READ the reviews of #${n} -- cannot say whether ${bot.status} reviewed ${short}`, "unreadable");
-      else if (!rs.some((r) => (r.user?.login ?? "").replace(/\[bot\]$/, "") === botLogin && r.commit_id === sha)) {
-        // Mikael, 2026-10-27: "we should be able to work without coderabbit when the limits are hit."
-        // Its latest word at this head, status or check-run, saying it is rate limited lets the PR go
-        // without its review, said every time.
+      // A review counts only with a body. Each of its replies inside a review thread is a review object
+      // of its own, empty, at the head of the moment: on lyyti-classic#8705, 2026-11-12, two replies at
+      // the head passed for its review there, which had been rate limited.
+      else if (!rs.some((r) => (r.user?.login ?? "").replace(/\[bot\]$/, "") === botLogin && r.commit_id === sha && !!r.body?.trim())) {
+        // Mikael, 2026-11-12: "My just opened PRs always get coderabbit comments, please fix." Its latest
+        // word at this head, status or check-run, saying it is rate limited is waited out and asked
+        // again, never sent past. This replaces 2026-10-27's "we should be able to work without
+        // coderabbit when the limits are hit".
         const age = Math.round(sinceHead([...(runs ?? []).map((c) => c.started_at), ...sts.map((x) => x.created_at)]));
         const runTitle = latestRun?.status === "completed" ? (latestRun.output?.title ?? "") : "";
         const skipped = st ? (SKIPPED.test(desc) ? `its status here says "${desc}"` : "") : SKIPPED.test(runTitle) ? `its check here says "${runTitle}"` : "";
         if ((st && RATE_LIMITED.test(desc)) || (latestRun && rateLimitedRun(latestRun)))
-          remarks.push(`${bot.status} is rate limited and has not reviewed ${short}; sent without its review`);
+          failures.push({ text: `${bot.status} is rate limited and has not reviewed ${short} -- wait for the limit, then ${ask}`, kind: "waits", trigger: bot.trigger, again: true });
         else if (skipped) failures.push({ text: `${bot.status} has not reviewed ${short}: ${skipped} -- ${ask}`, kind: "fatal", trigger: bot.trigger });
         else if (!st && age < graceS()) fail(`${bot.status} has posted nothing at ${short} yet, ${age}s after its first check -- waiting up to ${graceS()}s`, "waits");
         else if (st) fail(`${bot.status} has not reviewed ${short}: its status here says "${desc}" -- ${ask}`);
