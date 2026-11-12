@@ -251,3 +251,18 @@ test("the lead closes a product PR only once the human has named it", () => {
   assert.notEqual(factory(dir, ["allow-close", "api", "8703"]).status, 0);
   assert.notEqual(factory(dir, ["allow-close", "nope", "8703", "--words", "x"]).status, 0);
 });
+
+// A lead launched before --allow-close was rendered into its settings has none; its guard finds the
+// list through the workspace instead, and the flag still wins when given.
+test("the lead's guard finds the allow-close list through its workspace when the flag is missing", () => {
+  const dir = tempWorkspace();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.equal(factory(dir, ["allow-close", "api", "8701", "--words", "I allow you to close the PR"]).status, 0);
+  const lead: GuardContext = { ...pr, role: "lead", workspace: dir };
+  assert.equal(verdict("gh pr close 8701 -R acme/api", lead), null);
+  assert.match(verdict("gh pr close 8702 -R acme/api", lead) ?? "", /acme\/api#8702 is not on the allow-close list/);
+  assert.match(verdict("gh pr merge 8701 -R acme/api", lead) ?? "", /^merge of a PR on a product repo/);
+  assert.notEqual(verdict("gh pr close 8701 -R acme/api", { ...lead, role: "builder" }), null);
+  // the flag overrides the workspace: a list that names nothing closes nothing
+  assert.notEqual(verdict("gh pr close 8701 -R acme/api", { ...lead, allowClose: `${dir}/nothing.jsonl` }), null);
+});
