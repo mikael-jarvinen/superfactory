@@ -11,9 +11,7 @@
 //
 // A review bot that skipped or paused a draft reviews nothing until asked, so it asks: it posts the
 // gate's trigger comment once per head, then waits for the review like any other. Once asked, a bot
-// that has posted nothing at the head yet is waited on for the gate's grace from the ask. A bot that
-// is rate limited is waited on to the limit and asked again each time the grace passes; it is never
-// sent without its review.
+// that has posted nothing at the head yet is waited on for the gate's grace from the ask.
 //
 // Exit codes: 1 not sendable, 2 the gate could not be read, 3 still waiting at the limit, 4 green
 // but held on prose.
@@ -51,7 +49,7 @@ export function waitAndSend(ws: Workspace, repo: Repo, n: number, reviewed: stri
       const asked = new Set(v.failures.filter((f) => f.asked && (sinceAsked(repo, n, v.head, f.asked) ?? Infinity) < graceS()));
       const fatal = v.failures.filter((f) => f.kind === "fatal" && !f.trigger && !asked.has(f));
       if (fatal.length) throw stop(1, `NOT SENDABLE, and waiting will not clear it:\n${fatal.map((f) => `  - ${f.text}`).join("\n")}`);
-      for (const f of v.failures) if (f.trigger) askOnce(repo, n, v.head, f.trigger, err, f.again ? graceS() : Infinity);
+      for (const f of v.failures) if (f.trigger) askOnce(repo, n, v.head, f.trigger, err);
       unread = v.failures.find((f) => f.kind === "unreadable")?.text ?? "";
       waiting = v.failures.map((f) => f.text);
     } catch (e) {
@@ -89,10 +87,9 @@ function sinceAsked(repo: Repo, n: number, head: string, body: string): number |
   return at ? Math.round((Date.now() - Date.parse(at)) / 1000) : undefined;
 }
 
-// Posts the trigger unless it was already asked at this head, less than `again` seconds ago.
-function askOnce(repo: Repo, n: number, head: string, body: string, err: (line: string) => void, again: number): void {
-  const at = askedAt(repo, n, head, body);
-  if (at && (Date.now() - Date.parse(at)) / 1000 < again) return;
+// Posts the trigger unless it was already asked at this head.
+function askOnce(repo: Repo, n: number, head: string, body: string, err: (line: string) => void): void {
+  if (askedAt(repo, n, head, body)) return;
   const r = gh("pr", "comment", String(n), "--repo", repo.remote, "--body", body);
   if (r.status !== 0) throw stop(1, `could not post "${body}" -- ${r.stderr.trim() || r.stdout.trim()}`);
   err(`pr-wait: posted "${body}" to ask for a review of ${head.slice(0, 7)}`);

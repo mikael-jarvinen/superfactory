@@ -308,18 +308,12 @@ test("pr-wait asks a review bot that skipped the head, once, and waits for it", 
   assert.match(r.stderr, /posted "@coderabbitai review" to ask for a review of aaaaaaa/);
   assert.match(r.stdout, /^SENDABLE/m);
 
-  // asked, and then rate limited: waited on, asked again once the ask is older than the grace, then
-  // its review lands and the PR is sent
+  // asked, and then rate limited: sent with the remark, asked only the once
   const limited = checkRuns(check("test"), rabbitRun("Review skipped", { conclusion: "skipped" }), rabbitRun("Review rate limited", { started_at: "2026-01-01T10:05:00Z" }));
-  r = wait({
-    [cr]: [skipped("Review skipped"), limited], [rv]: [{ stdout: [] }, { stdout: [] }, { stdout: [] }, { stdout: [review] }],
-    ...asking([], [TRIGGER], [{ ...TRIGGER, created_at: new Date().toISOString() }]),
-  });
+  r = wait({ [cr]: [skipped("Review skipped"), limited], [rv]: { stdout: [] }, ...asking([], [TRIGGER]) });
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.calls.filter((c) => c === POST).length, 2, "asked, then asked again after the limit, not on every poll");
-  assert.match(r.stderr, /waiting \(\d+s\) on: CodeRabbit is rate limited and has not reviewed aaaaaaa/);
-  assert.match(r.stdout, /^SENDABLE/m);
-  assert.doesNotMatch(r.stdout, /rate limited/, "sent on its review, not past the limit");
+  assert.equal(r.calls.filter((c) => c === POST).length, 1);
+  assert.ok(r.stdout.includes("CodeRabbit is rate limited and has not reviewed aaaaaaa; sent without its review"), r.stdout);
 
   // a second run at the same head finds the ask already made and does not post it again
   r = wait({ [cr]: skipped("Review paused"), [rv]: [{ stdout: [] }, { stdout: [review] }], ...asking([TRIGGER]) });
@@ -388,41 +382,35 @@ test("pr-wait waits on a review bot whose check is still running, past the grace
 const rabbitRun = (title: string, o: Record<string, unknown> = {}) =>
   check("CodeRabbit", { conclusion: "neutral", output: { title }, app: { slug: "coderabbitai" }, details_url: null, ...o });
 
-// Mikael, 2026-11-12: "My just opened PRs always get coderabbit comments, please fix." lyyti-classic#8700
-// went to him rate limited at its head, with the remark this used to be, and was reviewed on opening.
-test("a rate-limited review bot holds the PR: waited on and asked again, never sent past", () => {
+// Mikael, 2026-11-12: "clearly the rule change from waiting on coderabbit even when we hit the limits
+// is wrong. We have so many tasks waiting on the gate." A rate limit is a remark again, as on 2026-10-27.
+test("a rate-limited review bot lets the PR go without its review, said as a remark", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
   const rv = `api repos/${REMOTE}/pulls/${N}/reviews?per_page=100&page=1`;
   const cr = `api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`;
-  const LIMITED = /CodeRabbit is rate limited and has not reviewed aaaaaaa -- wait for the limit, then comment "@coderabbitai review" on the PR, then run this again/;
+  const REMARK = "CodeRabbit is rate limited and has not reviewed aaaaaaa; sent without its review";
   const limited = { [st]: { stdout: { statuses: [] } }, [rv]: { stdout: [] }, [cr]: checkRuns(check("test"), rabbitRun("Review rate limited")) };
 
   let r = run(green(limited), ["pr-ready", "web", String(N)]);
-  assert.equal(r.status, 1, r.stdout);
-  assert.match(r.stdout, LIMITED);
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, new RegExp(`REMARKS \\(not blocking\\):[\\s\\S]*- ${REMARK}`));
   assert.doesNotMatch(r.stdout, /check 'CodeRabbit' concluded neutral/);
 
   r = run(green({ [st]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review rate limited" }] } }, [rv]: { stdout: [] } }), ["pr-ready", "web", String(N)]);
-  assert.equal(r.status, 1, r.stdout);
-  assert.match(r.stdout, LIMITED, "its status alone says it too");
+  assert.equal(r.status, 0, r.stdout);
+  assert.ok(r.stdout.includes(REMARK), "its status alone says it too");
 
-  r = run(green(limited), ["pr-send", "web", String(N), HEAD], { FACTORY_SEND_LIMIT: "0" });
-  assert.equal(r.status, 1, r.stdout);
-  assert.match(r.stdout, LIMITED);
-  assert.doesNotMatch(r.stdout, /^SENDABLE/m);
+  r = run(green(limited), ["pr-send", "web", String(N), HEAD]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes(REMARK), `pr-send shows the remark:\n${r.stdout}`);
 
-  // pr-wait asked a moment ago: waits, does not ask again, and at its bound stops naming the limit
-  const fresh = { ...TRIGGER, created_at: new Date().toISOString() };
-  r = run(green({ ...limited, ...asking([fresh]) }), ["pr-wait", "web", String(N), HEAD], { FACTORY_WAIT_LIMIT: "0" });
-  assert.equal(r.status, 3, r.stderr);
+  // pr-wait does not wait on it, and does not ask it
+  r = run(green({ ...limited, ...asking([]) }), ["pr-wait", "web", String(N), HEAD], { FACTORY_WAIT_LIMIT: "0" });
+  assert.equal(r.status, 0, r.stderr);
   assert.equal(r.calls.filter((c) => c === POST).length, 0);
-  assert.match(r.stderr, /still waiting after \d+s on:\n {2}- CodeRabbit is rate limited and has not reviewed aaaaaaa/);
-  assert.doesNotMatch(r.stdout, /^SENDABLE/m);
-  // asked longer ago than the grace: asks again
-  r = run(green({ ...limited, ...asking([TRIGGER]) }), ["pr-wait", "web", String(N), HEAD], { FACTORY_WAIT_LIMIT: "0" });
-  assert.equal(r.status, 3, r.stderr);
-  assert.equal(r.calls.filter((c) => c === POST).length, 1);
+  assert.match(r.stdout, /^SENDABLE/m);
+  assert.ok(r.stdout.includes(REMARK), r.stdout);
 
   // an older rate limit under a later run still in progress is waited out, not sent
   r = run(green({ ...limited, [cr]: checkRuns(check("test"), rabbitRun("Review rate limited"), rabbitRun("Review in progress", { status: "in_progress", conclusion: null, started_at: "2026-01-01T10:05:00Z" })) }), ["pr-ready", "web", String(N)]);
@@ -430,22 +418,27 @@ test("a rate-limited review bot holds the PR: waited on and asked again, never s
   assert.match(r.stdout, /check 'CodeRabbit' is in_progress, not completed/);
 });
 
-// lyyti-classic#8705, 2026-11-12: rate limited at its head, but its two replies in review threads
-// there are review objects at that sha, so the gate read them as its review and sent the PR.
+// lyyti-classic#8705, 2026-11-12: its two replies in review threads there are review objects at the
+// head's sha, and the gate read them as its review of the head.
 test("a review bot's replies in review threads are not its review of the head", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const reply = { user: { login: "coderabbitai[bot]" }, commit_id: HEAD, state: "COMMENTED", body: "" };
-  const over = (reviews: unknown[]) => green({
+  const over = (reviews: unknown[], title: string, o: Record<string, unknown> = {}) => green({
     [`api repos/${REMOTE}/commits/${HEAD}/status`]: { stdout: { statuses: [] } },
     [`api repos/${REMOTE}/pulls/${N}/reviews?per_page=100&page=1`]: { stdout: reviews },
-    [`api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`]: checkRuns(check("test"), rabbitRun("Review rate limited")),
+    [`api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`]: checkRuns(check("test"), rabbitRun(title, o)),
   });
-  let r = run(over([reply, reply]), ["pr-ready", "web", String(N)]);
+  let r = run(over([reply, reply], "Review skipped", { conclusion: "skipped" }), ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 1, r.stdout);
-  assert.match(r.stdout, /CodeRabbit is rate limited and has not reviewed aaaaaaa/);
+  assert.match(r.stdout, /CodeRabbit has not reviewed aaaaaaa: its check here says "Review skipped"/);
 
-  r = run(over([reply, { ...reply, body: REVIEW_BODY }]), ["pr-ready", "web", String(N)]);
+  r = run(over([reply, { ...reply, body: REVIEW_BODY }], "Review skipped", { conclusion: "skipped" }), ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 0, r.stdout);
+
+  // rate limited with only replies: still said to have reviewed nothing
+  r = run(over([reply, reply], "Review rate limited"), ["pr-ready", "web", String(N)]);
+  assert.equal(r.status, 0, r.stdout);
+  assert.ok(r.stdout.includes("CodeRabbit is rate limited and has not reviewed aaaaaaa; sent without its review"), r.stdout);
 });
 
 // lyyti-events#847, 2026-10-27: after a rebase CodeRabbit said "Already reviewed the last commit",
