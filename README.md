@@ -136,7 +136,8 @@ Builders, from their worktree:
 | `factory stack url\|status\|down\|destroy` | Read it, stop it, or with `destroy` delete its data and free the slot. |
 | `factory demo <KEY> --init` | Copy the demo template. |
 | `factory demo <KEY> <spec.ts> [base-url]` | Record the demo. |
-| `factory pr-media <repo> <n> --dir <media-dir>` | Put the demo into the PR body. |
+| `factory demo --before <KEY> <spec.ts> [base-url]` | Record the same demo on main's code, the "before". |
+| `factory pr-media <repo> <n> --dir <media-dir>` | Put the demo into the PR body; a before recording goes under Before. |
 
 Scripts and hooks. Nobody types these; they are listed so you can recognise them:
 

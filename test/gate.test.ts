@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { beforeSha } from "../src/gate/demo.js";
+import { BEFORE_BEGIN, BEFORE_END, MEDIA_BEGIN, MEDIA_END, STAMP } from "../src/gate/media.js";
 import { proseLines } from "../src/gate/ready.js";
 import { loadRec, saveRec } from "../src/state.js";
 import { openWorkspace } from "../src/workspace.js";
@@ -622,4 +624,94 @@ test("pr-comment replies only inside a configured bot's thread", () => {
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout.trim(), "https://github.com/acme/web/pull/7#discussion_r13");
   assert.ok(r.calls.some((c) => c.startsWith(`api repos/${REMOTE}/pulls/${N}/comments/11/replies -f body=> Written by agent.`)));
+});
+
+// pr-media: media stamped at the head is the after set, exactly as it always was; media stamped at
+// the PR's base (the merge-base, or the base branch's head) is the before set; any other is refused.
+test("pr-media puts a base-stamped demo under Before and refuses any other commit", () => {
+  const { ws, run } = gateWorkspace();
+  const MB = "b".repeat(40);
+  const TIP = "c".repeat(40);
+  const dir = join(ws, "media");
+  mkdirSync(dir);
+  writeFileSync(join(dir, "01-shot.png"), "png");
+  writeFileSync(join(dir, "demo.mp4"), "mp4");
+  const stampAt = (sha: string) => writeFileSync(join(dir, STAMP), JSON.stringify({ sha }));
+  const cmp = `api repos/${REMOTE}/compare/main...${HEAD}`;
+  const routes = green({ [cmp]: { stdout: { behind_by: 1, merge_base_commit: { sha: MB }, base_commit: { sha: TIP } } } });
+  const media = (r: Routes, ...more: string[]) => run(r, ["pr-media", "web", String(N), ...more]);
+  const upload = ["**shot**\n\n![shot](<upload:01-shot.png>)\n", "**demo**\n\n<upload:demo.mp4>\n"];
+
+  // After: the section is what it always was, and the base is never asked about.
+  stampAt(HEAD);
+  let r = media(routes, "--dir", dir, "--dry-run");
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, [MEDIA_BEGIN, "## Demo", ...upload, MEDIA_END].join("\n") + "\n");
+  assert.ok(!r.calls.some((c) => c.includes("/compare/")));
+
+  // Before, at the merge-base or at main's head: its own block, and the after half is kept.
+  for (const sha of [MB, TIP]) {
+    stampAt(sha);
+    r = media(routes, "--dir", dir, "--dry-run");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, [MEDIA_BEGIN, "## Demo", BEFORE_BEGIN, "### Before", ...upload, BEFORE_END, "### After", "No visual change.", MEDIA_END].join("\n") + "\n");
+  }
+
+  // Neither head nor base: refused, nothing uploaded or edited.
+  stampAt("d".repeat(40));
+  r = media(routes, "--dir", dir, "--dry-run");
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /the demo captured ddddddd but the PR head is aaaaaaa and its base \(main\) is bbbbbbb or ccccccc/);
+  r = media({ ...routes, [`pr edit ${N}`]: { stdout: "" } }, "--dir", dir);
+  assert.equal(r.status, 1);
+  assert.ok(!r.calls.some((c) => c.startsWith("pr edit") || c.startsWith(`api repos/${REMOTE} `)));
+
+  // An after upload writes the body it always did, and keeps a before block that is there.
+  const bodies = join(ws, "bodies.md");
+  const edit = (body: string) => {
+    rmSync(bodies, { force: true });
+    const res = run({ ...routes, [`pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`]: { stdout: { ...(green()[`pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`] as { stdout: object }).stdout, body } }, [`pr edit ${N}`]: { stdout: "" } },
+      ["pr-media", "web", String(N), "--no-visual-change"], { FAKE_GH_BODIES: bodies });
+    assert.equal(res.status, 0, res.stderr);
+    return readFileSync(bodies, "utf8");
+  };
+  assert.equal(edit("Why it changed.\n"), BODY);
+  const withBefore = `Why it changed.\n\n${MEDIA_BEGIN}\n## Demo\n${BEFORE_BEGIN}\n### Before\nold\n${BEFORE_END}\n### After\nnew\n${MEDIA_END}\n`;
+  assert.equal(edit(withBefore), `Why it changed.\n\n${MEDIA_BEGIN}\n## Demo\n${BEFORE_BEGIN}\n### Before\nold\n${BEFORE_END}\n### After\nNo visual change.\n${MEDIA_END}\n`);
+});
+
+// demo --before stamps the commit the files are, not HEAD: the merge-base with origin's default
+// branch, or that branch's head, and nothing when the files are neither.
+test("demo --before finds the base commit the checked-out files match", () => {
+  const dir = join(tempWorkspace(TOML), "repo");
+  after(() => rmSync(dirname(dir), { recursive: true, force: true }));
+  mkdirSync(dir);
+  const g = (...a: string[]) => {
+    const r = git(dir, ...a);
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  g("init", "-q", "-b", "main");
+  g("config", "user.email", "t@example.com");
+  g("config", "user.name", "t");
+  writeFileSync(join(dir, "a.txt"), "main\n");
+  g("add", ".");
+  g("commit", "-qm", "main");
+  const base = g("rev-parse", "HEAD");
+  g("update-ref", "refs/remotes/origin/main", base);
+  g("switch", "-qc", "feature");
+  writeFileSync(join(dir, "a.txt"), "feature\n");
+  g("commit", "-qam", "feature");
+
+  assert.equal(beforeSha(dir).sha, undefined, "the branch's own files are not the base");
+  g("checkout", base, "--", "a.txt");
+  assert.equal(beforeSha(dir).sha, base, "main's files on the branch's HEAD are the base");
+  g("checkout", "HEAD", "--", "a.txt");
+  writeFileSync(join(dir, "b.txt"), "new\n");
+  g("add", "b.txt");
+  g("commit", "-qm", "adds a file");
+  g("checkout", base, "--", "a.txt");
+  assert.equal(beforeSha(dir).sha, undefined, "a file the branch added is still there");
+  g("switch", "-q", "--detach", "origin/main");
+  assert.equal(beforeSha(dir).sha, base);
 });
