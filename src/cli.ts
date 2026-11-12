@@ -113,9 +113,12 @@ usage: factory [--workspace <dir>] <command> [options]
                                   \`gh pr close <n> -R owner/repo\` through only for a PR recorded there.
                                   Never a merge.
   pr-media <repo> <n> (--dir <media-dir> | --no-visual-change) [--dry-run]
-                                  put a demo's screenshots and video into the PR body
+                                  put a demo's screenshots and video into the PR body; media
+                                  stamped at the PR's base (demo --before) goes under Before
   demo <KEY> --init               copy the demo template to /tmp/demo/<KEY>/demo.spec.ts
   demo <KEY> <spec.ts> [base-url] run a Playwright demo from the worktree; media in /tmp/demo/<KEY>
+  demo --before <KEY> <spec.ts> [base-url]
+                                  the same with main's code checked out; media in /tmp/demo/<KEY>-before
   watch queue                     read the tracker's queue once, and tell the lead about new queued
                                   tickets and fresh merges. What the scheduler runs; prompts/queue.md.
   watch round [--facts]           the round once: facts gathered here, judged by a disposable session
@@ -630,14 +633,14 @@ function cmdPrMedia(ws: Workspace, argv: string[]) {
 }
 
 function cmdDemo(ws: Workspace, argv: string[]): number | void {
-  const { v, p } = args("demo", argv, { init: { type: "boolean" } }, [1, 3]);
+  const { v, p } = args("demo", argv, { init: { type: "boolean" }, before: { type: "boolean" } }, [1, 3]);
   const [key, spec, base] = p as [string, string | undefined, string | undefined];
   if (v.init) {
-    if (spec) throw new UsageError("demo: --init takes only the key");
+    if (spec || v.before) throw new UsageError("demo: --init takes only the key");
     return demoInit(ws, key);
   }
-  if (!spec) throw new UsageError("demo: which spec? factory demo <KEY> <spec.ts> [base-url], or --init for the template");
-  return demo(ws, key, spec, base);
+  if (!spec) throw new UsageError("demo: which spec? factory demo [--before] <KEY> <spec.ts> [base-url], or --init for the template");
+  return demo(ws, key, spec, base, undefined, !!v.before);
 }
 
 // A scheduled run that dies before it starts leaves a line where the round looks, not only in the

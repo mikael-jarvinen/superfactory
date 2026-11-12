@@ -5,6 +5,7 @@
 //                   prefixes the call wins. A list is answered in order, its last reply repeating.
 //                   No route is a failed call, which is what an unreadable answer looks like.
 //   FAKE_GH_LOG     each call's args, one JSON array per line
+//   FAKE_GH_BODIES  optional: the contents of each --body-file, appended, so a test can read a body
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 
 interface Reply {
@@ -17,6 +18,8 @@ const args = process.argv.slice(2);
 const call = args.join(" ");
 const routesFile = process.env.FAKE_GH_ROUTES as string;
 appendFileSync(process.env.FAKE_GH_LOG as string, JSON.stringify(args) + "\n");
+const bodyFile = args[args.indexOf("--body-file") + 1];
+if (process.env.FAKE_GH_BODIES && args.includes("--body-file") && bodyFile) appendFileSync(process.env.FAKE_GH_BODIES, readFileSync(bodyFile, "utf8"));
 const routes = JSON.parse(readFileSync(routesFile, "utf8")) as Record<string, Reply | Reply[]>;
 const key = Object.keys(routes).filter((k) => call.startsWith(k)).sort((a, b) => b.length - a.length)[0];
 if (key === undefined) {

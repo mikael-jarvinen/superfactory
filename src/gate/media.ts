@@ -6,16 +6,21 @@
 // the repo.
 //
 // Provenance: the media dir must hold pr-media.json, written by `factory demo` on a passing run,
-// and its sha must be the PR head. Media from another commit is refused.
+// and its sha must be the PR head, or the PR's base for a "before" recording (`factory demo
+// --before`): the merge-base with the base branch, or that branch's head. Media from any other
+// commit is refused. A before set sits in its own block inside the Demo section, so either upload
+// keeps the other's media; with no before set the section is what it always was.
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import type { Repo } from "../config.js";
 import { FactoryError } from "../util.js";
-import { api, gh, headOf, prView } from "./github.js";
+import { api, gh, headOf, prView, type PrView } from "./github.js";
 
 export const MEDIA_BEGIN = "<!-- pr-media:begin -->";
 export const MEDIA_END = "<!-- pr-media:end -->";
+export const BEFORE_BEGIN = "<!-- pr-media:before:begin -->";
+export const BEFORE_END = "<!-- pr-media:before:end -->";
 export const STAMP = "pr-media.json";
 
 const TYPES: Record<string, string> = {
@@ -33,6 +38,32 @@ export function splice(body: string, section: string): string {
   if (s === -1 || e === -1) return `${body.trimEnd()}\n\n${section}\n`;
   return `${body.slice(0, s)}${section}${body.slice(e + MEDIA_END.length)}`;
 }
+
+// The Demo section's two halves in a body: the before block, markers and all, and the rest.
+export function demoParts(body: string): { before?: string; after: string } {
+  const s = body.indexOf(MEDIA_BEGIN);
+  const e = body.indexOf(MEDIA_END);
+  if (s === -1 || e === -1) return { after: "" };
+  let inner = body.slice(s + MEDIA_BEGIN.length, e);
+  let before: string | undefined;
+  const bs = inner.indexOf(BEFORE_BEGIN);
+  const be = inner.indexOf(BEFORE_END);
+  if (bs !== -1 && be !== -1) {
+    before = inner.slice(bs, be + BEFORE_END.length);
+    inner = inner.slice(0, bs) + inner.slice(be + BEFORE_END.length);
+  }
+  const after = inner.trim().replace(/^## Demo\s*/, "").replace(/^### After\s*/, "").trim();
+  return { before, after };
+}
+
+// The Demo section. Without a before block it is the heading and the after lines, as it always was.
+export function demoSection(after: string[], before?: string): string {
+  if (before === undefined) return [MEDIA_BEGIN, "## Demo", ...after, MEDIA_END].join("\n");
+  const rest = after.join("\n").trim();
+  return [MEDIA_BEGIN, "## Demo", before, ...(rest ? ["### After", rest] : []), MEDIA_END].join("\n");
+}
+
+const beforeBlock = (lines: string[]) => [BEFORE_BEGIN, "### Before", ...lines, BEFORE_END].join("\n");
 
 async function upload(file: string, repoId: string, token: string): Promise<string> {
   const type = typeOf(file) as string;
@@ -59,6 +90,8 @@ export async function media(repo: Repo, n: number, a: MediaArgs, out: (line: str
   const head = headOf(repo, n);
   if (!head) throw no(`cannot read the head of ${repo.remote}#${n}`);
   let lines: string[];
+  let isBefore = false;
+  let pr: PrView | undefined;
   if (a.noVisualChange) {
     lines = ["No visual change."];
   } else {
@@ -67,8 +100,20 @@ export async function media(repo: Repo, n: number, a: MediaArgs, out: (line: str
     const stampPath = join(dir, STAMP);
     if (!existsSync(stampPath)) throw no(`${dir} has no ${STAMP}: the demo did not pass, or was not run with \`factory demo\``);
     const stamp = JSON.parse(readFileSync(stampPath, "utf8")) as { sha?: string };
-    if (stamp.sha !== head)
-      throw no(`the demo captured ${String(stamp.sha).slice(0, 7)} but the PR head is ${head.slice(0, 7)}. Re-run the demo on the current commit.`);
+    if (stamp.sha !== head) {
+      // Not the head: the before set, if the stamp is the PR's base.
+      pr = prView(repo, n);
+      if (!pr) throw no(`cannot read ${repo.remote}#${n}`);
+      const cmp = api<{ merge_base_commit?: { sha?: string }; base_commit?: { sha?: string } }>(
+        `repos/${repo.remote}/compare/${pr.baseRefName}...${head}`);
+      const bases = [cmp?.merge_base_commit?.sha, cmp?.base_commit?.sha].filter((x): x is string => !!x);
+      if (!bases.length) throw no(`cannot read the base of ${repo.remote}#${n}`);
+      if (!stamp.sha || !bases.includes(stamp.sha))
+        throw no(`the demo captured ${String(stamp.sha).slice(0, 7)} but the PR head is ${head.slice(0, 7)} and its base ` +
+          `(${pr.baseRefName}) is ${[...new Set(bases.map((b) => b.slice(0, 7)))].join(" or ")}. ` +
+          "Re-run the demo on the current commit, or `factory demo --before` on the base.");
+      isBefore = true;
+    }
     const files = readdirSync(dir).filter((f) => !f.startsWith(".") && typeOf(f)).sort();
     if (!files.length) throw no(`${dir} holds no images or videos`);
     const isVideo = (f: string) => (typeOf(f) as string).startsWith("video/");
@@ -90,20 +135,24 @@ export async function media(repo: Repo, n: number, a: MediaArgs, out: (line: str
       lines.push(isVideo(f) ? `**${caption(f)}**\n\n${url}\n` : `**${caption(f)}**\n\n![${caption(f)}](${url})\n`);
     }
   }
-  const section = [MEDIA_BEGIN, "## Demo", ...lines, MEDIA_END].join("\n");
+  // An after upload's dry run reads no body, as it never did; a before set has read it already.
+  if (!pr && !a.dryRun) {
+    pr = prView(repo, n);
+    if (!pr) throw no(`cannot read the body of ${repo.remote}#${n}`);
+  }
+  const kept = demoParts(pr?.body ?? "");
+  const section = isBefore ? demoSection(kept.after ? [kept.after] : [], beforeBlock(lines)) : demoSection(lines, kept.before);
   if (a.dryRun) {
     out(section);
     return;
   }
-  const pr = prView(repo, n);
-  if (!pr) throw no(`cannot read the body of ${repo.remote}#${n}`);
   const file = join(tmpdir(), `pr-body-${process.pid}.md`);
-  writeFileSync(file, splice(pr.body ?? "", section));
+  writeFileSync(file, splice(pr?.body ?? "", section));
   try {
     const r = gh("pr", "edit", String(n), "--repo", repo.remote, "--body-file", file);
     if (r.status !== 0) throw no(`gh pr edit failed: ${r.stderr.trim()}`);
   } finally {
     rmSync(file, { force: true });
   }
-  out(`PR ${repo.remote}#${n} body updated with ${lines.length} media lines.`);
+  out(`PR ${repo.remote}#${n} body updated with ${lines.length} ${isBefore ? "before " : ""}media lines.`);
 }

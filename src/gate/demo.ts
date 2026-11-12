@@ -1,9 +1,13 @@
-// `factory demo <KEY> <spec.ts> [base-url]`: run one Playwright demo headless and collect its media.
+// `factory demo [--before] <KEY> <spec.ts> [base-url]`: run one Playwright demo headless and collect its media.
 //
 // Run from the item's worktree so the provenance stamp names the commit under demo. Output lands in
 // /tmp/demo/<KEY>/: the NN-caption.png screenshots the spec takes, demo.mp4 encoded from the frames
 // the template's camera records, and pr-media.json with the sha and branch. `factory pr-media`
-// refuses media whose stamp is not the PR head. Needs ffmpeg with libx264.
+// refuses media whose stamp is neither the PR head nor its base. Needs ffmpeg with libx264.
+//
+// --before records the code as it was before the change, into /tmp/demo/<KEY>-before/: the files
+// checked out must be exactly the merge-base of HEAD with origin's default branch, or that branch's
+// head, and the stamp names that commit, not HEAD.
 //
 // Playwright is an optional peer, never imported here: the runner is found in this package, the
 // workspace or the worktree, and run as a child. The spec and the config are copied next to each
@@ -64,19 +68,40 @@ export function demoInit(ws: Workspace, key: string, out: (line: string) => void
   out(dest);
 }
 
-export function demo(ws: Workspace, key: string, spec: string, baseUrl: string | undefined, out: (line: string) => void = console.log): number {
+// The commit a --before run's files are: the merge-base of HEAD with origin's default branch, or
+// that branch's head, whichever the tracked files match exactly. Undefined when they match neither.
+export function beforeSha(cwd = process.cwd()): { sha?: string; base: string } {
+  const git = (...args: string[]) => run("git", args, { cwd });
+  const head = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.trim();
+  const base = head || "origin/main";
+  const tip = git("rev-parse", "--verify", "--quiet", `${base}^{commit}`).stdout.trim();
+  if (!tip) return { base };
+  const mb = git("merge-base", "HEAD", tip).stdout.trim();
+  for (const sha of [mb, tip]) if (sha && git("diff", "--quiet", sha, "--").status === 0) return { sha, base };
+  return { base };
+}
+
+export function demo(ws: Workspace, key: string, spec: string, baseUrl: string | undefined, out: (line: string) => void = console.log, before = false): number {
   const no = (msg: string) => new FactoryError(`demo: ${msg}`, 2);
   checkKey(ws, key);
   if (!existsSync(spec)) throw no(`no spec at ${spec}`);
   const git = (...args: string[]) => run("git", args);
   if (git("rev-parse", "--is-inside-work-tree").status !== 0) throw no("run this from the item's worktree");
+  let ranAt: string | undefined;
+  if (before) {
+    const b = beforeSha();
+    if (!b.sha)
+      throw no(`--before: the files checked out are neither ${b.base} nor its merge-base with HEAD. ` +
+        `\`git switch --detach ${b.base}\` (or the merge-base), run the demo, then switch back.`);
+    ranAt = b.sha;
+  }
   if (run("ffmpeg", ["-version"]).status !== 0) throw no("ffmpeg is not installed (brew install ffmpeg)");
   const pw = findPlaywright(ws);
   if (!pw)
     throw no("@playwright/test is not installed in this package, the workspace or the worktree. " +
       "`npm install -D @playwright/test` in the workspace, then `npx playwright install chromium`.");
 
-  const outDir = join(DEMO_ROOT, key);
+  const outDir = join(DEMO_ROOT, before ? `${key}-before` : key);
   const specDir = join(outDir, ".spec");
   const frames = join(outDir, ".frames");
   mkdirSync(outDir, { recursive: true });
@@ -116,10 +141,10 @@ export function demo(ws: Workspace, key: string, spec: string, baseUrl: string |
     console.error(`demo: FAILED (exit ${rc}). No provenance written; pr-media will refuse this run.`);
     return rc;
   }
-  const sha = git("rev-parse", "HEAD").stdout.trim();
+  const sha = ranAt ?? git("rev-parse", "HEAD").stdout.trim();
   const branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.trim();
-  writeFileSync(stamp, JSON.stringify({ sha, branch, at: new Date().toISOString(), spec: resolve(spec) }) + "\n");
-  out(`demo: PASS. media in ${outDir}:`);
+  writeFileSync(stamp, JSON.stringify({ sha, branch, at: new Date().toISOString(), spec: resolve(spec), ...(before ? { before: true } : {}) }) + "\n");
+  out(`demo: PASS${before ? ` (before, at ${sha.slice(0, 7)})` : ""}. media in ${outDir}:`);
   for (const f of readdirSync(outDir).filter((x) => !x.startsWith(".")).sort()) out(f);
   return 0;
 }
