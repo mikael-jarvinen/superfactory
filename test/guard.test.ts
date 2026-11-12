@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { rmSync } from "node:fs";
+import { after, test } from "node:test";
+import { allowClosePath } from "../src/allow-close.js";
 import { type GuardContext, verdict } from "../src/hooks/guard.js";
+import { openWorkspace } from "../src/workspace.js";
+import { factory, tempWorkspace } from "./helpers.js";
 
 const ro: GuardContext = { role: "reviewer", policy: "readonly", writeDirs: [], ownRepos: [] };
 const pr: GuardContext = { role: "builder", policy: "protect", writeDirs: [], org: "acme", ownRepos: ["acme/workspace", "alex/factory"] };
@@ -208,4 +212,42 @@ test("the command after a heredoc is checked", () => {
   const write = "cat > /tmp/close3374.md <<'EOF'\n> Written by agent.\nClosing: superseded.\nEOF\n";
   for (const c of [`${write}gh pr close 3374 -R acme/api --comment "$(cat /tmp/close3374.md)"`, `${write}gh pr merge 3374 -R acme/api`])
     assert.notEqual(verdict(c, lead), null, c);
+});
+
+// Mikael, 2026-11-12: "I allow you to close the PR". A product PR closes only when he named that exact
+// PR and `factory allow-close` recorded it; a merge never does.
+test("the lead closes a product PR only once the human has named it", () => {
+  const dir = tempWorkspace();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const r = factory(dir, ["allow-close", "api", "8701", "--words", "I allow you to close the PR"]);
+  assert.equal(r.status, 0, r.stderr);
+  const lead: GuardContext = { ...pr, role: "lead", allowClose: allowClosePath(openWorkspace(dir).stateDir) };
+  for (const c of ["gh pr close 8701 -R acme/api", "gh pr close 8701 --repo Acme/api --comment 'Superseded by #8702'",
+    "gh pr close https://github.com/acme/api/pull/8701", "gh pr close https://github.com/acme/api/pull/8701/files -c x",
+    "cat > /tmp/c.md <<'EOF'\nSuperseded.\nEOF\ngh pr close 8701 -R acme/api --comment \"$(cat /tmp/c.md)\""])
+    assert.equal(verdict(c, lead), null, c);
+  const refused = {
+    "an unrecorded PR": verdict("gh pr close 8702 -R acme/api", lead),
+    "the same number in another repo": verdict("gh pr close 8701 -R acme/web", lead),
+    "a merge of the recorded PR": verdict("gh pr merge 8701 -R acme/api", lead),
+    "a squash merge by URL": verdict("gh pr merge https://github.com/acme/api/pull/8701 --squash", lead),
+    "a lock of the recorded PR": verdict("gh pr lock 8701 -R acme/api", lead),
+    "no number": verdict("gh pr close -R acme/api", lead),
+    "a branch name": verdict("gh pr close CL-1 -R acme/api", lead),
+    "two selectors": verdict("gh pr close 8701 8702 -R acme/api", lead),
+    "a URL and --repo that disagree": verdict("gh pr close https://github.com/acme/web/pull/8701 -R acme/api", lead),
+    "--delete-branch": verdict("gh pr close 8701 -R acme/api --delete-branch", lead),
+    "no repo": verdict("gh pr close 8701", lead),
+    "an assistant": verdict("gh pr close 8701 -R acme/api", { ...lead, role: "assistant" }),
+    "a lead with no list": verdict("gh pr close 8701 -R acme/api", { ...pr, role: "lead" }),
+  };
+  for (const [what, reason] of Object.entries(refused)) assert.notEqual(reason, null, `${what} should be refused`);
+  assert.match(refused["an unrecorded PR"] as string, /acme\/api#8702 is not on the allow-close list; .*factory allow-close <repo-key> <n> --words/);
+  assert.match(refused["a merge of the recorded PR"] as string, /^merge of a PR on a product repo/);
+  assert.match(refused["no number"] as string, /needs its number or URL/);
+  // the factory's own repos are unchanged
+  assert.equal(verdict("gh pr close 3 -R acme/workspace", { ...pr, role: "assistant" }), null);
+  // the words are the permission
+  assert.notEqual(factory(dir, ["allow-close", "api", "8703"]).status, 0);
+  assert.notEqual(factory(dir, ["allow-close", "nope", "8703", "--words", "x"]).status, 0);
 });

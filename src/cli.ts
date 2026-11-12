@@ -2,6 +2,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
+import { recordAllowClose } from "./allow-close.js";
 import { followInbox } from "./board/inbox.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
@@ -106,6 +107,11 @@ usage: factory [--workspace <dir>] <command> [options]
   pr-comment <repo> <n> <agent> <body-file> <bot-comment-id> [--dry-run]
                                   reply inside a bot's review thread; never a standalone comment,
                                   never to a person. The bots are github.bots.
+  allow-close <repo> <n> --words "<the human's words>"
+                                  record that the human named this product PR for the lead to
+                                  close, in state/allow-close.jsonl; the guard lets the lead's
+                                  \`gh pr close <n> -R owner/repo\` through only for a PR recorded there.
+                                  Never a merge.
   pr-media <repo> <n> (--dir <media-dir> | --no-visual-change) [--dry-run]
                                   put a demo's screenshots and video into the PR body
   demo <KEY> --init               copy the demo template to /tmp/demo/<KEY>/demo.spec.ts
@@ -600,6 +606,16 @@ function cmdPrComment(ws: Workspace, argv: string[]) {
   comment(ws, resolveRepo(ws, repo), prNumber(n), { agent, bodyFile, replyTo, dryRun: !!v["dry-run"] });
 }
 
+function cmdAllowClose(ws: Workspace, argv: string[]) {
+  const { v, p } = args("allow-close", argv, { words: { type: "string" } }, [2, 2]);
+  const words = str(v.words)?.trim();
+  if (!words) throw new UsageError(`allow-close: --words "<${ws.config.human.name}'s words>" is the permission; give them`);
+  const repo = resolveRepo(ws, p[0] as string);
+  if (!repo.remote) throw new FactoryError(`repo ${pyRepr(repo.key)} has no remote in factory.toml`, 2);
+  const rec = recordAllowClose(ws, repo.remote, prNumber(p[1] as string), words);
+  console.log(`${rec.repo}#${rec.number} may be closed by the lead (gh pr close ${rec.number} -R ${rec.repo}); ${ws.config.human.name}: ${pyRepr(rec.words)}`);
+}
+
 // The upload is a fetch, so this one finishes after main returns; its failure is reported the way
 // main's own would be.
 function cmdPrMedia(ws: Workspace, argv: string[]) {
@@ -687,6 +703,7 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void>
   "pr-open-for-review": cmdPrOpenForReview,
   "delta-range": cmdDeltaRange,
   "pr-comment": cmdPrComment,
+  "allow-close": cmdAllowClose,
   "pr-media": cmdPrMedia,
   "demo": cmdDemo,
   "stack": cmdStack,

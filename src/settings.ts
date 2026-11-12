@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync,
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { allowClosePath } from "./allow-close.js";
 import { isSettingsPath } from "./config.js";
 import { lead } from "./fleet.js";
 import { POLICIES, type Policy, TMP_ROOTS } from "./hooks/guard.js";
@@ -203,7 +204,9 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
     if (h === "guard") {
       const dirs = [...t.writeDirs.map((d) => WRITE_DIRS[d](ws)), ...(work ? [work] : [])].flatMap((d) => ["--write-dir", d]);
       const repos = t.guard === "protect" ? [...(org ? ["--org", org] : []), ...ws.config.github.ownRepos.flatMap((r) => ["--own-repo", r])] : [];
-      add("PreToolUse", "Bash|Read|Grep", ["hook", "guard", "--role", s.role, "--policy", t.guard as Policy, ...dirs, ...repos], 10);
+      // only the lead closes a product PR, and only one the human named
+      const close = t.guard === "protect" && s.role === "lead" ? ["--allow-close", allowClosePath(ws.stateDir)] : [];
+      add("PreToolUse", "Bash|Read|Grep", ["hook", "guard", "--role", s.role, "--policy", t.guard as Policy, ...dirs, ...repos, ...close], 10);
     } else if (h === "no-dialogs") {
       add("PreToolUse", DIALOGS, ["hook", "no-dialogs", "--lead", leadName], 5);
     } else if (h === "no-side-channels") {
