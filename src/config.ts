@@ -59,6 +59,16 @@ export interface Agent {
   cwd?: string;
   permissionMode?: string;
   autocompact?: string;
+  // A [hosts] key: the agent's sessions run on that machine, through its factory daemon.
+  host?: string;
+}
+
+// Another machine's factory daemon. remote.ts says what a request carries.
+export interface Host {
+  name: string;
+  url: string;
+  tokenFile: string;
+  hashFiles: string[];
 }
 
 export interface Tracker {
@@ -77,6 +87,7 @@ export interface Config {
   paths: { repos: string; state: string; logs: string };
   repos: Record<string, Repo>;
   stacks: Record<string, Stack>;
+  hosts: Record<string, Host>;
   roles: Partial<Record<RoleName, Role>>;
   agents: Agent[];
   tracker: Tracker;
@@ -284,6 +295,8 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   }
 
   const roles: Partial<Record<RoleName, Role>> = {};
+  // As written, for an agent on a host: its cwd is a path there, so nothing here expands it.
+  const rolesCwd: Partial<Record<RoleName, string>> = {};
   const rolesT = top.table("roles") ?? {};
   for (const [name, v] of Object.entries(rolesT)) {
     const where = `roles.${name}`;
@@ -297,7 +310,9 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     }
     const r = reader(problems, where, v);
     const role = name as RoleName;
-    const cwd = path(r, "cwd", r.str("cwd", role !== "builder"));
+    const rawCwd = r.str("cwd", role !== "builder");
+    if (rawCwd) rolesCwd[role] = rawCwd;
+    const cwd = path(r, "cwd", rawCwd);
     if (role === "builder" && cwd) r.bad("cwd", "a builder starts in its worktree, so it takes no cwd");
     const settings = r.str("settings", true) ?? "";
     roles[role] = {
@@ -312,6 +327,28 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
       mcpConfig: path(r, "mcp_config", r.str("mcp_config")),
       addDirs: repoKeys(r, "add_dirs", r.strs("add_dirs")) ?? [],
     };
+    r.done();
+  }
+
+  const hosts: Record<string, Host> = {};
+  for (const [key, v] of Object.entries(top.table("hosts") ?? {})) {
+    const where = `hosts.${key}`;
+    if (!isTable(v)) {
+      problems.push(`${where}: must be a table, got ${show(v)}`);
+      continue;
+    }
+    const r = reader(problems, where, v);
+    if (key === "local") problems.push(`${where}: "local" names this machine's own sessions; give the host another name`);
+    const url = r.str("url", true);
+    if (url && !/^https?:\/\/[^/]+\/?$/.test(url)) r.bad("url", `must be http(s)://host:port, got ${show(url)}`);
+    hosts[key] = {
+      name: key,
+      url: (url ?? "").replace(/\/$/, ""),
+      tokenFile: path(r, "token_file", r.str("token_file") ?? "~/.config/factory/token") ?? "",
+      hashFiles: (r.strs("hash_files", true) ?? []).map((f) => path(r, "hash_files", f) ?? ""),
+    };
+    if (Array.isArray(v.hash_files) && v.hash_files.length !== 2)
+      r.bad("hash_files", `must name two files, the daemon's config then the workspace config, got ${v.hash_files.length}`);
     r.done();
   }
 
@@ -348,8 +385,15 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const appendix = r.strs("appendix") ?? [];
     const resolved = appendix.map((a) => (a.startsWith("repo:") ? a : (path(r, "appendix", a) ?? a)));
     const addDirs = repoKeys(r, "add_dirs", r.strs("add_dirs"));
-    const cwd = path(r, "cwd", r.str("cwd"));
+    const rawCwd = r.str("cwd");
+    const host = r.str("host");
+    const cwd = host ? rawCwd : path(r, "cwd", rawCwd);
     if (role === "builder" && cwd) r.bad("cwd", "a builder starts in its worktree, so it takes no cwd");
+    const there = rawCwd ?? (role ? rolesCwd[role] : undefined);
+    if (host && there !== undefined && !(isAbsolute(there) && !/[~$]/.test(there)))
+      r.bad(rawCwd ? "cwd" : "host", `${name} runs on host ${host}, so ${rawCwd ? "its cwd" : `roles.${role}.cwd`} must be an absolute path there, with no ~ or $, got ${show(there)}`);
+    if (host && !hosts[host]) r.bad("host", `no host ${show(host)}; hosts: ${Object.keys(hosts).join(", ") || "none"}`);
+    if (host && role === "builder") r.bad("host", "a builder runs where its worktrees are, on this machine");
     agents.push({
       name,
       role,
@@ -361,6 +405,7 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
       cwd,
       permissionMode: r.str("permission_mode"),
       autocompact: r.str("autocompact"),
+      host,
     });
     r.done();
   });
@@ -428,6 +473,6 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   return {
     file: resolve(file), dir,
     human: { name: humanName, legacyMessageKind },
-    github, paths, repos, stacks, roles, agents, tracker, board, gate, watchers, worktree,
+    github, paths, repos, stacks, hosts, roles, agents, tracker, board, gate, watchers, worktree,
   };
 }

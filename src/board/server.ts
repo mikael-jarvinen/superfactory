@@ -5,11 +5,12 @@ import { get as httpsGet } from "node:https";
 import type { AddressInfo } from "node:net";
 import { basename, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { lead, reviewOnly, type Session } from "../fleet.js";
+import { lead, owesSession, reviewOnly, type Session } from "../fleet.js";
 import { leadStatus } from "../hooks/status.js";
+import { Unreachable } from "../remote.js";
 import { agentSessions, pick, transportFor, transports } from "../transport.js";
 import { isHuman, readTail } from "../messages.js";
-import { allRecs, BUSY, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
+import { allRecs, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { capitalize, run, sleep } from "../util.js";
 import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, type Relay, saveAttachment, sweep } from "./inbox.js";
@@ -83,7 +84,7 @@ const SESSION_EVERY = 3000;
 // The listing of each transport the fleet uses, refreshed in the background, and each agent's
 // background session in it.
 class SessionCache {
-  private rows = new Map<string, Session[]>();
+  private rows = new Map<string, Session[] | Unreachable>();
   private busy = new Set<string>();
 
   constructor(private ws: Workspace) {}
@@ -106,6 +107,14 @@ class SessionCache {
       if (s) m.set(agent.name, s);
     }
     return m;
+  }
+
+  // Why the agent's host could not be asked, or null.
+  unknown(name: string): string | null {
+    const a = this.ws.config.agents.find((x) => x.name === name);
+    const t = a ? transportFor(this.ws, a) : undefined;
+    const rows = t ? this.rows.get(t.where) : undefined;
+    return t && rows instanceof Unreachable ? rows.brief : null;
   }
 
   alive(name: string, s: Session | undefined): boolean {
@@ -257,7 +266,7 @@ function reviewKeys(ws: Workspace): string[] {
 
 // Builders group by their stack, or by their repos when they have none, so an agent added to the
 // config lands in the right group without the board changing.
-function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>, alive: (name: string, s: Session | undefined) => boolean) {
+function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>, alive: (name: string, s: Session | undefined) => boolean, unknown: (name: string) => string | null = () => null) {
   const groups = new Map<string, { key: string; title: string; scope: string; members: unknown[] }>();
   const reviewerRepos = ws.config.roles.reviewer?.addDirs ?? [];
   for (const a of ws.config.agents) {
@@ -272,11 +281,12 @@ function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>, alive: 
     if (!g) groups.set(key, (g = { key, title, scope, members: [] }));
     const s = listed.get(a.name);
     const live = alive(a.name, s);
-    const rec = recs.find((r) => r.agent === a.name && r.state !== null && BUSY.has(r.state));
+    const rec = recs.find((r) => r.agent === a.name && owesSession(r));
     g.members.push({
       name: a.name,
       alive: live,
       status: live ? (s?.status ?? null) : null,
+      unknown: unknown(a.name),
       ticket: rec?.ticket ?? null,
       state: rec?.state ?? null,
       since_min: rec ? ageMinutes(rec.since) : null,
@@ -362,7 +372,7 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
     columns: COLUMNS,
     descriptions,
     waiting_on_you: [...WAITING_ON_YOU].sort(),
-    teams: teams(ws, recs, sessions.background(), (n, s) => sessions.alive(n, s)),
+    teams: teams(ws, recs, sessions.background(), (n, s) => sessions.alive(n, s), (n) => sessions.unknown(n)),
     stacks: stacks.view(ws, recs),
     tickets,
     plumbing: heartbeats(ws),
@@ -374,7 +384,7 @@ function messagesView(ws: Workspace, sessions: SessionCache, receipts: Receipts)
   const st = leadStatus(ws);
   receipts.read(st.transcript);
   const leadName = lead(ws).name;
-  const status = sessions.alive(leadName, sessions.background().get(leadName)) ? (st.words ?? null) : "offline";
+  const status = sessions.alive(leadName, sessions.background().get(leadName)) ? (st.words ?? null) : sessions.unknown(leadName) ? "unknown" : "offline";
   const rows = readTail(ws.messages).reverse().slice(0, 60).map((r) => {
     const human = isHuman(ws, r.kind);
     return { ...r, from: human ? "human" : "lead", age_min: ageMinutes(r.t), receipt: human && r.id ? receipts.receipt(r.id) : null };

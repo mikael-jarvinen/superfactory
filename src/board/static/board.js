@@ -32,6 +32,8 @@ function member(p, cls = ''){
     ? `<span class="tk">${esc(p.ticket)}</span><span class="st">${esc(p.state)}${p.since_min != null ? ' &middot; ' + mins(p.since_min) : ''}</span>`
     : p.in_review && p.in_review.length
     ? `<span class="st">free &middot; ${p.in_review.map(esc).join(', ')} in review</span>`
+    : p.unknown
+    ? `<span class="st" title="${esc(p.unknown)}">unknown</span>`
     : `<span class="st">${p.alive ? esc(p.status || 'idle') : 'not running'}</span>`;
   return `<div class="mem ${cls}"><span class="face">${face(avatars[p.name], '', p.name)}<span class="dot ${p.alive ? 'on' : ''}"></span></span>
       <div class="nm">${esc(p.name)}</div><div class="status">${status}</div></div>`;

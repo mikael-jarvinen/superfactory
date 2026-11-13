@@ -6,7 +6,8 @@ import { recordAllowClose } from "./allow-close.js";
 import { followInbox } from "./board/inbox.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
-import { agentOrDie, byRole, findSession, fleetLines, lead, leftWork, stopSession, waitForName } from "./fleet.js";
+import { agentOrDie, byRole, findSession, fleetLines, owedNote, owesSession, lead, leftWork, listing, type Session, stopSession, waitForName } from "./fleet.js";
+import { Unreachable } from "./remote.js";
 import { agentSessions, transportFor, transports } from "./transport.js";
 import type { Agent } from "./config.js";
 import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleOf } from "./launch.js";
@@ -176,7 +177,7 @@ const str = (v: string | boolean | undefined) => (typeof v === "string" ? v : un
 function cmdStatus(ws: Workspace, argv: string[]) {
   const { v } = args("status", argv, { all: { type: "boolean" } }, [0, 0]);
   console.log("-- sessions --");
-  const { lines, live } = fleetLines(ws);
+  const { lines, live, unknown } = fleetLines(ws);
   console.log(lines.join("\n"));
   console.log(boardLine(ws));
   console.log("-- tickets (state/) --");
@@ -184,11 +185,11 @@ function cmdStatus(ws: Workspace, argv: string[]) {
   if (!recs.length) console.log("  none");
   for (const r of recs) {
     for (const l of showRec(ws, r)) console.log(l);
-    if (r.state && BUSY.has(r.state) && r.agent && !live.has(r.agent))
-      console.log(`  ${"".padEnd(12)} !! ${r.agent} has no live session while ${r.ticket} is ${r.state} -- dropped delegation?`);
+    const note = owedNote(r, live, unknown);
+    if (note) console.log(`  ${"".padEnd(12)} ${note.label.mark} ${note.says}${note.label.tail}`);
   }
   console.log("-- waiting --");
-  const work = idleWork(recs, ws.config.agents, new Set(live.keys()));
+  const work = idleWork(recs, ws.config.agents, new Set(live.keys()), unknown);
   if (!work.length) console.log("  none");
   else for (const w of work) console.log(`  ${w}`);
 }
@@ -284,7 +285,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   }
   // One active item per agent, and the store agrees.
   for (const r of allRecs(ws))
-    if (r.agent === name && r.state && BUSY.has(r.state) && r.ticket !== ticket)
+    if (owesSession(r) && r.agent === name && r.ticket !== ticket)
       throw new FactoryError(`${name} is recorded as ${r.state} on ${r.ticket}. Finish or re-state that first.`);
   const rec = loadRec(ws, ticket);
   const cur = rec?.state ?? null;
@@ -499,7 +500,7 @@ function up(ws: Workspace, fresh: boolean) {
   const old = findSession(t, ld.name, true);
   if (old && !fresh) {
     const sid = old.id as string;
-    const r = t.respawn(sid);
+    const r = t.respawn(ld.name, sid);
     if (r.ok && waitForName(t, ld.name, 60)) {
       console.log(`${ld.name} respawned from ${sid}: ${r.said}`);
       return;
@@ -516,15 +517,28 @@ function cmdUp(ws: Workspace, argv: string[]) {
   up(ws, !!v.fresh);
 }
 
+// Prints each host that could not be asked, and returns 1 if there was any.
+function sayUnknown(rows: Iterable<Session[] | Unreachable>, so: string): number {
+  let code = 0;
+  for (const r of rows)
+    if (r instanceof Unreachable) {
+      console.error(`${r.message}; ${so}`);
+      code = 1;
+    }
+  return code;
+}
+
 function cmdDown(ws: Workspace, argv: string[]) {
   args("down", argv, {}, [0, 0]);
-  const rows = new Map(transports(ws).map((t) => [t.where, t.sessions()]));
+  const rows = new Map(transports(ws).map((t) => [t.where, listing(t)]));
+  const code = sayUnknown(rows.values(), "its sessions are left as they are");
   for (const { t, hits } of agentSessions(ws, (where) => rows.get(where)))
     for (const s of hits) {
       console.log(`stopping ${s.name} (${s.id})`);
       stopSession(t, s, false);
     }
   stopBoard(ws, true);
+  return code;
 }
 
 function cmdRestartLead(ws: Workspace, argv: string[]) {
@@ -544,7 +558,13 @@ function cmdRestartLead(ws: Workspace, argv: string[]) {
 function cmdSessions(ws: Workspace, argv: string[]) {
   const { v } = args("sessions", argv, { all: { type: "boolean" }, fleet: { type: "boolean" } }, [0, 0]);
   if (v.fleet) console.log(fleetLines(ws).lines.join("\n"));
-  else console.log(pyDumps(transports(ws).flatMap((t) => t.sessions(!!v.all)), { indent: 2 }));
+  else {
+    const rows = transports(ws).map((t) => listing(t, !!v.all));
+    const code = sayUnknown(rows, "its sessions are not listed");
+    console.log(pyDumps(rows.flatMap((r) => (Array.isArray(r) ? r : [])), { indent: 2 }));
+    return code;
+  }
+  return 0;
 }
 
 // A tracker ticket is never droppable: its record is the factory's half of something that exists

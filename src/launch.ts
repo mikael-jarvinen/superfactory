@@ -115,7 +115,11 @@ export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string,
     env: { ...process.env, ...GIT_HTTPS_ENV },
   });
   const s = waitForName(t, agent.name);
-  if (!s) die(`${agent.name} did not appear in \`claude agents\` within 90s (launch id ${sid}). Check \`claude logs ${sid}\`.`);
+  if (!s) {
+    const there = agent.host ? ` on host ${t.where}` : "";
+    const also = agent.host ? ` there, and \`factory doctor\` for whether ${t.where} answers` : "";
+    die(`${agent.name} did not appear in \`claude agents\`${there} within 90s (launch id ${sid}). Check \`claude logs ${sid}\`${also}.`);
+  }
   return s;
 }
 

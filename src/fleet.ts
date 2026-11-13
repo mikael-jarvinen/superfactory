@@ -1,7 +1,8 @@
 import type { Agent, RoleName } from "./config.js";
 import { allRecs, BUSY, IN_REVIEW, type Rec } from "./state.js";
 import type { Workspace } from "./workspace.js";
-import { agentSessions, isAgentSession, pick, type Transport, transports } from "./transport.js";
+import { ask, Unreachable } from "./remote.js";
+import { agentSessions, isAgentSession, pick, type Transport, transportFor, transports } from "./transport.js";
 import { die, pyRepr, pyStr, sleep } from "./util.js";
 import { branchPushed, worktreeDirty } from "./worktree.js";
 
@@ -38,12 +39,13 @@ export function findSession(t: Transport, name: string, includeDone = false): Se
   return pick(t, t.sessions(includeDone).filter(isAgentSession(name)));
 }
 
-export function waitForName(t: Transport, name: string, timeoutS = 90): Session | null {
+// A host that cannot be asked on one poll is asked again on the next.
+export function waitForName(t: Transport, name: string, timeoutS = 90, pollMs = 3000): Session | null {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutS * 1000) {
-    const s = findSession(t, name);
-    if (t.alive(s)) return s;
-    sleep(3000);
+    const s = ask(() => findSession(t, name));
+    if (!(s instanceof Unreachable) && t.alive(s)) return s;
+    sleep(pollMs);
   }
   return null;
 }
@@ -51,7 +53,7 @@ export function waitForName(t: Transport, name: string, timeoutS = 90): Session 
 export function stopSession(t: Transport, s: Session | null, remove = true): void {
   const id = s?.id;
   if (!id) return;
-  t.stop(id, remove);
+  t.stop(s.name ?? "", id, remove);
 }
 
 // What stopping a builder would lose from its worktree, as the refusal to give, or null if nothing.
@@ -71,13 +73,64 @@ export function reviewOnly(recs: Rec[], name: string): Rec[] {
   return mine.some((r) => BUSY.has(r.state as string)) ? [] : mine.filter((r) => IN_REVIEW.has(r.state as string));
 }
 
+// A record in a working state: its agent is owed a session, and is not free for other work.
+export const owesSession = (r: Rec): r is Rec & { agent: string; state: string } => !!r.agent && !!r.state && BUSY.has(r.state);
+
+// Where the agent a record owes a session stands: running, on a host that could not be asked, or
+// dropped. Null when the record is not in a working state or names no agent.
+export type Owed = { is: "live" } | { is: "unknown"; why: string } | { is: "dropped" };
+
+export function owed(r: Rec, live: ReadonlySet<string> | ReadonlyMap<string, unknown>, unknown: ReadonlyMap<string, string>): Owed | null {
+  if (!owesSession(r)) return null;
+  if (live.has(r.agent)) return { is: "live" };
+  const why = unknown.get(r.agent);
+  return why !== undefined ? { is: "unknown", why } : { is: "dropped" };
+}
+
+// Where each output labels an owed session that is not live: `factory status` prints mark before
+// the line and tail after it, and the round and the idle check print theirs before it.
+interface OwedLabel {
+  mark: string;
+  tail: string;
+  round: string;
+  idle: string;
+}
+
+const OWED_LABEL: Record<Exclude<Owed["is"], "live">, OwedLabel> = {
+  unknown: { mark: "??", tail: "", round: "UNKNOWN", idle: "unknown" },
+  dropped: { mark: "!!", tail: " -- dropped delegation?", round: "NO SESSION", idle: "dropped" },
+};
+
+function owedSays(r: Rec, o: Exclude<Owed, { is: "live" }>): string {
+  switch (o.is) {
+    case "unknown":
+      return `${r.agent}'s host could not be asked (${o.why}) while ${r.ticket} is ${r.state}`;
+    case "dropped":
+      return `${r.agent} has no live session while ${r.ticket} is ${r.state}`;
+  }
+}
+
+// The label and text every output prints for a record's owed session; null when it owes none or is live.
+export function owedNote(r: Rec, live: ReadonlySet<string> | ReadonlyMap<string, unknown>, unknown: ReadonlyMap<string, string>): { label: OwedLabel; says: string } | null {
+  const o = owed(r, live, unknown);
+  if (!o || o.is === "live") return null;
+  return { label: OWED_LABEL[o.is], says: owedSays(r, o) };
+}
+
 const field = (s: Session, k: string) => (k in s ? pyStr(s[k]) : "?");
 
-// One line per fleet member: live session, stale record, or nothing. Returns the live ones too.
-export function fleetLines(ws: Workspace): { lines: string[]; live: Map<string, Session> } {
+// A transport's listing, or why its host could not be asked.
+export function listing(t: Transport, includeDone = false): Session[] | Unreachable {
+  return ask(() => t.sessions(includeDone));
+}
+
+// One line per fleet member: live session, stale record, unknown, or nothing. Returns the live ones
+// too, and the unknown ones with why.
+export function fleetLines(ws: Workspace): { lines: string[]; live: Map<string, Session>; unknown: Map<string, string> } {
   const listed = new Map<string, Session>();
   const live = new Map<string, Session>();
-  const rows = new Map(transports(ws).map((t) => [t.where, t.sessions()]));
+  const unknown = new Map<string, string>();
+  const rows = new Map(transports(ws).map((t) => [t.where, listing(t)]));
   for (const { agent: a, t, hits } of agentSessions(ws, (where) => rows.get(where))) {
     const s = pick(t, hits);
     if (s) listed.set(a.name, s);
@@ -86,7 +139,11 @@ export function fleetLines(ws: Workspace): { lines: string[]; live: Map<string, 
   const recs = allRecs(ws);
   const lines = ws.config.agents.map((a) => {
     const s = listed.get(a.name);
-    const st = s && live.has(a.name)
+    const got = rows.get(transportFor(ws, a).where);
+    if (got instanceof Unreachable) unknown.set(a.name, got.brief);
+    const st = got instanceof Unreachable
+      ? `unknown (${got.message})`
+      : s && live.has(a.name)
       ? `${field(s, "status")}/${field(s, "state")} id=${pyStr(s.id)} cwd=${pyStr(s.cwd)}`
       : s
         ? `not running (stale record id=${pyStr(s.id)} says ${field(s, "state")}; the daemon is gone)`
@@ -95,5 +152,5 @@ export function fleetLines(ws: Workspace): { lines: string[]; live: Map<string, 
     const free = review.length ? `  -- free: ${review.map((r) => `${r.ticket} is ${r.state}`).join(", ")}` : "";
     return `  ${a.name.padEnd(10)} ${a.role.padEnd(9)} ${st}${free}`;
   });
-  return { lines, live };
+  return { lines, live, unknown };
 }

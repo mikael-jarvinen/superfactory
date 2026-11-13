@@ -20,12 +20,15 @@ import { checks as schedulerChecks } from "./scheduler/index.js";
 import { TEMPLATES_DIR, templateNames } from "./settings.js";
 import { stackDoctor } from "./stacks/engine.js";
 import { trackerOf } from "./tracker/read.js";
+import { probe } from "./remote.js";
+import { local } from "./transport.js";
 import { promptPath } from "./watchers/job.js";
 import type { Workspace } from "./workspace.js";
 import { run } from "./util.js";
-import type { Check } from "./check.js";
+import { type Check, okIf } from "./check.js";
 
-export const line = (c: Check) => (c.ok ? `ok ${c.what}` : `MISSING ${c.what}${c.fix ? ` [fix: ${c.fix}]` : ""}`);
+export const line = (c: Check) =>
+  c.status === "unchecked" ? `NOT CHECKED ${c.what}` : c.status === "ok" ? `ok ${c.what}` : `MISSING ${c.what}${c.fix ? ` [fix: ${c.fix}]` : ""}`;
 
 // The combined output of a command that succeeded, or undefined.
 function out(cmd: string, args: string[]): string | undefined {
@@ -70,11 +73,11 @@ const shown = (ws: Workspace, p: string) => (p.startsWith(ws.dir + sep) ? relati
 function tools(ws: Workspace): Check[] {
   const checks: Check[] = [];
   const node = process.versions.node;
-  checks.push({ ok: versionAtLeast(node, [22, 0]), what: `Node 22 or later (running ${node})`, fix: "install Node 22 or later, then install this package again" });
+  checks.push({ status: okIf(versionAtLeast(node, [22, 0])), what: `Node 22 or later (running ${node})`, fix: "install Node 22 or later, then install this package again" });
 
   const claude = claudeBin();
   const haveClaude = executable(claude);
-  checks.push({ ok: haveClaude, what: `claude at ${claude}`, fix: "install Claude Code (curl -fsSL https://claude.ai/install.sh | bash), or set CLAUDE_BIN" });
+  checks.push({ status: okIf(haveClaude), what: `claude at ${claude}`, fix: "install Claude Code (curl -fsSL https://claude.ai/install.sh | bash), or set CLAUDE_BIN" });
   if (haveClaude) {
     let loggedIn = false;
     try {
@@ -82,32 +85,32 @@ function tools(ws: Workspace): Check[] {
     } catch {
       loggedIn = false;
     }
-    checks.push({ ok: loggedIn, what: "claude logged in", fix: "claude auth login" });
+    checks.push({ status: okIf(loggedIn), what: "claude logged in", fix: "claude auth login" });
     let lists = false;
     try {
-      lists = Array.isArray(JSON.parse(out(claude, ["agents", "--json"]) ?? ""));
+      lists = Array.isArray(local.sessions());
     } catch {
       lists = false;
     }
-    checks.push({ ok: lists, what: "claude agents --json, which lists background sessions", fix: "claude update" });
+    checks.push({ status: okIf(lists), what: "claude agents --json, which lists background sessions", fix: "claude update" });
   }
 
   const gh = ghBin();
   const haveGh = out(gh, ["--version"]) !== undefined;
-  checks.push({ ok: haveGh, what: `gh at ${gh.includes(sep) ? gh : (onPath(gh) ?? `${gh} on PATH`)}`, fix: "brew install gh, or set GH_BIN" });
+  checks.push({ status: okIf(haveGh), what: `gh at ${gh.includes(sep) ? gh : (onPath(gh) ?? `${gh} on PATH`)}`, fix: "brew install gh, or set GH_BIN" });
   const ghIn = haveGh && out(gh, ["auth", "status"]) !== undefined;
-  if (haveGh) checks.push({ ok: ghIn, what: "gh logged in", fix: "gh auth login" });
+  if (haveGh) checks.push({ status: okIf(ghIn), what: "gh logged in", fix: "gh auth login" });
   if (ghIn)
     for (const r of Object.values(ws.config.repos))
       checks.push({
-        ok: out(gh, ["api", `repos/${r.remote}`, "--jq", ".full_name"]) !== undefined,
+        status: okIf(out(gh, ["api", `repos/${r.remote}`, "--jq", ".full_name"]) !== undefined),
         what: `gh can read ${r.remote} (repos.${r.key})`,
         fix: `ask for access to ${r.remote}, or gh auth refresh -s repo`,
       });
 
   const git = out("git", ["version"]);
   checks.push({
-    ok: versionAtLeast(git, [2, 31]),
+    status: okIf(versionAtLeast(git, [2, 31])),
     what: `git 2.31 or later, for rev-parse --path-format${git ? ` (${git.replace(/^git version /, "")})` : ""}`,
     fix: "install a newer git",
   });
@@ -124,7 +127,7 @@ function checkouts(ws: Workspace): Check[] {
       ok = !!top && real(top) === real(r.path) && origin.toLowerCase().includes(r.remote.toLowerCase());
     }
     return {
-      ok,
+      status: okIf(ok),
       what: `${r.path} is a checkout of ${r.remote} (repos.${r.key})`,
       fix: `git clone https://github.com/${r.remote}.git ${r.path}, or set repos.${r.key}.path`,
     };
@@ -133,27 +136,32 @@ function checkouts(ws: Workspace): Check[] {
 
 // ---------------------------------------------------------------- the workspace
 
-function workspaceFiles(ws: Workspace): Check[] {
+export function workspaceFiles(ws: Workspace): Check[] {
   const checks: Check[] = [];
   const cfg = ws.config;
   for (const name of ROLES) {
     const role = cfg.roles[name];
     if (!role || !cfg.agents.some((a) => a.role === name)) continue;
     if (isSettingsPath(role.settings))
-      checks.push({ ok: nonEmpty(role.settings), what: `${shown(ws, role.settings)} (roles.${name}.settings)`, fix: `write it, or name a template: ${templateNames().join(", ")}` });
+      checks.push({ status: okIf(nonEmpty(role.settings)), what: `${shown(ws, role.settings)} (roles.${name}.settings)`, fix: `write it, or name a template: ${templateNames().join(", ")}` });
     else
       checks.push({
-        ok: existsSync(join(TEMPLATES_DIR, `${role.settings}.json`)),
+        status: okIf(existsSync(join(TEMPLATES_DIR, `${role.settings}.json`))),
         what: `settings template ${JSON.stringify(role.settings)} (roles.${name}.settings)`,
         fix: `name one of ${templateNames().join(", ")}, or the path of a settings file`,
       });
-    if (role.mcpConfig) checks.push({ ok: nonEmpty(role.mcpConfig), what: `${shown(ws, role.mcpConfig)} (roles.${name}.mcp_config)`, fix: "write it, or remove the key" });
+    if (role.mcpConfig) checks.push({ status: okIf(nonEmpty(role.mcpConfig)), what: `${shown(ws, role.mcpConfig)} (roles.${name}.mcp_config)`, fix: "write it, or remove the key" });
   }
-  // Every agent but a builder starts by reading CLAUDE.md in its cwd. One line per cwd.
+  // Every agent but a builder starts by reading CLAUDE.md in its cwd. One line per cwd. An agent on
+  // a host has its cwd there, which this machine cannot look at.
   const cwds = new Map<string, { names: string[]; keys: Set<string> }>();
   for (const a of cfg.agents) {
     const dir = a.cwd ?? cfg.roles[a.role]?.cwd;
     if (!dir) continue;
+    if (a.host) {
+      checks.push({ status: "unchecked", what: `${dir}/CLAUDE.md, instructions for ${a.name}: it is on host ${a.host}, and the daemon there does not say` });
+      continue;
+    }
     const c = cwds.get(dir) ?? { names: [], keys: new Set<string>() };
     c.names.push(a.name);
     c.keys.add(a.cwd ? `${a.name}'s cwd` : `roles.${a.role}.cwd`);
@@ -162,7 +170,7 @@ function workspaceFiles(ws: Workspace): Check[] {
   for (const [dir, { names, keys }] of cwds) {
     const md = join(dir, "CLAUDE.md");
     checks.push({
-      ok: nonEmpty(md),
+      status: okIf(nonEmpty(md)),
       what: `${shown(ws, md)}, instructions for ${names.join(", ")} (${[...keys].join(", ")})`,
       fix: isDir(dir) ? `write ${shown(ws, md)}` : `create ${shown(ws, dir)} and write CLAUDE.md in it, or set ${[...keys].join(" or ")}`,
     });
@@ -180,7 +188,7 @@ function workspaceFiles(ws: Workspace): Check[] {
       for (const f of files) appendix.set(f, [...(appendix.get(f) ?? []), a.name]);
     }
   for (const [f, names] of appendix)
-    checks.push({ ok: nonEmpty(f), what: `${shown(ws, f)}, appended for ${names.join(", ")}`, fix: "write it, or take it out of the agent's appendix" });
+    checks.push({ status: okIf(nonEmpty(f)), what: `${shown(ws, f)}, appended for ${names.join(", ")}`, fix: "write it, or take it out of the agent's appendix" });
 
   // The round runs on every schedule and the courier on every board; the queue watcher only when
   // there is a tracker to read.
@@ -188,7 +196,7 @@ function workspaceFiles(ws: Workspace): Check[] {
   const prompt = (job: "queue" | "round" | "relay", why: string, extra?: (text: string) => boolean) => {
     const p = promptPath(ws, job);
     const ok = nonEmpty(p) && (!extra || extra(readFileSync(p, "utf8")));
-    checks.push({ ok, what: `${shown(ws, p)}, ${why}`, fix: example(job) });
+    checks.push({ status: okIf(ok), what: `${shown(ws, p)}, ${why}`, fix: example(job) });
   };
   if (trackerOf(ws).reads) prompt("queue", "the queue watcher's prompt");
   prompt("round", "the hourly round's prompt");
@@ -197,7 +205,7 @@ function workspaceFiles(ws: Workspace): Check[] {
   for (const s of Object.values(cfg.stacks))
     if (s.script)
       checks.push({
-        ok: existsSync(s.script) && executable(s.script),
+        status: okIf(existsSync(s.script) && executable(s.script)),
         what: `${shown(ws, s.script)} executable (stacks.${s.key}.script)`,
         fix: existsSync(s.script) ? `chmod +x ${shown(ws, s.script)}` : "write it to the stack contract in the program's docs/design.md",
       });
@@ -247,19 +255,19 @@ function demoTools(ws: Workspace): Check[] {
   if (!why) return [];
   const checks: Check[] = [];
   checks.push({
-    ok: (out("ffmpeg", ["-hide_banner", "-encoders"]) ?? "").includes("libx264"),
+    status: okIf((out("ffmpeg", ["-hide_banner", "-encoders"]) ?? "").includes("libx264")),
     what: `ffmpeg with libx264, which factory demo encodes with (${why})`,
     fix: "brew install ffmpeg",
   });
   const pw = findPlaywright(ws, ws.dir);
   checks.push({
-    ok: !!pw,
+    status: okIf(!!pw),
     what: pw ? `@playwright/test at ${pw}` : `@playwright/test, which factory demo runs (${why})`,
     fix: "npm install -D @playwright/test in the workspace",
   });
   if (pw) {
     const b = headlessChromium(pw);
-    checks.push({ ok: !!b.dir && isDir(b.dir), what: `Playwright's headless Chromium ${b.name}`, fix: "npx playwright install chromium, in the workspace" });
+    checks.push({ status: okIf(!!b.dir && isDir(b.dir)), what: `Playwright's headless Chromium ${b.name}`, fix: "npx playwright install chromium, in the workspace" });
   }
   return checks;
 }
@@ -280,11 +288,25 @@ async function boardPort(ws: Workspace): Promise<Check> {
   const { host, port } = ws.config.board;
   const at = `${host}:${port}`;
   const pid = boardPid(ws);
-  if (pid) return { ok: true, what: `board port ${at}, held by this workspace's board (pid ${pid})` };
+  if (pid) return { status: "ok", what: `board port ${at}, held by this workspace's board (pid ${pid})` };
   const e = await tryListen(host, port);
-  if (!e) return { ok: true, what: `board port ${at} free` };
-  if (e.code === "EADDRINUSE") return { ok: false, what: `board port ${at} free, but another process holds it`, fix: "stop that process, or set board.port" };
-  return { ok: false, what: `board host ${host} to listen on (${e.code ?? e.message})`, fix: "set board.host to a name this machine answers on, such as localhost" };
+  if (!e) return { status: "ok", what: `board port ${at} free` };
+  if (e.code === "EADDRINUSE") return { status: "missing", what: `board port ${at} free, but another process holds it`, fix: "stop that process, or set board.port" };
+  return { status: "missing", what: `board host ${host} to listen on (${e.code ?? e.message})`, fix: "set board.host to a name this machine answers on, such as localhost" };
+}
+
+// Each host an agent runs on, asked once. One that cannot be asked leaves its agents unknown.
+export function hostChecks(ws: Workspace): Check[] {
+  const used = [...new Set(ws.config.agents.map((a) => a.host).filter((h): h is string => !!h))];
+  return used.map((name) => {
+    const h = ws.config.hosts[name];
+    if (!h) return { status: "missing", what: `host ${name}`, fix: `add [hosts.${name}]` };
+    const names = ws.config.agents.filter((a) => a.host === name).map((a) => a.name).join(", ");
+    const why = probe(h);
+    return why
+      ? { status: "missing", what: `host ${name} at ${h.url}, for ${names}: unknown (${why})`, fix: `start the factory daemon on ${name}, or check its token_file and hash_files` }
+      : { status: "ok", what: `host ${name} at ${h.url} answers, for ${names}` };
+  });
 }
 
 // ---------------------------------------------------------------- all of it
@@ -295,7 +317,7 @@ export async function doctor(ws: Workspace, print: (l: string) => void = console
   let missing = 0;
   const emit = (checks: Check[]) => {
     for (const c of checks) {
-      if (!c.ok) missing++;
+      if (c.status === "missing") missing++;
       print(line(c));
     }
   };
@@ -304,6 +326,7 @@ export async function doctor(ws: Workspace, print: (l: string) => void = console
   emit(workspaceFiles(ws));
   emit(demoTools(ws));
   emit([await boardPort(ws)]);
+  emit(hostChecks(ws));
   // Reported, never fixed: installing jobs is `factory schedule install`, which the human runs.
   emit(schedulerChecks(ws));
   // A stack whose script cannot run has its line above; its doctor would only repeat it.

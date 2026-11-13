@@ -247,12 +247,12 @@ export function loaded(ws: Workspace): string[] {
 export function checks(ws: Workspace): Check[] {
   const s = jobStates(ws);
   const fix = "factory schedule install";
-  if (s.listFailed) return [{ ok: false, what: "launchctl list, to see the watchers' jobs", fix: "run it by hand and read its error" }];
+  if (s.listFailed) return [{ status: "missing", what: "launchctl list, to see the watchers' jobs", fix: "run it by hand and read its error" }];
   const out: Check[] = s.jobs.map(({ job, installed, loaded }) =>
-    installed === "no" ? { ok: false, what: `launchd job ${job.label} installed`, fix }
-    : installed === "stale" ? { ok: false, what: `launchd job ${job.label} as config renders it now`, fix }
-    : !loaded ? { ok: false, what: `launchd job ${job.label} loaded`, fix }
-    : { ok: true, what: `launchd job ${job.label} loaded` });
-  for (const l of s.unwanted) out.push({ ok: false, what: `launchd job ${l} removed, since config no longer runs it`, fix });
+    installed === "no" ? { status: "missing", what: `launchd job ${job.label} installed`, fix }
+    : installed === "stale" ? { status: "missing", what: `launchd job ${job.label} as config renders it now`, fix }
+    : !loaded ? { status: "missing", what: `launchd job ${job.label} loaded`, fix }
+    : { status: "ok", what: `launchd job ${job.label} loaded` });
+  for (const l of s.unwanted) out.push({ status: "missing", what: `launchd job ${l} removed, since config no longer runs it`, fix });
   return out;
 }

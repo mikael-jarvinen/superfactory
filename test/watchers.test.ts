@@ -310,7 +310,7 @@ test("the round: flags said once, the failures cursor, and its heartbeat", () =>
   let r = run(["watch", "round", "--facts"], [], routes);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.equal(r.calls.length, 0, "--facts runs no session");
-  assert.match(r.stdout, /WEB-2 .*OVER 90 MIN in a working state -- probe {2}NO SESSION: bea has no live session while building/);
+  assert.match(r.stdout, /WEB-2 .*OVER 90 MIN in a working state -- probe {2}NO SESSION: bea has no live session while WEB-2 is building/);
   assert.match(r.stdout, /watcher failures since the last round --\n {2}2026-01-01T00:00:00Z queue FAILED exit=1/);
   assert.match(r.stdout, process.platform === "darwin" ? /launchd superfactory\.ada\.round NOT LOADED/ : /scheduler NOT RUNNING/);
 

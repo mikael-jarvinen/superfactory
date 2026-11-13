@@ -37,6 +37,8 @@ src/
                   runs `claude agents --json` and friends, with any undocumented daemon
                   internals behind one function
   claude-bin.ts   which claude binary to run
+  remote.ts       the transport for an agent with a host: each session operation is a request
+                  to the factory daemon there, and a host that cannot be asked is unknown
   launch.ts       the `claude --bg` command line, appendix assembly, the READY handshake
   settings.ts     render each role's Claude Code settings at launch into logs/run/
   worktree.ts     worktree per work item, push over https, dirty and pushed checks

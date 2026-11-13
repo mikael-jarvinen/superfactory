@@ -91,6 +91,13 @@ role = "reviewer"
 # cwd = "reviewers/rae"   # these three override the role's; a builder takes no cwd
 # permission_mode = "auto"
 # autocompact = "400k"
+# host = "studio"                         # its sessions run on that machine (not for a builder)
+
+# [hosts.studio]                          # another machine's factory daemon, for agents with host
+# url = "http://192.168.1.20:8787"
+# token_file = "~/.config/factory/token"  # the default; the daemon's shared token
+# hash_files = ["~/agents/factory/factory.toml", "~/agents/factory/workspace/factory.toml"]
+#                                         # the daemon's config, then the workspace config it launches from; order matters
 
 [tracker]
 kind = "jira"                             # or "none"

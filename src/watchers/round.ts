@@ -8,7 +8,7 @@
 // cursor move only once a round has run, so a failed round shows the same lines again.
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fleetLines, type Session } from "../fleet.js";
+import { fleetLines, owedNote, type Session } from "../fleet.js";
 import { json } from "../gate/github.js";
 import { readTail } from "../messages.js";
 import { loaded } from "../scheduler/index.js";
@@ -67,10 +67,12 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
   };
 
   let live: Map<string, Session> | null = null;
+  let unknown = new Map<string, string>();
   section("sessions", () => {
     try {
       const f = fleetLines(ws);
       live = f.live;
+      unknown = f.unknown;
       out.push(...f.lines);
     } catch (e) {
       if (!(e instanceof FactoryError)) throw e;
@@ -102,7 +104,8 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
       if (WAITING_ON_LEAD.has(s) && age !== null && age > LEAD_WAITING_S)
         flag = firstTime(r.ticket, s, r.since!) ? "  waiting on the lead over 2 h -- report, review or gate it" : "  waiting on the lead (already reported, not an escalation)";
       const sessions = live as Map<string, Session> | null;
-      if (BUSY.has(s) && r.agent && sessions && !sessions.has(r.agent)) flag += `  NO SESSION: ${r.agent} has no live session while ${s}`;
+      const note = sessions && owedNote(r, sessions, unknown);
+      if (note) flag += `  ${note.label.round}: ${note.says}`;
       // Mikael, 2026-10-09: the round must check whether a blocked item is still truly blocked. A
       // blocked item that names a ticket it waits on ("held behind CL-2247 merge") stays blocked
       // silently after that ticket merges. When a named blocker has reached done, say so once, so

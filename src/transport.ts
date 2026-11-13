@@ -1,5 +1,6 @@
 // Where an agent's sessions live. Every session operation goes through the agent's
-// transport; the local one runs claude on this machine.
+// transport; the local one runs claude on this machine, and an agent with a host goes through that
+// host's daemon (remote.ts).
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -9,6 +10,7 @@ import { claudeBin } from "./claude-bin.js";
 import type { Agent } from "./config.js";
 import type { Session } from "./fleet.js";
 import type { Phase } from "./launch.js";
+import { remote, type Unreachable } from "./remote.js";
 import type { Workspace } from "./workspace.js";
 import { die, run } from "./util.js";
 
@@ -29,15 +31,16 @@ export interface StartRequest {
 // the same `where` are taken for one.
 export interface Transport {
   readonly where: string;
+  // Throws Unreachable (remote.ts) when a host cannot be asked.
   sessions(includeDone?: boolean): Session[];
-  // For the board, which must not block on a listing.
-  sessionsAsync(): Promise<Session[]>;
+  // For the board, which must not block on a listing. Resolves to Unreachable rather than throwing it.
+  sessionsAsync(): Promise<Session[] | Unreachable>;
   alive(s: Session | null | undefined): s is Session;
   // The launch id claude printed, or "?".
   start(req: StartRequest): string;
   // said: claude's stdout. why: its stderr (else stdout), read when the session does not come back.
-  respawn(id: string): { ok: boolean; said: string; why: string };
-  stop(id: string, remove: boolean): void;
+  respawn(name: string, id: string): { ok: boolean; said: string; why: string };
+  stop(name: string, id: string, remove: boolean): void;
 }
 
 const parse = (stdout: string): Session[] => JSON.parse(stdout || "[]") as Session[];
@@ -99,18 +102,28 @@ export const local: Transport = {
     if (r.status !== 0) die(`claude --bg failed: ${r.stderr.trim() || r.stdout.trim()}`);
     return /backgrounded · (\w+) · /.exec(r.stdout)?.[1] ?? "?";
   },
-  respawn(id) {
+  respawn(_name, id) {
     const r = run(claudeBin(), ["respawn", id]);
     return { ok: r.status === 0, said: r.stdout.trim(), why: r.stderr.trim() || r.stdout.trim() };
   },
-  stop(id, remove) {
+  stop(_name, id, remove) {
     run(claudeBin(), ["stop", id]);
     if (remove) run(claudeBin(), ["rm", id]);
   },
 };
 
-export function transportFor(_ws: Workspace, _agent: Agent): Transport {
-  return local;
+// One remote transport per host and workspace, so the agents on a host share it.
+const remotes = new WeakMap<Workspace, Map<string, Transport>>();
+
+export function transportFor(ws: Workspace, agent: Agent): Transport {
+  if (!agent.host) return local;
+  const host = ws.config.hosts[agent.host];
+  if (!host) die(`agent ${agent.name}: no host ${agent.host}`);
+  let m = remotes.get(ws);
+  if (!m) remotes.set(ws, (m = new Map()));
+  let t = m.get(host.name);
+  if (!t) m.set(host.name, (t = remote(host)));
+  return t;
 }
 
 export function transports(ws: Workspace): Transport[] {
@@ -135,10 +148,11 @@ export function pick(t: Transport, hits: Session[]): Session | null {
 export const isAgentSession = (name: string) => (s: Session) => s.kind === "background" && s.name === name;
 
 // Each agent with its transport and its background sessions, from the listings by `where` (none
-// for a transport not listed yet).
-export function agentSessions(ws: Workspace, listing: (where: string) => Session[] | undefined): { agent: Agent; t: Transport; hits: Session[] }[] {
+// for a transport not listed yet, or whose host could not be asked).
+export function agentSessions(ws: Workspace, listing: (where: string) => Session[] | Unreachable | undefined): { agent: Agent; t: Transport; hits: Session[] }[] {
   return ws.config.agents.map((agent) => {
     const t = transportFor(ws, agent);
-    return { agent, t, hits: (listing(t.where) ?? []).filter(isAgentSession(agent.name)) };
+    const rows = listing(t.where);
+    return { agent, t, hits: Array.isArray(rows) ? rows.filter(isAgentSession(agent.name)) : [] };
   });
 }

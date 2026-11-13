@@ -46,11 +46,11 @@ const FIX = "systemctl --user restart factory-scheduler, which reads config agai
 // For the doctor: the daemon is up and has every job config asks for, and none it does not.
 export function checks(ws: Workspace): Check[] {
   const s = readState(ws);
-  if (!daemonAlive(s)) return [{ ok: false, what: `the scheduler, which runs the watchers' jobs (no fresh ${stateFile(ws)})`, fix: "systemctl --user start factory-scheduler" }];
+  if (!daemonAlive(s)) return [{ status: "missing", what: `the scheduler, which runs the watchers' jobs (no fresh ${stateFile(ws)})`, fix: "systemctl --user start factory-scheduler" }];
   const want = jobs(ws);
-  const out: Check[] = want.map((j) => (s.jobs[j.label] ? { ok: true, what: `scheduler job ${j.label}` } : { ok: false, what: `scheduler job ${j.label}`, fix: FIX }));
+  const out: Check[] = want.map((j) => (s.jobs[j.label] ? { status: "ok", what: `scheduler job ${j.label}` } : { status: "missing", what: `scheduler job ${j.label}`, fix: FIX }));
   for (const l of Object.keys(s.jobs).filter((l) => !want.some((j) => j.label === l)))
-    out.push({ ok: false, what: `scheduler job ${l} gone, since config no longer runs it`, fix: FIX });
+    out.push({ status: "missing", what: `scheduler job ${l} gone, since config no longer runs it`, fix: FIX });
   return out;
 }
 
