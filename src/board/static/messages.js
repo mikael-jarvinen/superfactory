@@ -35,7 +35,7 @@ function render(d){
         ${m.receipt ? `<span class="rcpt ${esc(m.receipt)}">${esc(m.receipt)}</span>` : ''}
         <span class="when">${esc(when(m.age_min))}</span>
       </div>
-      ${m.text ? `<div class="body">${esc(m.text)}</div>` : ''}
+      ${m.text ? `<div class="body">${md(m.text)}</div>` : ''}
       ${(m.images || (m.image ? [m.image] : [])).map(f => `<div class="shot"><a href="/attachments/${esc(f)}" target="_blank" rel="noopener"><img src="/attachments/${esc(f)}" alt="screenshot" loading="lazy"></a></div>`).join('')}
       ${m.link ? `<div class="link"><a href="${esc(m.link)}" target="_blank" rel="noopener">${esc(m.link)}</a></div>` : ''}
     </div></div>`;
