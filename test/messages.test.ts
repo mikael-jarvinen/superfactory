@@ -12,7 +12,7 @@ test("records, events and messages are written as Python's json.dumps writes the
   assert.equal(pyDumps({ pr: { number: 1 }, prs: [] }, { indent: 2 }), '{\n  "pr": {\n    "number": 1\n  },\n  "prs": []\n}');
 });
 
-test("say appends one row, refuses over 1200 characters, and prints the push line", () => {
+test("say appends one row of any length, and prints a push line of the first line's first 200", () => {
   const ws = tempWorkspace();
   after(() => rmSync(ws, { recursive: true, force: true }));
   const log = join(ws, "state", "messages.jsonl");
@@ -21,8 +21,10 @@ test("say appends one row, refuses over 1200 characters, and prints the push lin
   assert.equal(r.stdout, "posted to http://localhost:8787/messages\nPUSH NOW: WEB-1 WEB-1 is ready\n");
   assert.match(readFileSync(log, "utf8"),
     /^\{"t": "[^"]+", "text": "WEB-1 is ready", "ticket": "WEB-1", "kind": "ready", "link": "https:\/\/example.com\/1"\}\n$/);
-  assert.equal(factory(ws, ["say", "é".repeat(1200)]).status, 0);
-  assert.match(factory(ws, ["say", "é".repeat(1201)]).stderr, /1201 characters/);
+  const long = factory(ws, ["say", "é".repeat(5000) + "\n" + "second line"]);
+  assert.equal(long.status, 0, long.stderr);
+  assert.equal(long.stdout, `posted to http://localhost:8787/messages\nPUSH NOW: ${"é".repeat(200)}\n`);
+  assert.equal(JSON.parse(readFileSync(log, "utf8").trimEnd().split("\n").at(-1) as string).text, "é".repeat(5000) + "\nsecond line");
   assert.equal(factory(ws, ["say", "x", "--kind", "chat"]).status, 2);
 });
 

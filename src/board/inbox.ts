@@ -5,7 +5,7 @@ import { HUMAN_KIND, isHuman, type Message, rowImages } from "../messages.js";
 import type { Workspace } from "../workspace.js";
 import { chars, die, now, pyDumps, sleep } from "../util.js";
 
-// What the human can type on the page; `factory say` keeps its own 1200 for the lead.
+// What the human can type on the page. `factory say` has no limit: the lead's instructions keep it short.
 export const MAX_CHARS = 20_000;
 
 // Carries one message to the lead when no inbox is held. It must return at once: the courier runs
