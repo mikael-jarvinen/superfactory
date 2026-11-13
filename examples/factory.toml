@@ -88,6 +88,9 @@ add_dirs = ["web", "api"]
 [[agents]]
 name = "rae"
 role = "reviewer"
+# cwd = "reviewers/rae"   # these three override the role's; a builder takes no cwd
+# permission_mode = "auto"
+# autocompact = "400k"
 
 [tracker]
 kind = "jira"                             # or "none"

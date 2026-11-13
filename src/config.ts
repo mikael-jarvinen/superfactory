@@ -56,6 +56,9 @@ export interface Agent {
   appendix: string[];
   addDirs?: string[];
   remoteControl: boolean;
+  cwd?: string;
+  permissionMode?: string;
+  autocompact?: string;
 }
 
 export interface Tracker {
@@ -345,6 +348,8 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const appendix = r.strs("appendix") ?? [];
     const resolved = appendix.map((a) => (a.startsWith("repo:") ? a : (path(r, "appendix", a) ?? a)));
     const addDirs = repoKeys(r, "add_dirs", r.strs("add_dirs"));
+    const cwd = path(r, "cwd", r.str("cwd"));
+    if (role === "builder" && cwd) r.bad("cwd", "a builder starts in its worktree, so it takes no cwd");
     agents.push({
       name,
       role,
@@ -353,6 +358,9 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
       appendix: resolved,
       addDirs,
       remoteControl: r.bool("remote_control") ?? false,
+      cwd,
+      permissionMode: r.str("permission_mode"),
+      autocompact: r.str("autocompact"),
     });
     r.done();
   });

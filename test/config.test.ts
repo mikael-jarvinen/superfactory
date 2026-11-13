@@ -136,3 +136,23 @@ test("the CLI prints every problem at once and exits 1", () => {
   writeFileSync(join(ws, "factory.toml"), "[human\n");
   assert.match(factory(ws, ["status"]).stderr, /has 1 problem:\n {2}not valid TOML: /);
 });
+
+test("an agent's own cwd, permission_mode and autocompact; a builder's cwd is refused", () => {
+  const ws = tempWorkspace(TOML.replace(`name = "rae"
+role = "reviewer"`, `name = "rae"
+role = "reviewer"
+cwd = "rae"
+permission_mode = "default"
+autocompact = "400k"`));
+  after(() => rmSync(ws, { recursive: true, force: true }));
+  const c = loadConfig(join(ws, "factory.toml"), {});
+  const rae = c.agents.find((a) => a.name === "rae");
+  assert.deepEqual([rae?.cwd, rae?.permissionMode, rae?.autocompact], [join(ws, "rae"), "default", "400k"]);
+  const ada = c.agents.find((a) => a.name === "ada");
+  assert.deepEqual([ada?.cwd, ada?.permissionMode, ada?.autocompact], [undefined, undefined, undefined]);
+
+  assert.deepEqual(problems(TOML.replace(`name = "cal"
+role = "builder"`, `name = "cal"
+role = "builder"
+cwd = "cal"`)), ["agents[2].cwd: a builder starts in its worktree, so it takes no cwd"]);
+});

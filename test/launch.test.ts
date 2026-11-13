@@ -3,9 +3,18 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { agentOrDie } from "../src/fleet.js";
-import { buildAppendix, buildingPrompt, launchArgs } from "../src/launch.js";
+import { buildAppendix, buildingPrompt, launchArgs, roleOf } from "../src/launch.js";
 import { openWorkspace } from "../src/workspace.js";
-import { tempDir, tempWorkspace } from "./helpers.js";
+import { TOML, tempDir, tempWorkspace } from "./helpers.js";
+
+const TOML_WITH_ROB = TOML.replace("[tracker]", `[[agents]]
+name = "rob"
+role = "reviewer"
+cwd = "rob"
+permission_mode = "default"
+autocompact = "400k"
+
+[tracker]`);
 
 // The order is part of the contract: --add-dir is variadic, a builder's --settings follows its
 // --remote-control while every other role's leads, and the prompt always comes last.
@@ -58,4 +67,22 @@ test("the READY prompt names the lead from config and keeps a LOCAL key off GitH
   assert.match(p, /^You are Bea\. Your work item is LOCAL-fix-db\. .* on branch fix-db\. .*wait for Ada's brief\./);
   assert.match(p, /leave it out of the PR title and the commit message/);
   assert.doesNotMatch(buildingPrompt(ws, agentOrDie(ws, "bea"), "WEB-12"), /leave it out/);
+});
+
+test("an agent's own cwd, permission mode and autocompact override its role's", () => {
+  const dir = tempWorkspace(TOML_WITH_ROB);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const ws = openWorkspace(dir, {});
+  const rob = agentOrDie(ws, "rob");
+  const rae = agentOrDie(ws, "rae");
+  assert.equal(roleOf(ws, rob).cwd, join(dir, "rob"));
+  assert.equal(roleOf(ws, rae).cwd, join(dir, "reviewers"));
+  const tail = (args: string[]) => args.slice(args.indexOf("--name"));
+  assert.deepEqual(tail(launchArgs(ws, rob, "P", null, undefined)),
+    ["--name", "rob", "--model", "opus", "--effort", "high", "--autocompact", "400k", "--permission-mode", "default", "P"]);
+  assert.deepEqual(tail(launchArgs(ws, rae, "P", null, undefined)),
+    ["--name", "rae", "--model", "opus", "--effort", "high", "--autocompact", "1M", "--permission-mode", "auto", "P"]);
+  const mode = (name: string) => JSON.parse(readFileSync(join(dir, "logs", "run", `settings-${name}.json`), "utf8")).permissions.defaultMode;
+  assert.equal(mode("rob"), "default");
+  assert.equal(mode("rae"), "auto");
 });

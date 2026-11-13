@@ -91,7 +91,7 @@ test("doctor checks exactly what config needs", async () => {
   assert.equal(a.status, 0);
   assert.ok(lines.includes("ok gh can read acme/web (repos.web)"));
   assert.ok(lines.some((l) => /^ok .*repos\/web is a checkout of acme\/web \(repos\.web\)$/.test(l)));
-  assert.ok(lines.includes("ok lead/CLAUDE.md, the lead's instructions (roles.lead.cwd)"));
+  assert.ok(lines.includes("ok lead/CLAUDE.md, instructions for ada (roles.lead.cwd)"));
   assert.ok(lines.some((l) => l.startsWith("ok board port 127.0.0.1:")));
   for (const absent of ["queue", "ffmpeg", "playwright", "stacks/", "appended", "reviewers"])
     assert.ok(!lines.some((l) => l.toLowerCase().includes(absent)), `${absent} is not asked about: ${a.stdout}`);
@@ -121,6 +121,12 @@ appendix = ["briefs/app.md", "repo:AGENTS.md"]
 [[agents]]
 name = "rae"
 role = "reviewer"
+cwd = "rae"
+
+[[agents]]
+name = "rob"
+role = "reviewer"
+cwd = "rob"
 
 [tracker]
 kind = "jira"
@@ -140,7 +146,10 @@ done = "Done"
   const has = (re: RegExp) => assert.ok(got.some((l) => re.test(l)), `${re} in:\n${b.stdout}${b.stderr}`);
   has(/^MISSING gh can read acme\/api \(repos\.api\) \[fix: /);
   has(/^MISSING .*repos\/api is a checkout of acme\/api/);
-  has(/^MISSING reviewers\/CLAUDE\.md, the reviewers' instructions/);
+  // every reviewer starts in its own cwd, so the role's is not asked about
+  assert.ok(!got.some((l) => l.includes("reviewers/CLAUDE.md")), b.stdout);
+  has(/^MISSING rae\/CLAUDE\.md, instructions for rae \(rae's cwd\)/);
+  has(/^MISSING rob\/CLAUDE\.md, instructions for rob \(rob's cwd\) \[fix: create rob and write CLAUDE\.md in it, or set rob's cwd\]/);
   has(/^MISSING briefs\/app\.md, appended for bea \[fix: /);
   has(/^MISSING .*repos\/web\/AGENTS\.md, appended for bea/);
   assert.ok(!got.some((l) => l.includes("repos/api/AGENTS.md")), "a checkout that is not there has one line, its own");
@@ -152,4 +161,39 @@ done = "Done"
   has(/^app: MISSING web\.app-2\.test resolving/);
   if (process.platform === "darwin") has(/^MISSING launchd job superfactory\.ada\.queue installed \[fix: factory schedule install\]$/);
   else has(/^MISSING the scheduler, which runs the watchers' jobs .*\[fix: systemctl --user start factory-scheduler\]$/);
+});
+
+test("doctor names a CLAUDE.md once, with every agent that starts there", async () => {
+  const w = workspace(base(await freePort()).replace("[board]", () => `[roles.reviewer]
+cwd = "reviewers"
+settings = "readonly"
+
+[[agents]]
+name = "rae"
+role = "reviewer"
+cwd = "reviewers"
+
+[[agents]]
+name = "rob"
+role = "reviewer"
+
+[[agents]]
+name = "sam"
+role = "reviewer"
+cwd = "panel"
+
+[[agents]]
+name = "tia"
+role = "reviewer"
+cwd = "panel"
+
+[board]`));
+  const got = factory(w.dir, ["doctor"], { env: w.env }).stdout.trimEnd().split("\n");
+  const lines = (md: string) => got.filter((l) => l.includes(` ${md}, `));
+  assert.deepEqual(lines("reviewers/CLAUDE.md"), [
+    "MISSING reviewers/CLAUDE.md, instructions for rae, rob (rae's cwd, roles.reviewer.cwd) [fix: create reviewers and write CLAUDE.md in it, or set rae's cwd or roles.reviewer.cwd]",
+  ]);
+  assert.deepEqual(lines("panel/CLAUDE.md"), [
+    "MISSING panel/CLAUDE.md, instructions for sam, tia (sam's cwd, tia's cwd) [fix: create panel and write CLAUDE.md in it, or set sam's cwd or tia's cwd]",
+  ]);
 });

@@ -11,10 +11,16 @@ import { capitalize, die, run } from "./util.js";
 
 export type Phase = "build" | undefined;
 
+// The agent's own cwd, permission_mode and autocompact win over its role's.
 export function roleOf(ws: Workspace, agent: Agent): Role {
   const role = ws.config.roles[agent.role];
   if (!role) return die(`roles.${agent.role} is not configured`);
-  return role;
+  return {
+    ...role,
+    cwd: agent.cwd ?? role.cwd,
+    permissionMode: agent.permissionMode ?? role.permissionMode,
+    autocompact: agent.autocompact ?? role.autocompact,
+  };
 }
 
 // A builder's stack environment. Claude Code takes a settings env value literally and sets it on the

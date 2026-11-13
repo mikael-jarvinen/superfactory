@@ -139,16 +139,6 @@ function workspaceFiles(ws: Workspace): Check[] {
   for (const name of ROLES) {
     const role = cfg.roles[name];
     if (!role || !cfg.agents.some((a) => a.role === name)) continue;
-    // The lead's and the reviewers' launch prompts both begin with reading CLAUDE.md in their cwd.
-    if (role.cwd) {
-      const whose = name === "reviewer" || name === "designer" ? `the ${name}s'` : `the ${name}'s`;
-      const md = join(role.cwd, "CLAUDE.md");
-      checks.push({
-        ok: nonEmpty(md),
-        what: `${shown(ws, md)}, ${whose} instructions (roles.${name}.cwd)`,
-        fix: isDir(role.cwd) ? `write ${shown(ws, md)}` : `create ${shown(ws, role.cwd)} and write CLAUDE.md in it, or set roles.${name}.cwd`,
-      });
-    }
     if (isSettingsPath(role.settings))
       checks.push({ ok: nonEmpty(role.settings), what: `${shown(ws, role.settings)} (roles.${name}.settings)`, fix: `write it, or name a template: ${templateNames().join(", ")}` });
     else
@@ -158,6 +148,24 @@ function workspaceFiles(ws: Workspace): Check[] {
         fix: `name one of ${templateNames().join(", ")}, or the path of a settings file`,
       });
     if (role.mcpConfig) checks.push({ ok: nonEmpty(role.mcpConfig), what: `${shown(ws, role.mcpConfig)} (roles.${name}.mcp_config)`, fix: "write it, or remove the key" });
+  }
+  // Every agent but a builder starts by reading CLAUDE.md in its cwd. One line per cwd.
+  const cwds = new Map<string, { names: string[]; keys: Set<string> }>();
+  for (const a of cfg.agents) {
+    const dir = a.cwd ?? cfg.roles[a.role]?.cwd;
+    if (!dir) continue;
+    const c = cwds.get(dir) ?? { names: [], keys: new Set<string>() };
+    c.names.push(a.name);
+    c.keys.add(a.cwd ? `${a.name}'s cwd` : `roles.${a.role}.cwd`);
+    cwds.set(dir, c);
+  }
+  for (const [dir, { names, keys }] of cwds) {
+    const md = join(dir, "CLAUDE.md");
+    checks.push({
+      ok: nonEmpty(md),
+      what: `${shown(ws, md)}, instructions for ${names.join(", ")} (${[...keys].join(", ")})`,
+      fix: isDir(dir) ? `write ${shown(ws, md)}` : `create ${shown(ws, dir)} and write CLAUDE.md in it, or set ${[...keys].join(" or ")}`,
+    });
   }
 
   // One line per file however many agents append it. A repo: file is looked for in each checkout
