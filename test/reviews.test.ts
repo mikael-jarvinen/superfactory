@@ -8,7 +8,7 @@ import { transition } from "../src/state.js";
 import { openWorkspace } from "../src/workspace.js";
 import { tempWorkspace } from "./helpers.js";
 
-const macOnly = process.platform !== "darwin" && "the board tests are macOS-only";
+const noInboxLock = process.platform !== "darwin" && process.platform !== "linux" && "the board tests are built for macOS and Linux only";
 
 const user = (login: string) => ({ login, __typename: "User" });
 const bot = (login: string) => ({ login, __typename: "Bot" });
@@ -123,7 +123,7 @@ test("a failed read keeps the previous answer and marks it stale", async () => {
 });
 
 // The badge reaches the card only for a PR in review, and the request is served from the cache.
-test("the snapshot carries the review of a PR in review", { skip: macOnly }, async () => {
+test("the snapshot carries the review of a PR in review", { skip: noInboxLock }, async () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
   process.env.CLAUDE_BIN = join(dir, "bin", "claude");

@@ -13,7 +13,8 @@ import { parseRead, trackerOf, UNAVAILABLE } from "../tracker/read.js";
 import { squash } from "../util.js";
 import type { Workspace } from "../workspace.js";
 import { dockerWatchdog } from "./docker.js";
-import { beat, failure, heartbeatAge, heartbeatPath, loadPrompt, logTo, openLog, runFailure, runReader, TIMED_OUT, watcherGh } from "./job.js";
+import { failure } from "../failures.js";
+import { beat, heartbeatAge, heartbeatPath, loadPrompt, logTo, openLog, runFailure, runReader, TIMED_OUT, watcherGh } from "./job.js";
 import { deliver } from "./relay.js";
 
 // What the last runs left: the queue keys already seen, the merge urls already reported, the PRs

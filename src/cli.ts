@@ -34,7 +34,7 @@ import {
   allRecs, appendEvent, BUSY, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
 import { FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.js";
-import { failure } from "./watchers/job.js";
+import { failure } from "./failures.js";
 import { runQueue } from "./watchers/queue.js";
 import { relay } from "./watchers/relay.js";
 import { runRound } from "./watchers/round.js";
@@ -675,8 +675,7 @@ function cmdSchedule(ws: Workspace, argv: string[]): number {
       return n;
     };
     const opts = { checkSeconds: num("check-seconds", 30), memoryLimitMb: num("memory-limit-mb", 512) };
-    // The board here carries no relay to the lead yet: the inbox lock it needs is macOS-only.
-    runScheduler(ws, opts).catch((e: unknown) => {
+    runScheduler(ws, { ...opts, board: { relay } }).catch((e: unknown) => {
       console.error(`factory: schedule run: ${e instanceof Error ? e.message : String(e)}`);
       process.exit(e instanceof FactoryError ? e.code : 1);
     });

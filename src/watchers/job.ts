@@ -1,5 +1,5 @@
-// What every watcher run shares: its prompt from the workspace, its log, a disposable `claude -p`,
-// the failures log and the heartbeats. A watcher run costs money, so a run is one model call that
+// What every watcher run shares: its prompt from the workspace, its log, a disposable `claude -p`
+// and the heartbeats. A watcher run costs money, so a run is one model call that
 // does only what needs a model; fixed commands, set differences and file writes stay in the code.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -7,12 +7,11 @@ import { claudeBin, lead } from "../fleet.js";
 import { ghBin } from "../gate/github.js";
 import { renderSettings } from "../settings.js";
 import { parseRead } from "../tracker/read.js";
+import { iso } from "../failures.js";
 import type { Workspace } from "../workspace.js";
 import { die, run, type RunResult } from "../util.js";
 
 export type Job = "queue" | "round" | "relay";
-
-export const iso = (d = new Date()) => d.toISOString().replace(/\.\d+Z$/, "Z");
 
 // prompts/<job>.md in the workspace. {lead} and {human} are filled in, and {text} for the relay;
 // in one pass, so a message that happens to contain a placeholder reaches the session as written.
@@ -46,14 +45,6 @@ export function openLog(ws: Workspace, job: Job): string {
 }
 
 export const logTo = (path: string, text: string) => appendFileSync(path, text.endsWith("\n") || !text ? text : text + "\n");
-
-// One line per failed or off-contract run. The round shows what arrived since the last round.
-export const failuresLog = (ws: Workspace) => join(ws.logsDir, "watcher-failures.log");
-
-export function failure(ws: Workspace, line: string): void {
-  mkdirSync(ws.logsDir, { recursive: true });
-  appendFileSync(failuresLog(ws), `${iso()} ${line}\n`);
-}
 
 // A heartbeat means "ran and read the tracker", and only the caller that has that evidence writes
 // one. The board shows every *.heartbeat in logs/.

@@ -12,7 +12,8 @@ import type { Relay } from "../board/inbox.js";
 import { claudeBin } from "../fleet.js";
 import type { Workspace } from "../workspace.js";
 import { die, run } from "../util.js";
-import { claudeArgs, claudeOptions, failure, loadPrompt, logTo, openLog } from "./job.js";
+import { failure, tryFailure } from "../failures.js";
+import { claudeArgs, claudeOptions, loadPrompt, logTo, openLog } from "./job.js";
 
 const TOOLS = ["SendMessage", "ListAgents"];
 
@@ -33,7 +34,7 @@ export const relay: Relay = (ws: Workspace, text: string) => {
     prompt = courierPrompt(ws, text);
     args = claudeArgs(ws, "relay", TOOLS);
   } catch (e) {
-    failure(ws, `relay FAILED before starting: ${(e as Error).message}`);
+    tryFailure(ws, `relay FAILED before starting: ${(e as Error).message}`);
     return;
   }
   const fd = openSync(log, "a");
@@ -43,12 +44,14 @@ export const relay: Relay = (ws: Workspace, text: string) => {
   // A courier that cannot start can report both an error and an exit; one failure line is enough.
   let failed = false;
   const fail = (why: string) => {
-    if (!failed) failure(ws, `relay FAILED ${why}`);
+    if (!failed) tryFailure(ws, `relay FAILED ${why}`);
     failed = true;
   };
   child.on("error", (e) => fail(`to start: ${e.message}`));
   child.on("exit", (code, signal) => {
-    logTo(log, `exit=${code ?? signal}`);
+    try {
+      logTo(log, `exit=${code ?? signal}`);
+    } catch {} // the failure below still reports a bad exit
     if (code !== 0) fail(`exit=${code ?? signal}`);
   });
   child.stdin?.on("error", () => {}); // a courier that died at once is reported by its exit

@@ -12,6 +12,7 @@ import { allRecs, BUSY, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON
 import type { Workspace } from "../workspace.js";
 import { capitalize, run, sleep } from "../util.js";
 import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, type Relay, saveAttachment, sweep } from "./inbox.js";
+import { tryFailure } from "../failures.js";
 import { type Fetch, ReviewCache } from "./reviews.js";
 import { isScheduler } from "../scheduler/state.js";
 
@@ -467,12 +468,19 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
   });
   every(REVIEW_EVERY, readReviews);
   const relay = opts.relay;
+  // Runs from a timer in the scheduler: must not throw.
+  let sweepError = "";
   if (relay)
     every(500, () => {
       try {
         sweep(ws, relay);
-      } catch {
-        // an unreadable log or cursor is tried again on the next pass
+        sweepError = "";
+      } catch (e) {
+        const why = (e as Error).message;
+        if (why === sweepError) return;
+        sweepError = why;
+        console.error(`factory: board: the courier sweep failed: ${why}`);
+        tryFailure(ws, `board sweep FAILED: ${why}`);
       }
     });
 

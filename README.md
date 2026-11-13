@@ -9,7 +9,8 @@ machine or a company lives in a workspace that the program reads.
 
 You need Node 22 or later, Claude Code, the GitHub CLI `gh` (logged in), and git 2.31 or later.
 macOS is the platform built in full. On Linux, `factory schedule run` is the scheduler in place of
-launchd and serves the board (see "Off macOS" below). The inbox lock is still macOS-only.
+launchd and serves the board (see "Off macOS" below), and the inbox lock uses util-linux's
+`flock(1)`.
 
 ```sh
 git clone <this repo> superfactory
@@ -185,3 +186,13 @@ WantedBy=default.target
 
 Then `systemctl --user enable --now factory-scheduler`, and `loginctl enable-linger` so it runs while
 you are logged out.
+
+On Linux the inbox lock is a `flock(1)` on `logs/run/inbox.lock`, held by the board's sweep or by
+`factory board --inbox`, and gone when its holder exits. It needs util-linux's `flock`: one without
+`-E`, such as busybox's, is refused rather than trusted. `FLOCK_BIN` names another binary. A broken
+lock does not show in the lead's session: its Stop hook reads a lock it cannot take as held.
+`factory board --inbox` exits with the flock error in its own output. The board's sweep, in
+`schedule run` or a standalone `board --serve`, logs it to stderr and to
+`logs/watcher-failures.log`, but it takes the lock only when a message is pending, so a broken lock
+stays silent until a message arrives, and that message is not delivered while the lock stays
+broken. A `flock(1)` killed at its 2 s timeout fails the same way.

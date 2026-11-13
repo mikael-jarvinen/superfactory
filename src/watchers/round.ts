@@ -17,7 +17,8 @@ import { parseRead, trackerOf } from "../tracker/read.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
 import { git, worktreeDirty } from "../worktree.js";
-import { beat, failure, failuresLog, heartbeatAge, loadPrompt, logTo, openLog, runClaude, runFailure, runReader, watcherGh } from "./job.js";
+import { failure, failuresLog } from "../failures.js";
+import { beat, heartbeatAge, loadPrompt, logTo, openLog, runClaude, runFailure, runReader, watcherGh } from "./job.js";
 import { belongs, type GhPr, loadQueueState, withRecorded } from "./queue.js";
 import { deliver } from "./relay.js";
 
