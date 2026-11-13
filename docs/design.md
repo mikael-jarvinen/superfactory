@@ -32,8 +32,11 @@ src/
                   workspace-relative paths; one error per bad key, naming the key
   workspace.ts    resolution (above), state/, logs/, logs/run/
   state.ts        records, the transition graph, evidence rules, events.jsonl
-  fleet.ts        agents from config; sessions via `claude agents --json`; any undocumented
-                  daemon internals behind one function
+  fleet.ts        agents from config; finding, waiting for and stopping their sessions
+  transport.ts    where an agent's sessions live and every session operation; the local one
+                  runs `claude agents --json` and friends, with any undocumented daemon
+                  internals behind one function
+  claude-bin.ts   which claude binary to run
   launch.ts       the `claude --bg` command line, appendix assembly, the READY handshake
   settings.ts     render each role's Claude Code settings at launch into logs/run/
   worktree.ts     worktree per work item, push over https, dirty and pushed checks

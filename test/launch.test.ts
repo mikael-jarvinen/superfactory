@@ -52,11 +52,11 @@ test("appendix: workspace files labelled relative, repo: files inside the checko
   writeFileSync(join(dir, "briefs", "app.md"), "the brief\n\n");
   const bea = agentOrDie(ws, "bea");
   assert.throws(() => buildAppendix(ws, bea, checkout), /appendix file .*AGENTS.md is missing or empty/);
-  writeFileSync(join(checkout, "AGENTS.md"), "repo rules");
-  const path = buildAppendix(ws, bea, checkout) as string;
-  after(() => rmSync(path, { force: true }));
-  assert.equal(readFileSync(path, "utf8"),
-    `<!-- briefs/app.md -->\nthe brief\n\n\n<!-- ${join(checkout, "AGENTS.md")} -->\nrepo rules\n`);
+  writeFileSync(join(checkout, "AGENTS.md"), "<!-- prettier-ignore -->\nrepo rules");
+  assert.deepEqual(buildAppendix(ws, bea, checkout), {
+    text: `<!-- briefs/app.md -->\nthe brief\n\n\n<!-- ${join(checkout, "AGENTS.md")} -->\n<!-- prettier-ignore -->\nrepo rules\n`,
+    labels: ["briefs/app.md", join(checkout, "AGENTS.md")],
+  });
 });
 
 test("the READY prompt names the lead from config and keeps a LOCAL key off GitHub", () => {

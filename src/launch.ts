@@ -1,13 +1,12 @@
-import { randomBytes } from "node:crypto";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import type { Agent, Role } from "./config.js";
-import { claudeBin, lead, type Session, waitForName } from "./fleet.js";
+import { lead, type Session, waitForName } from "./fleet.js";
 import { renderSettings } from "./settings.js";
 import { branchFor, isLocal } from "./state.js";
+import { transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
-import { capitalize, die, run } from "./util.js";
+import { capitalize, die } from "./util.js";
 
 export type Phase = "build" | undefined;
 
@@ -45,8 +44,9 @@ export function settingsFile(ws: Workspace, agent: Agent): string {
   });
 }
 
-export function buildAppendix(ws: Workspace, agent: Agent, repoDir: string | undefined): string | null {
+export function buildAppendix(ws: Workspace, agent: Agent, repoDir: string | undefined): { text: string; labels: string[] } | null {
   const parts: string[] = [];
+  const labels: string[] = [];
   for (const item of agent.appendix) {
     let p = item;
     if (item.startsWith("repo:")) {
@@ -63,12 +63,10 @@ export function buildAppendix(ws: Workspace, agent: Agent, repoDir: string | und
     if (size === 0)
       die(`${agent.name}: appendix file ${p} is missing or empty. A session that starts without its brief looks fine and behaves like a stranger, so this refuses.`);
     const label = p.startsWith(ws.dir + sep) ? relative(ws.dir, p) : p;
+    labels.push(label);
     parts.push(`<!-- ${label} -->\n` + readFileSync(p, "utf8").trimEnd() + "\n");
   }
-  if (!parts.length) return null;
-  const path = join(tmpdir(), `sf-${agent.name}-${randomBytes(4).toString("hex")}.md`);
-  writeFileSync(path, parts.join("\n\n"), { flag: "wx" });
-  return path;
+  return parts.length ? { text: parts.join("\n\n"), labels } : null;
 }
 
 const addDirs = (ws: Workspace, agent: Agent) =>
@@ -109,12 +107,14 @@ export const GIT_HTTPS_ENV = {
   GIT_CONFIG_VALUE_0: "git@github.com:",
 };
 
-export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string, appendixPath: string | null = null, phase: Phase = undefined): Session {
-  const args = launchArgs(ws, agent, prompt, appendixPath, phase);
-  const r = run(claudeBin(), args, { cwd, env: { ...process.env, ...GIT_HTTPS_ENV } });
-  if (r.status !== 0) die(`claude --bg failed: ${r.stderr.trim() || r.stdout.trim()}`);
-  const sid = /backgrounded · (\w+) · /.exec(r.stdout)?.[1] ?? "?";
-  const s = waitForName(agent.name);
+export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string, appendix: string | null = null, phase: Phase = undefined): Session {
+  const t = transportFor(ws, agent);
+  const sid = t.start({
+    agent, cwd, prompt, appendix, phase,
+    args: (appendixPath) => launchArgs(ws, agent, prompt, appendixPath, phase),
+    env: { ...process.env, ...GIT_HTTPS_ENV },
+  });
+  const s = waitForName(t, agent.name);
   if (!s) die(`${agent.name} did not appear in \`claude agents\` within 90s (launch id ${sid}). Check \`claude logs ${sid}\`.`);
   return s;
 }

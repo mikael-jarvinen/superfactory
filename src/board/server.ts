@@ -1,12 +1,13 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, get as httpGet, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { get as httpsGet } from "node:https";
 import type { AddressInfo } from "node:net";
 import { basename, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { claudeBin, lead, reviewOnly, type Session, sessionAlive } from "../fleet.js";
+import { lead, reviewOnly, type Session } from "../fleet.js";
 import { leadStatus } from "../hooks/status.js";
+import { agentSessions, pick, transportFor, transports } from "../transport.js";
 import { isHuman, readTail } from "../messages.js";
 import { allRecs, BUSY, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
@@ -79,27 +80,37 @@ const clock = () => new Date().toTimeString().slice(0, 8);
 // stops answering while the listing runs is a board that looks down.
 const SESSION_EVERY = 3000;
 
+// The listing of each transport the fleet uses, refreshed in the background, and each agent's
+// background session in it.
 class SessionCache {
-  rows: Session[] = [];
-  private busy = false;
+  private rows = new Map<string, Session[]>();
+  private busy = new Set<string>();
+
+  constructor(private ws: Workspace) {}
 
   refresh(): void {
-    if (this.busy) return;
-    this.busy = true;
-    execFile(claudeBin(), ["agents", "--json"], { timeout: 20_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
-      this.busy = false;
-      try {
-        this.rows = err ? [] : (JSON.parse(stdout || "[]") as Session[]);
-      } catch {
-        this.rows = [];
-      }
-    });
+    for (const t of transports(this.ws)) {
+      if (this.busy.has(t.where)) continue;
+      this.busy.add(t.where);
+      void t.sessionsAsync().then((rows) => {
+        this.busy.delete(t.where);
+        this.rows.set(t.where, rows);
+      });
+    }
   }
 
   background(): Map<string, Session> {
     const m = new Map<string, Session>();
-    for (const s of this.rows) if (s.kind === "background" && s.name !== undefined && !(m.has(s.name) && !sessionAlive(s))) m.set(s.name, s);
+    for (const { agent, t, hits } of agentSessions(this.ws, (where) => this.rows.get(where))) {
+      const s = pick(t, hits);
+      if (s) m.set(agent.name, s);
+    }
     return m;
+  }
+
+  alive(name: string, s: Session | undefined): boolean {
+    const a = this.ws.config.agents.find((x) => x.name === name);
+    return !!a && transportFor(this.ws, a).alive(s);
   }
 }
 
@@ -246,7 +257,7 @@ function reviewKeys(ws: Workspace): string[] {
 
 // Builders group by their stack, or by their repos when they have none, so an agent added to the
 // config lands in the right group without the board changing.
-function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>) {
+function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>, alive: (name: string, s: Session | undefined) => boolean) {
   const groups = new Map<string, { key: string; title: string; scope: string; members: unknown[] }>();
   const reviewerRepos = ws.config.roles.reviewer?.addDirs ?? [];
   for (const a of ws.config.agents) {
@@ -260,12 +271,12 @@ function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>) {
     let g = groups.get(key);
     if (!g) groups.set(key, (g = { key, title, scope, members: [] }));
     const s = listed.get(a.name);
-    const alive = sessionAlive(s);
+    const live = alive(a.name, s);
     const rec = recs.find((r) => r.agent === a.name && r.state !== null && BUSY.has(r.state));
     g.members.push({
       name: a.name,
-      alive,
-      status: alive ? (s?.status ?? null) : null,
+      alive: live,
+      status: live ? (s?.status ?? null) : null,
       ticket: rec?.ticket ?? null,
       state: rec?.state ?? null,
       since_min: rec ? ageMinutes(rec.since) : null,
@@ -351,7 +362,7 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
     columns: COLUMNS,
     descriptions,
     waiting_on_you: [...WAITING_ON_YOU].sort(),
-    teams: teams(ws, recs, sessions.background()),
+    teams: teams(ws, recs, sessions.background(), (n, s) => sessions.alive(n, s)),
     stacks: stacks.view(ws, recs),
     tickets,
     plumbing: heartbeats(ws),
@@ -363,7 +374,7 @@ function messagesView(ws: Workspace, sessions: SessionCache, receipts: Receipts)
   const st = leadStatus(ws);
   receipts.read(st.transcript);
   const leadName = lead(ws).name;
-  const status = sessionAlive(sessions.background().get(leadName)) ? (st.words ?? null) : "offline";
+  const status = sessions.alive(leadName, sessions.background().get(leadName)) ? (st.words ?? null) : "offline";
   const rows = readTail(ws.messages).reverse().slice(0, 60).map((r) => {
     const human = isHuman(ws, r.kind);
     return { ...r, from: human ? "human" : "lead", age_min: ageMinutes(r.t), receipt: human && r.id ? receipts.receipt(r.id) : null };
@@ -436,7 +447,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
   const files = new Map<string, Buffer>();
   for (const f of readdirSync(STATIC)) files.set(f, readFileSync(join(STATIC, f)));
 
-  const sessions = new SessionCache();
+  const sessions = new SessionCache(ws);
   const stacks = new StackChecks();
   const receipts = opts.receipts ?? new Receipts();
   const reviews = new ReviewCache(opts.reviews);

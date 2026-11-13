@@ -1,11 +1,11 @@
-import { accessSync, constants, existsSync, readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
 import type { Agent, RoleName } from "./config.js";
 import { allRecs, BUSY, IN_REVIEW, type Rec } from "./state.js";
 import type { Workspace } from "./workspace.js";
-import { die, pyRepr, pyStr, run, sleep } from "./util.js";
+import { agentSessions, isAgentSession, pick, type Transport, transports } from "./transport.js";
+import { die, pyRepr, pyStr, sleep } from "./util.js";
 import { branchPushed, worktreeDirty } from "./worktree.js";
+
+export { claudeBin, executable } from "./claude-bin.js";
 
 export interface Session {
   id?: string;
@@ -18,22 +18,6 @@ export interface Session {
   startedAt?: string;
   createdAt?: string;
   [k: string]: unknown;
-}
-
-export const executable = (p: string) => {
-  try {
-    accessSync(p, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-// $CLAUDE_BIN, else claude on PATH, else ~/.local/bin/claude.
-export function claudeBin(env: NodeJS.ProcessEnv = process.env): string {
-  if (env.CLAUDE_BIN) return env.CLAUDE_BIN;
-  for (const d of (env.PATH ?? "").split(delimiter)) if (d && executable(join(d, "claude"))) return join(d, "claude");
-  return join(homedir(), ".local", "bin", "claude");
 }
 
 export const agents = (ws: Workspace) => ws.config.agents;
@@ -50,61 +34,24 @@ export function agentOrDie(ws: Workspace, name: string): Agent {
   return a;
 }
 
-export function sessions(includeDone = false): Session[] {
-  const r = run(claudeBin(), ["agents", "--json", ...(includeDone ? ["--all"] : [])]);
-  if (r.status !== 0) die(`\`claude agents --json\` failed: ${r.stderr.trim()}`);
-  try {
-    return JSON.parse(r.stdout || "[]") as Session[];
-  } catch {
-    return die("`claude agents --json` returned something that is not JSON");
-  }
+export function findSession(t: Transport, name: string, includeDone = false): Session | null {
+  return pick(t, t.sessions(includeDone).filter(isAgentSession(name)));
 }
 
-// `claude agents --json` is a registry, not a probe: after the daemon retires an idle worker and
-// exits, the listing keeps the session at its last state. The roster names the supervisor pid; a
-// dead pid or a missing control socket means no background session is alive, whatever the listing
-// says. These are undocumented Claude Code internals, so they stay behind this one function.
-// Probed on every call, never cached.
-export function daemonAlive(): boolean {
-  try {
-    const roster = JSON.parse(readFileSync(join(homedir(), ".claude", "daemon", "roster.json"), "utf8")) as { supervisorPid?: unknown };
-    const pid = Number.parseInt(String(roster.supervisorPid), 10);
-    if (!Number.isInteger(pid)) return false;
-    process.kill(pid, 0);
-    const base = join("/tmp", `cc-daemon-${process.getuid?.() ?? ""}`);
-    return readdirSync(base).some((d) => !d.startsWith(".") && existsSync(join(base, d, "control.sock")));
-  } catch {
-    return false;
-  }
-}
-
-// A background session that has not stopped or failed, behind a daemon that is running. "done"
-// means it finished a turn and is idle; it still wakes on SendMessage, so it counts as alive.
-export function sessionAlive(s: Session | null | undefined): s is Session {
-  return !!s && s.kind === "background" && s.state !== "stopped" && s.state !== "failed" && daemonAlive();
-}
-
-export function findSession(name: string, includeDone = false): Session | null {
-  const hits = sessions(includeDone).filter((s) => s.name === name);
-  const live = hits.filter(sessionAlive);
-  return live[0] ?? hits[0] ?? null;
-}
-
-export function waitForName(name: string, timeoutS = 90): Session | null {
+export function waitForName(t: Transport, name: string, timeoutS = 90): Session | null {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutS * 1000) {
-    const s = findSession(name);
-    if (sessionAlive(s)) return s;
+    const s = findSession(t, name);
+    if (t.alive(s)) return s;
     sleep(3000);
   }
   return null;
 }
 
-export function stopSession(s: Session | null, remove = true): void {
+export function stopSession(t: Transport, s: Session | null, remove = true): void {
   const id = s?.id;
   if (!id) return;
-  run(claudeBin(), ["stop", id]);
-  if (remove) run(claudeBin(), ["rm", id]);
+  t.stop(id, remove);
 }
 
 // What stopping a builder would lose from its worktree, as the refusal to give, or null if nothing.
@@ -129,8 +76,13 @@ const field = (s: Session, k: string) => (k in s ? pyStr(s[k]) : "?");
 // One line per fleet member: live session, stale record, or nothing. Returns the live ones too.
 export function fleetLines(ws: Workspace): { lines: string[]; live: Map<string, Session> } {
   const listed = new Map<string, Session>();
-  for (const s of sessions()) if (s.kind === "background" && s.name !== undefined) listed.set(s.name, s);
-  const live = new Map([...listed].filter(([, s]) => sessionAlive(s)));
+  const live = new Map<string, Session>();
+  const rows = new Map(transports(ws).map((t) => [t.where, t.sessions()]));
+  for (const { agent: a, t, hits } of agentSessions(ws, (where) => rows.get(where))) {
+    const s = pick(t, hits);
+    if (s) listed.set(a.name, s);
+    if (t.alive(s)) live.set(a.name, s);
+  }
   const recs = allRecs(ws);
   const lines = ws.config.agents.map((a) => {
     const s = listed.get(a.name);
