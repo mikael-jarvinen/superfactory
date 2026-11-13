@@ -17,7 +17,7 @@ import { parseRead, trackerOf } from "../tracker/read.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
 import { git, worktreeDirty } from "../worktree.js";
-import { beat, failure, failuresLog, heartbeatAge, loadPrompt, logTo, openLog, runClaude, runFailure, watcherGh } from "./job.js";
+import { beat, failure, failuresLog, heartbeatAge, loadPrompt, logTo, openLog, runClaude, runFailure, runReader, watcherGh } from "./job.js";
 import { belongs, type GhPr, loadQueueState, withRecorded } from "./queue.js";
 import { deliver } from "./relay.js";
 
@@ -254,7 +254,8 @@ export function runRound(ws: Workspace, opts: { factsOnly?: boolean } = {}, out:
     "---- END FACTS ----",
   ].join("\n\n") + "\n";
   const log = openLog(ws, "round");
-  const r = runClaude(ws, "round", prompt, ["Read", "ListAgents", "ToolSearch", "SendMessage", ...tracker.tools], log);
+  const tools = ["Read", "ListAgents", "ToolSearch", "SendMessage", ...tracker.tools];
+  const r = tracker.reads ? runReader(ws, "round", prompt, tools, log) : runClaude(ws, "round", prompt, tools, log);
   const read = tracker.reads && r.status === 0 ? parseRead(ws, r.stdout).outcome : "none";
   logTo(log, `facts=${facts.complete ? "complete" : "partial"} tracker=${read}`);
   // The round ran and saw these facts, whatever the tracker did, so what it saw is not news again.

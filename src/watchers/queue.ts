@@ -13,7 +13,7 @@ import { parseRead, trackerOf, UNAVAILABLE } from "../tracker/read.js";
 import { squash } from "../util.js";
 import type { Workspace } from "../workspace.js";
 import { dockerWatchdog } from "./docker.js";
-import { beat, failure, heartbeatAge, heartbeatPath, loadPrompt, logTo, openLog, runClaude, runFailure, TIMED_OUT, watcherGh } from "./job.js";
+import { beat, failure, heartbeatAge, heartbeatPath, loadPrompt, logTo, openLog, runFailure, runReader, TIMED_OUT, watcherGh } from "./job.js";
 import { deliver } from "./relay.js";
 
 // What the last runs left: the queue keys already seen, the merge urls already reported, the PRs
@@ -187,7 +187,7 @@ export function runQueue(ws: Workspace, out: (line: string) => void = console.lo
   }
   const prompt = `${loadPrompt(ws, "queue")}\n\n${tracker.instructions(ws)}\n`;
   const log = openLog(ws, "queue");
-  const r = runClaude(ws, "queue", prompt, ["ToolSearch", ...tracker.tools], log);
+  const r = runReader(ws, "queue", prompt, ["ToolSearch", ...tracker.tools], log);
   const read = r.status === 0 ? parseRead(ws, r.stdout) : null;
 
   const prev = loadQueueState(ws);

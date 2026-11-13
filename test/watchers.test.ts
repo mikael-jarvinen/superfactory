@@ -47,6 +47,7 @@ function watcherWorkspace(toml = JIRA) {
       env: {
         PATH: `${bin}:${process.env.PATH}`, GH_BIN: "", DOCKER_BIN: "", LAUNCHCTL_BIN: join(bin, "launchctl"),
         FAKE_CLAUDE_REPLIES: f("replies.json"), FAKE_CLAUDE_LOG: f("claude.log"), FAKE_GH_ROUTES: f("routes.json"), FAKE_GH_LOG: f("gh.log"),
+        TRACKER_RETRY_S: "0",
       },
     });
     const calls = readFileSync(f("claude.log"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Call);
@@ -99,6 +100,29 @@ test("the queue heartbeat is written only on evidence that the tracker was read"
   const state = JSON.parse(read("queue.state")) as { outcomes: string[]; known: string[] };
   assert.deepEqual(state.outcomes, ["quiet", "unavailable", "off-contract", "unavailable", "failed"]);
   assert.deepEqual(state.known, [], "a run that did not read the queue keeps what the last read saw");
+});
+
+// A run that searched for the Jira tool before the connector arrived reads the tracker on the next
+// run. One retry, and a second unavailable is the outage it was before.
+test("the queue reads once more when its first run finds no tracker", () => {
+  const { run, logs, read } = watcherWorkspace();
+
+  let r = run(["watch", "queue"], [{ stdout: "TRACKER-UNAVAILABLE\n" }, { stdout: "QUEUE:\n" }]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(r.calls.length, 2, "the run and its retry");
+  assert.equal((r.calls[1] as Call).prompt, (r.calls[0] as Call).prompt, "the retry asks the same");
+  assert.ok(existsSync(logs("queue.heartbeat")), "the retry read the tracker");
+  assert.match(read("queue.log"), /tracker unavailable; running once more/);
+
+  rmSync(logs("queue.heartbeat"));
+  r = run(["watch", "queue"], [{ stdout: "TRACKER-UNAVAILABLE\n" }]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(r.calls.length, 2, "one retry, not more");
+  assert.ok(!existsSync(logs("queue.heartbeat")));
+  assert.deepEqual((JSON.parse(read("queue.state")) as { outcomes: string[] }).outcomes, ["quiet", "unavailable"]);
+
+  r = run(["watch", "queue"], [{ stdout: "QUEUE: WEB-1\n", status: 1 }]);
+  assert.equal(r.calls.length, 1, "a failed run is not retried");
 });
 
 test("the queue says what is new once, and says it again when the courier failed", () => {
@@ -298,13 +322,13 @@ test("the round: flags said once, the failures cursor, and its heartbeat", () =>
   assert.ok(!existsSync(logs("round.heartbeat")));
   const prompt = (r.calls[0] as Call).prompt;
   assert.ok(prompt.includes("You are the round") && prompt.includes(SEARCH) && prompt.includes("OVER 90 MIN"));
-  assert.equal(r.calls.length, 2);
-  assert.match((r.calls[1] as Call).prompt, /\[round\]\ntracker UNAVAILABLE/);
+  assert.equal(r.calls.length, 3, "the round, its one retry, and the courier");
+  assert.match((r.calls[2] as Call).prompt, /\[round\]\ntracker UNAVAILABLE/);
   r = run(["watch", "round", "--facts"], [], routes);
   assert.match(r.stdout, /over 90 min \(already probed, not an escalation\)/);
   assert.match(r.stdout, /watcher failures since the last round --\n {2}none/);
   r = run(["watch", "round"], [{ stdout: "TRACKER-UNAVAILABLE\n" }], routes);
-  assert.equal(r.calls.length, 1, "the same outage is not said twice");
+  assert.equal(r.calls.length, 2, "the same outage is not said twice");
 
   r = run(["watch", "round"], [{ stdout: "QUEUE: WEB-2\nQUIET\n" }, { stdout: "" }], routes);
   assert.equal(r.status, 0);
@@ -318,6 +342,23 @@ test("the round: flags said once, the failures cursor, and its heartbeat", () =>
   assert.equal(r.status, 1);
   assert.equal(statSync(logs("round.heartbeat")).mtimeMs, before);
   assert.match(read("watcher-failures.log"), /round FAILED exit=1\n$/);
+});
+
+test("the round reads once more when its first run finds no tracker", () => {
+  const { run, logs, read } = watcherWorkspace();
+  const routes = { "pr list -R acme/web --state all": { stdout: [] }, "pr list -R acme/api --state all": { stdout: [] } };
+
+  let r = run(["watch", "round"], [{ stdout: "TRACKER-UNAVAILABLE\n" }, { stdout: "QUEUE:\nQUIET\n" }], routes);
+  assert.equal(r.calls.length, 2, "the round and its retry, and no outage to tell");
+  assert.ok(existsSync(logs("round.heartbeat")), "the retry read the tracker");
+  assert.match(read("round.log"), /tracker unavailable; running once more[\s\S]*tracker=read/);
+
+  rmSync(logs("round.heartbeat"));
+  r = run(["watch", "round"], [{ stdout: "TRACKER-UNAVAILABLE\n" }], routes);
+  assert.equal(r.calls.length, 3, "one retry, then the courier tells the outage");
+  assert.match((r.calls[2] as Call).prompt, /\[round\]\ntracker UNAVAILABLE/);
+  assert.ok(!existsSync(logs("round.heartbeat")));
+  assert.match(read("round.log"), /tracker=unavailable\n$/);
 });
 
 test("the round: a blocked item whose named blocker has merged is flagged, once", () => {
