@@ -38,7 +38,24 @@ form button:disabled{color:var(--faint);cursor:default}
 .msg .kind{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;
            color:var(--faint);border:1px solid var(--line);border-radius:3px;padding:1px 5px}
 .msg .when{font-family:var(--mono);font-size:11px;color:var(--faint);margin-left:auto}
-.msg .body{white-space:pre-wrap;font-size:15px;line-height:1.6;color:var(--ink)}
+.msg .body{font-size:15px;line-height:1.6;color:var(--ink);overflow-wrap:anywhere}
+.msg .body>:first-child{margin-top:0}
+.msg .body>:last-child{margin-bottom:0}
+.msg .body :is(p,ul,ol,pre,blockquote,table){margin:.5em 0}
+.msg .body :is(h1,h2,h3,h4,h5,h6){margin:.7em 0 .3em;font-size:1.05em;line-height:1.3}
+.msg .body h1{font-size:1.3em}
+.msg .body h2{font-size:1.15em}
+.msg .body :is(ul,ol){padding-left:22px}
+.msg .body li:has(>input[type=checkbox]){list-style:none;margin-left:-20px}
+.msg .body code{font-family:var(--mono);font-size:.88em;background:var(--raised);border:1px solid var(--line);
+                border-radius:3px;padding:0 4px}
+.msg .body pre{background:var(--raised);border:1px solid var(--line);border-radius:4px;padding:8px 10px;overflow-x:auto}
+.msg .body pre code{background:none;border:0;padding:0}
+.msg .body blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--dim)}
+.msg .body table{border-collapse:collapse;display:block;overflow-x:auto}
+.msg .body :is(th,td){border:1px solid var(--line);padding:3px 8px}
+.msg .body hr{border:0;border-top:1px solid var(--line)}
+.msg .body img{max-width:100%;border-radius:4px}
 .msg .link{margin-top:7px;font-family:var(--mono);font-size:12px;word-break:break-all}
 .msg.human{border-left-color:var(--cool)}
 .msg.human .name{color:var(--cool)}
