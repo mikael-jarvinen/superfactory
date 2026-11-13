@@ -12,7 +12,6 @@ export type Kind = (typeof KINDS)[number];
 // human.legacy_message_kind, and those rows read as the human's too.
 export const HUMAN_KIND = "human";
 
-export const MAX_CHARS = 1200;
 const ROTATE_BYTES = 1_000_000;
 const TAIL_BYTES = 256 * 1024;
 
@@ -38,8 +37,6 @@ export function isHuman(ws: Workspace, kind: string | undefined): boolean {
 export function say(ws: Workspace, words: string[], opts: { ticket?: string; link?: string; kind?: Kind }, out = console.log): void {
   const text = words.join(" ").trim();
   if (!text) die("nothing to say");
-  const n = chars(text).length;
-  if (n > MAX_CHARS) die(`${n} characters. A message is short by construction; put the detail in the PR or the ticket and link it.`);
   if (opts.ticket && !validKey(ws, opts.ticket)) die(`${pyRepr(opts.ticket)} is neither a ticket key nor a local key`);
   mkdirSync(ws.stateDir, { recursive: true });
   // The log only grows and nothing else trims it, so it is rolled here. The page reads the tail
