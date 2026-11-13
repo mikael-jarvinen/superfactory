@@ -62,7 +62,7 @@ form button:disabled{color:var(--faint);cursor:default}
 .msg.ready{border-left-color:var(--ok)}
 .msg.ready .kind{color:var(--ok);border-color:rgba(120,199,149,.35)}
 .msg.decision,.msg.blocked{border-left-color:var(--you)}
-.msg.decision .kind,.msg.blocked .kind{color:var(--you);border-color:rgba(240,169,76,.35)}
+.msg.decision .kind,.msg.blocked .kind,.msg.watchdog .kind{color:var(--you);border-color:rgba(240,169,76,.35)}
 .msg .tk{font-family:var(--mono);font-size:10.5px;color:var(--dim)}
 .none{color:var(--mute);font-size:13px;font-family:var(--mono)}
 .sk{height:58px;margin-bottom:20px}

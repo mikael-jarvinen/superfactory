@@ -162,14 +162,16 @@ contract and the Claude Code integration.
 
 launchd runs the watchers' jobs on macOS. Elsewhere `factory schedule run` does: one long-running
 process per workspace that runs the same jobs at the same calendar times, serves the board, and
-keeps its state in `logs/run/scheduler.json`, which `schedule status`, the doctor and the round read.
-It reads `[watchers]` when it starts, so a config change takes a restart. A run in flight is
+keeps its state in `logs/run/scheduler.json`, which `schedule status`, the doctor and the round
+read. It reads `[watchers]` when it starts, so a config change takes a restart. A run in flight is
 detached and outlives a restart of the scheduler, which finds it again by pid and start time. Over
-`--memory-limit-mb` (512) it exits 75. When a run ends, including one that ended while the
-scheduler was down, it kills what the run left in its process group, as launchd does: on Linux,
-only within the scheduler's own cgroup, and never a claude process or a process still running
-under one. While no claude is found at `CLAUDE_BIN` (or on PATH), the group is kept and nothing is
-killed until one is found. Run it as a systemd user unit:
+`--memory-limit-mb` (512) it exits 75. On each check it also looks for a message from the human that
+the lead has not seen for `--unanswered-minutes` (12), and posts one alert to the message log for
+it, which the page shows. The lead seeing that message, or a later one, ends the episode. When a run
+ends, including one that ended while the scheduler was down, it kills what the run left in its
+process group, as launchd does: on Linux, only within the scheduler's own cgroup, and never a claude
+process or a process still running under one. While no claude is found at `CLAUDE_BIN` (or on
+PATH), the group is kept and nothing is killed until one is found. Run it as a systemd user unit:
 
 ```ini
 # ~/.config/systemd/user/factory-scheduler.service

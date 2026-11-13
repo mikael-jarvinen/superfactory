@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
+import { openWorkspace } from "../src/workspace.js";
 import { CLI, linuxOnly, noCleanup, runningNotZombie, tempDir } from "./helpers.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -18,6 +19,9 @@ async function until(what: string, fn: () => unknown, ms = 15_000) {
   for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) if (fn()) return;
   assert.fail(`timed out waiting for ${what}`);
 }
+const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+const alerts = (w: { messages: string }) =>
+  readFileSync(w.messages, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.kind === "watchdog");
 
 // Every process a test started, wherever it has been reparented or regrouped since: each carries
 // the test's TMPDIR, and a board names the workspace under it. A zombie has neither, so it is not
@@ -418,4 +422,65 @@ test("a SIGKILL still owed when the scheduler exits is sent by the next one", { 
   await until("the group to be settled", () => t.state().jobs[UP].clearing === undefined);
   t.upPids.add(t.state().jobs[UP].pid);
   d.kill();
+});
+
+test("after a long gap in checks, an old unanswered message is not alerted on the first check", { skip: linuxOnly }, async () => {
+  const t = await setup();
+  const w = openWorkspace(t.ws);
+  mkdirSync(dirname(w.messages), { recursive: true });
+  writeFileSync(w.messages, JSON.stringify({ t: ago(60), id: "bb0001", text: "anyone?", kind: "human" }) + "\n");
+  mkdirSync(w.runDir, { recursive: true });
+  // last check two hours ago (a suspend): the run restarts now, backdated by capMs
+  const checked = ago(120);
+  writeFileSync(join(w.runDir, "watchdog.json"), JSON.stringify({ awakeFrom: ago(180), checked }));
+
+  const d = t.start();
+  await until("the first check", () => JSON.parse(readFileSync(join(w.runDir, "watchdog.json"), "utf8")).checked !== checked);
+  await until("up to run", () => t.upRunning());
+  t.upPids.add(t.state().jobs[UP].pid);
+  assert.equal(alerts(w).length, 0, d.out);
+  assert.doesNotMatch(d.out, /watchdog: ALERT/);
+  d.kill();
+});
+
+test("an unanswered message is one alert in the message log, and seeing it ends the episode", { skip: linuxOnly }, async () => {
+  const t = await setup();
+  const w = openWorkspace(t.ws);
+  mkdirSync(dirname(w.messages), { recursive: true });
+  const unseen = ago(13);
+  writeFileSync(w.messages, [
+    { t: ago(30), id: "aa0001", text: "an old one, never receipted", kind: "human" },
+    { t: ago(20), id: "aa0002", text: "seen", kind: "human" },
+    { t: unseen, id: "aa0003", text: "are you there?", kind: "human" },
+  ].map((r) => JSON.stringify(r) + "\n").join(""));
+  // the lead's transcript has seen aa0002 and not aa0003
+  const transcript = join(t.dir, "transcripts", "lead.jsonl");
+  mkdirSync(dirname(transcript), { recursive: true });
+  const seenLines = (id: string) => JSON.stringify({ type: "user", message: { content: `[m:${id}] text` } }) + "\n" + JSON.stringify({ type: "assistant" }) + "\n";
+  writeFileSync(transcript, seenLines("aa0002"));
+  mkdirSync(w.runDir, { recursive: true });
+  writeFileSync(join(w.runDir, "status-ada.json"), JSON.stringify({ transcript }));
+  // a scheduler that has been checking for the last 30 minutes, so aa0003's 13 count
+  writeFileSync(join(w.runDir, "watchdog.json"), JSON.stringify({ awakeFrom: ago(30), checked: new Date().toISOString() }));
+
+  const d = t.start();
+  await until("the alert", () => alerts(w).length === 1);
+  assert.equal(alerts(w)[0].text, `ada has not seen your message of ${new Date(unseen).toTimeString().slice(0, 5)} after 13 minutes. Nudge the session to get an answer.`);
+  assert.match(d.out, /watchdog: ALERT, \[m:aa0003\] unseen by ada for 13 min/);
+  await until("up to run", () => t.upRunning());
+  t.upPids.add(t.state().jobs[UP].pid);
+  await sleep(2500);
+  assert.equal(alerts(w).length, 1, "once per episode, not every check");
+
+  d.kill("SIGKILL");
+  await until("the scheduler to die", () => d.exitCode !== null || d.signalCode !== null);
+  const d2 = t.start();
+  await until("the restarted scheduler", () => d2.out.includes("scheduler for "));
+  await sleep(2500);
+  assert.equal(alerts(w).length, 1, "not again after a restart");
+
+  writeFileSync(transcript, seenLines("aa0003"), { flag: "a" });
+  await until("the episode to end", () => d2.out.includes("watchdog: ada has seen [m:aa0003] or a later message, episode over"));
+  assert.equal(JSON.parse(readFileSync(join(w.runDir, "watchdog.json"), "utf8")).alerted, null);
+  d2.kill();
 });

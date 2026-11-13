@@ -3,17 +3,20 @@
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { Receipts } from "../board/inbox.js";
 import { type ServeOptions, pidFile, serve } from "../board/server.js";
 import type { Workspace } from "../workspace.js";
 import { startStamp } from "../stacks/process.js";
 import { nextDue, runAlive } from "./daemon.js";
 import { type Job, environment, jobs } from "./launchd.js";
 import { cleanUp } from "./leftovers.js";
+import { watchdog } from "./watchdog.js";
 import { type JobRun, readState, stateFile } from "./state.js";
 
 export interface RunOptions {
   checkSeconds?: number;
   memoryLimitMb?: number;
+  unansweredMinutes?: number;
   board?: ServeOptions;
   log?: (line: string) => void;
 }
@@ -123,6 +126,11 @@ export async function runScheduler(ws: Workspace, opts: RunOptions = {}): Promis
     runs[j.label] = { ...prev, due: j.runAtLoad ? new Date(0).toISOString() : (prev?.due ?? nextDue(j.calendar, new Date()).toISOString()) };
   }
 
+  // Shared with the board, so the lead's transcripts are read from the start once, not twice.
+  const receipts = opts.board?.receipts ?? new Receipts();
+  const board: ServeOptions = { ...opts.board, receipts };
+  const unanswered = watchdog(ws, { staleMinutes: opts.unansweredMinutes ?? 12, checkSeconds, receipts }, log);
+
   let checking = false;
   async function check() {
     if (checking) return;
@@ -150,6 +158,11 @@ export async function runScheduler(ws: Workspace, opts: RunOptions = {}): Promis
         r.due = nextDue(j.calendar, new Date(Math.max(Date.now(), due))).toISOString();
       }
       writeState();
+      try {
+        unanswered();
+      } catch (e) {
+        log(`watchdog failed: ${(e as Error).stack ?? e}`);
+      }
       if (rssMb() > memoryLimitMb) {
         log(`rss ${rssMb()} MB over limit ${memoryLimitMb} MB, exiting for a restart`);
         stop(75);
@@ -185,7 +198,7 @@ export async function runScheduler(ws: Workspace, opts: RunOptions = {}): Promis
   // written before the first check can start `up`. A board that cannot listen is logged and the
   // jobs run without it.
   try {
-    const b = await serve(ws, opts.board ?? {});
+    const b = await serve(ws, board);
     closeBoard = b.close;
     mkdirSync(ws.logsDir, { recursive: true });
     writeFileSync(pidFile(ws), String(process.pid));

@@ -7,6 +7,8 @@ import { chars, die, now, pyDumps, pyRepr, splitlines } from "./util.js";
 
 export const KINDS = ["ready", "decision", "blocked", "answer", "note"] as const;
 export type Kind = (typeof KINDS)[number];
+// Rows the factory writes itself, which `say` cannot.
+export type SystemKind = "watchdog";
 
 // The human's side of the thread. A workspace whose log holds rows under an older kind names it as
 // human.legacy_message_kind, and those rows read as the human's too.
@@ -34,10 +36,8 @@ export function isHuman(ws: Workspace, kind: string | undefined): boolean {
   return kind === HUMAN_KIND || (kind !== undefined && kind === ws.config.human.legacyMessageKind);
 }
 
-export function say(ws: Workspace, words: string[], opts: { ticket?: string; link?: string; kind?: Kind }, out = console.log): void {
-  const text = words.join(" ").trim();
-  if (!text) die("nothing to say");
-  if (opts.ticket && !validKey(ws, opts.ticket)) die(`${pyRepr(opts.ticket)} is neither a ticket key nor a local key`);
+// Appends a row to the message log, which the page shows.
+export function post(ws: Workspace, r: { text: string; kind: Kind | SystemKind; ticket?: string | null; link?: string | null }) {
   mkdirSync(ws.stateDir, { recursive: true });
   // The log only grows and nothing else trims it, so it is rolled here. The page reads the tail
   // either way, and .1 keeps the older half recoverable.
@@ -46,8 +46,16 @@ export function say(ws: Workspace, words: string[], opts: { ticket?: string; lin
   } catch {
     // no log yet
   }
-  const row = { t: now(), text, ticket: opts.ticket ?? null, kind: opts.kind ?? "note", link: opts.link ?? null };
+  const row = { t: now(), text: r.text, ticket: r.ticket ?? null, kind: r.kind, link: r.link ?? null };
   appendFileSync(ws.messages, pyDumps(row) + "\n");
+  return row;
+}
+
+export function say(ws: Workspace, words: string[], opts: { ticket?: string; link?: string; kind?: Kind }, out = console.log): void {
+  const text = words.join(" ").trim();
+  if (!text) die("nothing to say");
+  if (opts.ticket && !validKey(ws, opts.ticket)) die(`${pyRepr(opts.ticket)} is neither a ticket key nor a local key`);
+  const row = post(ws, { text, ticket: opts.ticket, kind: opts.kind ?? "note", link: opts.link });
   const head = splitlines(text)[0] ?? "";
   notify("superfactory", row.ticket ?? row.kind, chars(head).slice(0, 160).join(""));
   const { host, port } = ws.config.board;

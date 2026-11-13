@@ -10,16 +10,26 @@
 // re-armed at the next stop at the latest.
 //
 // A hook that fails must not cost the session anything, so every error ends in exit 0.
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { inboxHeld } from "../board/inbox.js";
+import { lead } from "../fleet.js";
 import { idleWorkFor } from "../idle.js";
 import { factoryCommand, type HookResult, shq } from "../settings.js";
 import { capitalize } from "../util.js";
 import { openWorkspace, resolveWorkspace, type Workspace } from "../workspace.js";
 
 export const statusFile = (ws: Workspace, agent: string) => join(ws.runDir, `status-${agent}.json`);
+
+// The lead's status hook writes its last word there, with the transcript path the receipts read.
+export function leadStatus(ws: Workspace): { words?: string; transcript?: string } {
+  try {
+    return JSON.parse(readFileSync(statusFile(ws, lead(ws).name), "utf8"));
+  } catch {
+    return {};
+  }
+}
 
 const armText = (ws: Workspace) =>
   `The message page inbox is not armed, so ${ws.config.human.name}'s messages are going by the slow courier. ` +

@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 import { basename, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { claudeBin, lead, reviewOnly, type Session, sessionAlive } from "../fleet.js";
-import { statusFile } from "../hooks/status.js";
+import { leadStatus } from "../hooks/status.js";
 import { isHuman, readTail } from "../messages.js";
 import { allRecs, BUSY, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
@@ -359,15 +359,6 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
   };
 }
 
-// The lead's status hook writes its last word there, with the transcript path the receipts read.
-function leadStatus(ws: Workspace): { words?: string; transcript?: string } {
-  try {
-    return JSON.parse(readFileSync(statusFile(ws, lead(ws).name), "utf8"));
-  } catch {
-    return {};
-  }
-}
-
 function messagesView(ws: Workspace, sessions: SessionCache, receipts: Receipts) {
   const st = leadStatus(ws);
   receipts.read(st.transcript);
@@ -430,6 +421,8 @@ export interface ServeOptions {
   relay?: Relay;
   // How the review badges read GitHub; gh by default.
   reviews?: Fetch;
+  // The lead's receipts, shared with the scheduler's watchdog in the same process.
+  receipts?: Receipts;
 }
 
 export interface Board {
@@ -445,7 +438,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
 
   const sessions = new SessionCache();
   const stacks = new StackChecks();
-  const receipts = new Receipts();
+  const receipts = opts.receipts ?? new Receipts();
   const reviews = new ReviewCache(opts.reviews);
   const readReviews = () => {
     try {
