@@ -8,6 +8,7 @@ import type { Workspace } from "../workspace.js";
 import { startStamp } from "../stacks/process.js";
 import { nextDue, runAlive } from "./daemon.js";
 import { type Job, environment, jobs } from "./launchd.js";
+import { cleanUp } from "./leftovers.js";
 import { type JobRun, readState, stateFile } from "./state.js";
 
 export interface RunOptions {
@@ -48,6 +49,7 @@ export async function runScheduler(ws: Workspace, opts: RunOptions = {}): Promis
   const want = jobs(ws);
   const runs: Record<string, JobRun> = {};
   const children = new Set<number>(); // pids this process started, whose exit it hears
+  const live = () => new Set(Object.values(runs).map((r) => r.pid).filter((p): p is number => !!p));
   const alive = (label: string) =>
     runAlive(runs[label] as JobRun, (e) => log(`job ${label}: cannot tell whether pid ${runs[label]?.pid} is still the run (${(e as Error).message}); counting it as running`));
 
@@ -90,10 +92,27 @@ export async function runScheduler(ws: Workspace, opts: RunOptions = {}): Promis
       r.lastExit = exit;
       r.pid = null;
       if (exit !== 0) log(`job ${j.label} exited ${exit}`);
+      if (pid) clear(j.label, pid);
       writeState();
     };
     child.once("error", (e: NodeJS.ErrnoException) => done(e.code ?? String(e)));
     child.once("exit", (code, sig) => done(code ?? sig));
+  }
+
+  const clearingInProcess = new Set<string>(); // label:pgid, a cleanUp under way in this process
+  function clear(label: string, pgid: number) {
+    const r = runs[label] as JobRun;
+    if (!r.clearing?.includes(pgid)) r.clearing = [...(r.clearing ?? []), pgid];
+    const key = `${label}:${pgid}`;
+    if (clearingInProcess.has(key)) return;
+    clearingInProcess.add(key);
+    cleanUp(label, pgid, live(), log, (deferred) => {
+      clearingInProcess.delete(key);
+      if (deferred) return; // still in clearing, so the next check tries again
+      r.clearing = r.clearing?.filter((g) => g !== pgid);
+      if (!r.clearing?.length) delete r.clearing;
+      writeState();
+    });
   }
 
   // A missed fire (sleep, restart) runs once on wake, not once per fire missed. Like launchd, the
@@ -114,7 +133,12 @@ export async function runScheduler(ws: Workspace, opts: RunOptions = {}): Promis
         const r = runs[j.label] as JobRun;
         // A run an earlier scheduler started is not this one's child, so its exit is never heard:
         // when its pid is gone it is over, with an exit nobody saw.
-        if (r.pid && !children.has(r.pid) && !alive(j.label)) Object.assign(r, { pid: null, lastEnd: new Date().toISOString(), lastExit: "unknown (started by an earlier scheduler)" });
+        if (r.pid && !children.has(r.pid) && !alive(j.label)) {
+          const pgid = r.pid;
+          Object.assign(r, { pid: null, lastEnd: new Date().toISOString(), lastExit: "unknown (started by an earlier scheduler)" });
+          clear(j.label, pgid);
+        }
+        for (const pgid of [...(r.clearing ?? [])]) clear(j.label, pgid);
         const due = Date.parse(r.due);
         if (due > now + 1000) continue; // 1s slack, so a job due just after this check is not pushed a whole period
         try {

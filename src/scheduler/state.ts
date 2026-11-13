@@ -16,6 +16,8 @@ export interface JobRun {
   // set while a run is going
   pid?: number | null;
   stamp?: string | null;
+  // process groups of ended runs whose leftovers are still being killed
+  clearing?: number[];
 }
 
 export interface SchedulerState {

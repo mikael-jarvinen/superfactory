@@ -165,7 +165,11 @@ process per workspace that runs the same jobs at the same calendar times, serves
 keeps its state in `logs/run/scheduler.json`, which `schedule status`, the doctor and the round read.
 It reads `[watchers]` when it starts, so a config change takes a restart. A run in flight is
 detached and outlives a restart of the scheduler, which finds it again by pid and start time. Over
-`--memory-limit-mb` (512) it exits 75. Run it as a systemd user unit:
+`--memory-limit-mb` (512) it exits 75. When a run ends, including one that ended while the
+scheduler was down, it kills what the run left in its process group, as launchd does: on Linux,
+only within the scheduler's own cgroup, and never a claude process or a process still running
+under one. While no claude is found at `CLAUDE_BIN` (or on PATH), the group is kept and nothing is
+killed until one is found. Run it as a systemd user unit:
 
 ```ini
 # ~/.config/systemd/user/factory-scheduler.service
@@ -177,7 +181,7 @@ Description=superfactory scheduler
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/env factory --workspace %h/my-workspace schedule run
 Restart=on-failure
-# a run in flight outlives a restart of the scheduler
+# a run in flight outlives a restart of the scheduler; the scheduler clears what an ended run leaves
 KillMode=process
 
 [Install]

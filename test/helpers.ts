@@ -3,6 +3,8 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ownCgroupProcs } from "../src/scheduler/leftovers.js";
+import { procStat } from "../src/stacks/process.js";
 
 export const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
@@ -119,4 +121,20 @@ export function factory(ws: string | undefined, args: string[], opts: { cwd?: st
     encoding: "utf8", cwd: opts.cwd ?? tmpdir(), env,
   });
   return { status: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
+}
+
+export const runningNotZombie = (pid: number): boolean => {
+  const st = procStat(pid);
+  return !!st && st.state !== "Z";
+};
+
+// Why a test that reads /proc cannot run here, or false.
+export const linuxOnly: string | false = process.platform !== "linux" && "Linux only: reads /proc";
+
+// Why a test of leftover cleanup cannot run here, or false: it needs Linux and a cgroup v2 this
+// process can list its cgroup from, as the scheduler does.
+export function noCleanup(): string | false {
+  if (linuxOnly) return linuxOnly;
+  const own = ownCgroupProcs();
+  return "none" in own && `needs cgroup v2 for the scheduler's own cgroup (${own.none})`;
 }

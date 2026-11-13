@@ -58,24 +58,55 @@ export function pidFromFile(file: string): number | null {
   return Date.now() - p.age * 1000 <= statSync(file).mtimeMs + 2000 ? pid : null;
 }
 
+export interface ProcStat {
+  comm: string;
+  // R, S, D, Z (zombie: exited, not yet reaped) and so on
+  state: string;
+  ppid: number;
+  pgid: number;
+  // the clock tick it started at
+  ticks: string;
+}
+
+// /proc/<pid>/stat, Linux only. null when there is no such process; a read that fails otherwise
+// throws.
+export function procStat(pid: number): ProcStat | null {
+  let stat: string;
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  } catch (e) {
+    if (["ENOENT", "ESRCH"].includes((e as NodeJS.ErrnoException).code ?? "")) return null;
+    throw e;
+  }
+  // the command name in field 2 is in parentheses and may hold spaces; the fields after it are
+  // split by single spaces, and starttime is field 22
+  const f = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  const ticks = f[19];
+  if (!ticks) die(`/proc/${pid}/stat has no start time`);
+  return { comm: stat.slice(stat.indexOf("(") + 1, stat.lastIndexOf(")")), state: f[0] ?? "", ppid: Number(f[1]), pgid: Number(f[2]), ticks };
+}
+
+// Each pid that is still there gets sig.
+export function signalAll(pids: Iterable<number>, sig: NodeJS.Signals): void {
+  for (const p of pids) {
+    try {
+      process.kill(p, sig);
+    } catch {
+      // already gone
+    }
+  }
+}
+
 // What tells a process apart from a later one given the same pid: on Linux the boot and the clock
 // tick it started at, elsewhere ps's start time. Neither moves when the wall clock is stepped. null
 // when there is no such process; a lookup that fails otherwise throws.
 let bootId: string | undefined;
 export function startStamp(pid: number): string | null {
   if (process.platform === "linux") {
-    let stat: string;
-    try {
-      stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    } catch (e) {
-      if (["ENOENT", "ESRCH"].includes((e as NodeJS.ErrnoException).code ?? "")) return null;
-      throw e;
-    }
+    const st = procStat(pid);
+    if (!st) return null;
     bootId ??= readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-    // the command name in field 2 is in parentheses and may hold spaces; starttime is field 22
-    const ticks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
-    if (!ticks) die(`/proc/${pid}/stat has no start time`);
-    return `${bootId}:${ticks}`;
+    return `${bootId}:${st.ticks}`;
   }
   // lstart is printed in local time and the locale's words: pin both, or a TZ change restamps it
   const r = run("ps", ["-o", "lstart=", "-p", String(pid)], { env: { ...process.env, TZ: "UTC0", LC_ALL: "C" } });
@@ -101,19 +132,10 @@ export function killTree(pid: number, graceMs = 10_000): boolean {
   }
   tree.delete(process.pid);
   tree.delete(process.ppid);
-  const signal = (sig: NodeJS.Signals) => {
-    for (const p of tree) {
-      try {
-        process.kill(p, sig);
-      } catch {
-        // already gone
-      }
-    }
-  };
   const gone = () => ![...tree].some(alive);
-  signal("SIGTERM");
+  signalAll(tree, "SIGTERM");
   for (const end = Date.now() + graceMs; Date.now() < end; sleep(100)) if (gone()) return true;
-  signal("SIGKILL");
+  signalAll(tree, "SIGKILL");
   sleep(200);
   return gone();
 }

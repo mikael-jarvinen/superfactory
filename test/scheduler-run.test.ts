@@ -1,13 +1,12 @@
 // `factory schedule run` against a throwaway workspace and a fake claude.
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { CLI, tempDir } from "./helpers.js";
+import { CLI, linuxOnly, noCleanup, runningNotZombie, tempDir } from "./helpers.js";
 
-const linux = process.platform === "linux" ? false : "the scheduler runs off macOS; these tests use /proc";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const freePort = () => new Promise<number>((res) => {
   const s = createServer().listen(0, "127.0.0.1", () => {
@@ -19,14 +18,6 @@ async function until(what: string, fn: () => unknown, ms = 15_000) {
   for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) if (fn()) return;
   assert.fail(`timed out waiting for ${what}`);
 }
-const alive = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
 
 // Every process a test started, wherever it has been reparented or regrouped since: each carries
 // the test's TMPDIR, and a board names the workspace under it. A zombie has neither, so it is not
@@ -63,6 +54,10 @@ async function setup(extraEnv: Record<string, string> = {}) {
   for (const d of [join(ws, "lead"), join(ws, "prompts"), join(dir, "bin"), home]) mkdirSync(d, { recursive: true });
   const seen = join(dir, "claude-calls");
   const boardPort = await freePort();
+  // When up itself (not the board, which calls claude too) first lists sessions, the fake leaves two
+  // processes in up's process group: a stray, and `claude session`, a stand-in session that runs
+  // sleep. Their pids go to stray.pid and session.pid, and the session's sleep goes to child.pid.
+  // With stray-ignores-term in place, the stray ignores SIGTERM.
   writeFileSync(join(dir, "bin", "claude"), `#!/bin/sh
 echo "HOME=$HOME USER=$USER TMPDIR=$TMPDIR DBUS=$DBUS_SESSION_BUS_ADDRESS XDG=$XDG_RUNTIME_DIR SSH=$SSH_AUTH_SOCK NOT_INHERITED=$NOT_INHERITED args=$* parent=$(tr '\\0' ' ' < /proc/$PPID/cmdline)" >> ${seen}
 # a print-mode run (the courier) is given its prompt on stdin
@@ -70,7 +65,21 @@ echo "HOME=$HOME USER=$USER TMPDIR=$TMPDIR DBUS=$DBUS_SESSION_BUS_ADDRESS XDG=$X
 [ "$1" = -p ] && [ -n "$FAKE_COURIER_EXIT" ] && exit "$FAKE_COURIER_EXIT"
 # replace relay.log with a directory while the courier runs, so its exit line cannot be written
 [ "$1" = -p ] && [ -n "$FAKE_RELAY_LOG_GOES" ] && rm -f ${join(ws, "logs", "relay.log")} && mkdir ${join(ws, "logs", "relay.log")}
-case "$1" in agents) echo '[]' ;; auth) echo '{"loggedIn": true}' ;; *) exit 0 ;; esac
+if [ "$1" = agents ] && tr '\\0' ' ' < /proc/$PPID/cmdline | grep -q ' up $' && [ ! -e ${join(dir, "spawned")} ]; then
+  touch ${join(dir, "spawned")}
+  if [ -e ${join(dir, "stray-ignores-term")} ]; then sh -c "trap '' TERM; exec sleep 600" >/dev/null 2>&1 &
+  else sleep 600 >/dev/null 2>&1 &
+  fi
+  echo $! > ${join(dir, "stray.pid")}
+  ${join(dir, "bin", "claude")} session >/dev/null 2>&1 &
+  echo $! > ${join(dir, "session.pid")}
+fi
+case "$1" in
+  agents) echo '[]' ;;
+  auth) echo '{"loggedIn": true}' ;;
+  session) sleep 600 & echo $! > ${join(dir, "child.pid")}; wait ;;
+  *) exit 0 ;;
+esac
 `);
   chmodSync(join(dir, "bin", "claude"), 0o755);
   writeFileSync(join(ws, "lead", "CLAUDE.md"), "You lead.\n");
@@ -91,10 +100,16 @@ case "$1" in agents) echo '[]' ;; auth) echo '{"loggedIn": true}' ;; *) exit 0 ;
     runs.push(p);
     return p;
   };
+  const pidIn = (name: string) => (existsSync(join(dir, name)) ? Number(readFileSync(join(dir, name), "utf8")) || null : null);
   const upPids = new Set<number>();
   const upRunning = () => existsSync(stateFile) && state().jobs[UP]?.pid;
   after(async () => {
     for (const p of runs) p.kill("SIGKILL");
+    for (const pid of [pidIn("stray.pid"), pidIn("session.pid"), pidIn("child.pid")]) {
+      try {
+        if (pid) process.kill(pid, "SIGKILL");
+      } catch {}
+    }
     // a test that failed early never recorded the last up's pid
     try {
       upPids.add(state().jobs[UP].pid);
@@ -125,10 +140,10 @@ case "$1" in agents) echo '[]' ;; auth) echo '{"loggedIn": true}' ;; *) exit 0 ;
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }),
   });
   const page = async () => (await fetch(`http://127.0.0.1:${boardPort}/`)).status;
-  return { dir, ws, home, seen, state, start, upPids, upRunning, post, page };
+  return { dir, ws, home, seen, state, start, upPids, upRunning, pidIn, post, page };
 }
 
-test("a job gets HOME, USER and TMPDIR as launchd would give it, and the session bus and SSH agent", { skip: linux }, async () => {
+test("a job gets HOME, USER and TMPDIR as launchd would give it, and the session bus and SSH agent", { skip: linuxOnly }, async () => {
   const t = await setup();
   const d = t.start();
   // the board in the scheduler's own process calls claude too, with the scheduler's environment
@@ -140,7 +155,7 @@ test("a job gets HOME, USER and TMPDIR as launchd would give it, and the session
   d.kill();
 });
 
-test("the board is served in the scheduler's process, and its pid file names it", { skip: linux }, async () => {
+test("the board is served in the scheduler's process, and its pid file names it", { skip: linuxOnly }, async () => {
   const t = await setup();
   const d = t.start();
   const pidFile = join(t.ws, "logs", "board.pid");
@@ -158,14 +173,14 @@ test("the board is served in the scheduler's process, and its pid file names it"
   assert.ok(!existsSync(join(t.ws, "logs", "board.log")), "up opened no board log, so started no board");
   // up gone first: with the scheduler stopped and board.pid removed, an up still booting would start a board
   process.kill(-up, "SIGKILL");
-  await until("up to go", () => !alive(up)); // the scheduler reaps it
+  await until("up to go", () => !runningNotZombie(up)); // the scheduler reaps it
   d.kill("SIGTERM");
   await until("the scheduler to stop", () => d.exitCode !== null);
   assert.equal(d.exitCode, 0, d.out);
   assert.ok(!existsSync(pidFile), "its pid file goes with it");
 });
 
-test("a restarted scheduler waits for its predecessor's run, and marks it ended when it goes", { skip: linux }, async () => {
+test("a restarted scheduler waits for its predecessor's run, and marks it ended when it goes", { skip: linuxOnly }, async () => {
   const t = await setup();
   let d = t.start();
   await until("up to run", () => t.upRunning());
@@ -173,7 +188,7 @@ test("a restarted scheduler waits for its predecessor's run, and marks it ended 
   t.upPids.add(pid);
   d.kill("SIGKILL");
   await until("the first scheduler to die", () => d.exitCode !== null || d.signalCode !== null);
-  assert.ok(alive(pid), "KillMode=process: the run outlives its scheduler");
+  assert.ok(runningNotZombie(pid), "KillMode=process: the run outlives its scheduler");
 
   d = t.start();
   await until("the fire to be skipped", () => d.out.includes(`still running (pid ${pid}), this fire skipped`));
@@ -185,7 +200,7 @@ test("a restarted scheduler waits for its predecessor's run, and marks it ended 
   d.kill();
 });
 
-test("a pid reused since the run was recorded does not hold the job off", { skip: linux }, async () => {
+test("a pid reused since the run was recorded does not hold the job off", { skip: linuxOnly }, async () => {
   const t = await setup();
   // as after a reboot: the state file names a pid that now belongs to something started later
   const stranger = spawn("sleep", ["60"], { detached: true });
@@ -202,11 +217,11 @@ test("a pid reused since the run was recorded does not hold the job off", { skip
   });
   t.upPids.add(t.state().jobs[UP].pid);
   assert.ok(!d.out.includes("still running"), d.out);
-  assert.ok(alive(stranger.pid as number), "the stranger is left alone");
+  assert.ok(runningNotZombie(stranger.pid as number), "the stranger is left alone");
   d.kill();
 });
 
-test("a missed fire runs once, and the job is then due at its next calendar time", { skip: linux }, async () => {
+test("a missed fire runs once, and the job is then due at its next calendar time", { skip: linuxOnly }, async () => {
   const t = await setup();
   const ROUND = "superfactory.ada.round";
   // as after a night asleep: the round was due three hours ago, so three fires were missed
@@ -226,7 +241,7 @@ test("a missed fire runs once, and the job is then due at its next calendar time
   d.kill();
 });
 
-test("over its memory limit, the scheduler exits 75 for a restart, on its first check", { skip: linux }, async () => {
+test("over its memory limit, the scheduler exits 75 for a restart, on its first check", { skip: linuxOnly }, async () => {
   const t = await setup();
   // a second check would be a minute away
   const d = t.start("--memory-limit-mb", "1", "--check-seconds", "60");
@@ -240,7 +255,7 @@ test("over its memory limit, the scheduler exits 75 for a restart, on its first 
 
 // The scheduler's board relays: a page line that lands while no monitor holds the inbox is carried
 // to the lead by a courier, which is claude run from the scheduler with the workspace's relay prompt.
-test("a message from the page reaches the courier", { skip: linux }, async () => {
+test("a message from the page reaches the courier", { skip: linuxOnly }, async () => {
   const t = await setup();
   const d = t.start();
   await until("the board", () => d.out.includes("board on "));
@@ -257,7 +272,7 @@ test("a message from the page reaches the courier", { skip: linux }, async () =>
   d.kill();
 });
 
-test("a board that cannot take the inbox lock says so in the scheduler's output and the failures log", { skip: linux }, async () => {
+test("a board that cannot take the inbox lock says so in the scheduler's output and the failures log", { skip: linuxOnly }, async () => {
   const t = await setup({ FLOCK_BIN: "/nonexistent" });
   const d = t.start();
   await until("the sweep failure in the scheduler's output", () => d.out.includes("the courier sweep failed: the inbox lock: flock(1) failed"));
@@ -271,7 +286,7 @@ test("a board that cannot take the inbox lock says so in the scheduler's output 
   d.kill();
 });
 
-test("a sweep failure the failures log cannot take does not bring the scheduler down", { skip: linux }, async () => {
+test("a sweep failure the failures log cannot take does not bring the scheduler down", { skip: linuxOnly }, async () => {
   const t = await setup({ FLOCK_BIN: "/nonexistent" });
   mkdirSync(join(t.ws, "logs", "watcher-failures.log"), { recursive: true }); // a directory: every append fails
   const d = t.start();
@@ -285,7 +300,7 @@ test("a sweep failure the failures log cannot take does not bring the scheduler 
   d.kill();
 });
 
-test("a courier that fails while the failures log cannot be written does not bring the scheduler down", { skip: linux }, async () => {
+test("a courier that fails while the failures log cannot be written does not bring the scheduler down", { skip: linuxOnly }, async () => {
   const t = await setup({ FAKE_COURIER_EXIT: "3" });
   mkdirSync(join(t.ws, "logs", "watcher-failures.log"), { recursive: true }); // a directory: every append fails
   const d = t.start();
@@ -303,7 +318,7 @@ test("a courier that fails while the failures log cannot be written does not bri
   d.kill();
 });
 
-test("a courier whose log cannot take its exit line does not bring the scheduler down", { skip: linux }, async () => {
+test("a courier whose log cannot take its exit line does not bring the scheduler down", { skip: linuxOnly }, async () => {
   const t = await setup({ FAKE_RELAY_LOG_GOES: "1" });
   const d = t.start();
   await until("the board", () => d.out.includes("board on "));
@@ -317,5 +332,90 @@ test("a courier whose log cannot take its exit line does not bring the scheduler
   assert.ok(statSync(join(t.ws, "logs", "relay.log")).isDirectory(), "the courier's log really went");
   assert.equal(d.exitCode, null, d.out);
   assert.equal(await t.page(), 200, "the board still serves");
+  d.kill();
+});
+
+test("what an ended run leaves in its process group is cleaned up, but never a claude", { skip: noCleanup() }, async () => {
+  const t = await setup();
+  const d = t.start();
+  await until("up to leave its stray", () => t.pidIn("stray.pid") && t.pidIn("session.pid") && t.pidIn("child.pid") && t.upRunning());
+  const pid = t.state().jobs[UP].pid;
+  t.upPids.add(pid);
+  const [stray, session, child] = [t.pidIn("stray.pid") as number, t.pidIn("session.pid") as number, t.pidIn("child.pid") as number];
+  process.kill(pid, "SIGKILL"); // up alone: its group lives on
+  await until("the stray to be cleaned up", () => !runningNotZombie(stray));
+  assert.match(d.out, new RegExp(`job ${UP.replace(/\./g, "\\.")}: ended, leaving ${stray} \\(sleep\\) in its process group; SIGTERM`), d.out);
+  assert.ok(runningNotZombie(session), "a claude in the group is left alone");
+  assert.ok(runningNotZombie(child), "and so is what runs under it");
+  d.kill();
+});
+
+test("with no claude to tell a session by, nothing is killed, and the group is tried again once there is", { skip: noCleanup() }, async () => {
+  const t = await setup();
+  const d = t.start();
+  await until("up to leave its stray", () => t.pidIn("stray.pid") && t.pidIn("session.pid") && t.pidIn("child.pid") && t.upRunning());
+  const pid = t.state().jobs[UP].pid;
+  t.upPids.add(pid);
+  const [stray, session, child] = [t.pidIn("stray.pid") as number, t.pidIn("session.pid") as number, t.pidIn("child.pid") as number];
+  const claude = join(t.dir, "bin", "claude");
+  renameSync(claude, `${claude}.away`);
+  process.kill(pid, "SIGKILL");
+  await until("the group to be kept for later", () => d.out.includes("no claude at") && t.state().jobs[UP].clearing?.includes(pid));
+  await sleep(3000); // three checks
+  assert.ok(runningNotZombie(stray), "left alone");
+  assert.match(d.out, /no claude at \S+bin\/claude: leftovers are not killed until one is found, since a claude session among them could not be told apart/);
+  assert.equal(d.out.split("no claude at").length - 1, 1, "said once");
+  assert.ok(t.state().jobs[UP].clearing?.includes(pid), "still to be cleared");
+
+  renameSync(`${claude}.away`, claude);
+  await until("the stray to be cleaned up", () => !runningNotZombie(stray));
+  assert.ok(runningNotZombie(session), "a claude in the group is left alone");
+  assert.ok(runningNotZombie(child), "and so is what runs under it");
+  await until("the group to be settled", () => t.state().jobs[UP].clearing === undefined);
+  t.upPids.add(t.state().jobs[UP].pid);
+  d.kill();
+});
+
+test("a restarted scheduler cleans up after a run that ended while it was down", { skip: noCleanup() }, async () => {
+  const t = await setup();
+  let d = t.start();
+  await until("up to leave its stray", () => t.pidIn("stray.pid") && t.pidIn("session.pid") && t.pidIn("child.pid") && t.upRunning());
+  const pid = t.state().jobs[UP].pid;
+  t.upPids.add(pid);
+  const [stray, session, child] = [t.pidIn("stray.pid") as number, t.pidIn("session.pid") as number, t.pidIn("child.pid") as number];
+  d.kill("SIGKILL");
+  await until("the first scheduler to die", () => d.exitCode !== null || d.signalCode !== null);
+  process.kill(pid, "SIGKILL");
+  await sleep(300);
+  assert.ok(runningNotZombie(stray), "nobody has cleaned up yet");
+
+  d = t.start();
+  await until("the run to be marked ended", () => t.state().jobs[UP].lastExit === "unknown (started by an earlier scheduler)");
+  await until("the stray to be cleaned up", () => !runningNotZombie(stray));
+  assert.ok(runningNotZombie(session), "a claude in the group is left alone");
+  assert.ok(runningNotZombie(child), "and so is what runs under it");
+  t.upPids.add(t.state().jobs[UP].pid); // the up this scheduler started in its place
+  d.kill();
+});
+
+test("a SIGKILL still owed when the scheduler exits is sent by the next one", { skip: noCleanup() }, async () => {
+  const t = await setup();
+  writeFileSync(join(t.dir, "stray-ignores-term"), "");
+  let d = t.start();
+  await until("up to leave its stray", () => t.pidIn("stray.pid") && t.pidIn("child.pid") && t.upRunning());
+  const pid = t.state().jobs[UP].pid;
+  t.upPids.add(pid);
+  const stray = t.pidIn("stray.pid") as number;
+  process.kill(pid, "SIGKILL");
+  await until("the SIGTERM, recorded as owed a SIGKILL", () => d.out.includes(`leaving ${stray} (sleep)`) && t.state().jobs[UP].clearing?.includes(pid));
+  d.kill("SIGKILL"); // before the 10 s are up
+  await until("the first scheduler to die", () => d.exitCode !== null || d.signalCode !== null);
+  assert.ok(runningNotZombie(stray), "it ignores SIGTERM");
+
+  d = t.start();
+  await until("the stray to be killed", () => !runningNotZombie(stray), 30_000);
+  assert.match(d.out, new RegExp(`${stray} outlived SIGTERM; SIGKILL`), d.out);
+  await until("the group to be settled", () => t.state().jobs[UP].clearing === undefined);
+  t.upPids.add(t.state().jobs[UP].pid);
   d.kill();
 });
