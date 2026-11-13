@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { claudeBin, lead } from "../fleet.js";
 import { ghBin } from "../gate/github.js";
 import { renderSettings } from "../settings.js";
+import { parseRead } from "../tracker/read.js";
 import type { Workspace } from "../workspace.js";
 import { die, run, type RunResult } from "../util.js";
 
@@ -111,6 +112,22 @@ export function runClaude(ws: Workspace, job: Job, prompt: string, tools: string
   const why = r.status === TIMED_OUT ? ` (timed out after ${seconds}s${slept ? "; the laptop slept during the run" : ""})` : "";
   logTo(log, `exit=${r.status}${why}`);
   return { status: r.status, stdout: r.stdout, seconds, slept };
+}
+
+// On 2026-11-12 and 13 seven watcher runs found no Jira tool. In a `claude -p` the claude.ai
+// connectors arrive a few seconds after the session starts, later on a network still waking from
+// sleep, and a run that searched for the tool before they arrived ended unavailable while the next
+// one read Jira. So a run that cannot reach the tracker gets one more run, half a minute later; a
+// second one that cannot is an outage. TRACKER_RETRY_S overrides the wait, for the tests.
+const RETRY_WAIT_S = 30;
+
+export function runReader(ws: Workspace, job: "queue" | "round", prompt: string, tools: string[], log: string): ClaudeRun {
+  const r = runClaude(ws, job, prompt, tools, log);
+  if (r.status !== 0 || parseRead(ws, r.stdout).outcome !== "unavailable") return r;
+  const wait = Number(process.env.TRACKER_RETRY_S ?? RETRY_WAIT_S);
+  logTo(log, `tracker unavailable; running once more in ${wait}s, in case the connector was still loading`);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait * 1000);
+  return runClaude(ws, job, prompt, tools, log);
 }
 
 // The failures-log line for a run that did not exit 0, or null for one the laptop's sleep cut
