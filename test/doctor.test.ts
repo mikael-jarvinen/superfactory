@@ -81,6 +81,9 @@ test("doctor checks exactly what config needs", async () => {
   assert.equal(factory(bare.dir, ["schedule", "render"], { env: bare.env }).status, 0);
   const rendered = join(bare.dir, "logs", "run", "launchd");
   for (const f of readdirSync(rendered)) copyFileSync(join(rendered, f), join(bare.env.HOME as string, "Library", "LaunchAgents", f));
+  // Off macOS `factory schedule run` is the scheduler: a fresh state file, from a live pid, with config's jobs.
+  const jobs = { "superfactory.ada.round": { due: "2026-01-01T00:07:00Z" }, "superfactory.ada.up": { due: "2026-01-01T00:03:00Z" } };
+  writeFileSync(join(bare.dir, "logs", "run", "scheduler.json"), JSON.stringify({ pid: process.pid, at: new Date().toISOString(), checkSeconds: 30, jobs }));
 
   const a = factory(bare.dir, ["doctor"], { env: bare.env });
   const lines = a.stdout.trimEnd().split("\n");
@@ -148,4 +151,5 @@ done = "Done"
   has(/^app: ok container runtime$/);
   has(/^app: MISSING web\.app-2\.test resolving/);
   if (process.platform === "darwin") has(/^MISSING launchd job superfactory\.ada\.queue installed \[fix: factory schedule install\]$/);
+  else has(/^MISSING the scheduler, which runs the watchers' jobs .*\[fix: systemctl --user start factory-scheduler\]$/);
 });

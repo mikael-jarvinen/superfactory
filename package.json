@@ -16,6 +16,7 @@
   },
   "scripts": {
     "build": "tsc && cp -R src/board/static dist/src/board/",
+    "prepare": "npm run build",
     "test": "npm run build && node --test 'dist/test/*.test.js'"
   },
   "dependencies": {

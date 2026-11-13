@@ -8,7 +8,8 @@ machine or a company lives in a workspace that the program reads.
 ## Install
 
 You need Node 22 or later, Claude Code, the GitHub CLI `gh` (logged in), and git 2.31 or later.
-macOS is the only platform built so far.
+macOS is the platform built in full. On Linux, `factory schedule run` is the scheduler in place of
+launchd and serves the board (see "Off macOS" below). The inbox lock is still macOS-only.
 
 ```sh
 git clone <this repo> superfactory
@@ -111,7 +112,8 @@ The human:
 | `factory status` | Sessions, and every open work item. |
 | `factory messages [-n 20]` | The last messages on the message page. |
 | `factory board [--stop]` | Start or stop the board alone. |
-| `factory schedule install\|uninstall\|status` | The launchd jobs for the watchers. |
+| `factory schedule install\|uninstall\|status` | The launchd jobs for the watchers. Off macOS, `status` reads the scheduler and the other two point at it. |
+| `factory schedule run` | Off macOS: the scheduler, in the foreground. |
 
 The lead:
 
@@ -154,3 +156,32 @@ Scripts and hooks. Nobody types these; they are listed so you can recognise them
 
 [docs/design.md](docs/design.md) covers the program and workspace split, `factory.toml`, the stack
 contract and the Claude Code integration.
+
+## Off macOS
+
+launchd runs the watchers' jobs on macOS. Elsewhere `factory schedule run` does: one long-running
+process per workspace that runs the same jobs at the same calendar times, serves the board, and
+keeps its state in `logs/run/scheduler.json`, which `schedule status`, the doctor and the round read.
+It reads `[watchers]` when it starts, so a config change takes a restart. A run in flight is
+detached and outlives a restart of the scheduler, which finds it again by pid and start time. Over
+`--memory-limit-mb` (512) it exits 75. Run it as a systemd user unit:
+
+```ini
+# ~/.config/systemd/user/factory-scheduler.service
+[Unit]
+Description=superfactory scheduler
+
+[Service]
+# the jobs need claude and gh on PATH, which a user unit's own PATH may not have
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env factory --workspace %h/my-workspace schedule run
+Restart=on-failure
+# a run in flight outlives a restart of the scheduler
+KillMode=process
+
+[Install]
+WantedBy=default.target
+```
+
+Then `systemctl --user enable --now factory-scheduler`, and `loginctl enable-linger` so it runs while
+you are logged out.

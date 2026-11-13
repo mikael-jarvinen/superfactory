@@ -16,19 +16,14 @@ import { isSettingsPath, ROLES } from "./config.js";
 import { claudeBin, executable } from "./fleet.js";
 import { findPlaywright } from "./gate/demo.js";
 import { ghBin } from "./gate/github.js";
-import { jobStates } from "./scheduler/launchd.js";
+import { checks as schedulerChecks } from "./scheduler/index.js";
 import { TEMPLATES_DIR, templateNames } from "./settings.js";
 import { stackDoctor } from "./stacks/engine.js";
 import { trackerOf } from "./tracker/read.js";
 import { promptPath } from "./watchers/job.js";
 import type { Workspace } from "./workspace.js";
 import { run } from "./util.js";
-
-export interface Check {
-  ok: boolean;
-  what: string;
-  fix?: string;
-}
+import type { Check } from "./check.js";
 
 export const line = (c: Check) => (c.ok ? `ok ${c.what}` : `MISSING ${c.what}${c.fix ? ` [fix: ${c.fix}]` : ""}`);
 
@@ -284,21 +279,6 @@ async function boardPort(ws: Workspace): Promise<Check> {
   return { ok: false, what: `board host ${host} to listen on (${e.code ?? e.message})`, fix: "set board.host to a name this machine answers on, such as localhost" };
 }
 
-// Reported, never fixed: installing jobs is `factory schedule install`, which the human runs.
-function scheduler(ws: Workspace): Check[] {
-  if (process.platform !== "darwin") return [{ ok: false, what: "a scheduler for the watchers; only launchd on macOS is built" }];
-  const s = jobStates(ws);
-  const fix = "factory schedule install";
-  if (s.listFailed) return [{ ok: false, what: "launchctl list, to see the watchers' jobs", fix: "run it by hand and read its error" }];
-  const checks: Check[] = s.jobs.map(({ job, installed, loaded }) =>
-    installed === "no" ? { ok: false, what: `launchd job ${job.label} installed`, fix }
-    : installed === "stale" ? { ok: false, what: `launchd job ${job.label} as config renders it now`, fix }
-    : !loaded ? { ok: false, what: `launchd job ${job.label} loaded`, fix }
-    : { ok: true, what: `launchd job ${job.label} loaded` });
-  for (const l of s.unwanted) checks.push({ ok: false, what: `launchd job ${l} removed, since config no longer runs it`, fix });
-  return checks;
-}
-
 // ---------------------------------------------------------------- all of it
 
 // Prints as it goes, since the GitHub reads take a moment each. Resolves to the exit code: 1 when
@@ -316,7 +296,8 @@ export async function doctor(ws: Workspace, print: (l: string) => void = console
   emit(workspaceFiles(ws));
   emit(demoTools(ws));
   emit([await boardPort(ws)]);
-  emit(scheduler(ws));
+  // Reported, never fixed: installing jobs is `factory schedule install`, which the human runs.
+  emit(schedulerChecks(ws));
   // A stack whose script cannot run has its line above; its doctor would only repeat it.
   for (const s of Object.values(ws.config.stacks)) {
     if (!s.script || !existsSync(s.script) || !executable(s.script)) continue;

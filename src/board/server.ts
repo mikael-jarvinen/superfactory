@@ -13,6 +13,7 @@ import type { Workspace } from "../workspace.js";
 import { capitalize, run, sleep } from "../util.js";
 import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, type Relay, saveAttachment, sweep } from "./inbox.js";
 import { type Fetch, ReviewCache } from "./reviews.js";
+import { isScheduler } from "../scheduler/state.js";
 
 // The board: a read-only picture of the fleet at `/`, and the thread between the human and the lead
 // at `/messages`. `/api` and `/api/messages` are the JSON behind them, and both pages re-fetch every
@@ -28,7 +29,7 @@ const CLI = fileURLToPath(new URL("../cli.js", import.meta.url));
 // stack, slot, name, worktree ("-" for a free slot), url, health url.
 export const stacksFile = (ws: Workspace) => join(ws.stateDir, "stacks.tsv");
 
-const pidFile = (ws: Workspace) => join(ws.logsDir, "board.pid");
+export const pidFile = (ws: Workspace) => join(ws.logsDir, "board.pid");
 const logFile = (ws: Workspace) => join(ws.logsDir, "board.log");
 const url = (ws: Workspace) => `http://${ws.config.board.host}:${ws.config.board.port}`;
 
@@ -592,8 +593,11 @@ export function boardPid(ws: Workspace): number | null {
     return null;
   }
   const cmd = run("ps", ["-o", "command=", "-p", String(pid)]).stdout;
-  return cmd.includes("board --serve") && cmd.includes(ws.dir) ? pid : null;
+  if (cmd.includes("board --serve") && cmd.includes(ws.dir)) return pid;
+  // Off macOS the scheduler serves the board in its own process; its pid file names it.
+  return isScheduler(ws, pid) ? pid : null;
 }
+
 
 export const boardLine = (ws: Workspace) => {
   const pid = boardPid(ws);
@@ -658,6 +662,11 @@ export function stopBoard(ws: Workspace, quiet = false, out = console.log): void
   const pid = boardPid(ws);
   if (!pid) {
     if (!quiet) out("board is not running");
+    return;
+  }
+  // The scheduler's board is up as long as it is: stopping it would stop the scheduler too.
+  if (isScheduler(ws, pid)) {
+    if (!quiet) out(`board is the scheduler's (pid ${pid}) and stays up with it`);
     return;
   }
   try {

@@ -25,7 +25,9 @@ import { send } from "./gate/send.js";
 import { ACCEPT_PROSE, waitAndSend } from "./gate/wait.js";
 import { KINDS, type Kind, messages, say } from "./messages.js";
 import { type HookName, type HookResult, HOOKS } from "./settings.js";
-import { install, render, status as scheduleStatus, uninstall } from "./scheduler/launchd.js";
+import { schedule } from "./scheduler/index.js";
+import { render } from "./scheduler/launchd.js";
+import { runScheduler } from "./scheduler/run.js";
 import { cmdStack, STACK_USAGE } from "./stacks/command.js";
 import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/engine.js";
 import {
@@ -128,6 +130,9 @@ usage: factory [--workspace <dir>] <command> [options]
                                   the launchd jobs from [watchers]: render them into
                                   logs/run/launchd/, load or unload them for this user, or show
                                   what is installed and loaded
+  schedule run [--check-seconds N] [--memory-limit-mb N]
+                                  off macOS, the scheduler: run those jobs at their times and
+                                  serve the board, in the foreground under a systemd user unit
   hook <${HOOKS.join("|")}> [...]
                                   a Claude Code hook, reading the event on stdin. The rendered
                                   settings in logs/run/ call these; nothing else needs to.
@@ -659,16 +664,30 @@ function cmdWatch(ws: Workspace, argv: string[]): number {
 }
 
 function cmdSchedule(ws: Workspace, argv: string[]): number {
-  const { p } = args("schedule", argv, {}, [1, 1]);
+  const { v, p } = args("schedule", argv, { "check-seconds": { type: "string" }, "memory-limit-mb": { type: "string" } }, [1, 1]);
   const verb = p[0] as string;
+  if (verb !== "run" && (v["check-seconds"] !== undefined || v["memory-limit-mb"] !== undefined))
+    throw new UsageError("schedule: --check-seconds and --memory-limit-mb are for run");
+  if (verb === "run") {
+    const num = (k: string, d: number) => {
+      const n = v[k] === undefined ? d : Number(v[k]);
+      if (!(Number.isInteger(n) && n > 0)) throw new UsageError(`schedule run: --${k}: want a whole number above 0, not ${pyRepr(String(v[k]))}`);
+      return n;
+    };
+    const opts = { checkSeconds: num("check-seconds", 30), memoryLimitMb: num("memory-limit-mb", 512) };
+    // The board here carries no relay to the lead yet: the inbox lock it needs is macOS-only.
+    runScheduler(ws, opts).catch((e: unknown) => {
+      console.error(`factory: schedule run: ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(e instanceof FactoryError ? e.code : 1);
+    });
+    return 0;
+  }
   if (verb === "render") {
     for (const r of render(ws)) console.log(`rendered ${r.path}`);
     return 0;
   }
-  if (verb === "install") return install(ws);
-  if (verb === "uninstall") return uninstall(ws);
-  if (verb === "status") return scheduleStatus(ws);
-  throw new UsageError(`schedule: ${pyRepr(verb)}; give render, install, uninstall or status`);
+  if (verb === "install" || verb === "uninstall" || verb === "status") return schedule(ws, verb);
+  throw new UsageError(`schedule: ${pyRepr(verb)}; give render, install, uninstall, status or run`);
 }
 
 // The board port check binds, which is asynchronous, so this one finishes after main returns.

@@ -58,6 +58,34 @@ export function pidFromFile(file: string): number | null {
   return Date.now() - p.age * 1000 <= statSync(file).mtimeMs + 2000 ? pid : null;
 }
 
+// What tells a process apart from a later one given the same pid: on Linux the boot and the clock
+// tick it started at, elsewhere ps's start time. Neither moves when the wall clock is stepped. null
+// when there is no such process; a lookup that fails otherwise throws.
+let bootId: string | undefined;
+export function startStamp(pid: number): string | null {
+  if (process.platform === "linux") {
+    let stat: string;
+    try {
+      stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    } catch (e) {
+      if (["ENOENT", "ESRCH"].includes((e as NodeJS.ErrnoException).code ?? "")) return null;
+      throw e;
+    }
+    bootId ??= readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    // the command name in field 2 is in parentheses and may hold spaces; starttime is field 22
+    const ticks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+    if (!ticks) die(`/proc/${pid}/stat has no start time`);
+    return `${bootId}:${ticks}`;
+  }
+  // lstart is printed in local time and the locale's words: pin both, or a TZ change restamps it
+  const r = run("ps", ["-o", "lstart=", "-p", String(pid)], { env: { ...process.env, TZ: "UTC0", LC_ALL: "C" } });
+  if (r.status !== 0) {
+    if (!r.stdout.trim() && !r.stderr.trim()) return null; // no such process
+    die(`ps failed: ${r.stderr.trim()}`);
+  }
+  return r.stdout.trim() || null;
+}
+
 // The process, its descendants, and anything left in its process group: a child whose parent died
 // first is reparented and only the group still ties it to the tree. TERM first, KILL what is left.
 export function killTree(pid: number, graceMs = 10_000): boolean {

@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { fleetLines, type Session } from "../fleet.js";
 import { json } from "../gate/github.js";
 import { readTail } from "../messages.js";
-import { loaded } from "../scheduler/launchd.js";
+import { loaded } from "../scheduler/index.js";
 import { allRecs, BUSY, isLocal, recPrs, WAITING_ON_LEAD, WAITING_ON_YOU } from "../state.js";
 import { parseRead, trackerOf } from "../tracker/read.js";
 import type { Workspace } from "../workspace.js";
