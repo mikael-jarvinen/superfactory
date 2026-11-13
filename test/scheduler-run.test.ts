@@ -1,12 +1,10 @@
 // `factory schedule run` against a throwaway workspace and a fake claude.
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { boardPid } from "../src/board/server.js";
-import { openWorkspace } from "../src/workspace.js";
 import { CLI, tempDir } from "./helpers.js";
 
 const linux = process.platform === "linux" ? false : "the scheduler runs off macOS; these tests use /proc";
@@ -27,6 +25,29 @@ const alive = (pid: number) => {
     return true;
   } catch {
     return false;
+  }
+};
+
+// Every process a test started, wherever it has been reparented or regrouped since: each carries
+// the test's TMPDIR, and a board names the workspace under it. A zombie has neither, so it is not
+// counted.
+function startedBy(dir: string): number[] {
+  const env = Buffer.from(`\0TMPDIR=${dir}\0`);
+  const arg = Buffer.from(`\0${dir}/`);
+  return readdirSync("/proc").filter((e) => /^\d+$/.test(e)).map(Number).filter((pid) => {
+    try {
+      const nul = Buffer.from([0]);
+      return Buffer.concat([nul, readFileSync(`/proc/${pid}/environ`)]).includes(env) || Buffer.concat([nul, readFileSync(`/proc/${pid}/cmdline`)]).includes(arg);
+    } catch {
+      return false; // gone, or not ours
+    }
+  });
+}
+const cmdline = (pid: number) => {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" ");
+  } catch {
+    return "";
   }
 };
 
@@ -72,7 +93,7 @@ case "$1" in agents) echo '[]' ;; auth) echo '{"loggedIn": true}' ;; *) exit 0 ;
   };
   const upPids = new Set<number>();
   const upRunning = () => existsSync(stateFile) && state().jobs[UP]?.pid;
-  after(() => {
+  after(async () => {
     for (const p of runs) p.kill("SIGKILL");
     // a test that failed early never recorded the last up's pid
     try {
@@ -84,12 +105,21 @@ case "$1" in agents) echo '[]' ;; auth) echo '{"loggedIn": true}' ;; *) exit 0 ;
         process.kill(-pid, "SIGKILL"); // detached: its own process group
       } catch {}
     }
-    // a board `up` started while no scheduler held board.pid outlives the test otherwise
-    const board = boardPid(openWorkspace(ws));
-    try {
-      if (board) process.kill(board, "SIGKILL");
-    } catch {}
+    // then anything else left. A process mid-exec can match neither check, so stop after three empty passes.
+    let left: number[] = [];
+    let empty = 0;
+    for (let i = 0; empty < 3 && i < 50; i++, await sleep(100)) {
+      left = startedBy(dir);
+      empty = left.length ? 0 : empty + 1;
+      for (const pid of left) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+    }
+    if (empty < 3) left = startedBy(dir);
     rmSync(dir, { recursive: true, force: true });
+    assert.deepEqual(left.map(cmdline), [], "processes the test started, still running");
   });
   const post = (text: string) => fetch(`http://127.0.0.1:${boardPort}/api/messages`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }),
@@ -117,7 +147,18 @@ test("the board is served in the scheduler's process, and its pid file names it"
   await until("the board", () => d.out.includes("board on http://127.0.0.1:"));
   assert.equal(readFileSync(pidFile, "utf8").trim(), String(d.pid));
   await until("up to run", () => t.upRunning());
-  t.upPids.add(t.state().jobs[UP].pid);
+  const up = t.state().jobs[UP].pid;
+  t.upPids.add(up);
+  // up looks for the board before it asks claude for the lead's session
+  await until("up past its board check", () => existsSync(t.seen) && / up $/m.test(readFileSync(t.seen, "utf8")));
+  assert.deepEqual(startedBy(t.dir).map(cmdline).filter((c) => c.includes("board --serve")), [], "up found the scheduler's board and started none");
+  // a board started by up would already have exited on the taken port, but up removes
+  // board.pid and opens board.log before it starts one
+  assert.equal(existsSync(pidFile) && readFileSync(pidFile, "utf8").trim(), String(d.pid), "board.pid still names the scheduler");
+  assert.ok(!existsSync(join(t.ws, "logs", "board.log")), "up opened no board log, so started no board");
+  // up gone first: with the scheduler stopped and board.pid removed, an up still booting would start a board
+  process.kill(-up, "SIGKILL");
+  await until("up to go", () => !alive(up)); // the scheduler reaps it
   d.kill("SIGTERM");
   await until("the scheduler to stop", () => d.exitCode !== null);
   assert.equal(d.exitCode, 0, d.out);

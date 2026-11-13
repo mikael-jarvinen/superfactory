@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { test } from "node:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { after, test } from "node:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { daemonAlive, nextDue, runAlive } from "../src/scheduler/daemon.js";
 import { isScheduler, stateFile } from "../src/scheduler/state.js";
@@ -107,7 +107,9 @@ test("runAlive: a lookup that fails counts as alive, and is reported", () => {
 });
 
 test("isScheduler: the pid the workspace's state file names, with the start stamp it has now", () => {
-  const ws = openWorkspace(tempWorkspace());
+  const dir = tempWorkspace();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const ws = openWorkspace(dir);
   const write = (v: object) => {
     mkdirSync(join(ws.runDir), { recursive: true });
     writeFileSync(stateFile(ws), JSON.stringify({ at: new Date().toISOString(), checkSeconds: 30, jobs: {}, ...v }));
