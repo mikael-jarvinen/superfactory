@@ -115,6 +115,11 @@ done = "Done"
 host = "localhost"
 port = 8787
 
+[peers]
+isolate_machines = true                   # a message to a session on another machine waits for the
+                                          # account owner to approve it in the app, each time. false
+                                          # sends it straight away, as on one machine.
+
 [gate]
 prose_remark = 30                         # added comment lines at which the gate remarks on prose volume
 

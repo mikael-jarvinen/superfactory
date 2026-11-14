@@ -80,7 +80,7 @@ function loadTemplate(file: string): Template {
 }
 
 // Set for every session whatever the template says: memory off, and the peer settings the design
-// lists under Claude Code integration.
+// lists under Claude Code integration. isolatePeerMachines comes from [peers].
 const BASE = { autoMemoryEnabled: false, crossSessionInbound: "accept", isolatePeerMachines: true };
 
 const DIALOGS = "EnterPlanMode|ExitPlanMode|AskUserQuestion";
@@ -169,7 +169,7 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
     if (!(HOOKS as readonly string[]).includes(h)) die(`settings for ${s.name}: extra hook ${JSON.stringify(h)} is not a hook; hooks are ${HOOKS.join(", ")}`);
   const names = [...new Set([...t.hooks, ...((s.extraHooks ?? []) as HookName[])])];
 
-  const out: Record<string, unknown> = { ...BASE };
+  const out: Record<string, unknown> = { ...BASE, isolatePeerMachines: ws.config.peers.isolateMachines };
   for (const [k, v] of Object.entries(structuredClone(t.settings))) if (!(k in BASE)) out[k] = v;
 
   const perms = (out.permissions ?? {}) as { deny?: string[]; allow?: string[]; defaultMode?: string };
