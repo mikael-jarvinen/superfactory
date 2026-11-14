@@ -1,11 +1,14 @@
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, posix } from "node:path";
+import type { GitOver } from "./config.js";
 import { branchFor } from "./state.js";
 import { die, realpathLoose, run } from "./util.js";
 
 export const git = (dir: string, ...args: string[]) => run("git", ["-C", dir, ...args]);
 
 export const HTTPS = ["-c", "url.https://github.com/.insteadOf=git@github.com:"];
+// The -c arguments a git that talks to GitHub takes: none when the checkout's origin is used as it is.
+export const overArgs = (over: GitOver): string[] => (over === "ssh" ? [] : HTTPS);
 
 // Where a checkout's worktrees go, on this machine or a host: <checkout>/.claude/worktrees/<item>.
 export const worktreesDir = (repoDir: string) => posix.join(repoDir, ".claude", "worktrees");
@@ -28,13 +31,14 @@ export function worktreeList(repoDir: string): { path: string; locked: string | 
 export const registeredWorktrees = (repoDir: string): Set<string> => new Set(worktreeList(repoDir).map((w) => w.path));
 
 // A worktree per ticket, on branchFor(ticket), started from origin/<base>. Never touches HEAD.
-export function ensureWorktree(repoDir: string, ticket: string, base: string): { wt: string; how: string } {
+export function ensureWorktree(repoDir: string, ticket: string, base: string, over: GitOver = "https"): { wt: string; how: string } {
   const wt = worktreePath(repoDir, ticket);
   const branch = branchFor(ticket);
-  const r = git(repoDir, ...HTTPS, "fetch", "-q", "origin", base);
+  const via = overArgs(over);
+  const r = git(repoDir, ...via, "fetch", "-q", "origin", base);
   if (r.status !== 0) die(`git fetch failed in ${repoDir}: ${r.stderr.trim()}`);
   // the branch may already be on origin (a resumed item, a rebuilt laptop); a missing ref is fine
-  git(repoDir, ...HTTPS, "fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
+  git(repoDir, ...via, "fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
   git(repoDir, "worktree", "prune");
   if (existsSync(wt) && statSync(wt).isDirectory()) {
     const registered = worktreeList(repoDir).find((w) => w.path === realpathLoose(wt));
@@ -43,7 +47,7 @@ export function ensureWorktree(repoDir: string, ticket: string, base: string): {
       // lock and a partial checkout.
       if (registered.locked === "initializing")
         die(`${wt} was never fully checked out: its git worktree add was interrupted. Remove it with \`git -C ${repoDir} worktree remove -f -f ${wt}\`, then dispatch again.`);
-      pushOverHttps(repoDir, wt);
+      pushConfig(repoDir, wt, over);
       return { wt, how: "reused existing worktree" };
     }
     // A plain directory here is inside the human's clone: a session started in it would work on
@@ -81,8 +85,18 @@ export function ensureWorktree(repoDir: string, ticket: string, base: string): {
     how = `new branch ${branch} from origin/${base}`;
   }
   if (add.status !== 0) die(`git worktree add failed: ${add.stderr.trim()}`);
-  pushOverHttps(repoDir, wt);
+  pushConfig(repoDir, wt, over);
   return { wt, how };
+}
+
+// How the worktree's pushes reach GitHub. Over ssh it is the origin as the human set it up, so a
+// worktree made over https before the host said ssh loses the https config it was given.
+export function pushConfig(repoDir: string, wt: string, over: GitOver): void {
+  if (over === "https") return pushOverHttps(repoDir, wt);
+  // Only with per-worktree config on: otherwise --worktree is the shared .git/config, the human's.
+  if (git(repoDir, "config", "--get", "extensions.worktreeConfig").stdout.trim() !== "true") return;
+  git(wt, "config", "--worktree", "--unset-all", "url.https://github.com/.insteadOf");
+  git(wt, "config", "--worktree", "--unset-all", "credential.helper");
 }
 
 // Push over https through gh, so no session needs the ssh key. Scoped with --worktree: a linked

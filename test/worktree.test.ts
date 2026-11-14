@@ -4,7 +4,9 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { branchPushed, ensureWorktree, git, worktreeDirty } from "../src/worktree.js";
+import { GIT_HTTPS_ENV, gitEnv } from "../src/launch.js";
+import { branchPushed, ensureWorktree, git, HTTPS, overArgs, worktreeDirty } from "../src/worktree.js";
+import { run } from "../src/util.js";
 import { tempDir, until } from "./helpers.js";
 
 const WORKTREE = fileURLToPath(new URL("../src/worktree.js", import.meta.url));
@@ -48,6 +50,48 @@ test("a worktree per item, with its own push config, and the human's clone untou
   assert.equal(branchPushed(wt, "main"), false);
   must(wt, "push", "-q", "origin", "fix-db");
   assert.equal(branchPushed(wt, "main"), true);
+});
+
+// A host with git_over = "ssh" has the key and no gh. Its origin is git@github.com:..., here mapped
+// to a local bare repo by the clone's own config. A fetch given superfactory's https rewrite as well
+// would go to https://github.com instead, so the fetch working shows none was given.
+test("over ssh: the origin as it is, no https push config, and a worktree's old one removed", () => {
+  assert.deepEqual(overArgs("ssh"), []);
+  assert.deepEqual(overArgs("https"), HTTPS);
+  assert.deepEqual(gitEnv("ssh"), {});
+  assert.deepEqual(gitEnv("https"), GIT_HTTPS_ENV);
+  assert.deepEqual(gitEnv(), GIT_HTTPS_ENV);
+
+  const root = tempDir();
+  after(() => rmSync(root, { recursive: true, force: true }));
+  const origin = join(root, "origin.git");
+  const clone = join(root, "app");
+  must(root, "init", "-q", "--bare", "-b", "main", origin);
+  must(root, "clone", "-q", origin, clone);
+  must(clone, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "start");
+  must(clone, "push", "-q", "origin", "HEAD:main");
+  must(clone, "remote", "set-url", "origin", "git@github.com:acme/origin.git");
+  must(clone, "config", `url.${root}/.insteadOf`, "git@github.com:acme/");
+
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/bin/false" };
+  const { wt, how } = ensureWorktree(clone, "APP-1", "main", "ssh");
+  assert.equal(how, "new branch APP-1 from origin/main");
+  assert.equal(git(wt, "config", "--get", "extensions.worktreeConfig").status, 1, "no per-worktree config at all");
+  assert.equal(git(wt, "config", "--local", "--get", "credential.helper").status, 1, "no gh credential helper");
+  assert.equal(git(wt, "config", "--local", "--get", "url.https://github.com/.insteadOf").status, 1, "no https rewrite");
+  must(wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "work");
+  assert.equal(run("git", ["-C", wt, "push", "-q", "origin", "APP-1"], { env }).status, 0, "pushed through the origin's own url");
+  assert.equal(must(origin, "rev-parse", "APP-1"), must(wt, "rev-parse", "HEAD"));
+
+  // made over https, then the host said ssh: reusing it takes the https config away again
+  const old = ensureWorktree(clone, "APP-2", "main").wt;
+  assert.equal(must(old, "config", "--worktree", "credential.helper"), "!gh auth git-credential");
+  assert.equal(ensureWorktree(clone, "APP-2", "main", "ssh").how, "reused existing worktree");
+  assert.equal(git(old, "config", "--worktree", "--get", "credential.helper").status, 1);
+  assert.equal(git(old, "config", "--worktree", "--get", "url.https://github.com/.insteadOf").status, 1);
+  // and the human's clone keeps its own config
+  assert.equal(must(clone, "config", "--get", `url.${root}/.insteadOf`), "git@github.com:acme/");
+  assert.equal(must(clone, "config", "--get", "remote.origin.url"), "git@github.com:acme/origin.git");
 });
 
 // A .mo that translates git's "initializing" as en_GB's langpack does, for GIT_TEXTDOMAINDIR.

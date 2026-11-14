@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
-import type { Agent, Role } from "./config.js";
+import type { Agent, GitOver, Role } from "./config.js";
 import { lead, type Session, waitForName } from "./fleet.js";
 import { renderSettings } from "./settings.js";
 import { branchFor, isLocal } from "./state.js";
@@ -106,6 +106,9 @@ export const GIT_HTTPS_ENV = {
   GIT_CONFIG_KEY_0: "url.https://github.com/.insteadOf",
   GIT_CONFIG_VALUE_0: "git@github.com:",
 };
+// What a session's environment adds for git on a machine whose [hosts] git_over is `over`: nothing
+// for "ssh", so its pushes use the checkout's origin and the machine's own key.
+export const gitEnv = (over: GitOver = "https"): Record<string, string> => (over === "ssh" ? {} : GIT_HTTPS_ENV);
 
 export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string, appendix: string | null = null, phase: Phase = undefined): Session {
   const t = transportFor(ws, agent);
