@@ -22,7 +22,14 @@ export interface Repo {
   localChecks: string[];
   // A [hosts] key: the checkout is on that machine, and `path` is its absolute path there.
   host?: string;
+  // How git reaches GitHub for this checkout: its host's git_over, or "https" for one here.
+  gitOver: GitOver;
 }
+
+// "https": GitHub over https through gh, whatever the remote says, so no session needs the ssh key.
+// "ssh": the checkout's origin as it is, for a host with the key and no gh.
+export const GIT_OVER = ["https", "ssh"] as const;
+export type GitOver = (typeof GIT_OVER)[number];
 
 export interface Stack {
   key: string;
@@ -71,6 +78,7 @@ export interface Host {
   url: string;
   tokenFile: string;
   hashFiles: string[];
+  gitOver: GitOver;
 }
 
 export interface Tracker {
@@ -267,6 +275,7 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     repos[key] = {
       key,
       host,
+      gitOver: "https",   // set from the host's git_over once [hosts] is read
       remote: remote ?? "",
       // Normalized: no ., .., doubled or trailing slashes. Symlinks are not resolved; that would need the host.
       path: host ? (rawPath ? posix.normalize(rawPath).replace(/(.)\/+$/, "$1") : "") : (path(r, "path", rawPath ?? key, paths.repos) ?? ""),
@@ -372,11 +381,19 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
       url: (url ?? "").replace(/\/$/, ""),
       tokenFile: path(r, "token_file", r.str("token_file") ?? "~/.config/factory/token") ?? "",
       hashFiles: (r.strs("hash_files", true) ?? []).map((f) => path(r, "hash_files", f) ?? ""),
+      gitOver: "https",
     };
+    const over = r.str("git_over");
+    if (over !== undefined) {
+      if ((GIT_OVER as readonly string[]).includes(over)) hosts[key]!.gitOver = over as GitOver;
+      else r.bad("git_over", `must be one of ${GIT_OVER.join(", ")}, got ${show(over)}`);
+    }
     if (Array.isArray(v.hash_files) && v.hash_files.length !== 2)
       r.bad("hash_files", `must name two files, the daemon's config then the workspace config, got ${v.hash_files.length}`);
     r.done();
   }
+  for (const repo of Object.values(repos))
+    if (repo.host && hosts[repo.host]) repo.gitOver = hosts[repo.host]!.gitOver;
   for (const repo of Object.values(repos))
     if (repo.host && !hosts[repo.host])
       problems.push(`repos.${repo.key}.host: no host ${show(repo.host)}; hosts: ${Object.keys(hosts).join(", ") || "none"}`);

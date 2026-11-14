@@ -173,6 +173,26 @@ host = "far"`)), [
   ]);
 });
 
+test("a host's git_over: https unless it says ssh, and its repos follow it", () => {
+  const load = (toml: string) => {
+    const dir = tempWorkspace(toml);
+    try {
+      return loadConfig(join(dir, "factory.toml"), {});
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const https = load(hostedCal("http://x:1"));
+  assert.equal(https.hosts.far!.gitOver, "https");
+  assert.equal(https.repos.api!.gitOver, "https");
+  const ssh = load(hostedCal("http://x:1").replace("[hosts.far]\n", '[hosts.far]\ngit_over = "ssh"\n'));
+  assert.equal(ssh.hosts.far!.gitOver, "ssh");
+  assert.equal(ssh.repos.api!.gitOver, "ssh", "a repo on far goes the way far does");
+  assert.equal(ssh.repos.web!.gitOver, "https", "a repo here is still over https");
+  assert.deepEqual(problems(withHost("http://x:1").replace("[hosts.far]\n", '[hosts.far]\ngit_over = "git"\n')),
+    ['hosts.far.git_over: must be one of https, ssh, got "git"']);
+});
+
 test("the remote transport: each operation is a request to the host's daemon", async () => {
   const dir = workspace(withHost("http://placeholder:1"));
   const d = await fakeDaemon(dir, sha(join(dir, "daemon.toml"), join(dir, "workspace.toml")));

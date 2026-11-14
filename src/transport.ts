@@ -137,7 +137,7 @@ export const local: Transport = {
     if (remove) run(claudeBin(), ["rm", id]);
   },
   worktree(q) {
-    return ensureWorktree(q.repo.path, q.ticket, q.repo.base);
+    return ensureWorktree(q.repo.path, q.ticket, q.repo.base, q.repo.gitOver);
   },
   worktreeLeft(q) {
     const wt = worktreePath(q.repo.path, q.ticket);

@@ -99,6 +99,8 @@ role = "reviewer"
 # token_file = "~/.config/factory/token"  # the default; the daemon's shared token
 # hash_files = ["~/agents/factory/factory.toml", "~/agents/factory/workspace/factory.toml"]
 #                                         # the daemon's config, then the workspace config it launches from; order matters
+# git_over = "https"                       # the default: GitHub over https through gh there; "ssh" uses
+#                                         # each checkout's origin and that machine's own key, for one with no gh login
 
 [tracker]
 kind = "jira"                             # or "none"
