@@ -4,7 +4,7 @@ import type { Agent, GitOver, Role } from "./config.js";
 import { lead, type Session, waitForName } from "./fleet.js";
 import { renderSettings } from "./settings.js";
 import { branchFor, isLocal } from "./state.js";
-import { transportFor } from "./transport.js";
+import { type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
 import { capitalize, die } from "./util.js";
 
@@ -110,8 +110,7 @@ export const GIT_HTTPS_ENV = {
 // for "ssh", so its pushes use the checkout's origin and the machine's own key.
 export const gitEnv = (over: GitOver = "https"): Record<string, string> => (over === "ssh" ? {} : GIT_HTTPS_ENV);
 
-export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string, appendix: string | null = null, phase: Phase = undefined): Session {
-  const t = transportFor(ws, agent);
+export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string, appendix: string | null = null, phase: Phase = undefined, t: Transport = transportFor(ws, agent)): Session {
   const sid = t.start({
     agent, cwd, prompt, appendix, phase,
     args: (appendixPath) => launchArgs(ws, agent, prompt, appendixPath, phase),
