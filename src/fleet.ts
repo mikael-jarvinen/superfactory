@@ -1,10 +1,11 @@
-import type { Agent, RoleName } from "./config.js";
+import { existsSync, statSync } from "node:fs";
+import type { Agent, Repo, RoleName } from "./config.js";
 import { allRecs, BUSY, IN_REVIEW, type Rec } from "./state.js";
 import type { Workspace } from "./workspace.js";
 import { ask, Unreachable } from "./remote.js";
 import { agentSessions, isAgentSession, pick, type Transport, transportFor, transports } from "./transport.js";
-import { die, pyRepr, pyStr, sleep } from "./util.js";
-import { branchPushed, worktreeDirty } from "./worktree.js";
+import { die, pyRepr, pyStr, realpathLoose, sleep } from "./util.js";
+import { branchPushed, worktreeDirty, worktreesDir } from "./worktree.js";
 
 export { claudeBin, executable } from "./claude-bin.js";
 
@@ -58,12 +59,56 @@ export function stopSession(t: Transport, s: Session | null, remove = true): voi
 
 // What stopping a builder would lose from its worktree, as the refusal to give, or null if nothing.
 export function leftWork(ws: Workspace, name: string, cwd: string): string | null {
-  const left = worktreeDirty(cwd, ws.config.worktree.toolWritten);
-  if (left.length) return `${name}'s worktree ${cwd} has uncommitted changes: ${left.slice(0, 4).join(", ")}. Ask them to commit and push, or --force to lose it.`;
   let base = "main";
   for (const r of Object.values(ws.config.repos)) if (cwd.startsWith(r.path + "/")) base = r.base;
-  if (!branchPushed(cwd, base)) return `${name}'s branch in ${cwd} is not fully pushed. Ask them to push, or --force.`;
+  return leftSaid(name, cwd, worktreeDirty(cwd, ws.config.worktree.toolWritten), () => branchPushed(cwd, base));
+}
+
+function leftSaid(name: string, cwd: string, dirty: string[], pushed: () => boolean): string | null {
+  if (dirty.length) return `${name}'s worktree ${cwd} has uncommitted changes: ${dirty.slice(0, 4).join(", ")}. Ask them to commit and push, or --force to lose it.`;
+  if (!pushed()) return `${name}'s branch in ${cwd} is not fully pushed. Ask them to push, or --force.`;
   return null;
+}
+
+const isDir = (p: string) => existsSync(p) && statSync(p).isDirectory();
+
+// Which of the builder's worktrees a session's cwd is, by repo and work item: the cwd is
+// <checkout>/.claude/worktrees/<item>. Paths here are compared as realpaths, as registeredWorktrees
+// does; paths on a host are compared as that host's config gives them.
+export function worktreeOf(ws: Workspace, agent: Agent, cwd: string): { repo: Repo; ticket: string } | null {
+  const real = (p: string) => (agent.host ? p : realpathLoose(p));
+  const dir = real(cwd).replace(/\/+$/, "");
+  for (const key of agent.repos) {
+    const repo = ws.config.repos[key]!;
+    const pre = `${real(worktreesDir(repo.path))}/`;
+    if (dir.startsWith(pre) && dir.length > pre.length && !dir.slice(pre.length).includes("/")) return { repo, ticket: dir.slice(pre.length) };
+  }
+  return null;
+}
+
+// leftWork for any builder. On this machine it is leftWork on a cwd that is a directory. For a
+// builder with a host the worktree is looked at there, by repo and item, and a session with no cwd
+// or one that is none of its worktrees, or a host that does not answer, is a refusal: what it would
+// lose is unknown.
+export function builderLeft(ws: Workspace, agent: Agent, t: Transport, cwd: string | undefined): string | null {
+  if (!agent.host) return cwd && isDir(cwd) ? leftWork(ws, agent.name, cwd) : null;
+  if (!cwd) return `${agent.name}'s session on ${agent.host} gives no cwd, so what stopping it would lose is unknown. Look there, or --force.`;
+  const w = worktreeOf(ws, agent, cwd);
+  if (!w) return `${agent.name}'s session is in ${cwd} on ${agent.host}, which is none of its worktrees, so what stopping it would lose is unknown. Look there, or --force.`;
+  const got = ask(() => t.worktreeLeft({ agent, repo: w.repo, ticket: w.ticket, toolWritten: ws.config.worktree.toolWritten }));
+  if (got instanceof Unreachable) return `${agent.name}'s worktree ${cwd} could not be checked (${got.brief}). Look there, or --force.`;
+  if (!got.exists) return null;
+  return leftSaid(agent.name, cwd, got.dirty, () => got.pushed);
+}
+
+// Removes a builder's worktree when asked, here or on its host, and returns the line to print.
+// Null when cwd is not one of its worktrees.
+export function stopWorktree(ws: Workspace, agent: Agent, t: Transport, cwd: string | undefined, remove: boolean): string | null {
+  const at = cwd ? worktreeOf(ws, agent, cwd) : null;
+  if (!at || (!agent.host && !isDir(cwd as string))) return null;
+  if (!remove) return `worktree kept${agent.host ? ` on ${agent.host}` : ""}: ${cwd}`;
+  const r = t.removeWorktree({ agent, repo: at.repo, ticket: at.ticket, toolWritten: ws.config.worktree.toolWritten });
+  return r.ok ? "worktree removed" : `worktree kept: ${r.said}`;
 }
 
 // A builder owed nothing but items in review is free, with or without a session: the next dispatch

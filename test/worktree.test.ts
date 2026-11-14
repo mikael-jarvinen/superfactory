@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { branchPushed, ensureWorktree, git, worktreeDirty } from "../src/worktree.js";
-import { tempDir } from "./helpers.js";
+import { tempDir, until } from "./helpers.js";
+
+const WORKTREE = fileURLToPath(new URL("../src/worktree.js", import.meta.url));
 
 const must = (dir: string, ...args: string[]) => {
   const r = git(dir, ...args);
@@ -44,4 +48,84 @@ test("a worktree per item, with its own push config, and the human's clone untou
   assert.equal(branchPushed(wt, "main"), false);
   must(wt, "push", "-q", "origin", "fix-db");
   assert.equal(branchPushed(wt, "main"), true);
+});
+
+// A .mo that translates git's "initializing" as en_GB's langpack does, for GIT_TEXTDOMAINDIR.
+function initialisingMo(): Buffer {
+  const entries: [string, string][] = [
+    ["", "Content-Type: text/plain; charset=UTF-8\n"],
+    ["initializing", "initialising"],
+  ];
+  const n = entries.length;
+  const strings = [...entries.map(([k]) => k), ...entries.map(([, v]) => v)].map((x) => Buffer.from(x));
+  const table = Buffer.alloc(16 * n);
+  let at = 28 + 16 * n;
+  strings.forEach((b, i) => {
+    table.writeUInt32LE(b.length, 8 * i);
+    table.writeUInt32LE(at, 8 * i + 4);
+    at += b.length + 1;
+  });
+  const head = Buffer.alloc(28);
+  [0x950412de, 0, n, 28, 28 + 8 * n, 0, 0].forEach((v, i) => head.writeUInt32LE(v, 4 * i));
+  return Buffer.concat([head, table, ...strings.map((b) => Buffer.concat([b, Buffer.from([0])]))]);
+}
+
+// git itself writes the lock: a checkout filter holds `git worktree add` mid-checkout, in a locale
+// that translates the lock's reason, and the test SIGKILLs it there. Where en_GB.UTF-8 is not
+// installed, git does not translate, and the test checks the refusal alone.
+test("a worktree whose git worktree add was killed is refused, in any locale, until it is removed", async () => {
+  const root = tempDir();
+  after(() => rmSync(root, { recursive: true, force: true }));
+  const origin = join(root, "origin.git");
+  const clone = join(root, "web");
+  must(root, "init", "-q", "--bare", "-b", "main", origin);
+  must(root, "clone", "-q", origin, clone);
+  writeFileSync(join(clone, "a.txt"), "a\n");
+  must(clone, "add", "a.txt");
+  must(clone, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "start");
+  must(clone, "push", "-q", "origin", "HEAD:main");
+  const kept = ensureWorktree(clone, "WEB-4", "main").wt;
+
+  const hang = join(root, "hang");
+  const held = join(root, "held");
+  writeFileSync(join(root, "smudge"), `#!/bin/sh\ntouch ${held}\nwhile [ -f ${hang} ]; do sleep 0.1; done\nexec cat\n`);
+  chmodSync(join(root, "smudge"), 0o755);
+  must(clone, "config", "filter.slow.smudge", join(root, "smudge"));
+  writeFileSync(join(clone, ".git", "info", "attributes"), "a.txt filter=slow\n");
+  mkdirSync(join(root, "po", "en_GB", "LC_MESSAGES"), { recursive: true });
+  writeFileSync(join(root, "po", "en_GB", "LC_MESSAGES", "git.mo"), initialisingMo());
+
+  writeFileSync(hang, "");
+  const code = `import(${JSON.stringify(WORKTREE)}).then((m) => m.ensureWorktree(${JSON.stringify(clone)}, "WEB-3", "main"))`;
+  const env = { ...process.env, LC_ALL: "en_GB.UTF-8", GIT_TEXTDOMAINDIR: join(root, "po") };
+  const child = spawn(process.execPath, ["-e", code], { detached: true, stdio: ["ignore", "ignore", "pipe"], env });
+  let stderr = "";
+  child.stderr!.on("data", (b) => (stderr += b));
+  let gone = false;
+  const exited = new Promise((res) => child.once("close", () => res((gone = true))));
+  const kill = () => {
+    try {
+      process.kill(-child.pid!, "SIGKILL");
+    } catch {}
+  };
+  try {
+    // A child that dies early fails the test rather than hanging it.
+    await until("the filter to hold the checkout", () => existsSync(held) || gone, 30_000);
+    assert.ok(existsSync(held), `ensureWorktree exited before the checkout: ${stderr}`);
+    kill();
+    await exited;
+  } finally {
+    kill();
+    rmSync(hang, { force: true });
+  }
+
+  const half = join(clone, ".claude", "worktrees", "WEB-3");
+  assert.throws(() => ensureWorktree(clone, "WEB-3", "main"), /was never fully checked out.*worktree remove -f -f/);
+  // A worktree locked for any other reason is still reused. git lists worktrees by path, so WEB-4
+  // comes after WEB-3, and a check that matched any item's lock would find WEB-3's first.
+  must(clone, "worktree", "lock", "--reason", "kept", kept);
+  assert.equal(ensureWorktree(clone, "WEB-4", "main").how, "reused existing worktree");
+  must(clone, "worktree", "remove", "-f", "-f", half);
+  assert.match(ensureWorktree(clone, "WEB-3", "main").how, /^checked out existing local branch/);
+  assert.equal(readFileSync(join(half, "a.txt"), "utf8"), "a\n");
 });

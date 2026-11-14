@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, posix } from "node:path";
 import { branchFor } from "./state.js";
 import { die, realpathLoose, run } from "./util.js";
 
@@ -7,12 +7,25 @@ export const git = (dir: string, ...args: string[]) => run("git", ["-C", dir, ..
 
 export const HTTPS = ["-c", "url.https://github.com/.insteadOf=git@github.com:"];
 
-export const worktreePath = (repoDir: string, ticket: string) => join(repoDir, ".claude", "worktrees", ticket);
+// Where a checkout's worktrees go, on this machine or a host: <checkout>/.claude/worktrees/<item>.
+export const worktreesDir = (repoDir: string) => posix.join(repoDir, ".claude", "worktrees");
+export const worktreePath = (repoDir: string, ticket: string) => posix.join(worktreesDir(repoDir), ticket);
 
-export function registeredWorktrees(repoDir: string): Set<string> {
+// `git worktree list --porcelain`, one record per worktree: its realpath, and its lock reason
+// ("" for a lock without one), or null when it is not locked.
+export function worktreeList(repoDir: string): { path: string; locked: string | null }[] {
   const out = git(repoDir, "worktree", "list", "--porcelain").stdout;
-  return new Set(out.split("\n").filter((l) => l.startsWith("worktree ")).map((l) => realpathLoose(l.slice("worktree ".length))));
+  return out
+    .split("\n\n")
+    .map((b) => b.split("\n"))
+    .filter((ls) => ls[0]?.startsWith("worktree "))
+    .map((ls) => {
+      const lock = ls.find((l) => l === "locked" || l.startsWith("locked "));
+      return { path: realpathLoose(ls[0]!.slice("worktree ".length)), locked: lock === undefined ? null : lock.slice("locked ".length) };
+    });
 }
+
+export const registeredWorktrees = (repoDir: string): Set<string> => new Set(worktreeList(repoDir).map((w) => w.path));
 
 // A worktree per ticket, on branchFor(ticket), started from origin/<base>. Never touches HEAD.
 export function ensureWorktree(repoDir: string, ticket: string, base: string): { wt: string; how: string } {
@@ -24,7 +37,12 @@ export function ensureWorktree(repoDir: string, ticket: string, base: string): {
   git(repoDir, ...HTTPS, "fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
   git(repoDir, "worktree", "prune");
   if (existsSync(wt) && statSync(wt).isDirectory()) {
-    if (registeredWorktrees(repoDir).has(realpathLoose(wt))) {
+    const registered = worktreeList(repoDir).find((w) => w.path === realpathLoose(wt));
+    if (registered) {
+      // git locks a worktree as "initializing" while it checks it out, and a SIGKILL leaves that
+      // lock and a partial checkout.
+      if (registered.locked === "initializing")
+        die(`${wt} was never fully checked out: its git worktree add was interrupted. Remove it with \`git -C ${repoDir} worktree remove -f -f ${wt}\`, then dispatch again.`);
       pushOverHttps(repoDir, wt);
       return { wt, how: "reused existing worktree" };
     }
@@ -48,16 +66,18 @@ export function ensureWorktree(repoDir: string, ticket: string, base: string): {
       }
     }
   }
+  // git translates the lock reason (en_GB writes "initialising"), and the check above expects "initializing".
+  const worktreeAdd = (...args: string[]) => run("git", ["-C", repoDir, "worktree", "add", ...args], { env: { ...process.env, LC_ALL: "C" } });
   let add;
   let how;
   if (haveBranch) {
-    add = git(repoDir, "worktree", "add", wt, branch);
+    add = worktreeAdd(wt, branch);
     how = `checked out existing local branch ${branch}${note}`;
   } else if (haveRemote) {
-    add = git(repoDir, "worktree", "add", "--track", "-b", branch, wt, `origin/${branch}`);
+    add = worktreeAdd("--track", "-b", branch, wt, `origin/${branch}`);
     how = `tracked existing origin/${branch}`;
   } else {
-    add = git(repoDir, "worktree", "add", "-b", branch, wt, `origin/${base}`);
+    add = worktreeAdd("-b", branch, wt, `origin/${base}`);
     how = `new branch ${branch} from origin/${base}`;
   }
   if (add.status !== 0) die(`git worktree add failed: ${add.stderr.trim()}`);

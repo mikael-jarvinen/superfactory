@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -5,6 +6,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ownCgroupProcs } from "../src/scheduler/leftovers.js";
 import { procStat } from "../src/stacks/process.js";
+
+export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+export async function until(what: string, fn: () => unknown, ms = 15_000) {
+  for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) if (fn()) return;
+  assert.fail(`timed out waiting for ${what}`);
+}
 
 export const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
