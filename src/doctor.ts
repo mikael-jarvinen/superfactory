@@ -20,7 +20,8 @@ import { checks as schedulerChecks } from "./scheduler/index.js";
 import { TEMPLATES_DIR, templateNames } from "./settings.js";
 import { stackDoctor } from "./stacks/engine.js";
 import { trackerOf } from "./tracker/read.js";
-import { probe } from "./remote.js";
+import { ask, probe, Unreachable } from "./remote.js";
+import { repoTransport } from "./transport.js";
 import { local } from "./transport.js";
 import { promptPath } from "./watchers/job.js";
 import type { Workspace } from "./workspace.js";
@@ -118,9 +119,17 @@ function tools(ws: Workspace): Check[] {
 }
 
 // A repo is checked out where config resolves it, as its own top level, with its remote as origin.
-function checkouts(ws: Workspace): Check[] {
+export function checkouts(ws: Workspace): Check[] {
   return Object.values(ws.config.repos).map((r) => {
     let ok = false;
+    const what = `${r.path} is a checkout of ${r.remote} (repos.${r.key})`;
+    // A repo on another host is looked at there; its path is that host's, given absolute.
+    if (r.host) {
+      const got = ask(() => repoTransport(ws, r).checkout(r));
+      if (got instanceof Unreachable) return { status: "unchecked" as const, what: `${what} on ${r.host}`, fix: got.brief };
+      ok = got.top === r.path && got.origin.toLowerCase().includes(r.remote.toLowerCase());
+      return { status: okIf(ok), what: `${what} on ${r.host}`, fix: `on ${r.host}: git clone https://github.com/${r.remote}.git ${r.path}, or set repos.${r.key}.path` };
+    }
     if (isDir(r.path)) {
       const top = out("git", ["-C", r.path, "rev-parse", "--show-toplevel"]);
       const origin = top ? (out("git", ["-C", r.path, "remote", "get-url", "origin"]) ?? "") : "";

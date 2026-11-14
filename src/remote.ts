@@ -8,6 +8,19 @@
 //   POST /agents/<name>/respawn   {id} -> {ok, said, why}
 //   POST /agents/<name>/stop      {id, remove}
 //
+// A builder with a host has its repos' checkouts there too, and its worktrees are made and checked
+// there. These carry names only, never paths; the daemon finds the checkout, the base and the
+// tool-written files in its own copy of the config (serveWorktree below does it for the daemon):
+//
+//   POST /agents/<name>/worktree          {repo, ticket} -> {wt, how}
+//   POST /agents/<name>/worktree/left     {repo, ticket} -> {exists, dirty, pushed}
+//   POST /agents/<name>/worktree/remove   {repo, ticket} -> {ok, said}
+//   GET  /repos/<key>/checkout            {top, origin}, for the doctor
+//
+// On the worktree, worktree/left and worktree/remove routes, 422 {error} means the daemon was asked
+// and refused the operation itself (a directory in the way of a worktree, say); that is an error
+// here, not an unknown host. On every other route a 422 is an unknown host.
+//
 // Each request carries the token (Authorization: Bearer) and the sha256 of the host's hash_files,
 // their bytes one after another in order (X-Factory-Hash): the daemon's config and the workspace
 // config it renders launches from. A host that does not answer, or answers 401 or 409, is unknown:
@@ -16,8 +29,10 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Host } from "./config.js";
+import { validKey } from "./state.js";
 import type { Session } from "./fleet.js";
-import type { Transport } from "./transport.js";
+import { local, type Transport, type WorktreeRequest } from "./transport.js";
+import type { Workspace } from "./workspace.js";
 import { FactoryError } from "./util.js";
 
 export class Unreachable extends FactoryError {
@@ -96,6 +111,13 @@ try {
 }`;
 
 function callSync(h: Host, method: string, path: string, body?: unknown, timeoutMs = 10_000): Reply {
+  return checked(h, exchange(h, method, path, body, timeoutMs), false);
+}
+
+const worktreeCall = (h: Host, op: string, q: WorktreeRequest, timeoutMs: number): Reply =>
+  checked(h, exchange(h, "POST", agentPath(q.agent.name, op), names(q), timeoutMs), true);
+
+function exchange(h: Host, method: string, path: string, body: unknown, timeoutMs: number): { reply: Reply; hash: string } {
   const { headers: hd, hash } = headers(h);
   const q = { url: h.url + path, method, headers: hd, body: body === undefined ? undefined : JSON.stringify(body), timeoutMs };
   const r = spawnSync(process.execPath, ["--input-type=module", "-e", CHILD], { input: JSON.stringify(q), encoding: "utf8", timeout: timeoutMs + 5000 });
@@ -106,7 +128,11 @@ function callSync(h: Host, method: string, path: string, body?: unknown, timeout
     throw new Unreachable(h.name, `the request did not finish (${r.error?.message ?? (r.stderr.trim() || `exit ${r.status ?? r.signal}`)})`);
   }
   if (out.error) throw new Unreachable(h.name, out.error);
-  const reply = { status: out.status as number, body: out.body ?? {} };
+  return { reply: { status: out.status as number, body: out.body ?? {} }, hash };
+}
+
+function checked(h: Host, { reply, hash }: { reply: Reply; hash: string }, refusable: boolean): Reply {
+  if (refusable && reply.status === 422) throw new FactoryError(`on host ${h.name}: ${String(reply.body.error ?? "refused")}`);
   const no = refusal(h, reply, hash);
   if (no) throw no;
   return reply;
@@ -134,6 +160,7 @@ const listed = (h: Host, r: Reply): Session[] => {
 };
 
 const agentPath = (name: string, op: string) => `/agents/${encodeURIComponent(name)}/${op}`;
+const names = (q: WorktreeRequest) => ({ repo: q.repo.key, ticket: q.ticket });
 
 export function remote(h: Host): Transport {
   return {
@@ -160,7 +187,66 @@ export function remote(h: Host): Transport {
     stop(name, id, remove) {
       callSync(h, "POST", agentPath(name, "stop"), { id, remove }, 30_000);
     },
+    // A fetch of origin comes first, so this has a start's time.
+    worktree(q) {
+      const r = worktreeCall(h, "worktree", q, 120_000);
+      if (typeof r.body.wt !== "string") throw new Unreachable(h.name, "its worktree reply has no wt");
+      return { wt: r.body.wt, how: String(r.body.how ?? "") };
+    },
+    worktreeLeft(q) {
+      const r = worktreeCall(h, "worktree/left", q, 30_000);
+      if (typeof r.body.exists !== "boolean" || typeof r.body.pushed !== "boolean" || !Array.isArray(r.body.dirty))
+        throw new Unreachable(h.name, "its worktree/left reply is not {exists, dirty, pushed}");
+      return { exists: r.body.exists, dirty: r.body.dirty.map(String), pushed: r.body.pushed };
+    },
+    removeWorktree(q) {
+      const r = worktreeCall(h, "worktree/remove", q, 30_000);
+      return { ok: r.body.ok === true, said: String(r.body.said ?? "") };
+    },
+    checkout(repo) {
+      const r = callSync(h, "GET", `/repos/${encodeURIComponent(repo.key)}/checkout`);
+      return { top: typeof r.body.top === "string" ? r.body.top : null, origin: String(r.body.origin ?? "") };
+    },
   };
+}
+
+// ---------------------------------------------------------------- the daemon's side
+
+export type Served = { status: number; body: Record<string, unknown> };
+
+const PLAIN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+// The worktree routes for a daemon whose host is `me`, after it has checked the token, the hash
+// and its own roster: the agent must be a builder hosted here, the repo one of its repos, and the
+// ticket a key this workspace takes. Paths come from this machine's config, never the request.
+export function serveWorktree(ws: Workspace, me: string, name: string, op: string, body: Record<string, unknown>): Served {
+  const agent = ws.config.agents.find((a) => a.name === name);
+  if (!agent) return { status: 404, body: { error: `${name} is not in the workspace config` } };
+  if (agent.host !== me) return { status: 404, body: { error: `${name} runs on ${agent.host ?? "the primary"}, not ${me}` } };
+  if (agent.role !== "builder") return { status: 404, body: { error: `${name} is a ${agent.role}, and only a builder has worktrees` } };
+  const { repo: key, ticket } = body;
+  if (typeof key !== "string" || !agent.repos.includes(key))
+    return { status: 400, body: { error: `repo must be one of ${name}'s repos: ${agent.repos.join(", ")}` } };
+  if (typeof ticket !== "string" || !PLAIN.test(ticket) || ticket.includes("..") || !validKey(ws, ticket))
+    return { status: 400, body: { error: "ticket must be a work item key" } };
+  const repo = ws.config.repos[key]!;
+  if (repo.host !== me) return { status: 404, body: { error: `repos.${key} is not on ${me}` } };
+  const q: WorktreeRequest = { agent, repo, ticket, toolWritten: ws.config.worktree.toolWritten };
+  try {
+    if (op === "worktree") return { status: 200, body: { ...local.worktree(q) } };
+    if (op === "worktree/left") return { status: 200, body: { ...local.worktreeLeft(q) } };
+    if (op === "worktree/remove") return { status: 200, body: { ...local.removeWorktree(q) } };
+  } catch (e) {
+    if (e instanceof FactoryError) return { status: 422, body: { error: e.message } };
+    throw e;
+  }
+  return { status: 404, body: { error: "no such route" } };
+}
+
+export function serveCheckout(ws: Workspace, me: string, key: string): Served {
+  const repo = ws.config.repos[key];
+  if (!repo || repo.host !== me) return { status: 404, body: { error: `no repo ${key} on ${me}` } };
+  return { status: 200, body: { ...local.checkout(repo) } };
 }
 
 // For the doctor: why the host cannot be asked, or null when it answers.

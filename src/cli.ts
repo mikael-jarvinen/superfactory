@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { recordAllowClose } from "./allow-close.js";
 import { followInbox } from "./board/inbox.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
-import { agentOrDie, byRole, findSession, fleetLines, owedNote, owesSession, lead, leftWork, listing, type Session, stopSession, waitForName } from "./fleet.js";
+import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owesSession, lead, listing, type Session, stopSession, stopWorktree, waitForName } from "./fleet.js";
 import { Unreachable } from "./remote.js";
 import { agentSessions, transportFor, transports } from "./transport.js";
 import type { Agent } from "./config.js";
@@ -40,7 +40,6 @@ import { failure } from "./failures.js";
 import { runQueue } from "./watchers/queue.js";
 import { relay } from "./watchers/relay.js";
 import { runRound } from "./watchers/round.js";
-import { ensureWorktree, git } from "./worktree.js";
 import { openWorkspace, resolveWorkspace, type Workspace } from "./workspace.js";
 
 const USAGE = `factory: start, stop, dispatch and track a fleet of Claude Code sessions.
@@ -264,7 +263,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
       if (loadRec(ws, ticket)?.state !== "fixing")
         transition(ws, ticket, "fixing", { agent: name, evidence: `fix round sent to the live session ${s.id}, context kept` });
       console.log(`${name} is still on ${ticket} (${s.id}), so it keeps its context.`);
-      const noSlot = slotless(ws, stack, ticket, s.cwd ?? "");
+      const noSlot = ag.host ? null : slotless(ws, stack, ticket, s.cwd ?? "");
       if (noSlot) console.log(`  warning: ${noSlot}\n  Put that in the fix brief.`);
       console.log(`  next: SendMessage the fix brief to ${name}; no new session was started`);
       return;
@@ -274,7 +273,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
       console.log(`${name} is running (${s.id}); --force given, stopping it`);
       stopSession(t, s);
     } else if (onState && IN_REVIEW.has(onState)) {
-      const left = s.cwd && isDir(s.cwd) ? leftWork(ws, name, s.cwd) : null;
+      const left = builderLeft(ws, ag, t, s.cwd);
       if (left) throw new FactoryError(`${on} is ${onState}, so ${name} is free for ${ticket}, but ${left}`);
       stopSession(t, s);
       console.log(`${name}'s item ${on} is ${onState}, so ${name} is free: stopped ${s.id}, worktree kept: ${s.cwd}`);
@@ -292,10 +291,11 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (!DISPATCHABLE.has(cur) && !force)
     throw new FactoryError(`${ticket} is ${cur}; a dispatch makes no sense there. Use \`factory state\` first, ` +
       `or --force if you mean it (a verification run on a sent PR, say).`);
-  const { wt, how } = ensureWorktree(repo.path, ticket, repo.base);
+  const { wt, how } = t.worktree({ agent: ag, repo, ticket, toolWritten: ws.config.worktree.toolWritten });
   const appendix = buildAppendix(ws, ag, repo.path);
   const promptFile = str(v["prompt-file"]);
-  const noSlot = slotless(ws, stack, ticket, wt);
+  // A hosted builder has no stack, so there is no slot to check.
+  const noSlot = ag.host ? null : slotless(ws, stack, ticket, wt);
   if (noSlot) console.log(`  warning: ${noSlot}`);
   const prompt = (promptFile ? readFileSync(promptFile, "utf8") : buildingPrompt(ws, ag, ticket)) + (noSlot ? `\n\n${noSlot}` : "");
   const started = launch(ws, ag, wt, prompt, appendix?.text ?? null, "build");
@@ -366,8 +366,6 @@ function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boole
 
 const via = (ws: Workspace, name: string) => transportFor(ws, agentOrDie(ws, name));
 
-const isDir = (p: string) => existsSync(p) && statSync(p).isDirectory();
-
 function cmdStop(ws: Workspace, argv: string[]) {
   const { v, p } = args("stop", argv, { force: { type: "boolean" }, "remove-worktree": { type: "boolean" }, "keep-worktree": { type: "boolean" } }, [1, 1]);
   const name = p[0] as string;
@@ -380,22 +378,16 @@ function cmdStop(ws: Workspace, argv: string[]) {
   }
   const cwd = s.cwd;
   const builder = ag.role === "builder";
-  if (cwd && isDir(cwd) && builder && !v.force) {
-    const left = leftWork(ws, name, cwd);
+  if (builder && !v.force) {
+    const left = builderLeft(ws, ag, t, cwd);
     if (left) throw new FactoryError(left);
   }
   stopSession(t, s);
   console.log(`stopped ${name} (${s.id})`);
+  const remove = !!v["remove-worktree"] && !v["keep-worktree"];
   // The worktree stays unless asked for: a worktree can hold a running stack and its database.
-  if (cwd && builder && isDir(cwd) && cwd.includes("/.claude/worktrees/")) {
-    if (v["remove-worktree"] && !v["keep-worktree"]) {
-      const repoDir = cwd.split("/.claude/worktrees/")[0] as string;
-      const r = git(repoDir, "worktree", "remove", cwd);
-      console.log(r.status === 0 ? "  worktree removed" : `  worktree kept: ${r.stderr.trim()}`);
-    } else {
-      console.log(`  worktree kept: ${cwd}`);
-    }
-  }
+  const said = builder ? stopWorktree(ws, ag, t, cwd, remove) : null;
+  if (said) console.log(`  ${said}`);
 }
 
 // A review is always a fresh session, because a reviewer carrying a previous diff is the one thing

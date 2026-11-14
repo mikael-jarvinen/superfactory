@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { parse, TomlError } from "smol-toml";
 import { capitalize, FactoryError } from "./util.js";
 
@@ -20,6 +20,8 @@ export interface Repo {
   base: string;
   gateChecks: string[];
   localChecks: string[];
+  // A [hosts] key: the checkout is on that machine, and `path` is its absolute path there.
+  host?: string;
 }
 
 export interface Stack {
@@ -242,10 +244,17 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const r = reader(problems, where, v);
     const remote = r.str("remote", true);
     if (remote && !/^[\w.-]+\/[\w.-]+$/.test(remote)) r.bad("remote", `must look like owner/repo, got ${show(remote)}`);
+    const host = r.str("host");
+    const rawPath = r.str("path");
+    // A path on another machine: nothing here can expand it, and no default would name it.
+    if (host && !(rawPath && isAbsolute(rawPath) && !/[~$]/.test(rawPath)))
+      r.bad("path", `${key} lives on host ${host}, so give its checkout's absolute path there, with no ~ or $${rawPath ? `, got ${show(rawPath)}` : ""}`);
     repos[key] = {
       key,
+      host,
       remote: remote ?? "",
-      path: path(r, "path", r.str("path") ?? key, paths.repos) ?? "",
+      // Normalized: no ., .., doubled or trailing slashes. Symlinks are not resolved; that would need the host.
+      path: host ? (rawPath ? posix.normalize(rawPath).replace(/(.)\/+$/, "$1") : "") : (path(r, "path", rawPath ?? key, paths.repos) ?? ""),
       base: r.str("base") ?? "main",
       gateChecks: r.strs("gate_checks") ?? [],
       localChecks: r.strs("local_checks") ?? [],
@@ -267,6 +276,8 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const r = reader(problems, where, v);
     const stackRepos = repoKeys(r, "repos", r.strs("repos", true)) ?? [];
     if (r.strs("repos") && stackRepos.length === 0) r.bad("repos", "must name at least one repo");
+    for (const k of stackRepos)
+      if (repos[k]?.host) r.bad("repos", `repo ${k} lives on host ${repos[k]!.host}, and a stack's slots and script run on this machine`);
     const slots = r.int("slots", true, 1) ?? 1;
     const reserve = r.ints("reserve") ?? [];
     for (const n of reserve) if (n < 0 || n > slots) r.bad("reserve", `slot ${n} is outside 0..${slots}`);
@@ -351,6 +362,9 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
       r.bad("hash_files", `must name two files, the daemon's config then the workspace config, got ${v.hash_files.length}`);
     r.done();
   }
+  for (const repo of Object.values(repos))
+    if (repo.host && !hosts[repo.host])
+      problems.push(`repos.${repo.key}.host: no host ${show(repo.host)}; hosts: ${Object.keys(hosts).join(", ") || "none"}`);
 
   const agents: Agent[] = [];
   const agentsV = top.raw("agents");
@@ -393,12 +407,28 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     if (host && there !== undefined && !(isAbsolute(there) && !/[~$]/.test(there)))
       r.bad(rawCwd ? "cwd" : "host", `${name} runs on host ${host}, so ${rawCwd ? "its cwd" : `roles.${role}.cwd`} must be an absolute path there, with no ~ or $, got ${show(there)}`);
     if (host && !hosts[host]) r.bad("host", `no host ${show(host)}; hosts: ${Object.keys(hosts).join(", ") || "none"}`);
-    if (host && role === "builder") r.bad("host", "a builder runs where its worktrees are, on this machine");
+    const workRepos = stack ? (stacks[stack]?.repos ?? []) : (agentRepos ?? []);
+    // A builder runs where its worktrees are, and they are under its repos' checkouts.
+    if (role === "builder") {
+      const away = workRepos.find((k) => repos[k] && repos[k]!.host !== host);
+      if (away !== undefined) {
+        const rh = repos[away]!.host;
+        r.bad(host ? "host" : stack ? "stack" : "repos",
+          `repo ${away} lives on ${rh ? `host ${rh}` : "this machine"}, and a builder runs where its worktrees are, so ${name} needs ${rh ? `host = ${show(rh)}` : "no host"}`);
+      }
+      if (host)
+        for (const a of appendix.filter((x) => x.startsWith("repo:")))
+          r.bad("appendix", `${a} is read from the checkout on this machine, and ${name}'s checkouts are on host ${host}`);
+    }
+    // An --add-dir is a path on the machine that runs the session.
+    for (const k of addDirs ?? (role ? roles[role]?.addDirs : undefined) ?? [])
+      if (repos[k]?.host && repos[k]!.host !== host)
+        r.bad(addDirs ? "add_dirs" : "role", `repo ${k} lives on host ${repos[k]!.host}, and ${name} runs ${host ? `on host ${host}` : "on this machine"}, so it cannot be an --add-dir${addDirs ? "" : ` (from roles.${role}.add_dirs)`}`);
     agents.push({
       name,
       role,
       stack,
-      repos: stack ? (stacks[stack]?.repos ?? []) : (agentRepos ?? []),
+      repos: workRepos,
       appendix: resolved,
       addDirs,
       remoteControl: r.bool("remote_control") ?? false,

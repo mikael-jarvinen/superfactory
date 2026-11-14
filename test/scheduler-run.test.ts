@@ -6,19 +6,14 @@ import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { openWorkspace } from "../src/workspace.js";
-import { CLI, linuxOnly, noCleanup, runningNotZombie, tempDir } from "./helpers.js";
+import { CLI, linuxOnly, noCleanup, runningNotZombie, sleep, tempDir, until } from "./helpers.js";
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const freePort = () => new Promise<number>((res) => {
   const s = createServer().listen(0, "127.0.0.1", () => {
     const { port } = s.address() as { port: number };
     s.close(() => res(port));
   });
 });
-async function until(what: string, fn: () => unknown, ms = 15_000) {
-  for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) if (fn()) return;
-  assert.fail(`timed out waiting for ${what}`);
-}
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
 const alerts = (w: { messages: string }) =>
   readFileSync(w.messages, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.kind === "watchdog");
