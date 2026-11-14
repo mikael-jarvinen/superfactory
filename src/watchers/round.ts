@@ -1,24 +1,24 @@
-// `factory watch round`: once an hour, facts gathered here and a disposable session that decides
-// whether any of them needs the lead. Fresh context by construction.
+// `factory watch round`: once an hour, facts gathered here, and the lines among them that need the
+// lead left for it as one note. No model: each section says which of its lines escalate.
 //
 // The facts compare three views, the state store, GitHub and the live sessions, and flag what is
-// out of line. The session reads them and the tracker, and it executes nothing: its settings are
-// read-only. "Report once" cannot be an instruction to it, since it has no memory of the last run,
-// so the facts carry that: a flag that was already escalated says so. Markers and the failures
-// cursor move only once a round has run, so a failed round shows the same lines again.
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+// out of line, plus any files [[watchers.facts]] names. A store flag that was already escalated
+// says so and does not escalate again. Any other escalating line is told once, and again a day
+// later while it is still there. Markers, the failures cursor and what was told move only once the
+// note is written, so a round that could not tell the lead tells the next one.
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { fleetLines, owedNote, type Session } from "../fleet.js";
 import { json } from "../gate/github.js";
 import { readTail } from "../messages.js";
 import { loaded } from "../scheduler/index.js";
 import { allRecs, BUSY, isLocal, recPrs, WAITING_ON_LEAD, WAITING_ON_YOU } from "../state.js";
-import { parseRead, trackerOf } from "../tracker/read.js";
+import { trackerOf } from "../tracker/read.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
 import { git, worktreeDirty } from "../worktree.js";
 import { failure, failuresLog } from "../failures.js";
-import { beat, heartbeatAge, loadPrompt, logTo, openLog, runClaude, runFailure, runReader, watcherGh } from "./job.js";
+import { beat, heartbeatAge, logTo, openLog, watcherGh } from "./job.js";
 import { belongs, type GhPr, loadQueueState, withRecorded } from "./queue.js";
 import { deliver } from "./relay.js";
 
@@ -26,6 +26,8 @@ export interface Facts {
   text: string;
   // false when a section could not be read, so the facts are partial
   complete: boolean;
+  // the lines of text that need the lead
+  escalations: string[];
   // records what this round escalated and how far it read the failures log
   commit: () => void;
 }
@@ -54,17 +56,25 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
     markers.push(p);
     return true;
   };
-  // A read that fails is a CANNOT line in its section, which the session escalates. A section that
-  // throws is a bug here, and makes the facts partial.
-  const section = (title: string, body: () => void) => {
+  const escalations: string[] = [];
+  // A read that fails is a CANNOT line in its section, which escalates. A section that throws is a
+  // bug here, and makes the facts partial. `escalates` picks the section's lines that need the lead,
+  // or says which parts of a line to tell.
+  const section = (title: string, body: () => void, escalates: (line: string) => boolean | string[] = ALARM) => {
     out.push(`-- ${title} --`);
+    const from = out.length;
     try {
       body();
     } catch (e) {
       complete = false;
       out.push(`  CANNOT read: ${(e as Error).message.split("\n")[0]}`);
     }
+    for (const l of out.slice(from)) {
+      const e = /CANNOT/.test(l) || escalates(l);
+      for (const part of e === true ? [l.trim()] : e || []) escalations.push(`${title}: ${part}`);
+    }
   };
+  const lead = ws.config.agents.find((a) => a.role === "lead")?.name;
 
   let live: Map<string, Session> | null = null;
   let unknown = new Map<string, string>();
@@ -78,7 +88,7 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
       if (!(e instanceof FactoryError)) throw e;
       out.push(`  CANNOT read sessions: ${e.message}`);
     }
-  });
+  }, (l) => !!lead && l.trim().split(/\s+/)[0] === lead && /\s(not running|unknown \()/.test(l));
 
   const allItems = allRecs(ws);
   // ticket -> state across every record, done included, so a blocked item's named blocker can be
@@ -124,6 +134,10 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
       out.push(`  ${r.ticket.padEnd(12)} ${s.padEnd(17)} ${(age === null ? "?" : `${Math.floor(age / 60)}m`).padStart(6)} ` +
         `agent=${(r.agent || "-").padEnd(8)} tracker=${(isLocal(r.ticket) ? "none" : r.jira || "?").padEnd(12)} pr=${pr}${flag}`);
     }
+  }, (l) => {
+    // The ticket and each fresh flag on its own: the rest of the line moves every round.
+    const ticket = l.trim().split(/\s+/)[0];
+    return l.split(/ {2,}/).filter((p) => STORE_FLAG.test(p)).map((p) => `${ticket}: ${p}`);
   });
 
   section("gates: PRs on GitHub against the store", () => {
@@ -163,7 +177,7 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
             out.push(`  ${where} is a draft while colleague-review -- should be open: factory pr-open-for-review ${rec.ticket}`);
         }
     }
-  });
+  }, (l) => l !== "  nothing open");
 
   section("branches: commits nobody reported (last 3h)", () => {
     for (const r of recs) {
@@ -182,7 +196,7 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
       if (dirty.length && !BUSY.has(r.state ?? ""))
         out.push(`  ${r.ticket}: worktree has uncommitted changes while ${r.state}: ${dirty.slice(0, 4).join(", ")}`);
     }
-  });
+  }, () => true);
 
   let failuresTotal: number | null = null;
   const seenFile = join(ws.logsDir, ".watcher-failures.seen");
@@ -194,7 +208,7 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
     failuresTotal = lines.length;
     if (lines.length > seen) out.push(...lines.slice(seen).map((l) => `  ${l}`));
     else out.push("  none");
-  });
+  }, (l) => l !== "  none");
 
   section("plumbing", () => {
     const tracker = trackerOf(ws);
@@ -212,13 +226,38 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
     }
     const a = heartbeatAge(ws, "round");
     out.push(a === null ? "  round heartbeat MISSING -- first run, or the round has never completed"
-      : `  previous round heartbeat ${a}s ago${a > ROUND_STALE_S ? "  STALE (over 130 min: a round was missed or could not read the tracker)" : ""}`);
+      : `  previous round heartbeat ${a}s ago${a > ROUND_STALE_S ? "  STALE (over 130 min: a round was missed or could not tell the lead)" : ""}`);
     out.push(...loaded(ws));
   });
+
+  // Files written by something outside the factory, each a section of its own. A missing or stale
+  // file is an escalation: what it would have said is unknown.
+  for (const ff of ws.config.watchers.facts) {
+    let title = "";
+    section(`facts ${basename(ff.file)}`, () => {
+      if (!existsSync(ff.file)) return void out.push("  MISSING -- whatever writes it has not run");
+      const ageMin = Math.floor((at - statSync(ff.file).mtimeMs) / 60000);
+      if (ff.maxAgeMinutes !== undefined && ageMin > ff.maxAgeMinutes)
+        out.push(`  STALE -- written ${ageMin} min ago, over ${ff.maxAgeMinutes}`);
+      for (const l of readFileSync(ff.file, "utf8").split("\n").filter((x) => x.trim()))
+        out.push(`  ${l}`);
+    }, (l) => {
+      const t = l.trim();
+      const head = /^-- (.*) --$/.exec(t);
+      if (head) {
+        title = head[1]!;
+        return false;
+      }
+      if (/^(MISSING|STALE) --/.test(t)) return true;
+      if (ff.escalate.some((w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(t))) return true;
+      return ff.everyLineIn.some((p) => title.startsWith(p)) && !t.startsWith("(");
+    });
+  }
 
   return {
     text: out.join("\n") + "\n",
     complete,
+    escalations,
     commit: () => {
       if (markers.length) mkdirSync(reportedDir, { recursive: true });
       for (const p of markers) writeFileSync(p, "");
@@ -227,19 +266,29 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
   };
 }
 
-// The lead hears about a tracker outage once, when a round first cannot read it, and once more when
-// a round reads it again. An outage can last a day, and a message every hour about something the
-// lead cannot fix is noise. Said in a note from here, not by the session, which has no memory
-// of whether it said it last hour. A message that was not delivered leaves the marker as it was, so
-// the next round says it again.
-function outage(ws: Workspace, read: string): void {
-  const told = join(ws.logsDir, ".tracker-outage.told");
-  if (read === "unavailable" && !existsSync(told)) {
-    if (deliver(ws, "[round]\ntracker UNAVAILABLE: the round could not read the tracker. Said once per outage; the round says so again when it is back."))
-      writeFileSync(told, "");
-  } else if (read === "read" && existsSync(told)) {
-    if (deliver(ws, "[round]\ntracker back: the round read the tracker again.")) rmSync(told, { force: true });
+// Plumbing and the sessions: what says something is down.
+const ALARM = (l: string) => /CANNOT|MISSING|STALE|FAILED|NOT (LOADED|RUNNING|SCHEDULED|INSTALLED)|connector is failing/.test(l);
+// The store's own flags, each already said-once by its marker.
+const STORE_FLAG = /OVER 90 MIN|QUEUED -- not dispatched|over a working day|over 2 h --|NO SESSION:|UNKNOWN:|BLOCKER DONE:/;
+const REMIND_MS = 24 * 3600 * 1000;
+
+// What the lead was told, by the line with its times and durations taken out, so a line that only
+// ages is the same line. A line that leaves the facts is forgotten, so its return is news.
+function toldFile(ws: Workspace) { return join(ws.logsDir, "round-told.json"); }
+const keyOf = (l: string) => l.replace(/\d{4}-\d\d-\d\d[T ][\d:.]+Z?/g, "T").replace(/\d+(\.\d+)?\s?(ms|s|m|h|d|min)\b/g, "N").replace(/\s+/g, " ");
+
+export function news(ws: Workspace, lines: string[], at = Date.now()): { lines: string[]; commit: () => void } {
+  let told: Record<string, number> = {};
+  try { told = JSON.parse(readFileSync(toldFile(ws), "utf8")) as Record<string, number>; } catch { /* first round, or unreadable: tell all */ }
+  const next: Record<string, number> = {};
+  const fresh: string[] = [];
+  for (const l of lines) {
+    const k = keyOf(l);
+    if (k in next) continue;
+    const last = told[k];
+    if (last === undefined || at - last >= REMIND_MS) { fresh.push(l); next[k] = at; } else next[k] = last;
   }
+  return { lines: fresh, commit: () => { mkdirSync(ws.logsDir, { recursive: true }); writeFileSync(toldFile(ws), JSON.stringify(next)); } };
 }
 
 export function runRound(ws: Workspace, opts: { factsOnly?: boolean } = {}, out: (line: string) => void = console.log): number {
@@ -248,28 +297,16 @@ export function runRound(ws: Workspace, opts: { factsOnly?: boolean } = {}, out:
     out(facts.text.trimEnd());
     return facts.complete ? 0 : 1;
   }
-  const tracker = trackerOf(ws);
-  const prompt = [
-    loadPrompt(ws, "round"),
-    "---- TRACKER ----",
-    tracker.instructions(ws),
-    `---- FACTS${facts.complete ? "" : " (partial: a section could not be read)"} ----`,
-    facts.text.trimEnd(),
-    "---- END FACTS ----",
-  ].join("\n\n") + "\n";
   const log = openLog(ws, "round");
-  const tools = ["Read", "ListAgents", "ToolSearch", "SendMessage", ...tracker.tools];
-  const r = tracker.reads ? runReader(ws, "round", prompt, tools, log) : runClaude(ws, "round", prompt, tools, log);
-  const read = tracker.reads && r.status === 0 ? parseRead(ws, r.stdout).outcome : "none";
-  logTo(log, `facts=${facts.complete ? "complete" : "partial"} tracker=${read}`);
-  // The round ran and saw these facts, whatever the tracker did, so what it saw is not news again.
-  if (r.status === 0) facts.commit();
-  outage(ws, read);
-  // "Ran, read the facts, and read the tracker": each is required, and the read needs its evidence.
-  if (r.status === 0 && facts.complete && (read === "none" || read === "read")) beat(ws, "round");
-  const failed = r.status !== 0 ? runFailure("round", r) : null;
-  if (failed) failure(ws, failed);
+  const n = news(ws, facts.escalations);
+  const told = !n.lines.length || deliver(ws, `[round]\n${n.lines.join("\n")}`);
+  // A note that could not be written moves nothing, so the next round tells the same lines.
+  if (told) { facts.commit(); n.commit(); }
+  const said = `facts=${facts.complete ? "complete" : "partial"} escalations=${facts.escalations.length} told=${told ? n.lines.length : "FAILED"}`;
+  logTo(log, said);
+  for (const l of n.lines) logTo(log, `  ${l}`);
+  if (told && facts.complete) beat(ws, "round");
   if (!facts.complete) failure(ws, "round: the facts were partial");
-  out(`round: exit=${r.status} facts=${facts.complete ? "complete" : "partial"} tracker=${read}`);
-  return r.status === 0 && facts.complete ? 0 : 1;
+  out(`round: ${said}`);
+  return told && facts.complete ? 0 : 1;
 }

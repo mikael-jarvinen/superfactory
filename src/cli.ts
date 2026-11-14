@@ -123,9 +123,9 @@ usage: factory [--workspace <dir>] <command> [options]
                                   the same with main's code checked out; media in /tmp/demo/<KEY>-before
   watch queue                     read the tracker's queue once, and tell the lead about new queued
                                   tickets and fresh merges. What the scheduler runs; prompts/queue.md.
-  watch round [--facts]           the round once: facts gathered here, judged by a disposable session
-                                  that tells the lead what needs judgement; prompts/round.md.
-                                  --facts prints the facts and runs nothing.
+  watch round [--facts]           the round once: facts gathered here, and a note to the lead with
+                                  the lines that need it, each told once a day at most.
+                                  --facts prints the facts and tells nobody.
   schedule render|install|uninstall|status
                                   the launchd jobs from [watchers]: render them into
                                   logs/run/launchd/, load or unload them for this user, or show

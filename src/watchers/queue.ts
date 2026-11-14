@@ -175,7 +175,7 @@ function roundStale(ws: Workspace): { line: string; told: () => void } | null {
   const told = join(ws.logsDir, ".round-stale.told");
   if (existsSync(told) && statSync(told).mtimeMs >= statSync(heartbeatPath(ws, "round")).mtimeMs) return null;
   return {
-    line: `round STALE: heartbeat ${Math.floor(age / 60)} min old; the round has stopped, or could not read the tracker or its facts`,
+    line: `round STALE: heartbeat ${Math.floor(age / 60)} min old; the round has stopped, or could not read its facts or tell the lead`,
     told: () => writeFileSync(told, ""),
   };
 }
