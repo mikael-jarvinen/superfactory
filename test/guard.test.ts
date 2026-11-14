@@ -252,6 +252,36 @@ test("the lead closes a product PR only once the human has named it", () => {
   assert.notEqual(factory(dir, ["allow-close", "nope", "8703", "--words", "x"]).status, 0);
 });
 
+// Mikko, 2026-11-14: the lead may merge test PRs and bug fixes again. Only on a lead_merges repo, only
+// the lead, and only at the head it names; close, lock and every other role are as before.
+test("the lead merges a product PR on a lead_merges repo at a named head", () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  const lead: GuardContext = { ...pr, role: "lead", leadMerges: ["acme/web"] };
+  for (const c of [`gh pr merge 506 -R acme/web --match-head-commit ${sha}`, `gh pr merge 506 --repo Acme/web --squash --match-head-commit=${sha}`,
+    `gh pr merge 506 -R acme/web -s -d --match-head-commit ${sha} --subject "Fix x (#506)" --body ""`])
+    assert.equal(verdict(c, lead), null, c);
+  const refused = {
+    "a builder": verdict(`gh pr merge 506 -R acme/web --match-head-commit ${sha}`, { ...lead, role: "builder" }),
+    "an assistant": verdict(`gh pr merge 506 -R acme/web --match-head-commit ${sha}`, { ...lead, role: "assistant" }),
+    "no --match-head-commit": verdict("gh pr merge 506 -R acme/web --squash", lead),
+    "a short sha": verdict("gh pr merge 506 -R acme/web --match-head-commit 0123456", lead),
+    "a repo not listed": verdict(`gh pr merge 506 -R acme/api --match-head-commit ${sha}`, lead),
+    "no -R, by URL": verdict(`gh pr merge https://github.com/acme/web/pull/506 --match-head-commit ${sha}`, lead),
+    "no repo at all": verdict(`gh pr merge 506 --match-head-commit ${sha}`, lead),
+    "--admin": verdict(`gh pr merge 506 -R acme/web --admin --match-head-commit ${sha}`, lead),
+    "a branch name": verdict(`gh pr merge fix-x -R acme/web --match-head-commit ${sha}`, lead),
+    "two PRs": verdict(`gh pr merge 506 507 -R acme/web --match-head-commit ${sha}`, lead),
+    "a close": verdict("gh pr close 506 -R acme/web", lead),
+    "a lock": verdict("gh pr lock 506 -R acme/web", lead),
+    "a merge through the API": verdict("gh api -X PUT repos/acme/web/pulls/506/merge", lead),
+  };
+  for (const [what, reason] of Object.entries(refused)) assert.notEqual(reason, null, `${what} should be refused`);
+  assert.match(refused["a builder"] as string, /^merge of a PR on a product repo/);
+  assert.match(refused["no --match-head-commit"] as string, /needs --match-head-commit/);
+  assert.match(refused["a repo not listed"] as string, /^merge of a PR on a product repo/);
+  assert.match(refused["--admin"] as string, /^--admin is not allowed/);
+});
+
 // A lead launched before --allow-close was rendered into its settings has none; its guard finds the
 // list through the workspace instead, and the flag still wins when given.
 test("the lead's guard finds the allow-close list through its workspace when the flag is missing", () => {

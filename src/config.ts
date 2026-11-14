@@ -85,7 +85,7 @@ export interface Config {
   file: string;
   dir: string;
   human: { name: string; legacyMessageKind?: string };
-  github: { org?: string; bots: string[]; ownRepos: string[] };
+  github: { org?: string; bots: string[]; ownRepos: string[]; leadMerges: string[] };
   paths: { repos: string; state: string; logs: string };
   repos: Record<string, Repo>;
   stacks: Record<string, Stack>;
@@ -235,7 +235,10 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   const ownRepos = gh.strs("own_repos") ?? [];
   const notSlug = ownRepos.find((r) => !/^[\w.-]+\/[\w.-]+$/.test(r));
   if (notSlug !== undefined) gh.bad("own_repos", `must name repos as owner/repo, got ${show(notSlug)}`);
-  const github = { org: gh.str("org"), bots: gh.strs("bots") ?? [], ownRepos };
+  const leadMerges = gh.strs("lead_merges") ?? [];
+  const notSlug2 = leadMerges.find((r) => !/^[\w.-]+\/[\w.-]+$/.test(r));
+  if (notSlug2 !== undefined) gh.bad("lead_merges", `must name repos as owner/repo, got ${show(notSlug2)}`);
+  const github = { org: gh.str("org"), bots: gh.strs("bots") ?? [], ownRepos, leadMerges };
   gh.done();
 
   const p = reader(problems, "paths", top.table("paths") ?? {});

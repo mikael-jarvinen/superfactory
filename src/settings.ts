@@ -206,7 +206,9 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
       const repos = t.guard === "protect" ? [...(org ? ["--org", org] : []), ...ws.config.github.ownRepos.flatMap((r) => ["--own-repo", r])] : [];
       // only the lead closes a product PR, and only one the human named
       const close = t.guard === "protect" && s.role === "lead" ? ["--allow-close", allowClosePath(ws.stateDir)] : [];
-      add("PreToolUse", "Bash|Read|Grep", ["hook", "guard", "--role", s.role, "--policy", t.guard as Policy, ...dirs, ...repos, ...close], 10);
+      // only the lead merges on a lead_merges repo; nobody else's settings name them
+      const merges = t.guard === "protect" && s.role === "lead" ? ws.config.github.leadMerges.flatMap((r) => ["--lead-merge", r]) : [];
+      add("PreToolUse", "Bash|Read|Grep", ["hook", "guard", "--role", s.role, "--policy", t.guard as Policy, ...dirs, ...repos, ...close, ...merges], 10);
     } else if (h === "no-dialogs") {
       add("PreToolUse", DIALOGS, ["hook", "no-dialogs", "--lead", leadName], 5);
     } else if (h === "no-side-channels") {
