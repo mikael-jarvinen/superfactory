@@ -94,6 +94,8 @@ export interface Config {
   agents: Agent[];
   tracker: Tracker;
   board: { host: string; port: number };
+  // false lets a session message a session on another machine with nobody approving each send
+  peers: { isolateMachines: boolean };
   gate: { proseRemark?: number; reviewBot?: string };
   watchers: { queueEveryMinutes?: number; roundMinute?: number; model?: string; relayModel?: string };
   worktree: { toolWritten: string[] };
@@ -481,6 +483,10 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   const board = { host: b.str("host") ?? "localhost", port: b.int("port", false, 1, 65535) ?? 8787 };
   b.done();
 
+  const pe = reader(problems, "peers", top.table("peers") ?? {});
+  const peers = { isolateMachines: pe.bool("isolate_machines") ?? true };
+  pe.done();
+
   const g = reader(problems, "gate", top.table("gate") ?? {});
   const gate = { proseRemark: g.int("prose_remark", false, 1), reviewBot: g.str("review_bot") };
   g.done();
@@ -503,6 +509,6 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   return {
     file: resolve(file), dir,
     human: { name: humanName, legacyMessageKind },
-    github, paths, repos, stacks, hosts, roles, agents, tracker, board, gate, watchers, worktree,
+    github, paths, repos, stacks, hosts, roles, agents, tracker, board, peers, gate, watchers, worktree,
   };
 }

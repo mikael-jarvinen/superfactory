@@ -208,7 +208,7 @@ container projects are the script's business, derived from `FACTORY_SLOT`.
   are computed from the workspace. Tracked files carry no absolute paths.
 - Sessions use `--bg`, `--remote-control`, `--add-dir` (before the prompt, since it is variadic),
   `--append-system-prompt-file`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `autoMemoryEnabled: false`,
-  `crossSessionInbound`, `isolatePeerMachines`, and a READY handshake on first contact. Each
+  `crossSessionInbound`, `isolatePeerMachines` (from `[peers] isolate_machines`, true unless set), and a READY handshake on first contact. Each
   worktree gets its own https push config, so pushes never depend on an ssh agent.
 - The claude binary is `$CLAUDE_BIN`, else `claude` on PATH, else `~/.local/bin/claude`.
 

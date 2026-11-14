@@ -68,6 +68,17 @@ test("each role renders its own hooks and rules into logs/run/", () => {
 
 // Jira moved to the "claude.ai Atlassian MCP" connector, and a matcher written for the old one let
 // a builder transition a ticket. Claude Code tests a regex matcher against the tool name unanchored.
+test("[peers] isolate_machines sets isolatePeerMachines for every session, true unless set", () => {
+  const on = tempWorkspace();
+  const off = tempWorkspace(TOML + "\n[peers]\nisolate_machines = false\n");
+  after(() => { rmSync(on, { recursive: true, force: true }); rmSync(off, { recursive: true, force: true }); });
+  const peer = (r: Rendered) => (r as unknown as { isolatePeerMachines?: boolean }).isolatePeerMachines;
+  for (const name of ["ada", "bea", "rae"]) {
+    assert.equal(peer(render(on, name)), true, name);
+    assert.equal(peer(render(off, name)), false, name);
+  }
+});
+
 test("a builder's tracker hook catches Jira writes on the new connector and the old, and no reads", () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
