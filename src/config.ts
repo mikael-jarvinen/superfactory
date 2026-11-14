@@ -95,8 +95,18 @@ export interface Config {
   tracker: Tracker;
   board: { host: string; port: number };
   gate: { proseRemark?: number; reviewBot?: string };
-  watchers: { queueEveryMinutes?: number; roundMinute?: number; model?: string };
+  watchers: { queueEveryMinutes?: number; roundMinute?: number; model?: string; facts: FactsFile[] };
   worktree: { toolWritten: string[] };
+}
+
+// A file something outside the factory writes, which the round reads as more facts. A line
+// escalates when it has one of the escalate words, or sits under a section whose title starts with
+// one of every_line_in. A missing file, or one older than max_age_minutes, escalates too.
+export interface FactsFile {
+  file: string;
+  maxAgeMinutes?: number;
+  escalate: string[];
+  everyLineIn: string[];
 }
 
 export class ConfigError extends FactoryError {
@@ -490,7 +500,19 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     queueEveryMinutes: w.int("queue_every_minutes", false, 1),
     roundMinute: w.int("round_minute", false, 0, 59),
     model: w.str("model"),
+    facts: [] as FactsFile[],
   };
+  const factsV = w.raw("facts");
+  if (factsV !== undefined && !Array.isArray(factsV)) problems.push(`watchers.facts: must be an array of tables ([[watchers.facts]]), got ${show(factsV)}`);
+  (Array.isArray(factsV) ? factsV : []).forEach((v, i) => {
+    const where = `watchers.facts[${i}]`;
+    if (!isTable(v)) return void problems.push(`${where}: must be a table, got ${show(v)}`);
+    const f = reader(problems, where, v);
+    const file = path(f, "file", f.str("file", true));
+    const ff = { file: file ?? "", maxAgeMinutes: f.int("max_age_minutes", false, 1), escalate: f.strs("escalate") ?? [], everyLineIn: f.strs("every_line_in") ?? [] };
+    f.done();
+    if (file) watchers.facts.push(ff);
+  });
   w.done();
 
   const wt = reader(problems, "worktree", top.table("worktree") ?? {});

@@ -199,15 +199,16 @@ export function workspaceFiles(ws: Workspace): Check[] {
   for (const [f, names] of appendix)
     checks.push({ status: okIf(nonEmpty(f)), what: `${shown(ws, f)}, appended for ${names.join(", ")}`, fix: "write it, or take it out of the agent's appendix" });
 
-  // The round runs on every schedule; the queue watcher only when there is a tracker to read.
+  // The queue watcher runs only when there is a tracker to read. The round has no prompt.
   const example = (job: string) => `copy examples/prompts/${job}.md from the program and edit it`;
-  const prompt = (job: "queue" | "round", why: string, extra?: (text: string) => boolean) => {
+  const prompt = (job: "queue", why: string, extra?: (text: string) => boolean) => {
     const p = promptPath(ws, job);
     const ok = nonEmpty(p) && (!extra || extra(readFileSync(p, "utf8")));
     checks.push({ status: okIf(ok), what: `${shown(ws, p)}, ${why}`, fix: example(job) });
   };
   if (trackerOf(ws).reads) prompt("queue", "the queue watcher's prompt");
-  prompt("round", "the hourly round's prompt");
+  for (const ff of cfg.watchers.facts)
+    checks.push({ status: okIf(existsSync(ff.file)), what: `${shown(ws, ff.file)}, facts the round reads`, fix: "run whatever writes it, or take it out of [[watchers.facts]]" });
 
   for (const s of Object.values(cfg.stacks))
     if (s.script)

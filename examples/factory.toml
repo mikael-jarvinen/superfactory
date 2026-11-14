@@ -119,11 +119,19 @@ port = 8787
 prose_remark = 30                         # added comment lines at which the gate remarks on prose volume
 
 [watchers]                                # scheduled by `factory schedule install`, as launchd jobs
-                                          # named superfactory.<lead>.<job>. Their prompts are the
-                                          # workspace's prompts/queue.md and round.md;
-                                          # examples/prompts/ has one of each to start from.
+                                          # named superfactory.<lead>.<job>. The queue watcher's
+                                          # prompt is the workspace's prompts/queue.md;
+                                          # examples/prompts/ has one to start from. The round
+                                          # has no model: it tells the lead its alarming lines.
 queue_every_minutes = 15                  # how often the queue watcher reads the tracker: a number
                                           # that divides 60, or whole hours that divide 24. No queue
                                           # watcher runs when tracker.kind is "none".
 round_minute = 7                          # the minute past each hour the round runs
-model = "sonnet"                          # the queue watcher and the round
+model = "sonnet"                          # the queue watcher
+
+# [[watchers.facts]]                      # a file something else writes, read by the round
+# file = "logs/round-facts.txt"           # relative to this file
+# max_age_minutes = 90                    # older than this, by mtime, escalates; so does missing
+# escalate = ["DUE", "CANNOT", "FAILED"]  # a line with one of these words escalates
+# every_line_in = ["TODO"]                # every line under a "-- TODO... --" title escalates,
+#                                         # except one in parentheses such as "(none)"
