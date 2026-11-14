@@ -38,7 +38,6 @@ import {
 import { FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.js";
 import { failure } from "./failures.js";
 import { runQueue } from "./watchers/queue.js";
-import { relay } from "./watchers/relay.js";
 import { runRound } from "./watchers/round.js";
 import { openWorkspace, resolveWorkspace, type Workspace } from "./workspace.js";
 
@@ -592,8 +591,7 @@ function cmdBoard(ws: Workspace, argv: string[]) {
   const { v } = args("board", argv, { stop: { type: "boolean" }, serve: { type: "boolean" }, inbox: { type: "boolean" } }, [0, 0]);
   if ([v.stop, v.serve, v.inbox].filter(Boolean).length > 1) throw new UsageError("board: give one of --stop, --serve or --inbox");
   if (v.inbox) followInbox(ws);
-  // The courier carries a page line to the lead while no inbox monitor is armed.
-  else if (v.serve) runBoard(ws, { relay });
+  else if (v.serve) runBoard(ws);
   else if (v.stop) stopBoard(ws);
   else startBoard(ws);
 }
@@ -699,7 +697,7 @@ function cmdSchedule(ws: Workspace, argv: string[]): number {
       return n;
     };
     const opts = { checkSeconds: num("check-seconds", 30), memoryLimitMb: num("memory-limit-mb", 512), unansweredMinutes: num("unanswered-minutes", 12) };
-    runScheduler(ws, { ...opts, board: { relay } }).catch((e: unknown) => {
+    runScheduler(ws, opts).catch((e: unknown) => {
       console.error(`factory: schedule run: ${e instanceof Error ? e.message : String(e)}`);
       process.exit(e instanceof FactoryError ? e.code : 1);
     });

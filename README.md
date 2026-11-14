@@ -45,7 +45,7 @@ A workspace contains:
 | `CLAUDE.md` in `roles.lead.cwd` | When the lead has no `cwd` of its own. The lead reads it first. Skills in `.claude/skills/` next to it load too. |
 | `CLAUDE.md` in `roles.reviewer.cwd` | When config has a reviewer without its own `cwd`. |
 | `CLAUDE.md` in `roles.designer.cwd` | When config has a designer without its own `cwd`. The `designer` settings template lets it write only in `work/` there, which the launch creates; ignore that directory in git. |
-| `prompts/round.md`, `prompts/relay.md` | Always. The relay prompt must contain `{text}`. |
+| `prompts/round.md` | Always. |
 | `prompts/queue.md` | When `tracker.kind` is not `"none"`. |
 | `CLAUDE.md` in an agent's own `cwd` | When an agent gives one. It starts there instead of in its role's `cwd`. The `designer` template's `work/` goes there too; ignore it in git. |
 | `[hosts.<name>]` `token_file` and `hash_files` | When an agent names a `host`. Its sessions run on that machine, and every session operation is a request to the factory daemon there. `hash_files` names exactly two files: the daemon's config, then the workspace config it launches from. The agent's `cwd`, or its role's, is a path on that machine: absolute, with no `~` or `$`. A host that does not answer leaves its agents unknown, never stopped or dropped, wherever the fleet is shown. A builder runs where its worktrees are, so a builder with a `host` needs every one of its repos to name that `host` too, with an absolute `path` there. Such a repo is in no stack, no agent elsewhere has it as an `--add-dir`, and its builder takes no `repo:` appendix items. |

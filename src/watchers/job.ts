@@ -11,10 +11,9 @@ import { iso } from "../failures.js";
 import type { Workspace } from "../workspace.js";
 import { die, run, type RunResult } from "../util.js";
 
-export type Job = "queue" | "round" | "relay";
+export type Job = "queue" | "round";
 
-// prompts/<job>.md in the workspace. {lead} and {human} are filled in, and {text} for the relay;
-// in one pass, so a message that happens to contain a placeholder reaches the session as written.
+// prompts/<job>.md in the workspace. {lead} and {human} are filled in, in one pass.
 export const promptPath = (ws: Workspace, job: Job) => join(ws.dir, "prompts", `${job}.md`);
 
 export function loadPrompt(ws: Workspace, job: Job, vars: Record<string, string> = {}): string {
@@ -29,7 +28,7 @@ export function loadPrompt(ws: Workspace, job: Job, vars: Record<string, string>
   return text.replace(/\{(\w+)\}/g, (m, k: string) => all[k] ?? m).trimEnd();
 }
 
-const LOG_MAX = { queue: 5_000_000, round: 5_000_000, relay: 2_000_000 };
+const LOG_MAX = { queue: 5_000_000, round: 5_000_000 };
 
 // logs/<job>.log, rolled to .1 past its size, with a header for this run.
 export function openLog(ws: Workspace, job: Job): string {
@@ -60,13 +59,13 @@ export function heartbeatAge(ws: Workspace, name: "queue" | "round"): number | n
   return existsSync(p) ? Math.floor((Date.now() - statSync(p).mtimeMs) / 1000) : null;
 }
 
-const TIMEOUT_S = { queue: 600, round: 900, relay: 120 };
+const TIMEOUT_S = { queue: 600, round: 900 };
 
 // A disposable session: no memory, low effort, the watcher settings, and only the tools the job
 // names pre-approved. The prompt goes on stdin.
 export function claudeArgs(ws: Workspace, job: Job, tools: string[]): string[] {
   const w = ws.config.watchers;
-  const model = job === "relay" ? (w.relayModel ?? "haiku") : (w.model ?? "sonnet");
+  const model = w.model ?? "sonnet";
   const mode = watcherMode(ws);
   const settings = renderSettings(ws, { name: `watcher.${job}`, role: "watcher", template: "watcher", permissionMode: mode });
   return ["-p", "--model", model, "--effort", "low", "--permission-mode", mode, "--settings", settings, "--allowedTools", tools.join(",")];
@@ -74,7 +73,7 @@ export function claudeArgs(ws: Workspace, job: Job, tools: string[]): string[] {
 
 // The lead's own mode. Every watcher run messages the lead, and a session holds a cross-session
 // message from a sender in another mode for its human's approval: a prompt in the Claude app for
-// every relayed message and every round. Auto when the lead names no mode.
+// every round. Auto when the lead names no mode.
 export function watcherMode(ws: Workspace): string {
   const ld = lead(ws);
   return ld.permissionMode ?? ws.config.roles[ld.role]?.permissionMode ?? "auto";

@@ -229,7 +229,7 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
 
 // The lead hears about a tracker outage once, when a round first cannot read it, and once more when
 // a round reads it again. An outage can last a day, and a message every hour about something the
-// lead cannot fix is noise. Said by the courier from here, not by the session, which has no memory
+// lead cannot fix is noise. Said in a note from here, not by the session, which has no memory
 // of whether it said it last hour. A message that was not delivered leaves the marker as it was, so
 // the next round says it again.
 function outage(ws: Workspace, read: string): void {

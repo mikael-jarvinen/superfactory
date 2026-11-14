@@ -13,7 +13,7 @@ import { isHuman, readTail } from "../messages.js";
 import { allRecs, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { capitalize, run, sleep } from "../util.js";
-import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, type Relay, saveAttachment, sweep } from "./inbox.js";
+import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, saveAttachment } from "./inbox.js";
 import { tryFailure } from "../failures.js";
 import { type Fetch, ReviewCache } from "./reviews.js";
 import { isScheduler } from "../scheduler/state.js";
@@ -437,9 +437,6 @@ function sameSite(req: IncomingMessage): boolean {
 export interface ServeOptions {
   host?: string;
   port?: number;
-  // Step in for the lead while no monitor holds the inbox. Without one, messages wait in the log
-  // and the next monitor prints them from its cursor.
-  relay?: Relay;
   // How the review badges read GitHub; gh by default.
   reviews?: Fetch;
   // The lead's receipts, shared with the scheduler's watchdog in the same process.
@@ -481,22 +478,6 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
     stacks.check(ws).catch(() => {}).finally(() => (checking = false));
   });
   every(REVIEW_EVERY, readReviews);
-  const relay = opts.relay;
-  // Runs from a timer in the scheduler: must not throw.
-  let sweepError = "";
-  if (relay)
-    every(500, () => {
-      try {
-        sweep(ws, relay);
-        sweepError = "";
-      } catch (e) {
-        const why = (e as Error).message;
-        if (why === sweepError) return;
-        sweepError = why;
-        console.error(`factory: board: the courier sweep failed: ${why}`);
-        tryFailure(ws, `board sweep FAILED: ${why}`);
-      }
-    });
 
   const handle = (req: IncomingMessage, res: ServerResponse) => {
     const path = (req.url ?? "/").split("?")[0] as string;

@@ -150,9 +150,9 @@ function listed(): Map<string, { pid: string; status: string }> | null {
 
 // A job whose prompt is missing would run on schedule and fail every time, so it is not installed.
 function missingPrompts(ws: Workspace, js: Job[]): string[] {
-  const need = new Set<"queue" | "round" | "relay">();
+  const need = new Set<"queue" | "round">();
   for (const j of js) {
-    if (j.name === "queue") need.add("queue").add("relay");
+    if (j.name === "queue") need.add("queue");
     if (j.name === "round") need.add("round");
   }
   return [...need].map((p) => promptPath(ws, p)).filter((p) => !existsSync(p));

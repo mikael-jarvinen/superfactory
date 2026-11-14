@@ -225,7 +225,7 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
 
   mkdirSync(ws.runDir, { recursive: true });
   const path = join(ws.runDir, `settings-${s.name}.json`);
-  // Through a temp file and a rename: the board's courier and a watcher can render the same file at
+  // Through a temp file and a rename: two watchers can render the same file at
   // once, and a session must never read one half written.
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(out, null, 2) + "\n");
