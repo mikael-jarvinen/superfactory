@@ -31,7 +31,7 @@ export function leadStatus(ws: Workspace): { words?: string; transcript?: string
   }
 }
 
-const armText = (ws: Workspace) =>
+export const armText = (ws: Workspace) =>
   `The message page inbox is not armed, so ${ws.config.human.name}'s messages and the watchers' notes are waiting for it. ` +
   `Arm it now: Monitor with command \`${factoryCommand()} --workspace ${shq(ws.dir)} board --inbox\`, timeout_ms 1800000, ` +
   `description "message page" (load Monitor with ToolSearch first if it is deferred). ` +

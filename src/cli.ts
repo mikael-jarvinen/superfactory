@@ -11,6 +11,7 @@ import { Unreachable } from "./remote.js";
 import { agentSessions, transportFor, transports } from "./transport.js";
 import type { Agent } from "./config.js";
 import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleOf } from "./launch.js";
+import { bringUpLead } from "./lead-up.js";
 import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
 import { hook as noSideChannelsHook } from "./hooks/no-side-channels.js";
@@ -482,25 +483,7 @@ function up(ws: Workspace, fresh: boolean) {
   startBoard(ws, true);
   const boot = startBoot(ws);
   if (boot) console.log(`stacks: any slot that does not answer comes up in the background; see ${boot}`);
-  const t = transportFor(ws, ld);
-  const s = findSession(t, ld.name);
-  if (t.alive(s)) {
-    console.log(`${ld.name} already running (${s.id})`);
-    return;
-  }
-  const old = findSession(t, ld.name, true);
-  if (old && !fresh) {
-    const sid = old.id as string;
-    const r = t.respawn(ld.name, sid);
-    if (r.ok && waitForName(t, ld.name, 60)) {
-      console.log(`${ld.name} respawned from ${sid}: ${r.said}`);
-      return;
-    }
-    console.log(`respawn of ${sid} did not come back (${r.why}); starting fresh`);
-  }
-  const cwd = roleOf(ws, ld).cwd as string;
-  const started = launch(ws, ld, cwd, leadPrompt(ws));
-  console.log(`${ld.name} started (${started.id}) in ${cwd}${ld.remoteControl ? " with Remote Control" : ""}`);
+  bringUpLead(ws, ld, transportFor(ws, ld), fresh);
 }
 
 function cmdUp(ws: Workspace, argv: string[]) {
