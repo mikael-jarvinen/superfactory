@@ -66,8 +66,6 @@ test("each role renders its own hooks and rules into logs/run/", () => {
   assert.equal(builder.permissions?.deny, undefined);
 });
 
-// Jira moved to the "claude.ai Atlassian MCP" connector, and a matcher written for the old one let
-// a builder transition a ticket. Claude Code tests a regex matcher against the tool name unanchored.
 test("[peers] isolate_machines sets isolatePeerMachines for every session, true unless set", () => {
   const on = tempWorkspace();
   const off = tempWorkspace(TOML + "\n[peers]\nisolate_machines = false\n");
@@ -79,6 +77,16 @@ test("[peers] isolate_machines sets isolatePeerMachines for every session, true 
   }
 });
 
+// [github] lead_merges reaches only the lead's guard: a builder's guard never hears of those repos.
+test("[github] lead_merges is rendered into the lead's guard and nobody else's", () => {
+  const dir = tempWorkspace(TOML + '\n[github]\nlead_merges = ["acme/web"]\n');
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.match(commandFor(render(dir, "ada"), "PreToolUse", "Bash|Read|Grep"), / --lead-merge acme\/web$/);
+  for (const name of ["bea", "rae"]) assert.doesNotMatch(commandFor(render(dir, name), "PreToolUse", "Bash|Read|Grep"), /--lead-merge/, name);
+});
+
+// Jira moved to the "claude.ai Atlassian MCP" connector, and a matcher written for the old one let
+// a builder transition a ticket. Claude Code tests a regex matcher against the tool name unanchored.
 test("a builder's tracker hook catches Jira writes on the new connector and the old, and no reads", () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
