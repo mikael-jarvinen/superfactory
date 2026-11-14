@@ -305,8 +305,8 @@ test("the round: a PR open outside colleague review, or a draft in it, is flagge
   assert.doesNotMatch(r.stdout, /WEB-7: /, "a draft stacked on another PR's branch keeps its draft");
 });
 
-test("the round: flags said once, the failures cursor, and its heartbeat", () => {
-  const { ws, run, logs, read, age, notes } = watcherWorkspace();
+test("the round tells the lead what escalates in one note, once a day, and moves nothing it could not tell", () => {
+  const { ws, run, logs, read, notes, jam, unjam } = watcherWorkspace();
   assert.equal(factory(ws, ["state", "WEB-2", "building", "--agent", "bea"]).status, 0);
   const recFile = join(ws, "state", "WEB-2.json");
   const rec = JSON.parse(readFileSync(recFile, "utf8")) as Record<string, unknown>;
@@ -314,59 +314,87 @@ test("the round: flags said once, the failures cursor, and its heartbeat", () =>
   mkdirSync(join(ws, "logs"), { recursive: true });
   writeFileSync(logs("watcher-failures.log"), "2026-01-01T00:00:00Z queue FAILED exit=1\n");
   const routes = { "pr list -R acme/web --state all": { stdout: [] }, "pr list -R acme/api --state all": { stdout: [] } };
+  const down = process.platform === "darwin" ? /launchd superfactory\.ada\.round NOT LOADED/ : /scheduler NOT RUNNING/;
 
   let r = run(["watch", "round", "--facts"], [], routes);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.equal(r.calls.length, 0, "--facts runs no session");
   assert.match(r.stdout, /WEB-2 .*OVER 90 MIN in a working state -- probe {2}NO SESSION: bea has no live session while WEB-2 is building/);
   assert.match(r.stdout, /watcher failures since the last round --\n {2}2026-01-01T00:00:00Z queue FAILED exit=1/);
-  assert.match(r.stdout, process.platform === "darwin" ? /launchd superfactory\.ada\.round NOT LOADED/ : /scheduler NOT RUNNING/);
+  assert.match(r.stdout, down);
+  assert.equal(notes().length, 0, "--facts tells nobody");
 
-  // A round whose tracker was down still saw the facts, so they are not news again; it writes no
-  // heartbeat, because it did not read the tracker.
-  // The outage itself goes to the lead in a note, once, and again only when it is over.
-  r = run(["watch", "round"], [{ stdout: "TRACKER-UNAVAILABLE\n" }], routes);
-  assert.equal(r.status, 0, r.stdout + r.stderr);
+  // A note that cannot be written moves no marker and no cursor, and writes no heartbeat.
+  jam();
+  r = run(["watch", "round"], [], routes);
+  unjam();
+  assert.equal(r.status, 1);
   assert.ok(!existsSync(logs("round.heartbeat")));
-  const prompt = (r.calls[0] as Call).prompt;
-  assert.ok(prompt.includes("You are the round") && prompt.includes(SEARCH) && prompt.includes("OVER 90 MIN"));
-  assert.equal(r.calls.length, 2, "the round and its one retry");
-  assert.match(notes().join("\n"), /^\[round\]\ntracker UNAVAILABLE/);
+  assert.match(read("round.log"), /told=FAILED/);
+  r = run(["watch", "round", "--facts"], [], routes);
+  assert.match(r.stdout, /OVER 90 MIN in a working state -- probe/);
+
+  r = run(["watch", "round"], [], routes);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(r.calls.length, 0, "the round runs no session");
+  assert.ok(existsSync(logs("round.heartbeat")));
+  assert.equal(notes().length, 1);
+  const note = notes()[0]!;
+  assert.match(note, /^\[round\]\n/);
+  assert.match(note, /state store: WEB-2: OVER 90 MIN in a working state -- probe\nstate store: WEB-2: NO SESSION: bea/);
+  assert.match(note, /queue FAILED exit=1/);
+  assert.match(note, /relay FAILED/, "the note that could not be written is a failure the next one tells");
+  assert.match(note, down);
+  assert.doesNotMatch(note, /previous round heartbeat/);
+
+  // Nothing new: the probe flag says "already probed", and the rest was told under an hour ago.
   r = run(["watch", "round", "--facts"], [], routes);
   assert.match(r.stdout, /over 90 min \(already probed, not an escalation\)/);
   assert.match(r.stdout, /watcher failures since the last round --\n {2}none/);
-  r = run(["watch", "round"], [{ stdout: "TRACKER-UNAVAILABLE\n" }], routes);
-  assert.equal(notes().length, 1, "the same outage is not said twice");
+  r = run(["watch", "round"], [], routes);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(notes().length, 1, "a line still there is not news within a day");
 
-  r = run(["watch", "round"], [{ stdout: "QUEUE: WEB-2\nQUIET\n" }], routes);
-  assert.equal(r.status, 0);
-  assert.equal(r.calls.length, 1);
-  assert.match(notes()[1] ?? "", /^\[round\]\ntracker back/);
-  const before = age("round.heartbeat");
-  r = run(["watch", "round"], [{ stdout: "QUIET\n" }], routes);
-  assert.equal(statSync(logs("round.heartbeat")).mtimeMs, before, "QUIET without a QUEUE line is not a read");
-  assert.equal(notes().length, 2, "the outage is over, so nothing more is said about it");
-  r = run(["watch", "round"], [{ status: 1 }], routes);
-  assert.equal(r.status, 1);
-  assert.equal(statSync(logs("round.heartbeat")).mtimeMs, before);
-  assert.match(read("watcher-failures.log"), /round FAILED exit=1\n$/);
+  // A day on, what is still wrong is said again.
+  const told = logs("round-told.json");
+  const seen = JSON.parse(readFileSync(told, "utf8")) as Record<string, number>;
+  for (const k of Object.keys(seen)) seen[k] = Date.now() - 25 * 3600_000;
+  writeFileSync(told, JSON.stringify(seen));
+  r = run(["watch", "round"], [], routes);
+  assert.equal(notes().length, 2);
+  assert.match(notes()[1]!, /NO SESSION: bea/);
+  assert.match(notes()[1]!, down);
+  assert.doesNotMatch(notes()[1]!, /queue FAILED/, "a failure line is shown once, by the cursor");
 });
 
-test("the round reads once more when its first run finds no tracker", () => {
-  const { run, logs, read, notes } = watcherWorkspace();
-  const routes = { "pr list -R acme/web --state all": { stdout: [] }, "pr list -R acme/api --state all": { stdout: [] } };
+test("the round reads [[watchers.facts]] files: escalating lines, and a missing or stale file", () => {
+  const toml = JIRA.replace('kind = "jira"', 'kind = "none"') +
+    '\n[[watchers.facts]]\nfile = "extra.txt"\nmax_age_minutes = 90\nescalate = ["DUE"]\nevery_line_in = ["TODO"]\n';
+  const { ws, run, notes } = watcherWorkspace(toml);
+  const routes = { "pr list": { stdout: [] } };
+  const extra = join(ws, "extra.txt");
 
-  let r = run(["watch", "round"], [{ stdout: "TRACKER-UNAVAILABLE\n" }, { stdout: "QUEUE:\nQUIET\n" }], routes);
-  assert.equal(r.calls.length, 2, "the round and its retry, and no outage to tell");
-  assert.ok(existsSync(logs("round.heartbeat")), "the retry read the tracker");
-  assert.match(read("round.log"), /tracker unavailable; running once more[\s\S]*tracker=read/);
+  let r = run(["watch", "round", "--facts"], [], routes);
+  assert.match(r.stdout, /-- facts extra\.txt --\n {2}MISSING/);
+  r = run(["watch", "round"], [], routes);
+  assert.match(notes()[0] ?? "", /facts extra\.txt: MISSING/);
 
-  rmSync(logs("round.heartbeat"));
-  r = run(["watch", "round"], [{ stdout: "TRACKER-UNAVAILABLE\n" }], routes);
-  assert.equal(r.calls.length, 2, "one retry, then a note tells the outage");
-  assert.match(notes()[0] ?? "", /^\[round\]\ntracker UNAVAILABLE/);
-  assert.ok(!existsSync(logs("round.heartbeat")));
-  assert.match(read("round.log"), /tracker=unavailable\n$/);
+  const body = (w: string) => `-- TODO: ready --\n  A-1 waited=${w}\n  (nothing else)\n-- WAITING --\n  B-1 asked\n-- BRIEF --\n  nothing due\n  W45 DUE\n`;
+  writeFileSync(extra, body("2h"));
+  r = run(["watch", "round"], [], routes);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const n = notes()[1] ?? "";
+  assert.match(n, /facts extra\.txt: A-1 waited=2h/);
+  assert.match(n, /facts extra\.txt: W45 DUE/);
+  assert.doesNotMatch(n, /B-1|nothing else|nothing due|MISSING/);
+
+  writeFileSync(extra, body("3h"));
+  r = run(["watch", "round"], [], routes);
+  assert.equal(notes().length, 2, "a line that only aged is not news");
+
+  const old = new Date(Date.now() - 2 * 3600_000);
+  utimesSync(extra, old, old);
+  r = run(["watch", "round"], [], routes);
+  assert.match(notes()[2] ?? "", /facts extra\.txt: STALE -- written 1[0-9]{2} min ago, over 90/);
 });
 
 test("the round: a blocked item whose named blocker has merged is flagged, once", () => {
@@ -388,7 +416,7 @@ test("the round: a blocked item whose named blocker has merged is flagged, once"
   assert.doesNotMatch(r.stdout, /WEB-3 .*BLOCKER DONE/, "a blocker that is still open is not flagged");
 
   // Said once: a real (non-facts) run commits the marker, after which the flag goes quiet.
-  r = run(["watch", "round"], [{ stdout: "QUIET\n" }], routes);
+  r = run(["watch", "round"], [], routes);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   r = run(["watch", "round", "--facts"], [], routes);
   assert.doesNotMatch(r.stdout, /WEB-2 .*BLOCKER DONE/, "the cleared blocker is reported once, not every round");
@@ -410,23 +438,20 @@ test("the round: an item waiting on the lead over two hours is flagged, once", (
   assert.match(r.stdout, /WEB-2 .*pr-open .*waiting on the lead over 2 h -- report, review or gate it/);
   assert.doesNotMatch(r.stdout, /WEB-3 .*waiting on the lead/, "an hour in pr-open is not yet a wait");
 
-  r = run(["watch", "round"], [{ stdout: "QUIET\n" }], routes);
+  r = run(["watch", "round"], [], routes);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   r = run(["watch", "round", "--facts"], [], routes);
   assert.match(r.stdout, /WEB-2 .*waiting on the lead \(already reported, not an escalation\)/);
 });
 
-test("with no tracker there is no queue to watch, and the round needs no read", () => {
+test("with no tracker there is no queue to watch", () => {
   const { run, logs } = watcherWorkspace(JIRA.replace('kind = "jira"', 'kind = "none"'));
   let r = run(["watch", "queue"], []);
   assert.equal(r.status, 0);
   assert.match(r.stdout, /no queue to watch/);
   assert.equal(r.calls.length, 0);
-  r = run(["watch", "round"], [{ stdout: "QUIET\n" }], { "pr list": { stdout: [] } });
-  assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.ok(existsSync(logs("round.heartbeat")));
-  const prompt = (r.calls[0] as Call).prompt;
-  assert.ok(prompt.includes("no tracker") && !prompt.includes(SEARCH) && !prompt.includes("queue heartbeat"));
+  r = run(["watch", "round", "--facts"], [], { "pr list": { stdout: [] } });
+  assert.doesNotMatch(r.stdout, /queue heartbeat/);
 });
 
 // On 2026-10-20 every "exit=127" in the failures log was a claude run that launchd started in a
