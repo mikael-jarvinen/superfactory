@@ -67,8 +67,17 @@ const TIMEOUT_S = { queue: 600, round: 900, relay: 120 };
 export function claudeArgs(ws: Workspace, job: Job, tools: string[]): string[] {
   const w = ws.config.watchers;
   const model = job === "relay" ? (w.relayModel ?? "haiku") : (w.model ?? "sonnet");
-  const settings = renderSettings(ws, { name: `watcher.${job}`, role: "watcher", template: "watcher", permissionMode: "auto" });
-  return ["-p", "--model", model, "--effort", "low", "--permission-mode", "auto", "--settings", settings, "--allowedTools", tools.join(",")];
+  const mode = watcherMode(ws);
+  const settings = renderSettings(ws, { name: `watcher.${job}`, role: "watcher", template: "watcher", permissionMode: mode });
+  return ["-p", "--model", model, "--effort", "low", "--permission-mode", mode, "--settings", settings, "--allowedTools", tools.join(",")];
+}
+
+// The lead's own mode. Every watcher run messages the lead, and a session holds a cross-session
+// message from a sender in another mode for its human's approval: a prompt in the Claude app for
+// every relayed message and every round. Auto when the lead names no mode.
+export function watcherMode(ws: Workspace): string {
+  const ld = lead(ws);
+  return ld.permissionMode ?? ws.config.roles[ld.role]?.permissionMode ?? "auto";
 }
 
 export const claudeOptions = (job: Job) => ({

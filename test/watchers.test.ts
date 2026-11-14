@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { run } from "../src/util.js";
-import { type ClaudeRun, runFailure, TIMED_OUT, watcherGh } from "../src/watchers/job.js";
+import { claudeArgs, type ClaudeRun, runFailure, TIMED_OUT, watcherGh } from "../src/watchers/job.js";
+import { openWorkspace } from "../src/workspace.js";
 import { factory, TOML, tempWorkspace } from "./helpers.js";
 
 const FAKE_CLAUDE = fileURLToPath(new URL("./fake-claude.js", import.meta.url));
@@ -451,5 +452,22 @@ test("a watcher's gh call has a bound, and its timeout says so", () => {
     if (was === undefined) delete process.env.GH_BIN;
     else process.env.GH_BIN = was;
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a watcher runs in the lead's permission mode, so the lead never holds its messages for approval", () => {
+  const leadMode = (m: string) => TOML.replace('permission_mode = "bypassPermissions"\nsettings = "lead"', `${m}settings = "lead"`);
+  for (const [toml, want] of [
+    [TOML, "bypassPermissions"],
+    [leadMode('permission_mode = "acceptEdits"\n'), "acceptEdits"],
+    [leadMode(""), "auto"],
+  ]) {
+    const ws = openWorkspace(tempWorkspace(toml));
+    for (const job of ["relay", "round", "queue"] as const) {
+      const args = claudeArgs(ws, job, ["SendMessage"]);
+      assert.equal(args[args.indexOf("--permission-mode") + 1], want, `${job}, lead ${want}`);
+      const settings = JSON.parse(readFileSync(args[args.indexOf("--settings") + 1] ?? "", "utf8"));
+      assert.equal(settings.permissions.defaultMode, want, `${job} settings, lead ${want}`);
+    }
   }
 });
