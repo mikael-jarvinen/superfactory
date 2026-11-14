@@ -4,7 +4,7 @@
 // The model does the one thing only a session can: read the tracker through the connector. It is
 // handed no state, runs no commands and messages nobody. Everything after the read is here: the
 // set difference against the last run and the state store, the merged and conflicting PRs from
-// fixed `gh` calls, and the delivery, which goes by the courier and only when something is new.
+// fixed `gh` calls, and the delivery, a note for the lead only when something is new.
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { json } from "../gate/github.js";
@@ -118,7 +118,7 @@ const conflicted = (pr: GhPr) => pr.mergeable === "CONFLICTING" || pr.mergeState
 
 // Recorded PRs of watched items that conflict with their base, said once when a PR becomes
 // conflicting and not again while it stays so. `keep` is what the state carries whatever the
-// courier does: the PRs already reported that still conflict, or whose answer is not in yet. A PR
+// delivery does: the PRs already reported that still conflict, or whose answer is not in yet. A PR
 // GitHub answers UNKNOWN for is still computing, so it is neither news nor cleared: the next run
 // asks again. A merged or closed PR is skipped first: GitHub goes on saying CONFLICTING for a
 // merged one (lyyti-classic#8334, merged 2026-10-14, still did on 2026-11-09). A PR that came

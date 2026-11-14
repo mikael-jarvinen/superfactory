@@ -41,7 +41,6 @@ function workspace(toml: string): { dir: string; env: NodeJS.ProcessEnv } {
   writeFileSync(join(dir, "lead", "CLAUDE.md"), "You lead.\n");
   mkdirSync(join(dir, "prompts"));
   writeFileSync(join(dir, "prompts", "round.md"), "Judge the facts.\n");
-  writeFileSync(join(dir, "prompts", "relay.md"), "Carry {text}.\n");
   const web = join(dir, "repos", "web");
   mkdirSync(web, { recursive: true });
   assert.equal(run("git", ["init", "-q", web]).status, 0);

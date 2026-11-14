@@ -59,11 +59,6 @@ async function setup(extraEnv: Record<string, string> = {}) {
   // With stray-ignores-term in place, the stray ignores SIGTERM.
   writeFileSync(join(dir, "bin", "claude"), `#!/bin/sh
 echo "HOME=$HOME USER=$USER TMPDIR=$TMPDIR DBUS=$DBUS_SESSION_BUS_ADDRESS XDG=$XDG_RUNTIME_DIR SSH=$SSH_AUTH_SOCK NOT_INHERITED=$NOT_INHERITED args=$* parent=$(tr '\\0' ' ' < /proc/$PPID/cmdline)" >> ${seen}
-# a print-mode run (the courier) is given its prompt on stdin
-[ "$1" = -p ] && cat >> ${join(dir, "courier-stdin")}
-[ "$1" = -p ] && [ -n "$FAKE_COURIER_EXIT" ] && exit "$FAKE_COURIER_EXIT"
-# replace relay.log with a directory while the courier runs, so its exit line cannot be written
-[ "$1" = -p ] && [ -n "$FAKE_RELAY_LOG_GOES" ] && rm -f ${join(ws, "logs", "relay.log")} && mkdir ${join(ws, "logs", "relay.log")}
 if [ "$1" = agents ] && tr '\\0' ' ' < /proc/$PPID/cmdline | grep -q ' up $' && [ ! -e ${join(dir, "spawned")} ]; then
   touch ${join(dir, "spawned")}
   if [ -e ${join(dir, "stray-ignores-term")} ]; then sh -c "trap '' TERM; exec sleep 600" >/dev/null 2>&1 &
@@ -83,7 +78,6 @@ esac
   chmodSync(join(dir, "bin", "claude"), 0o755);
   writeFileSync(join(ws, "lead", "CLAUDE.md"), "You lead.\n");
   writeFileSync(join(ws, "prompts", "round.md"), "Judge the facts.\n");
-  writeFileSync(join(ws, "prompts", "relay.md"), "Carry {text}.\n");
   writeFileSync(join(ws, "factory.toml"), `[human]\nname = "Alex"\n\n[paths]\nrepos = "repos"\n\n[roles.lead]\ncwd = "lead"\nsettings = "lead"\n\n[[agents]]\nname = "ada"\nrole = "lead"\n\n[board]\nhost = "127.0.0.1"\nport = ${boardPort}\n`);
   const env = { PATH: `${join(dir, "bin")}:${process.env.PATH}`, HOME: home, USER: "factory-test", TMPDIR: dir, CLAUDE_BIN: join(dir, "bin", "claude"), GH_BIN: "", DOCKER_BIN: "", SF_NOTIFY: "0",
     DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1/bus", XDG_RUNTIME_DIR: "/run/user/1", SSH_AUTH_SOCK: join(dir, "agent.sock"), NOT_INHERITED: "x", ...extraEnv };
@@ -252,9 +246,9 @@ test("over its memory limit, the scheduler exits 75 for a restart, on its first 
   if (s.jobs[UP]?.pid) t.upPids.add(s.jobs[UP].pid);
 });
 
-// The scheduler's board relays: a page line that lands while no monitor holds the inbox is carried
-// to the lead by a courier, which is claude run from the scheduler with the workspace's relay prompt.
-test("a message from the page reaches the courier", { skip: linuxOnly }, async () => {
+// No session carries a page line while no monitor holds the inbox: it waits in the log for the
+// next monitor, and the board starts no claude for it.
+test("a message from the page with no monitor armed starts no session", { skip: linuxOnly }, async () => {
   const t = await setup();
   const d = t.start();
   await until("the board", () => d.out.includes("board on "));
@@ -262,75 +256,9 @@ test("a message from the page reaches the courier", { skip: linuxOnly }, async (
   t.upPids.add(t.state().jobs[UP].pid);
   const res = await t.post("hello from the page");
   assert.equal(res.status, 200, await res.text());
-  const stdin = join(t.dir, "courier-stdin");
-  await until("the courier to be given the line", () => existsSync(stdin) && readFileSync(stdin, "utf8").includes("hello from the page"));
-  assert.match(readFileSync(stdin, "utf8"), /^Carry \[from the message page\] \[m:[^\]]+\] hello from the page/);
-  const call = readFileSync(t.seen, "utf8").split("\n").find((l) => / args=-p /.test(l)) as string;
-  assert.match(call, / --settings \S*settings-watcher\.relay\.json /, call);
-  assert.match(call, / --allowedTools SendMessage,ListAgents parent=/, call);
-  d.kill();
-});
-
-test("a board that cannot take the inbox lock says so in the scheduler's output and the failures log", { skip: linuxOnly }, async () => {
-  const t = await setup({ FLOCK_BIN: "/nonexistent" });
-  const d = t.start();
-  await until("the sweep failure in the scheduler's output", () => d.out.includes("the courier sweep failed: the inbox lock: flock(1) failed"));
-  await until("up to run", () => t.upRunning());
-  t.upPids.add(t.state().jobs[UP].pid);
   await sleep(1500);
-  assert.equal(d.out.split("the courier sweep failed").length - 1, 1, "said once, not every pass");
-  const logged = readFileSync(join(t.ws, "logs", "watcher-failures.log"), "utf8").split("\n").filter((l) => l.includes("board sweep FAILED"));
-  assert.equal(logged.length, 1, "once in the failures log too");
-  assert.match(logged[0] as string, /board sweep FAILED: the inbox lock: flock\(1\) failed/);
-  d.kill();
-});
-
-test("a sweep failure the failures log cannot take does not bring the scheduler down", { skip: linuxOnly }, async () => {
-  const t = await setup({ FLOCK_BIN: "/nonexistent" });
-  mkdirSync(join(t.ws, "logs", "watcher-failures.log"), { recursive: true }); // a directory: every append fails
-  const d = t.start();
-  await until("both failures in the scheduler's output", () => d.out.includes("the courier sweep failed: the inbox lock") && d.out.includes("the failures log could not be written: EISDIR"));
-  await until("up to run", () => t.upRunning());
-  t.upPids.add(t.state().jobs[UP].pid);
-  await sleep(1500);
-  assert.equal(d.exitCode, null, d.out);
-  assert.equal(await t.page(), 200, "the board still serves");
-  assert.ok(!d.out.includes("board cannot listen"), d.out);
-  d.kill();
-});
-
-test("a courier that fails while the failures log cannot be written does not bring the scheduler down", { skip: linuxOnly }, async () => {
-  const t = await setup({ FAKE_COURIER_EXIT: "3" });
-  mkdirSync(join(t.ws, "logs", "watcher-failures.log"), { recursive: true }); // a directory: every append fails
-  const d = t.start();
-  await until("the board", () => d.out.includes("board on "));
-  await until("up to run", () => t.upRunning());
-  t.upPids.add(t.state().jobs[UP].pid);
-  const res = await t.post("hello from the page");
-  assert.equal(res.status, 200, await res.text());
-  const said = "relay FAILED exit=3 (the failures log could not be written: EISDIR";
-  await until("the courier's failure on stderr, or the scheduler's end", () => d.out.includes(said) || d.exitCode !== null);
-  await sleep(1000);
-  assert.equal(d.exitCode, null, d.out);
-  assert.ok(d.out.includes(said), d.out);
-  assert.equal(await t.page(), 200, "the board still serves");
-  d.kill();
-});
-
-test("a courier whose log cannot take its exit line does not bring the scheduler down", { skip: linuxOnly }, async () => {
-  const t = await setup({ FAKE_RELAY_LOG_GOES: "1" });
-  const d = t.start();
-  await until("the board", () => d.out.includes("board on "));
-  await until("up to run", () => t.upRunning());
-  t.upPids.add(t.state().jobs[UP].pid);
-  const res = await t.post("hello from the page");
-  assert.equal(res.status, 200, await res.text());
-  const stdin = join(t.dir, "courier-stdin");
-  await until("the courier to be given the line, or the scheduler's end", () => (existsSync(stdin) && readFileSync(stdin, "utf8").includes("hello from the page")) || d.exitCode !== null);
-  await sleep(1500);
-  assert.ok(statSync(join(t.ws, "logs", "relay.log")).isDirectory(), "the courier's log really went");
-  assert.equal(d.exitCode, null, d.out);
-  assert.equal(await t.page(), 200, "the board still serves");
+  assert.ok(!readFileSync(t.seen, "utf8").split("\n").some((l) => / args=-p /.test(l)), "no print-mode claude");
+  assert.match(readFileSync(join(t.ws, "state", "messages.jsonl"), "utf8"), /hello from the page/);
   d.kill();
 });
 

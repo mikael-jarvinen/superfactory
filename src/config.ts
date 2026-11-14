@@ -97,7 +97,7 @@ export interface Config {
   // false lets a session message a session on another machine with nobody approving each send
   peers: { isolateMachines: boolean };
   gate: { proseRemark?: number; reviewBot?: string };
-  watchers: { queueEveryMinutes?: number; roundMinute?: number; model?: string; relayModel?: string };
+  watchers: { queueEveryMinutes?: number; roundMinute?: number; model?: string };
   worktree: { toolWritten: string[] };
 }
 
@@ -496,7 +496,6 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     queueEveryMinutes: w.int("queue_every_minutes", false, 1),
     roundMinute: w.int("round_minute", false, 0, 59),
     model: w.str("model"),
-    relayModel: w.str("relay_model"),
   };
   w.done();
 

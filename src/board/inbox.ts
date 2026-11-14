@@ -8,12 +8,20 @@ import { chars, die, now, pyDumps, run, sleep } from "../util.js";
 // What the human can type on the page. `factory say` has no limit: the lead's instructions keep it short.
 export const MAX_CHARS = 20_000;
 
-// Carries one message to the lead when no inbox is held. It must return at once: the courier runs
-// inside the board, and a sweep that waits on a model call is a page that hangs after Send.
-export type Relay = (ws: Workspace, text: string) => void;
-
 export const inboxLock = (ws: Workspace) => join(ws.runDir, "inbox.lock");
 const cursorFile = (ws: Workspace) => join(ws.runDir, "inbox.cursor");
+
+// What the watchers have for the lead: one JSON row a line, printed by the inbox monitor after the
+// human's messages. It is not the message log, so none of it shows on the page.
+export const notesLog = (ws: Workspace) => join(ws.stateDir, "lead-notes.jsonl");
+const notesCursorFile = (ws: Workspace) => join(ws.runDir, "notes.cursor");
+
+// For a watcher: leaves the text for the lead's inbox monitor. Nothing is lost while no monitor is
+// armed; the next one prints it, and the lead's Stop hook and the watchdog say it is not armed.
+export function leaveNote(ws: Workspace, text: string): void {
+  mkdirSync(ws.stateDir, { recursive: true });
+  appendFileSync(notesLog(ws), JSON.stringify({ t: now(), id: randomBytes(3).toString("hex"), text }) + "\n");
+}
 
 // The human's side of the thread. Appended here rather than through `say`, which is the lead's
 // voice; the kind keeps the two apart on the page and in the log.
@@ -60,9 +68,8 @@ export const pageText = (ws: Workspace, row: Message): string =>
     ...rowImages(row).map((f) => `[image saved at: ${join(attachmentsDir(ws), f)}]`)].join("\n");
 
 // The inbox has one owner at a time, and the owner holds the lock: `factory board --inbox`, run as
-// a monitor in the lead's session, or failing that the board's courier sweep. The lock dies with its
-// holder, so a monitor that expires hands the inbox back to the sweep with no gap. Only the owner
-// moves the cursor, so a message is printed or relayed, never both.
+// a monitor in the lead's session. The lock dies with its holder, and the next monitor carries on
+// from the cursor, so a message is printed once.
 //
 // Node has no flock(2). macOS's open(2) takes the same lock atomically with O_EXLOCK, and it is
 // released when the descriptor closes, however the process ends. Linux has no such flag and would
@@ -73,7 +80,7 @@ const HELD = 75;
 
 // Linux: util-linux's flock(1) on this descriptor as its fd 3. A flock belongs to the open
 // file description, so it outlives flock(1) and goes when this descriptor closes. flock -n never
-// waits, so the timeout only catches a flock(1) that hangs, and the board's sweep with it.
+// waits, so the timeout only catches a flock(1) that hangs.
 function tryFlock(path: string): number | null {
   const fd = openSync(path, constants.O_RDWR | constants.O_CREAT, 0o644);
   // -E sets "held by someone else" apart from flock's own failures
@@ -115,9 +122,9 @@ export function inboxHeld(ws: Workspace): boolean {
   return false;
 }
 
-// Where the inbox has got to in the message log, as the log's inode and a byte offset. The inode
-// is what notices `say` rotating the log: an offset alone is only caught while the new file is
-// still shorter than it, and without a relay the cursor can sit still for days.
+// Where the inbox has got to in a log, as the log's inode and a byte offset. The inode is what
+// notices `say` rotating the message log: an offset alone is only caught while the new file is
+// still shorter than it, and the cursor can sit still for days while no monitor is armed.
 export interface Cursor {
   ino: number;
   offset: number;
@@ -125,45 +132,38 @@ export interface Cursor {
 
 export const sameCursor = (a: Cursor | undefined, b: Cursor): boolean => !!a && a.ino === b.ino && a.offset === b.offset;
 
-export function readCursor(ws: Workspace): Cursor | null {
+function readCursorAt(path: string): Cursor | null {
   try {
-    const [ino, offset] = readFileSync(cursorFile(ws), "utf8").trim().split(" ").map(Number);
+    const [ino, offset] = readFileSync(path, "utf8").trim().split(" ").map(Number);
     return Number.isInteger(ino) && Number.isInteger(offset) ? { ino: ino as number, offset: offset as number } : null;
   } catch {
     return null;
   }
 }
 
-export function writeCursor(ws: Workspace, c: Cursor): void {
-  mkdirSync(ws.runDir, { recursive: true });
-  const p = cursorFile(ws);
-  writeFileSync(p + ".tmp", `${c.ino} ${c.offset}`);
-  renameSync(p + ".tmp", p);
+function writeCursorAt(path: string, c: Cursor): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path + ".tmp", `${c.ino} ${c.offset}`);
+  renameSync(path + ".tmp", path);
 }
 
-// Each complete line past the cursor, with the cursor after it; row is set only for the human's
-// messages. With no cursor it starts at the end, because history is not news.
-export function* unsent(ws: Workspace, cursor: Cursor | null): Generator<{ row: Message | null; cursor: Cursor }> {
-  let ino = 0;
-  let size = 0;
+export const readCursor = (ws: Workspace): Cursor | null => readCursorAt(cursorFile(ws));
+export const writeCursor = (ws: Workspace, c: Cursor): void => writeCursorAt(cursorFile(ws), c);
+
+const stat = (path: string): { ino: number; size: number } => {
   try {
-    const st = statSync(ws.messages);
-    ino = st.ino;
-    size = st.size;
+    const st = statSync(path);
+    return { ino: st.ino, size: st.size };
   } catch {
-    // no log yet
+    return { ino: 0, size: 0 }; // no log yet
   }
-  if (cursor === null) {
-    yield { row: null, cursor: { ino, offset: size } };
-    return;
-  }
-  let offset = cursor.ino === ino && cursor.offset <= size ? cursor.offset : 0;
-  if (offset === size) {
-    if (!sameCursor(cursor, { ino, offset })) yield { row: null, cursor: { ino, offset } };
-    return;
-  }
+};
+
+// The complete lines of a file from offset to size, each with the cursor after it.
+function* linesOf(path: string, ino: number, offset: number, size: number): Generator<{ line: string | null; cursor: Cursor }> {
+  if (offset >= size) return;
   const buf = Buffer.alloc(size - offset);
-  const fd = openSync(ws.messages, "r");
+  const fd = openSync(path, "r");
   try {
     readSync(fd, buf, 0, buf.length, offset);
   } finally {
@@ -174,13 +174,57 @@ export function* unsent(ws: Workspace, cursor: Cursor | null): Generator<{ row: 
     const line = buf.subarray(start, nl).toString("utf8");
     offset += nl + 1 - start;
     start = nl + 1;
-    let r: Message | null = null;
-    try {
-      r = JSON.parse(line) as Message;
-    } catch {
-      // a torn or foreign line
-    }
-    yield { row: r && isHuman(ws, r.kind) && r.id ? r : null, cursor: { ino, offset } };
+    yield { line, cursor: { ino, offset } };
+  }
+}
+
+// Each complete line of the log past the cursor, with the cursor after it. With no cursor it starts
+// at the end. A torn last line is not yielded, and the cursor never moves past it. A log rolled to
+// .1 since the cursor was written is read to its end first: lines can wait there for hours while no
+// monitor is armed.
+function* linesAfter(path: string, cursor: Cursor | null): Generator<{ line: string | null; cursor: Cursor }> {
+  const { ino, size } = stat(path);
+  if (cursor === null) {
+    yield { line: null, cursor: { ino, offset: size } };
+    return;
+  }
+  if (cursor.ino !== ino) {
+    const old = stat(path + ".1");
+    if (old.ino === cursor.ino && cursor.ino !== 0 && cursor.offset <= old.size) yield* linesOf(path + ".1", old.ino, cursor.offset, old.size);
+  }
+  const offset = cursor.ino === ino && cursor.offset <= size ? cursor.offset : 0;
+  if (offset === size) {
+    if (!sameCursor(cursor, { ino, offset })) yield { line: null, cursor: { ino, offset } };
+    return;
+  }
+  yield* linesOf(path, ino, offset, size);
+}
+
+const parse = <T>(line: string | null): T | null => {
+  if (line === null) return null;
+  try {
+    return JSON.parse(line) as T;
+  } catch {
+    return null; // a torn or foreign line
+  }
+};
+
+// The message log past the cursor; row is set only for the human's messages. History is not news,
+// so with no cursor it starts at the end.
+export function* unsent(ws: Workspace, cursor: Cursor | null): Generator<{ row: Message | null; cursor: Cursor }> {
+  for (const u of linesAfter(ws.messages, cursor)) {
+    const r = parse<Message>(u.line);
+    yield { row: r && isHuman(ws, r.kind) && r.id ? r : null, cursor: u.cursor };
+  }
+}
+
+// The notes past their cursor, as the text the lead reads. A note is for the lead whenever it was
+// left, so with no cursor it starts at the beginning of the log: a note left before the first
+// monitor ever armed is still printed. The tag is what the receipts look for.
+export function* unsentNotes(ws: Workspace, cursor: Cursor | null): Generator<{ text: string | null; cursor: Cursor }> {
+  for (const u of linesAfter(notesLog(ws), cursor ?? { ino: -1, offset: 0 })) {
+    const n = parse<{ id?: string; text?: string }>(u.line);
+    yield { text: n && typeof n.text === "string" && n.id ? `[m:${n.id}] ${n.text}` : null, cursor: u.cursor };
   }
 }
 
@@ -198,9 +242,10 @@ function writeLine(line: string): void {
   }
 }
 
-// `factory board --inbox`: each new message from the page as stdout, which a monitor in the lead's
-// session turns into an event within a second. Printed before the cursor moves, so a kill in
-// between repeats a message rather than losing it. Runs until killed.
+// `factory board --inbox`: each new message from the page, and each note a watcher left, as
+// stdout, which a monitor in the lead's session turns into an event within a second. Printed
+// before the cursor moves, so a kill in between repeats a line rather than losing it. Runs until
+// killed.
 export function followInbox(ws: Workspace, out: (line: string) => void = writeLine): void {
   let fd = tryLock(inboxLock(ws));
   for (const until = Date.now() + 3000; fd === null && Date.now() < until;) {
@@ -212,44 +257,20 @@ export function followInbox(ws: Workspace, out: (line: string) => void = writeLi
     return;
   }
   let cursor = readCursor(ws);
+  let notes = readCursorAt(notesCursorFile(ws));
   for (;;) {
     for (const u of unsent(ws, cursor)) {
       if (u.row) out(pageText(ws, u.row));
       writeCursor(ws, u.cursor);
       cursor = u.cursor;
     }
+    for (const u of unsentNotes(ws, notes)) {
+      if (u.text) out(u.text);
+      writeCursorAt(notesCursorFile(ws), u.cursor);
+      notes = u.cursor;
+    }
     sleep(250);
   }
-}
-
-// Whether unsent() has anything for the cursor, asked without the lock. A torn last line, which
-// the cursor never moves past, does not count.
-const pending = (ws: Workspace): boolean => !unsent(ws, readCursor(ws)).next().done;
-
-// The cursor after the last line each workspace's sweep relayed, kept until the cursor is written
-// past it, so a cursor that cannot be written does not relay the same message on every pass.
-const relayedTo = new Map<string, Cursor>();
-
-// The board's half: while no monitor holds the inbox, take it for one pass and relay what is new.
-// It runs every half second, so it takes the lock only when pending() is true. Returns whether it
-// held the inbox.
-export function sweep(ws: Workspace, relay: Relay): boolean {
-  if (!pending(ws)) return false;
-  const fd = tryLock(inboxLock(ws));
-  if (fd === null) return false;
-  try {
-    for (const u of unsent(ws, readCursor(ws))) {
-      if (u.row && !sameCursor(relayedTo.get(ws.dir), u.cursor)) {
-        relay(ws, pageText(ws, u.row));
-        relayedTo.set(ws.dir, u.cursor);
-      }
-      writeCursor(ws, u.cursor);
-      relayedTo.delete(ws.dir);
-    }
-  } finally {
-    closeSync(fd);
-  }
-  return true;
 }
 
 // What the lead's sessions did with each message, read from their transcripts. The harness writes

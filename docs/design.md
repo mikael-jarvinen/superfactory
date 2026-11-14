@@ -155,7 +155,6 @@ review_bot = "coderabbitai"           # its review of the head is required befor
 queue_every_minutes = 15
 round_minute = 7
 model = "sonnet"
-relay_model = "haiku"
 ```
 
 The program carries no text addressed to a named person. Every instruction a session reads comes
