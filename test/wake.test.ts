@@ -114,10 +114,36 @@ test("the wake hook blocks the send, saying why, when the recipient does not com
   assert.match(r.stderr, /bea is off and did not wake: respawned b1, and it was not listed live within 1 s/);
 });
 
-test("the wake hook lets the send through when the workspace does not load or the event is not JSON", () => {
+test("the wake hook lets the send through when the workspace does not load or the event is not JSON, and says so", () => {
   const { ws } = fakeFleet();
-  assert.equal(factory(undefined, ["--workspace", join(ws, "nowhere"), "hook", "wake"], { input: hookIn("bea") }).status, 0);
-  assert.equal(factory(undefined, ["--workspace", ws, "hook", "wake"], { input: "not json" }).status, 0);
+  const told = (r: { stdout: string }) => (JSON.parse(r.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext;
+  let r = factory(undefined, ["--workspace", join(ws, "nowhere"), "hook", "wake"], { input: hookIn("bea") });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(told(r), /^wake check failed: --workspace \S+nowhere: no such directory; message sent without a wake check$/);
+  assert.match(r.stderr, /no workspace found, so not logged/);
+  r = factory(undefined, ["--workspace", ws, "hook", "wake"], { input: "not json" });
+  assert.equal(r.status, 0);
+  assert.match(r.stderr, /the hook's input is not JSON .*; message sent without a wake check/);
+  // a factory.toml that does not load: logged in the workspace's default logs/
+  writeFileSync(join(ws, "factory.toml"), "[[agents]\n");
+  r = factory(undefined, ["--workspace", ws, "hook", "wake"], { input: hookIn("bea") });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(told(r), /^wake check failed: \S+factory\.toml has 1 problem:[\s\S]*not valid TOML[\s\S]*; message sent without a wake check$/);
+  assert.match(r.stderr, /\n\s+at /, "with the stack");
+  const lines = readFileSync(join(ws, "logs", "wake-hook.log"), "utf8").trim().split("\n");
+  assert.equal(lines.length, 1);
+  const row = JSON.parse(lines[0]!) as Record<string, string>;
+  assert.equal(row.to, "bea");
+  assert.equal(`wake check failed: ${row.error}; message sent without a wake check`, told(r));
+});
+
+test("a listing that is JSON but no list is a listing that failed, for every caller, not a crash", () => {
+  const { ws } = fakeFleet();
+  writeFileSync(join(ws, "live.json"), "{}");
+  const r = factory(ws, ["wake", "bea"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /`claude agents --json` returned something that is not a JSON list/);
+  assert.doesNotMatch(r.stderr, /TypeError|\n\s+at /);
 });
 
 test("factory wake: already live, woken, or not", () => {
@@ -311,7 +337,7 @@ test("a remote respawn left too little time fails rather than run past it", () =
 
 test("the hook's own error lets the send through, logged and told to the sender", () => {
   const { ws, put } = fakeFleet();
-  // a listing that is JSON but no array: reading its rows throws a TypeError
+  // a listing that is JSON but no list: the listing fails
   writeFileSync(join(ws, "live.json"), "{}");
   put("all.json", [sess("b1", "bea")]);
   const r = factory(undefined, ["--workspace", ws, "hook", "wake"], {
@@ -321,16 +347,15 @@ test("the hook's own error lets the send through, logged and told to the sender"
   assert.equal(r.status, 0, r.stderr);
   const out = JSON.parse(r.stdout) as { hookSpecificOutput: { hookEventName: string; additionalContext: string } };
   assert.equal(out.hookSpecificOutput.hookEventName, "PreToolUse");
-  assert.match(out.hookSpecificOutput.additionalContext, /^wake check failed: \S+ is not a function; message sent without a wake check$/);
-  assert.match(r.stderr, /TypeError/);
+  assert.equal(out.hookSpecificOutput.additionalContext, "wake check failed: `claude agents --json` returned something that is not a JSON list; message sent without a wake check");
   assert.match(r.stderr, /\n\s+at /, "with the stack");
   const lines = readFileSync(join(openWorkspace(ws, {}).logsDir, "wake-hook.log"), "utf8").trim().split("\n");
   assert.equal(lines.length, 1);
   const row = JSON.parse(lines[0]!) as Record<string, string>;
   assert.equal(row.from, "session s-123 in /w/ada");
   assert.equal(row.to, "bea");
-  assert.match(row.error!, /is not a function/);
-  assert.match(row.stack!, /TypeError[\s\S]*\n\s+at /);
+  assert.match(row.error!, /not a JSON list/);
+  assert.match(row.stack!, /not a JSON list[\s\S]*\n\s+at /);
   assert.ok(!Number.isNaN(Date.parse(row.at!)));
 });
 

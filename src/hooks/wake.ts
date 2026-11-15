@@ -24,7 +24,7 @@ import { sleep } from "../util.js";
 import { lead } from "../fleet.js";
 import { local } from "../transport.js";
 import { WAKE_SETTLE_S, wake } from "../wake.js";
-import { openWorkspace, resolveWorkspace, type Workspace } from "../workspace.js";
+import { openWorkspace, resolveWorkspace } from "../workspace.js";
 
 export const WAKE_HOOK_TIMEOUT_S = 90;
 
@@ -37,14 +37,15 @@ export const recipient = (to: unknown): string | null => {
   return n || null;
 };
 
-// The hook's own error: the send goes, and the error is logged and told to the sender.
-function failOpen(ws: Workspace, sender: string, to: string, e: unknown): HookResult {
+// The hook's own error: the send goes, and the error is logged and told to the sender. A workspace
+// whose config does not load logs to its default logs/; with no workspace found there is no log.
+function failOpen(logsDir: string | null, sender: string, to: string, e: unknown): HookResult {
   const error = e instanceof Error ? e.message : String(e);
   const stack = e instanceof Error ? (e.stack ?? error) : error;
-  let logged = "";
-  try {
-    mkdirSync(ws.logsDir, { recursive: true });
-    appendFileSync(join(ws.logsDir, "wake-hook.log"), `${JSON.stringify({ at: new Date().toISOString(), from: sender, to, error, stack })}\n`);
+  let logged = logsDir ? "" : "\n(no workspace found, so not logged)";
+  if (logsDir) try {
+    mkdirSync(logsDir, { recursive: true });
+    appendFileSync(join(logsDir, "wake-hook.log"), `${JSON.stringify({ at: new Date().toISOString(), from: sender, to, error, stack })}\n`);
   } catch (le) {
     logged = `\n(and it could not be logged: ${(le as Error).message})`;
   }
@@ -79,15 +80,17 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
       if (!fromHost || typeof said !== "string" || !NOT_REACHABLE.test(said)) return { code: 0 };
       failedSend = true;
     }
-  } catch {
-    return { code: 0 };
+  } catch (e) {
+    return { code: 0, stderr: `factory hook wake: the hook's input is not JSON (${(e as Error).message}); message sent without a wake check\n` };
   }
   if (!to) return { code: 0 };
+  let dir: string | null = null;
   let ws;
   try {
-    ws = openWorkspace(resolveWorkspace({ flag: workspace }));
-  } catch {
-    return { code: 0 };
+    dir = resolveWorkspace({ flag: workspace });
+    ws = openWorkspace(dir);
+  } catch (e) {
+    return failOpen(dir && join(dir, "logs"), sender, to, e);
   }
   const agent = ws.config.agents.find((a) => a.name === to);
   if (!agent) return { code: 0 };
@@ -105,7 +108,7 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   try {
     w = wake(ws, agent, { waitS, deadline, ...(fromHost ? { t: local } : {}) });
   } catch (e) {
-    return failOpen(ws, sender, to, e);
+    return failOpen(ws.logsDir, sender, to, e);
   }
   switch (w.is) {
     case "live":

@@ -94,7 +94,12 @@ const withActivity = (rows: Session[]): Session[] =>
     return at === undefined ? s : { ...s, activeAt: at };
   });
 
-const parse = (stdout: string): Session[] => JSON.parse(stdout || "[]") as Session[];
+// Rows that are not a list, `{}` say, are as unreadable as text that is not JSON.
+const parse = (stdout: string): Session[] => {
+  const rows: unknown = JSON.parse(stdout || "[]");
+  if (!Array.isArray(rows)) throw new SyntaxError("not a list");
+  return rows as Session[];
+};
 
 // `claude agents --json` is a registry, not a probe: after the daemon retires an idle worker and
 // exits, the listing keeps the session at its last state. The roster names the supervisor pid; a
@@ -134,7 +139,7 @@ export const local: Transport = {
     try {
       rows = parse(r.stdout);
     } catch {
-      return die("`claude agents --json` returned something that is not JSON");
+      return die("`claude agents --json` returned something that is not a JSON list");
     }
     return withActivity(rows);
   },
