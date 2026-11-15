@@ -197,7 +197,8 @@ export function remote(h: Host): Transport {
       const r = worktreeCall(h, "worktree/left", q, 30_000);
       if (typeof r.body.exists !== "boolean" || typeof r.body.pushed !== "boolean" || !Array.isArray(r.body.dirty))
         throw new Unreachable(h.name, "its worktree/left reply is not {exists, dirty, pushed}");
-      return { exists: r.body.exists, dirty: r.body.dirty.map(String), pushed: r.body.pushed };
+      const unreadable = typeof r.body.unreadable === "string" ? { unreadable: r.body.unreadable } : {};
+      return { exists: r.body.exists, dirty: r.body.dirty.map(String), ...unreadable, pushed: r.body.pushed };
     },
     removeWorktree(q) {
       const r = worktreeCall(h, "worktree/remove", q, 30_000);

@@ -91,7 +91,7 @@ createServer((req, res) => {
     if (req.url === "/agents/cal/worktree") return q.ticket === "TEST-7" ? send(422, { error: wt + " is in the way" }) : send(200, { wt, how: "made " + wt });
     if (q.ticket === "TEST-7" && req.url.startsWith("/agents/cal/worktree/")) return send(422, { error: wt + " is in the way" });
     if (req.url === "/repos/gone/checkout") return send(422, { error: "not a refusal" });
-    if (req.url === "/agents/cal/worktree/left") return send(200, lefts++ ? { exists: true, dirty: [], pushed: true } : { exists: true, dirty: ["src/x.ts"], pushed: true });
+    if (req.url === "/agents/cal/worktree/left") return send(200, [{ exists: true, dirty: [], unreadable: "git status exited 128: fatal: x", pushed: false }, { exists: true, dirty: ["src/x.ts"], pushed: true }][lefts++] ?? { exists: true, dirty: [], pushed: true });
     if (req.url === "/agents/cal/worktree/remove") return send(200, { ok: true, said: "" });
     if (req.url === "/repos/api/checkout") return send(200, { top: "/far/api", origin: "https://github.com/acme/api.git" });
     send(404, { error: "no such route" });
@@ -362,16 +362,22 @@ test("a builder with a host: dispatch makes its worktree there and stop looks th
   assert.equal((started?.[1] as { cwd: string }).cwd, wt);
   assert.equal(loadRec(openWorkspace(dir), "TEST-1")?.worktree, wt);
 
+  // the host could not read its worktree's status: stop refuses, without calling it uncommitted
+  r = factory(dir, ["stop", "cal"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /cal's worktree \/far\/api\/\.claude\/worktrees\/TEST-1 could not be read \(git status exited 128: fatal: x\), so what stopping it would lose is unknown/);
+  assert.doesNotMatch(r.stderr, /uncommitted/);
+
   // the host's worktree has an uncommitted file: stop refuses and stops nothing
   r = factory(dir, ["stop", "cal"]);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /cal's worktree \/far\/api\/\.claude\/worktrees\/TEST-1 has uncommitted changes: src\/x\.ts/);
-  assert.deepEqual(posts().slice(3), [["/agents/cal/worktree/left", { repo: "api", ticket: "TEST-1" }]]);
+  assert.deepEqual(posts().slice(3), [["/agents/cal/worktree/left", { repo: "api", ticket: "TEST-1" }], ["/agents/cal/worktree/left", { repo: "api", ticket: "TEST-1" }]]);
 
   r = factory(dir, ["stop", "cal", "--remove-worktree"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /stopped cal \(c1\)\n  worktree removed/);
-  assert.deepEqual(posts().slice(4).map(([u, b]) => (u === "/agents/cal/stop" ? [u] : [u, b])), [
+  assert.deepEqual(posts().slice(5).map(([u, b]) => (u === "/agents/cal/stop" ? [u] : [u, b])), [
     ["/agents/cal/worktree/left", { repo: "api", ticket: "TEST-1" }],
     ["/agents/cal/stop"],
     ["/agents/cal/worktree/remove", { repo: "api", ticket: "TEST-1" }],

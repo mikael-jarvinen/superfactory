@@ -2,9 +2,12 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, posix } from "node:path";
 import type { GitOver } from "./config.js";
 import { branchFor } from "./state.js";
-import { die, realpathLoose, run } from "./util.js";
+import { die, realpathLoose, run, type RunResult } from "./util.js";
 
 export const git = (dir: string, ...args: string[]) => run("git", ["-C", dir, ...args]);
+
+// git's stderr, after a ": ", when it said anything.
+const said = (r: RunResult) => (r.stderr.trim() ? `: ${r.stderr.trim()}` : "");
 
 export const HTTPS = ["-c", "url.https://github.com/.insteadOf=git@github.com:"];
 // The -c arguments a git that talks to GitHub takes: none when the checkout's origin is used as it is.
@@ -35,11 +38,17 @@ export function ensureWorktree(repoDir: string, ticket: string, base: string, ov
   const wt = worktreePath(repoDir, ticket);
   const branch = branchFor(ticket);
   const via = overArgs(over);
-  const r = git(repoDir, ...via, "fetch", "-q", "origin", base);
+  // Steps whose status is ignored still stop at a signal, so none runs into the daemon's SIGKILL.
+  const step = (cmd: string, ...args: string[]) => {
+    const r = git(repoDir, ...(cmd === "fetch" ? via : []), cmd, ...args);
+    if (r.signal) die(`git ${cmd} in ${repoDir} was ended by ${r.signal}, so the worktree was not made${said(r)}`);
+    return r;
+  };
+  const r = step("fetch", "-q", "origin", base);
   if (r.status !== 0) die(`git fetch failed in ${repoDir}: ${r.stderr.trim()}`);
   // the branch may already be on origin (a resumed item, a rebuilt laptop); a missing ref is fine
-  git(repoDir, ...via, "fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
-  git(repoDir, "worktree", "prune");
+  step("fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
+  step("worktree", "prune");
   if (existsSync(wt) && statSync(wt).isDirectory()) {
     const registered = worktreeList(repoDir).find((w) => w.path === realpathLoose(wt));
     if (registered) {
@@ -55,15 +64,15 @@ export function ensureWorktree(repoDir: string, ticket: string, base: string, ov
     die(`${wt} exists but is not a git worktree. Remove or rename it, then dispatch again.`);
   }
   mkdirSync(dirname(wt), { recursive: true });
-  const haveBranch = git(repoDir, "rev-parse", "--verify", "-q", `refs/heads/${branch}`).status === 0;
-  const haveRemote = git(repoDir, "rev-parse", "--verify", "-q", `refs/remotes/origin/${branch}`).status === 0;
+  const haveBranch = step("rev-parse", "--verify", "-q", `refs/heads/${branch}`).status === 0;
+  const haveRemote = step("rev-parse", "--verify", "-q", `refs/remotes/origin/${branch}`).status === 0;
   let note = "";
   if (haveBranch && haveRemote) {
-    const local = git(repoDir, "rev-parse", branch).stdout.trim();
-    const remote = git(repoDir, "rev-parse", `origin/${branch}`).stdout.trim();
+    const local = step("rev-parse", branch).stdout.trim();
+    const remote = step("rev-parse", `origin/${branch}`).stdout.trim();
     if (local !== remote) {
-      if (git(repoDir, "merge-base", "--is-ancestor", local, remote).status === 0) {
-        git(repoDir, "branch", "-f", branch, remote);
+      if (step("merge-base", "--is-ancestor", local, remote).status === 0) {
+        step("branch", "-f", branch, remote);
         note = `; local ${branch} was behind origin and was moved forward`;
       } else {
         note = `; WARNING local ${branch} and origin/${branch} have diverged, checked out the local one`;
@@ -84,7 +93,7 @@ export function ensureWorktree(repoDir: string, ticket: string, base: string, ov
     add = worktreeAdd("-b", branch, wt, `origin/${base}`);
     how = `new branch ${branch} from origin/${base}`;
   }
-  if (add.status !== 0) die(`git worktree add failed: ${add.stderr.trim()}`);
+  if (add.status !== 0) die(`git worktree add failed: ${add.stderr.trim()}${add.signal ? ` (ended by ${add.signal})` : ""}`);
   pushConfig(repoDir, wt, over);
   return { wt, how };
 }
@@ -121,11 +130,14 @@ export function porcelainPaths(out: string): string[] {
 
 // Dirt that is not the builder's work: files that tools rewrite just by running. An entry ending
 // in "/" is a directory prefix; any other matches the end of a path.
-export function worktreeDirty(wt: string, toolWritten: string[] = []): string[] {
+// A status that failed or was cut short says nothing about the tree: `unreadable` says why, and
+// `paths` is then empty without meaning clean.
+export function worktreeDirty(wt: string, toolWritten: string[] = []): { paths: string[]; unreadable?: string } {
   const dirs = toolWritten.filter((x) => x.endsWith("/"));
   const files = toolWritten.filter((x) => !x.endsWith("/"));
-  return porcelainPaths(git(wt, "status", "--porcelain").stdout)
-    .filter((p) => !files.some((f) => p.endsWith(f)) && !dirs.some((d) => p.startsWith(d)));
+  const r = git(wt, "status", "--porcelain");
+  if (r.status !== 0) return { paths: [], unreadable: `git status ${r.signal ? `ended by ${r.signal}` : `exited ${r.status}`}${said(r)}` };
+  return { paths: porcelainPaths(r.stdout).filter((p) => !files.some((f) => p.endsWith(f)) && !dirs.some((d) => p.startsWith(d))) };
 }
 
 // Nothing would be lost by removing this worktree: either the branch is on origin at this head, or

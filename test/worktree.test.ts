@@ -6,6 +6,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { GIT_HTTPS_ENV, gitEnv } from "../src/launch.js";
 import { branchPushed, ensureWorktree, git, HTTPS, overArgs, worktreeDirty } from "../src/worktree.js";
+import { local, type WorktreeRequest } from "../src/transport.js";
 import { run } from "../src/util.js";
 import { tempDir, until } from "./helpers.js";
 
@@ -44,13 +45,83 @@ test("a worktree per item, with its own push config, and the human's clone untou
   assert.equal(branchPushed(wt, "main"), true, "no commits of its own yet");
   writeFileSync(join(wt, "schema.gen.ts"), "");
   writeFileSync(join(wt, "real.txt"), "");
-  assert.deepEqual(worktreeDirty(wt, ["schema.gen.ts", ".tool/"]), ["real.txt"]);
+  assert.deepEqual(worktreeDirty(wt, ["schema.gen.ts", ".tool/"]), { paths: ["real.txt"] });
   must(wt, "add", "real.txt");
   must(wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "work");
   assert.equal(branchPushed(wt, "main"), false);
   must(wt, "push", "-q", "origin", "fix-db");
   assert.equal(branchPushed(wt, "main"), true);
 });
+
+test("a git status that fails or is ended by a signal is not read as a clean worktree", () => {
+  const root = tempDir();
+  after(() => rmSync(root, { recursive: true, force: true }));
+  const wt = join(root, "wt");
+  must(root, "init", "-q", wt);
+  assert.deepEqual(worktreeDirty(wt), { paths: [] }, "a clean tree reads clean");
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  const realGit = run("sh", ["-c", "command -v git"]).stdout.trim();
+  writeFileSync(join(bin, "git"), `#!/bin/sh\ncase "$*" in *status*) echo "cut short" >&2; kill -TERM $$ ;; esac\nexec ${realGit} "$@"\n`);
+  chmodSync(join(bin, "git"), 0o755);
+  const was = process.env.PATH;
+  process.env.PATH = `${bin}:${was}`;
+  try {
+    assert.deepEqual(worktreeDirty(wt), { paths: [], unreadable: "git status ended by SIGTERM: cut short" });
+  } finally {
+    process.env.PATH = was;
+  }
+  // A directory that is gone fails the same way wherever the test's temp dir is.
+  const d = worktreeDirty(join(root, "gone"));
+  assert.deepEqual(d.paths, []);
+  assert.match(d.unreadable ?? "", /^git status exited 128: fatal: cannot change to /);
+});
+
+test("a worktree whose status cannot be read is answered unreadable and not pushed, on a host's side", () => {
+  const root = tempDir();
+  after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, ".claude", "worktrees", "LOCAL-x"), { recursive: true });
+  const q = { repo: { path: root, base: "main" }, ticket: "LOCAL-x", toolWritten: [] } as unknown as WorktreeRequest;
+  const was = process.env.GIT_CEILING_DIRECTORIES;
+  process.env.GIT_CEILING_DIRECTORIES = root;
+  try {
+    const left = local.worktreeLeft(q);
+    assert.deepEqual({ ...left, unreadable: left.unreadable?.replace(/:.*/s, "") }, { exists: true, dirty: [], unreadable: "git status exited 128", pushed: false });
+  } finally {
+    if (was === undefined) delete process.env.GIT_CEILING_DIRECTORIES;
+    else process.env.GIT_CEILING_DIRECTORIES = was;
+  }
+});
+
+for (const { at, says } of [
+  { at: "*+refs/heads/*", says: /^git fetch in .* was ended by SIGTERM, so the worktree was not made: cut short$/ },
+  { at: "*worktree\\ add*", says: /^git worktree add failed: cut short \(ended by SIGTERM\)$/ },
+]) {
+  test(`a git ended by a signal at ${at} ends the worktree request, with git's stderr`, () => {
+    const root = tempDir();
+    after(() => rmSync(root, { recursive: true, force: true }));
+    const origin = join(root, "origin.git");
+    const clone = join(root, "web");
+    must(root, "init", "-q", "--bare", "-b", "main", origin);
+    must(root, "clone", "-q", origin, clone);
+    must(clone, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "start");
+    must(clone, "push", "-q", "origin", "HEAD:main");
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    const realGit = run("sh", ["-c", "command -v git"]).stdout.trim();
+    writeFileSync(join(bin, "git"), `#!/bin/sh\ncase "$*" in ${at}) echo "cut short" >&2; kill -TERM $$ ;; esac\nexec ${realGit} "$@"\n`);
+    chmodSync(join(bin, "git"), 0o755);
+    const was = process.env.PATH;
+    process.env.PATH = `${bin}:${was}`;
+    try {
+      assert.throws(() => ensureWorktree(clone, "LOCAL-cut", "main"), (e: Error) => says.test(e.message));
+    } finally {
+      process.env.PATH = was;
+    }
+    assert.ok(!existsSync(join(clone, ".claude", "worktrees", "LOCAL-cut")), "no worktree was started");
+    assert.equal(git(clone, "rev-parse", "--verify", "-q", "refs/heads/cut").status, 1, "nor its branch");
+  });
+}
 
 // A host with git_over = "ssh" has the key and no gh. Its origin is git@github.com:..., here mapped
 // to a local bare repo by the clone's own config. A fetch given superfactory's https rewrite as well

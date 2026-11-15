@@ -78,12 +78,14 @@ esac
   chmodSync(join(dir, "bin", "claude"), 0o755);
   // A pass-through systemd-run that refuses a call from up whose scope is not named after up's run
   // (factory-job-<label>-<up's group>-…), which is how the reaper finds what up's calls left. Each
-  // refusal goes to no-unit, which must stay empty.
+  // refusal goes to no-unit, which must stay empty. The group is read before the command line: a
+  // test that kills up between the two reads then finds no up, rather than up with no group.
   const noUnit = join(dir, "no-unit");
   writeFileSync(join(dir, "bin", "systemd-run"), `#!/bin/sh
-if tr '\\0' ' ' < /proc/$PPID/cmdline | grep -q ' up $'; then
+group=$(sed 's/.*) //' /proc/$PPID/stat 2>/dev/null | cut -d' ' -f3)
+if [ -n "$group" ] && tr '\\0' ' ' < /proc/$PPID/cmdline 2>/dev/null | grep -q ' up $'; then
   case " $* " in
-    *" --unit=factory-job-${UP}-$(sed 's/.*) //' /proc/$PPID/stat | cut -d' ' -f3)-"*) ;;
+    *" --unit=factory-job-${UP}-$group-"*) ;;
     *) echo "$*" >> ${noUnit}; echo "fake systemd-run: a call from up with no job unit" >&2; exit 2 ;;
   esac
 fi
