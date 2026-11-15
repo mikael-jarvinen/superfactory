@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
@@ -184,6 +184,44 @@ test("a named assistant that is off is woken on its conversation; --force starts
   r = factory(ws, ["assistant", "vega", "--force"]);
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn v1"]);
+  assert.ok(calls().some((c) => c.startsWith("--bg")), "--force starts a fresh one");
+});
+
+test("the session a wake respawns is the one last active by its transcript, not the one started last", () => {
+  const { ws, put, calls } = fakeFleet();
+  const cfg = join(ws, "claude-config");
+  const proj = join(cfg, "projects", "-w-bea-dir");
+  mkdirSync(proj, { recursive: true });
+  const row = (id: string, startedAt: number) => sess(id, "bea", { startedAt, cwd: "/w/bea.dir", sessionId: `${id}-uuid` });
+  writeFileSync(join(proj, "old1-uuid.jsonl"), "{}\n");
+  writeFileSync(join(proj, "new2-uuid.jsonl"), "{}\n");
+  utimesSync(join(proj, "new2-uuid.jsonl"), 2000, 2000);
+  utimesSync(join(proj, "old1-uuid.jsonl"), 5000, 5000);
+  put("all.json", [row("old1", 1000), row("new2", 2000)]);
+  put("after.json", [row("old1", 1000)]);
+  let r = factory(ws, ["wake", "bea"], { env: { CLAUDE_CONFIG_DIR: cfg } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn old1"], "old1 started first but talked last");
+  // With no transcript to go by, the one started last.
+  rmSync(join(ws, "live.json"));
+  rmSync(proj, { recursive: true });
+  put("after.json", [row("new2", 2000)]);
+  r = factory(ws, ["wake", "bea"], { env: { CLAUDE_CONFIG_DIR: cfg } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn old1", "respawn new2"]);
+});
+
+test("a named assistant that does not wake is not started fresh; --force starts it fresh", () => {
+  const { ws, put, calls } = fakeFleet(ASSISTANT_TOML);
+  mkdirSync(join(ws, "assistants"));
+  put("all.json", [sess("v1", "vega")]);
+  writeFileSync(join(ws, "respawn-fail"), "session v1 is gone");
+  let r = factory(ws, ["assistant", "vega"]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stderr, /vega was off and did not wake: respawn of v1 failed: session v1 is gone\. Nothing was started/);
+  assert.ok(!calls().some((c) => c.startsWith("--bg")), "no fresh session without --force");
+  r = factory(ws, ["assistant", "vega", "--force"]);
+  assert.equal(r.status, 0, r.stderr);
   assert.ok(calls().some((c) => c.startsWith("--bg")), "--force starts a fresh one");
 });
 

@@ -490,13 +490,17 @@ function cmdAssistant(ws: Workspace, argv: string[]) {
     names = [want];
   }
   const promptFile = str(v["prompt-file"]);
-  // A named assistant that was stopped idle is mid-conversation with the lead, so it is woken.
+  // A named assistant that was stopped idle is mid-conversation with the lead, so it is woken. One
+  // that does not wake is not started fresh, which would lose that conversation, unless --force.
   if (want && !v.force) {
     const ag = agentOrDie(ws, want);
-    if (wakeForRound(ws, ag, transportFor(ws, ag))) {
+    const w = wake(ws, ag);
+    if (w.is === "woke") {
+      console.log(`${want} was off; woke ${w.from} (its conversation kept)`);
       console.log(`  next: send it the task by message, or pass --force for a fresh session`);
       return;
     }
+    if (w.is === "failed" || w.is === "unknown") throw new FactoryError(`${want} was off and did not wake: ${w.why}. Nothing was started, so its conversation is kept; \`factory wake ${want}\` tries again, and --force starts a fresh session without it.`);
   }
   const ready = (name: string) => onDemand(ws, agentOrDie(ws, name), () => (promptFile ? readFileSync(promptFile, "utf8") : assistantPrompt(ws)));
   const busy: string[] = [];

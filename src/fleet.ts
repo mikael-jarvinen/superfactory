@@ -20,6 +20,9 @@ export interface Session {
   // epoch milliseconds in `claude agents --json`, which gives no other time
   startedAt?: string | number;
   createdAt?: string;
+  sessionId?: string;
+  // epoch ms the session's transcript was last written, added by the local listing (transport.ts)
+  activeAt?: number;
   [k: string]: unknown;
 }
 

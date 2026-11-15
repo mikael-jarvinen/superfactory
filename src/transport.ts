@@ -74,7 +74,26 @@ export interface Transport {
 
 const isDir = (p: string) => existsSync(p) && statSync(p).isDirectory();
 
-const parse = (stdout: string): Session[] => JSON.parse(stdout || "[]") as Session[];
+// When a session last did anything: its transcript's mtime, under claude's projects/ by the cwd with
+// every character but a letter or digit made "-". The listing gives a session only startedAt, and one
+// started earlier may have talked since. Undefined when the transcript is not found.
+export function transcriptAt(s: Session): number | undefined {
+  if (typeof s.sessionId !== "string" || !/^[\w-]+$/.test(s.sessionId) || typeof s.cwd !== "string") return undefined;
+  const dir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+  try {
+    return statSync(join(dir, "projects", s.cwd.replace(/[^A-Za-z0-9]/g, "-"), `${s.sessionId}.jsonl`)).mtimeMs;
+  } catch {
+    return undefined;
+  }
+}
+
+const withActivity = (rows: Session[]): Session[] =>
+  rows.map((s) => {
+    const at = transcriptAt(s);
+    return at === undefined ? s : { ...s, activeAt: at };
+  });
+
+const parse = (stdout: string): Session[] => withActivity(JSON.parse(stdout || "[]") as Session[]);
 
 // `claude agents --json` is a registry, not a probe: after the daemon retires an idle worker and
 // exits, the listing keeps the session at its last state. The roster names the supervisor pid; a
@@ -216,9 +235,10 @@ export function transports(ws: Workspace): Transport[] {
 
 // A number is epoch milliseconds; Date.parse would read it as text and give NaN.
 const instant = (x: unknown) => (typeof x === "number" ? x : typeof x === "string" ? Date.parse(x) : NaN);
-const stamp = (s: Session) => [s.updatedAt, s.startedAt, s.createdAt].map(instant).find(Number.isFinite) ?? -Infinity;
+const stamp = (s: Session) => [s.activeAt, s.updatedAt, s.startedAt, s.createdAt].map(instant).find(Number.isFinite) ?? -Infinity;
 
-// Newest first. The listing's order is not documented, so "newest" is the latest timestamp it carries.
+// Newest first: the latest activity, else the latest timestamp the listing carries, as its order is
+// not documented.
 const byNewest = (hits: Session[]) => [...hits].sort((a, b) => (stamp(a) < stamp(b) ? 1 : stamp(a) > stamp(b) ? -1 : 0));
 
 // An agent's session among several by its name: the newest live one, else the newest.
@@ -227,7 +247,7 @@ export function pick(t: Transport, hits: Session[]): Session | null {
   return newest.find((s) => t.alive(s)) ?? newest[0] ?? null;
 }
 
-// The newest of them, live or not: the one a wake respawns.
+// The newest of them, live or not: the one a wake respawns, the one last active where that is known.
 export const newest = (hits: Session[]): Session | null => byNewest(hits)[0] ?? null;
 
 export const isAgentSession = (name: string) => (s: Session) => s.kind === "background" && s.name === name;
