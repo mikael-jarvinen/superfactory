@@ -17,9 +17,9 @@ export const TICKET_USAGE = `  ticket ...                      the local tracker
     create --project P --title T [--body B | --body-file F] [--label L]... [--as A]
                                   file into Backlog; an agent files nowhere else
     move <ref> <State> [--asked "<the human's words>"] [--merged '#<pr>'] [--as A]
-                                  out of Backlog needs --asked, quoting the human's message; onward
-                                  out of In Review needs the PR, which GitHub must say is merged.
-                                  Back to work from In Review is free.
+                                  out of Backlog needs --asked, quoting the human's message; into
+                                  Done needs the ticket's PR, which GitHub must say is merged and
+                                  which names the ticket. Every other move is free.
     label <ref> add|rm <name> [--as A]
     describe <ref> (<text> | --file F) [--as A]
                                   append to the description; it is never replaced from here
@@ -76,7 +76,7 @@ export function showTicket(tk: T.Ticket): string[] {
   return out;
 }
 
-export function cmdTicket(ws: Workspace, argv: string[]): number {
+export function cmdTicket(ws: Workspace, argv: string[]): number | Promise<number> {
   T.requireEnabled(ws);
   const [sub, ...rest] = argv;
   switch (sub) {
@@ -123,9 +123,10 @@ export function cmdTicket(ws: Workspace, argv: string[]): number {
       const actor = cliActor(ws, s(v.as));
       const key = T.resolveKey(ws, p[0] as string);
       const to = T.checkState(p[1] as string);
-      const r = T.move(ws, key, to, actor, { ...(s(v.asked) ? { asked: s(v.asked) } : {}), ...(s(v.merged) !== undefined ? { merged: s(v.merged) } : {}) });
-      console.log(r.from === to ? `  ${key} already ${to}` : `  ${key}: ${r.from} -> ${to}`);
-      return 0;
+      return T.move(ws, key, to, actor, { ...(s(v.asked) ? { asked: s(v.asked) } : {}), ...(s(v.merged) !== undefined ? { merged: s(v.merged) } : {}) }).then((r) => {
+        console.log(r.from === to ? `  ${key} already ${to}` : `  ${key}: ${r.from} -> ${to}`);
+        return 0;
+      });
     }
     case "label": {
       const { v, p } = parse("ticket label", rest, { ...as }, 3, 3);

@@ -5,7 +5,7 @@
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { LABEL_RE, PROJECT_KEY_RE, type TrackerProject } from "../config.js";
-import { type Actor, checkCreate, checkMove, type MoveProof } from "./guard.js";
+import { type Actor, checkCreate, checkMove, checkMoveNow, type MoveProof } from "./guard.js";
 import { withLock } from "./lock.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError, now } from "../util.js";
@@ -281,19 +281,26 @@ export function create(ws: Workspace, c: CreateInput, actor: Actor): Ticket {
   }
 }
 
-// The state is read, checked and moved under the ticket's lock, so two moves cannot both start
-// from the same state, and the guard never judges a state that has already changed.
-export function move(ws: Workspace, key: string, to: TicketState, actor: Actor, proof: MoveProof = {}): { from: TicketState; ticket: Ticket } {
+// GitHub is asked first, without the lock: whether a PR merged does not depend on the ticket's
+// state, and a network call never runs under a lock. Then the state is read, checked again and
+// moved under the ticket's lock, so two moves cannot both start from the same state, and the
+// quote out of Backlog is judged against the state the move really leaves.
+export async function move(ws: Workspace, key: string, to: TicketState, actor: Actor, proof: MoveProof = {}): Promise<{ from: TicketState; ticket: Ticket }> {
+  const before = load(ws, key);
+  if (before.state === to) return { from: to, ticket: before };
+  const ok = await checkMove(ws, before, to, actor, proof);
   return withLock(lockOf(ws, key), () => {
     const tk = load(ws, key);
     if (tk.state === to) return { from: to, ticket: tk };
-    const ok = checkMove(ws, tk, to, actor, proof);
-    append(ws, key, { t: now(), by: actor.name, op: "move", from: tk.state, to, ...(ok.asked ? { asked: ok.asked } : {}), ...(ok.merged ? { merged: ok.merged } : {}) });
+    // moved meanwhile: the quote is judged again against the state it now leaves
+    const asked = tk.state === before.state ? ok.asked : checkMoveNow(ws, tk, to, actor, proof).asked;
+    append(ws, key, { t: now(), by: actor.name, op: "move", from: tk.state, to, ...(asked ? { asked } : {}), ...(ok.merged ? { merged: ok.merged } : {}) });
     return { from: tk.state, ticket: load(ws, key) };
   });
 }
 
-// The writes below change nothing guard.ts rules on; the CLI's actor is still one named agent.
+// Labels, comments, relations, links and titles are any agent's; a description is appended to by
+// an agent and replaced only by the human (rewrite, below).
 
 export function label(ws: Workspace, key: string, op: "add" | "rm", name: string, by: string): { changed: boolean; ticket: Ticket } {
   return withLock(lockOf(ws, key), () => labelLocked(ws, key, op, name, by));

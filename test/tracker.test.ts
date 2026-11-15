@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { postMessage } from "../src/board/inbox.js";
 import { serve } from "../src/board/server.js";
 import { ConfigError, loadConfig } from "../src/config.js";
-import { type Actor, checkMove, cliActor } from "../src/tickets/guard.js";
+import { type Actor, checkMove, cliActor, mentions } from "../src/tickets/guard.js";
+import { withLock } from "../src/tickets/lock.js";
 import * as T from "../src/tickets/store.js";
 import * as W from "../src/wiki/store.js";
 import { openWorkspace } from "../src/workspace.js";
@@ -39,13 +42,18 @@ const ADA: Actor = { human: false, name: "ada" };
 const ALEX: Actor = { human: true, name: "Alex" };
 const IMPORT: Actor = { human: false, name: "plane", importer: true };
 
-// gh as the guard calls it: #95 merged, #96 open, anything else GitHub cannot be reached.
+// gh as the guard calls it ($3 is the PR): #95 merged and RPE-1's by its branch, #94 merged and
+// RPE-1's by its title, #97 merged but RPE-10's, #96 open, #98 merged and RPE-1's after a second,
+// anything else GitHub cannot be reached.
 function fakeGh(): string {
   const f = join(tempDir(), "gh");
   writeFileSync(f, `#!/bin/sh
 case "$3" in
-  95) echo '{"state":"MERGED","mergedAt":"2026-11-15T10:00:00Z"}' ;;
-  96) echo '{"state":"OPEN","mergedAt":null}' ;;
+  95) echo '{"state":"MERGED","mergedAt":"2026-11-15T10:00:00Z","title":"Plan view","body":"","headRefName":"ada/rpe-1-plan-view"}' ;;
+  94) echo '{"state":"MERGED","mergedAt":"2026-11-15T10:00:00Z","title":"Plan view (RPE-1)","body":"","headRefName":"plan"}' ;;
+  97) echo '{"state":"MERGED","mergedAt":"2026-11-15T10:00:00Z","title":"RPE-10: other","body":"see RPE-100","headRefName":"ada/rpe-10"}' ;;
+  96) echo '{"state":"OPEN","mergedAt":null,"title":"RPE-1","body":"","headRefName":"ada/rpe-1"}' ;;
+  98) sleep 1; echo '{"state":"MERGED","mergedAt":"2026-11-15T10:00:00Z","title":"RPE-1","body":"","headRefName":"x"}' ;;
   *) echo "error connecting to api.github.com" >&2; exit 1 ;;
 esac
 `);
@@ -118,7 +126,7 @@ for (const [name, toml] of [["jira", TOML], ["none", NO_TRACKER]] as const)
     assert.equal(snap.tracker, null, "the board's header gets no tracker links");
   });
 
-test("store: numbers per project, the floor, events folded, a bare number with one project", () => {
+test("store: numbers per project, the floor, events folded, a bare number with one project", async () => {
   const ws = openWorkspace(tempWorkspace(LOCAL()));
   const a = T.create(ws, { project: "RPE", title: "first" }, ADA);
   const b = T.create(ws, { project: "WEB", title: "web first" }, ADA);
@@ -142,7 +150,7 @@ test("store: numbers per project, the floor, events folded, a bare number with o
   T.relate(ws, "RPE-1", "blocked_by", "WEB-1", "ada");
   T.link(ws, "RPE-1", "https://example.com/x", "x", "ada");
   T.comment(ws, "RPE-1", "a comment", "ada");
-  T.move(ws, "RPE-1", "Todo", ALEX);
+  await T.move(ws, "RPE-1", "Todo", ALEX);
   const tk = T.load(ws, "RPE-1");
   assert.equal(tk.state, "Todo");
   assert.equal(tk.body, "more");
@@ -160,7 +168,7 @@ test("store: numbers per project, the floor, events folded, a bare number with o
   assert.equal(T.resolveKey(one, "12"), "RPE-12");
 });
 
-test("guard: Backlog needs the human's message, onward from In Review needs GitHub's merge, back is free", () => {
+test("guard: Backlog needs the human's message, Done needs this ticket's merged PR from any state, the rest is free", async () => {
   const dir = tempWorkspace(LOCAL());
   const ws = openWorkspace(dir);
   postMessage(ws, "ship the planner change once it is green");
@@ -170,32 +178,67 @@ test("guard: Backlog needs the human's message, onward from In Review needs GitH
   assert.throws(() => cliActor(ws, "zed"), /no such agent/);
 
   const tk = T.create(ws, { project: "RPE", title: "t" }, ADA);
-  assert.throws(() => checkMove(ws, tk, "Todo", agent), /REFUSED: RPE-1 is in Backlog/);
-  assert.throws(() => checkMove(ws, tk, "Todo", agent, { asked: "the planner" }), /at least 20/);
-  assert.throws(() => checkMove(ws, tk, "Todo", agent, { asked: "words nobody ever said here" }), /not in any of Alex's messages/);
-  assert.deepEqual(checkMove(ws, tk, "Todo", agent, { asked: "ship the   planner change" }), { asked: "ship the planner change" }, "from the message log");
-  assert.throws(() => checkMove(ws, tk, "Todo", agent, { asked: "ok" + " ".repeat(30) }), /at least 20/);
+  await assert.rejects(checkMove(ws, tk, "Todo", agent), /REFUSED: RPE-1 is in Backlog/);
+  await assert.rejects(checkMove(ws, tk, "Todo", agent, { asked: "the planner" }), /at least 20/);
+  await assert.rejects(checkMove(ws, tk, "Todo", agent, { asked: "words nobody ever said here" }), /not in any of Alex's messages/);
+  assert.deepEqual(await checkMove(ws, tk, "Todo", agent, { asked: "ship the   planner change" }), { asked: "ship the planner change" }, "from the message log");
+  await assert.rejects(checkMove(ws, tk, "Todo", agent, { asked: "ok" + " ".repeat(30) }), /at least 20/);
   // a row an agent posts is not the human's, whatever it says
   appendFileSync(ws.messages, JSON.stringify({ t: "2026-11-15T00:00:00Z", id: "a1", text: "words an agent wrote for itself", kind: "ada" }) + "\n");
-  assert.throws(() => checkMove(ws, tk, "Todo", agent, { asked: "words an agent wrote for itself" }), /not in any of Alex's messages/);
-  assert.deepEqual(checkMove(ws, tk, "Todo", ALEX), {}, "the human is never refused");
+  await assert.rejects(checkMove(ws, tk, "Todo", agent, { asked: "words an agent wrote for itself" }), /not in any of Alex's messages/);
+  assert.deepEqual(await checkMove(ws, tk, "Todo", ALEX), {}, "the human is never refused");
+  // Backlog straight to Done needs both
+  await assert.rejects(checkMove(ws, tk, "Done", agent, { asked: "ship the planner change" }), /Done is Alex's merge, from any state/);
+  assert.deepEqual(await checkMove(ws, tk, "Done", agent, { asked: "ship the planner change", merged: "#95" }), { asked: "ship the planner change", merged: "#95" });
+  assert.deepEqual(await checkMove(ws, tk, "Cancelled", agent, { asked: "ship the planner change" }), { asked: "ship the planner change" }, "Cancelled needs no PR");
 
   // the store runs the guard itself: no caller can skip it
-  assert.throws(() => T.move(ws, "RPE-1", "Todo", ADA), /REFUSED: RPE-1 is in Backlog/);
+  await assert.rejects(T.move(ws, "RPE-1", "Todo", ADA), /REFUSED: RPE-1 is in Backlog/);
   assert.equal(T.load(ws, "RPE-1").state, "Backlog");
-  T.move(ws, "RPE-1", "In Review", ALEX);
+  await T.move(ws, "RPE-1", "In Review", ALEX);
   const rev = T.load(ws, "RPE-1");
-  assert.throws(() => checkMove(ws, rev, "Done", agent), /Alex's merge/);
-  assert.throws(() => checkMove(ws, rev, "Done", agent, { merged: "yes" }), /PR number/);
-  assert.throws(() => checkMove(ws, rev, "Done", agent, { merged: "#96" }), /acme\/web#96 is OPEN, not merged/);
-  assert.throws(() => checkMove(ws, rev, "Done", agent, { merged: "#1" }), /could not ask GitHub about acme\/web#1: error connecting/);
-  assert.deepEqual(checkMove(ws, rev, "Done", agent, { merged: "#95" }), { merged: "#95" });
-  assert.deepEqual(checkMove(ws, rev, "In Progress", agent), {}, "back to work is free");
-  assert.throws(() => T.move(ws, "RPE-1", "Done", ADA, { merged: "#96" }), /not merged/);
-  assert.equal(T.load(ws, "RPE-1").state, "In Review");
+  await assert.rejects(checkMove(ws, rev, "Done", agent), /Alex's merge/);
+  await assert.rejects(checkMove(ws, rev, "Done", agent, { merged: "yes" }), /PR number/);
+  await assert.rejects(checkMove(ws, rev, "Done", agent, { merged: "#96" }), /acme\/web#96 is OPEN, not merged/);
+  await assert.rejects(checkMove(ws, rev, "Done", agent, { merged: "#1" }), /could not ask GitHub about acme\/web#1: error connecting/);
+  await assert.rejects(checkMove(ws, rev, "Done", agent, { merged: "#97" }), /acme\/web#97 is merged but is not RPE-1's: its title, body and branch \("ada\/rpe-10"\) never name RPE-1/);
+  assert.deepEqual(await checkMove(ws, rev, "Done", agent, { merged: "#95" }), { merged: "#95" }, "by its branch");
+  assert.deepEqual(await checkMove(ws, rev, "Done", agent, { merged: "#94" }), { merged: "#94" }, "by its title");
+  for (const to of ["In Progress", "Todo", "In Design", "In Testing", "Cancelled"] as const)
+    assert.deepEqual(await checkMove(ws, rev, to, agent), {}, `${to} is free`);
+  // back to work, then on to Done, still needs the PR
+  await T.move(ws, "RPE-1", "In Progress", ADA);
+  await assert.rejects(T.move(ws, "RPE-1", "Done", ADA), /Done is Alex's merge/);
+  await assert.rejects(T.move(ws, "RPE-1", "Done", ADA, { merged: "#96" }), /not merged/);
+  assert.equal(T.load(ws, "RPE-1").state, "In Progress");
+  assert.equal((await T.move(ws, "RPE-1", "Done", ADA, { merged: "#95" })).ticket.state, "Done");
   T.create(ws, { project: "WEB", title: "w" }, ADA);
-  T.move(ws, "WEB-1", "In Review", ALEX);
-  assert.throws(() => T.move(ws, "WEB-1", "Done", ADA, { merged: "#95" }), /WEB names no repo/);
+  await assert.rejects(T.move(ws, "WEB-1", "Done", ADA, { asked: "ship the planner change", merged: "#95" }), /WEB names no repo/);
+
+  assert.ok(mentions("drake/rpe-1-plan", "RPE-1") && mentions("Fixes RPE-1.", "RPE-1"));
+  assert.ok(!mentions("RPE-10", "RPE-1") && !mentions("XRPE-1", "RPE-1") && !mentions("RPE-1a", "RPE-1"));
+});
+
+test("guard: a legacy message kind is shown as the human's but is never quotable", async () => {
+  // the test config's legacy_message_kind is "alex"
+  const ws = openWorkspace(tempWorkspace(LOCAL()));
+  mkdirSync(ws.stateDir, { recursive: true });
+  appendFileSync(ws.messages, JSON.stringify({ t: "2026-11-15T00:00:00Z", id: "n1", text: "a note that reads like an order", kind: "alex" }) + "\n");
+  const tk = T.create(ws, { project: "RPE", title: "t" }, ADA);
+  await assert.rejects(checkMove(ws, tk, "Todo", ADA, { asked: "a note that reads like an order" }), /not in any of Alex's messages/);
+});
+
+test("store: GitHub is asked before the lock, so a slow answer holds up no other write", async () => {
+  const ws = openWorkspace(tempWorkspace(LOCAL()));
+  T.create(ws, { project: "RPE", title: "t" }, ADA);
+  await T.move(ws, "RPE-1", "In Review", ALEX);
+  const start = Date.now();
+  const moving = T.move(ws, "RPE-1", "Done", ADA, { merged: "#98" });
+  await new Promise((r) => setTimeout(r, 100));
+  T.label(ws, "RPE-1", "add", "task", "ada");
+  assert.ok(Date.now() - start < 900, "the label did not wait for GitHub");
+  assert.equal((await moving).ticket.state, "Done");
+  assert.deepEqual(T.load(ws, "RPE-1").labels, ["task"]);
 });
 
 test("store: a torn line costs one event, the next lands on a line of its own", () => {
@@ -209,15 +252,30 @@ test("store: a torn line costs one event, the next lands on a line of its own", 
   assert.equal(readFileSync(f, "utf8").split("\n").filter(Boolean).length, 4);
 });
 
-test("store: a held lock makes a move wait, and a stale one is broken", () => {
-  const ws = openWorkspace(tempWorkspace(LOCAL()));
-  T.create(ws, { project: "RPE", title: "t" }, ADA);
-  const lock = join(ws.stateDir, "tracker", "tickets", "RPE", ".locks", "RPE-1");
-  mkdirSync(lock, { recursive: true });
-  const old = new Date(Date.now() - 600_000);
-  utimesSync(lock, old, old);
-  assert.equal(T.move(ws, "RPE-1", "Todo", ALEX).ticket.state, "Todo");
-  assert.ok(!existsSync(lock), "the lock is released");
+test("lock: two processes at once never both hold it, and a killed holder's lock is free", async () => {
+  const dir = tempDir();
+  const counter = join(dir, "n");
+  writeFileSync(counter, "0");
+  const lockJs = fileURLToPath(new URL("../src/tickets/lock.js", import.meta.url));
+  // each writer reads, waits, writes: without the lock two of them lose an increment
+  const writer = `const { withLock } = await import(${JSON.stringify(lockJs)});
+const fs = await import("node:fs");
+for (let i = 0; i < 40; i++) withLock(${JSON.stringify(join(dir, "l"))}, () => {
+  const n = Number(fs.readFileSync(${JSON.stringify(counter)}, "utf8"));
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2);
+  fs.writeFileSync(${JSON.stringify(counter)}, String(n + 1));
+});`;
+  const runOne = () => new Promise<number>((resolve) => spawn(process.execPath, ["--input-type=module", "-e", writer], { stdio: "inherit" }).on("exit", (c) => resolve(c ?? 1)));
+  assert.deepEqual(await Promise.all([runOne(), runOne(), runOne()]), [0, 0, 0]);
+  assert.equal(readFileSync(counter, "utf8"), "120");
+
+  const holder = spawn(process.execPath, ["--input-type=module", "-e", `const { withLock } = await import(${JSON.stringify(lockJs)});
+withLock(${JSON.stringify(join(dir, "k"))}, () => { process.stdout.write("held\\n"); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000); });`]);
+  await new Promise<void>((r) => holder.stdout.once("data", () => r()));
+  assert.throws(() => withLock(join(dir, "k"), () => 0, 100), /another writer holds/);
+  holder.kill("SIGKILL");
+  await new Promise((r) => holder.on("exit", r));
+  assert.equal(withLock(join(dir, "k"), () => "mine"), "mine");
 });
 
 test("the CLI: create, list by project, move with its guards, describe appends, wiki edit with a base", () => {

@@ -720,7 +720,7 @@ function cmdDoctor(ws: Workspace, argv: string[]) {
   });
 }
 
-const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void> = {
+const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void | Promise<number>> = {
   "up": cmdUp,
   "down": cmdDown,
   "restart-lead": cmdRestartLead,
@@ -778,7 +778,7 @@ function cmdHook(argv: string[], workspace: string | undefined): number {
   return r.code;
 }
 
-export function main(argv: string[]): number {
+export function main(argv: string[]): number | Promise<number> {
   let workspace: string | undefined;
   let i = 0;
   for (; i < argv.length; i++) {
@@ -818,10 +818,19 @@ process.stdout.on("error", (e: NodeJS.ErrnoException) => {
   process.exit(0);
 });
 
-try {
-  process.exitCode = main(process.argv.slice(2));
-} catch (e) {
+const failed = (e: unknown): number => {
   if (!(e instanceof FactoryError)) throw e;
   console.error(`factory: ${e.message}`);
-  process.exitCode = e.code;
+  return e.code;
+};
+try {
+  const r = main(process.argv.slice(2));
+  if (typeof r === "number") process.exitCode = r;
+  else
+    r.then((code) => (process.exitCode = code), (e: unknown) => (process.exitCode = failed(e))).catch((e: unknown) => {
+      console.error(e);
+      process.exitCode = 1;
+    });
+} catch (e) {
+  process.exitCode = failed(e);
 }

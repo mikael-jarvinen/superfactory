@@ -100,8 +100,7 @@ export interface Tracker {
   queueJql?: string;
   keyPattern?: RegExp;
   status: Partial<Record<State, string>>;
-  // kind = "local" only: the projects, where their tickets and wiki live, and the files beside the
-  // message log that hold the human's own words (as "### <name> ..." sections) for the Backlog guard.
+  // kind = "local" only: the projects, and where their tickets and wiki live.
   projects: TrackerProject[];
   dir?: string;
 }

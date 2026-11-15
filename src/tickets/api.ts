@@ -56,7 +56,7 @@ function ticketsGet(ws: Workspace, rest: string, q: URLSearchParams): Reply {
   return ok(T.load(ws, key));
 }
 
-function ticketsPost(ws: Workspace, rest: string, b: Record<string, unknown>): Reply {
+async function ticketsPost(ws: Workspace, rest: string, b: Record<string, unknown>): Promise<Reply> {
   const human: Actor = { human: true, name: ws.config.human.name };
   if (!rest) {
     const labels = Array.isArray(b.labels) ? b.labels.filter((l): l is string => typeof l === "string") : [];
@@ -70,7 +70,7 @@ function ticketsPost(ws: Workspace, rest: string, b: Record<string, unknown>): R
   switch (b.op) {
     case "move": {
       const to = T.checkState(str(b.to, "to"));
-      tk = T.move(ws, key, to, human).ticket;
+      tk = (await T.move(ws, key, to, human)).ticket;
       break;
     }
     case "label": {
@@ -134,7 +134,7 @@ function wikiPost(ws: Workspace, rest: string, b: Record<string, unknown>): Repl
 }
 
 // null when the path is not the tracker's, or the workspace has none: the caller answers 404.
-export function trackerApi(ws: Workspace, method: string, rawUrl: string, body?: Record<string, unknown>): Reply | null {
+export async function trackerApi(ws: Workspace, method: string, rawUrl: string, body?: Record<string, unknown>): Promise<Reply | null> {
   if (!T.enabled(ws)) return null;
   const u = new URL(rawUrl, "http://board");
   const path = u.pathname;
@@ -142,7 +142,7 @@ export function trackerApi(ws: Workspace, method: string, rawUrl: string, body?:
   const tickets = path.startsWith("/api/tickets");
   const rest = path.slice(tickets ? "/api/tickets".length : "/api/wiki".length).replace(/^\//, "");
   try {
-    if (method === "POST") return tickets ? ticketsPost(ws, rest, body ?? {}) : wikiPost(ws, rest, body ?? {});
+    if (method === "POST") return tickets ? await ticketsPost(ws, rest, body ?? {}) : wikiPost(ws, rest, body ?? {});
     return tickets ? ticketsGet(ws, rest, u.searchParams) : wikiGet(ws, rest, u.searchParams);
   } catch (e) {
     if (e instanceof FactoryError) return bad(e.message);

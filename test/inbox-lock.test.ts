@@ -42,7 +42,7 @@ test("the inbox lock without flock(1) throws, rather than reading as free", { sk
   const bin = process.env.FLOCK_BIN;
   process.env.FLOCK_BIN = "/nonexistent";
   try {
-    assert.throws(() => tryLock(join(dir, "no-flock.lock")), /the inbox lock: flock\(1\) failed \(exit 127: .*ENOENT/);
+    assert.throws(() => tryLock(join(dir, "no-flock.lock")), /the lock \S+no-flock.lock: flock\(1\) failed \(exit 127: .*ENOENT/);
   } finally {
     if (bin === undefined) delete process.env.FLOCK_BIN;
     else process.env.FLOCK_BIN = bin;

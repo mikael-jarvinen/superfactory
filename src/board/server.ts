@@ -524,9 +524,10 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
     if (req.method === "POST" && trackerEnabled(ws) && isTrackerApi(path)) {
       if (!sameSite(req)) return json(res, 403, { ok: false, error: "refused: not from the board" });
       readJson(req, res, (body) => {
-        const r = trackerApi(ws, "POST", req.url ?? "/", body);
-        if (r) json(res, r.code, r.body);
-        else send(res, 404, "not found", "text/plain; charset=utf-8");
+        trackerApi(ws, "POST", req.url ?? "/", body).then(
+          (r) => (r ? json(res, r.code, r.body) : send(res, 404, "not found", "text/plain; charset=utf-8")),
+          (e: unknown) => json(res, 500, { ok: false, error: String((e as Error)?.message ?? e) }),
+        );
       });
       return;
     }
@@ -571,8 +572,11 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
     }
     if (path === "/api/messages") return json(res, 200, messagesView(ws, sessions, receipts));
     if (isTrackerApi(path)) {
-      const r = trackerApi(ws, "GET", req.url ?? "/");
-      return r ? json(res, r.code, r.body) : send(res, 404, "not found", "text/plain; charset=utf-8");
+      trackerApi(ws, "GET", req.url ?? "/").then(
+        (r) => (r ? json(res, r.code, r.body) : send(res, 404, "not found", "text/plain; charset=utf-8")),
+        (e: unknown) => json(res, 500, { ok: false, error: String((e as Error)?.message ?? e) }),
+      );
+      return;
     }
     if (path.startsWith("/attachments/")) {
       // A pasted screenshot, stored beside the message log. The name was minted server-side, so a
