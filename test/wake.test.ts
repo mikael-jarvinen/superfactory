@@ -424,6 +424,24 @@ test("from a host, a failed send to an agent it cannot wake says it is off and t
   assert.equal(run({ hook_event_name: "PostToolUseFailure", tool_name: "SendMessage", tool_input: { to: "bea" } }).status, 0, "no error said");
 });
 
+test("from a host, a failed send whose workspace does not load is answered as the event it is", () => {
+  const { ws } = fakeFleet(HOSTED_TOML);
+  writeFileSync(join(ws, "factory.toml"), "[[agents]\n");
+  const run = (ev: Record<string, unknown>) =>
+    factory(undefined, ["--workspace", ws, "hook", "wake", "--from-host", "far"], { env: { CLAUDE_BIN: join(ws, "bin", "claude") }, input: JSON.stringify(ev) });
+  const answered = (r: { stdout: string }) => (JSON.parse(r.stdout) as { hookSpecificOutput: { hookEventName: string; additionalContext: string } }).hookSpecificOutput;
+  let r = run({ ...FAILED_SEND, tool_input: { ...FAILED_SEND.tool_input, to: "bea" } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(answered(r).hookEventName, "PostToolUse");
+  assert.match(answered(r).additionalContext, /^wake check failed: [\s\S]*not valid TOML[\s\S]*; the failed send to bea is not explained$/);
+  r = run({ hook_event_name: "PostToolUseFailure", tool_name: "SendMessage", tool_input: { to: "bea", message: "hi" }, error: "No agent named 'bea' is reachable." });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(answered(r).hookEventName, "PostToolUseFailure");
+  assert.equal(readFileSync(join(ws, "logs", "wake-hook.log"), "utf8").trim().split("\n").length, 2);
+  r = run({ ...FAILED_SEND, hook_event_name: "PreToolUse", tool_input: { ...FAILED_SEND.tool_input, to: "bea" } });
+  assert.equal(answered(r).hookEventName, "PreToolUse");
+});
+
 test("only a hosted agent's settings explain a failed send", () => {
   const dir = tempWorkspace(HOSTED_TOML);
   after(() => rmSync(dir, { recursive: true, force: true }));

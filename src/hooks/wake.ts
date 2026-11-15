@@ -26,9 +26,12 @@ export const recipient = (to: unknown): string | null => {
   return n || null;
 };
 
-// The hook's own error: the send goes, and the error is logged and told to the sender. A workspace
-// whose config does not load logs to its default logs/; with no workspace found there is no log.
-function failOpen(logsDir: string | null, sender: string, to: string, e: unknown): HookResult {
+type HookEvent = "PreToolUse" | "PostToolUse" | "PostToolUseFailure";
+
+// The hook's own error: the send goes, or after it the failure is left unexplained, and the error is
+// logged and told to the sender under the event it answers. A workspace whose config does not load
+// logs to its default logs/; with no workspace found there is no log.
+function failOpen(event: HookEvent, logsDir: string | null, sender: string, to: string, e: unknown): HookResult {
   const error = e instanceof Error ? e.message : String(e);
   const stack = e instanceof Error ? (e.stack ?? error) : error;
   let logged = logsDir ? "" : "\n(no workspace found, so not logged)";
@@ -38,10 +41,10 @@ function failOpen(logsDir: string | null, sender: string, to: string, e: unknown
   } catch (le) {
     logged = `\n(and it could not be logged: ${(le as Error).message})`;
   }
-  const said = `wake check failed: ${error}; message sent without a wake check`;
+  const said = event === "PreToolUse" ? `wake check failed: ${error}; message sent without a wake check` : `wake check failed: ${error}; the failed send to ${to} is not explained`;
   return {
     code: 0,
-    stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: said } }),
+    stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: said } }),
     stderr: `factory hook wake: ${said}\n${stack}${logged}\n`,
   };
 }
@@ -56,6 +59,7 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   const fromHost = typeof v["from-host"] === "string" ? v["from-host"] : undefined;
   let to: string | null = null;
   let failedSend = false;
+  let event: HookEvent = "PreToolUse";
   let sender = `session ? in ?${fromHost ? ` on ${fromHost}` : ""}`;
   try {
     const ev = JSON.parse(input) as { hook_event_name?: unknown; session_id?: unknown; cwd?: unknown; tool_input?: { to?: unknown }; tool_response?: { success?: unknown; message?: unknown }; error?: unknown };
@@ -68,6 +72,7 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
       const said = ev.hook_event_name === "PostToolUse" ? (ev.tool_response?.success === false ? ev.tool_response.message : undefined) : ev.error;
       if (!fromHost || typeof said !== "string" || !NOT_REACHABLE.test(said)) return { code: 0 };
       failedSend = true;
+      event = ev.hook_event_name;
     }
   } catch (e) {
     return { code: 0, stderr: `factory hook wake: the hook's input is not JSON (${(e as Error).message}); message sent without a wake check\n` };
@@ -79,7 +84,7 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
     dir = resolveWorkspace({ flag: workspace });
     ws = openWorkspace(dir);
   } catch (e) {
-    return failOpen(dir && join(dir, "logs"), sender, to, e);
+    return failOpen(event, dir && join(dir, "logs"), sender, to, e);
   }
   const agent = ws.config.agents.find((a) => a.name === to);
   if (!agent) return { code: 0 };
@@ -97,7 +102,7 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   try {
     w = wake(ws, agent, { waitS, deadline, ...(fromHost ? { t: local } : {}) });
   } catch (e) {
-    return failOpen(ws.logsDir, sender, to, e);
+    return failOpen("PreToolUse", ws.logsDir, sender, to, e);
   }
   switch (w.is) {
     case "live":
