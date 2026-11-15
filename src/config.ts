@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { parse, TomlError } from "smol-toml";
 import { capitalize, FactoryError } from "./util.js";
 
@@ -20,7 +20,16 @@ export interface Repo {
   base: string;
   gateChecks: string[];
   localChecks: string[];
+  // A [hosts] key: the checkout is on that machine, and `path` is its absolute path there.
+  host?: string;
+  // How git reaches GitHub for this checkout: its host's git_over, or "https" for one here.
+  gitOver: GitOver;
 }
+
+// "https": GitHub over https through gh, whatever the remote says, so no session needs the ssh key.
+// "ssh": the checkout's origin as it is, for a host with the key and no gh.
+export const GIT_OVER = ["https", "ssh"] as const;
+export type GitOver = (typeof GIT_OVER)[number];
 
 export interface Stack {
   key: string;
@@ -56,6 +65,20 @@ export interface Agent {
   appendix: string[];
   addDirs?: string[];
   remoteControl: boolean;
+  cwd?: string;
+  permissionMode?: string;
+  autocompact?: string;
+  // A [hosts] key: the agent's sessions run on that machine, through its factory daemon.
+  host?: string;
+}
+
+// Another machine's factory daemon. remote.ts says what a request carries.
+export interface Host {
+  name: string;
+  url: string;
+  tokenFile: string;
+  hashFiles: string[];
+  gitOver: GitOver;
 }
 
 export interface Tracker {
@@ -70,17 +93,30 @@ export interface Config {
   file: string;
   dir: string;
   human: { name: string; legacyMessageKind?: string };
-  github: { org?: string; bots: string[]; ownRepos: string[] };
+  github: { org?: string; bots: string[]; ownRepos: string[]; leadMerges: string[] };
   paths: { repos: string; state: string; logs: string };
   repos: Record<string, Repo>;
   stacks: Record<string, Stack>;
+  hosts: Record<string, Host>;
   roles: Partial<Record<RoleName, Role>>;
   agents: Agent[];
   tracker: Tracker;
   board: { host: string; port: number };
+  // false lets a session message a session on another machine with nobody approving each send
+  peers: { isolateMachines: boolean };
   gate: { proseRemark?: number; reviewBot?: string };
-  watchers: { queueEveryMinutes?: number; roundMinute?: number; model?: string; relayModel?: string };
+  watchers: { queueEveryMinutes?: number; roundMinute?: number; model?: string; facts: FactsFile[] };
   worktree: { toolWritten: string[] };
+}
+
+// A file something outside the factory writes, which the round reads as more facts. A line
+// escalates when it has one of the escalate words, or sits under a section whose title starts with
+// one of every_line_in. A missing file, or one older than max_age_minutes, escalates too.
+export interface FactsFile {
+  file: string;
+  maxAgeMinutes?: number;
+  escalate: string[];
+  everyLineIn: string[];
 }
 
 export class ConfigError extends FactoryError {
@@ -207,7 +243,10 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   const ownRepos = gh.strs("own_repos") ?? [];
   const notSlug = ownRepos.find((r) => !/^[\w.-]+\/[\w.-]+$/.test(r));
   if (notSlug !== undefined) gh.bad("own_repos", `must name repos as owner/repo, got ${show(notSlug)}`);
-  const github = { org: gh.str("org"), bots: gh.strs("bots") ?? [], ownRepos };
+  const leadMerges = gh.strs("lead_merges") ?? [];
+  const notSlug2 = leadMerges.find((r) => !/^[\w.-]+\/[\w.-]+$/.test(r));
+  if (notSlug2 !== undefined) gh.bad("lead_merges", `must name repos as owner/repo, got ${show(notSlug2)}`);
+  const github = { org: gh.str("org"), bots: gh.strs("bots") ?? [], ownRepos, leadMerges };
   gh.done();
 
   const p = reader(problems, "paths", top.table("paths") ?? {});
@@ -228,10 +267,18 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const r = reader(problems, where, v);
     const remote = r.str("remote", true);
     if (remote && !/^[\w.-]+\/[\w.-]+$/.test(remote)) r.bad("remote", `must look like owner/repo, got ${show(remote)}`);
+    const host = r.str("host");
+    const rawPath = r.str("path");
+    // A path on another machine: nothing here can expand it, and no default would name it.
+    if (host && !(rawPath && isAbsolute(rawPath) && !/[~$]/.test(rawPath)))
+      r.bad("path", `${key} lives on host ${host}, so give its checkout's absolute path there, with no ~ or $${rawPath ? `, got ${show(rawPath)}` : ""}`);
     repos[key] = {
       key,
+      host,
+      gitOver: "https",   // set from the host's git_over once [hosts] is read
       remote: remote ?? "",
-      path: path(r, "path", r.str("path") ?? key, paths.repos) ?? "",
+      // Normalized: no ., .., doubled or trailing slashes. Symlinks are not resolved; that would need the host.
+      path: host ? (rawPath ? posix.normalize(rawPath).replace(/(.)\/+$/, "$1") : "") : (path(r, "path", rawPath ?? key, paths.repos) ?? ""),
       base: r.str("base") ?? "main",
       gateChecks: r.strs("gate_checks") ?? [],
       localChecks: r.strs("local_checks") ?? [],
@@ -253,6 +300,8 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const r = reader(problems, where, v);
     const stackRepos = repoKeys(r, "repos", r.strs("repos", true)) ?? [];
     if (r.strs("repos") && stackRepos.length === 0) r.bad("repos", "must name at least one repo");
+    for (const k of stackRepos)
+      if (repos[k]?.host) r.bad("repos", `repo ${k} lives on host ${repos[k]!.host}, and a stack's slots and script run on this machine`);
     const slots = r.int("slots", true, 1) ?? 1;
     const reserve = r.ints("reserve") ?? [];
     for (const n of reserve) if (n < 0 || n > slots) r.bad("reserve", `slot ${n} is outside 0..${slots}`);
@@ -281,6 +330,8 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   }
 
   const roles: Partial<Record<RoleName, Role>> = {};
+  // As written, for an agent on a host: its cwd is a path there, so nothing here expands it.
+  const rolesCwd: Partial<Record<RoleName, string>> = {};
   const rolesT = top.table("roles") ?? {};
   for (const [name, v] of Object.entries(rolesT)) {
     const where = `roles.${name}`;
@@ -294,7 +345,9 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     }
     const r = reader(problems, where, v);
     const role = name as RoleName;
-    const cwd = path(r, "cwd", r.str("cwd", role !== "builder"));
+    const rawCwd = r.str("cwd", role !== "builder");
+    if (rawCwd) rolesCwd[role] = rawCwd;
+    const cwd = path(r, "cwd", rawCwd);
     if (role === "builder" && cwd) r.bad("cwd", "a builder starts in its worktree, so it takes no cwd");
     const settings = r.str("settings", true) ?? "";
     roles[role] = {
@@ -311,6 +364,39 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     };
     r.done();
   }
+
+  const hosts: Record<string, Host> = {};
+  for (const [key, v] of Object.entries(top.table("hosts") ?? {})) {
+    const where = `hosts.${key}`;
+    if (!isTable(v)) {
+      problems.push(`${where}: must be a table, got ${show(v)}`);
+      continue;
+    }
+    const r = reader(problems, where, v);
+    if (key === "local") problems.push(`${where}: "local" names this machine's own sessions; give the host another name`);
+    const url = r.str("url", true);
+    if (url && !/^https?:\/\/[^/]+\/?$/.test(url)) r.bad("url", `must be http(s)://host:port, got ${show(url)}`);
+    hosts[key] = {
+      name: key,
+      url: (url ?? "").replace(/\/$/, ""),
+      tokenFile: path(r, "token_file", r.str("token_file") ?? "~/.config/factory/token") ?? "",
+      hashFiles: (r.strs("hash_files", true) ?? []).map((f) => path(r, "hash_files", f) ?? ""),
+      gitOver: "https",
+    };
+    const over = r.str("git_over");
+    if (over !== undefined) {
+      if ((GIT_OVER as readonly string[]).includes(over)) hosts[key]!.gitOver = over as GitOver;
+      else r.bad("git_over", `must be one of ${GIT_OVER.join(", ")}, got ${show(over)}`);
+    }
+    if (Array.isArray(v.hash_files) && v.hash_files.length !== 2)
+      r.bad("hash_files", `must name two files, the daemon's config then the workspace config, got ${v.hash_files.length}`);
+    r.done();
+  }
+  for (const repo of Object.values(repos))
+    if (repo.host && hosts[repo.host]) repo.gitOver = hosts[repo.host]!.gitOver;
+  for (const repo of Object.values(repos))
+    if (repo.host && !hosts[repo.host])
+      problems.push(`repos.${repo.key}.host: no host ${show(repo.host)}; hosts: ${Object.keys(hosts).join(", ") || "none"}`);
 
   const agents: Agent[] = [];
   const agentsV = top.raw("agents");
@@ -345,14 +431,43 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const appendix = r.strs("appendix") ?? [];
     const resolved = appendix.map((a) => (a.startsWith("repo:") ? a : (path(r, "appendix", a) ?? a)));
     const addDirs = repoKeys(r, "add_dirs", r.strs("add_dirs"));
+    const rawCwd = r.str("cwd");
+    const host = r.str("host");
+    const cwd = host ? rawCwd : path(r, "cwd", rawCwd);
+    if (role === "builder" && cwd) r.bad("cwd", "a builder starts in its worktree, so it takes no cwd");
+    const there = rawCwd ?? (role ? rolesCwd[role] : undefined);
+    if (host && there !== undefined && !(isAbsolute(there) && !/[~$]/.test(there)))
+      r.bad(rawCwd ? "cwd" : "host", `${name} runs on host ${host}, so ${rawCwd ? "its cwd" : `roles.${role}.cwd`} must be an absolute path there, with no ~ or $, got ${show(there)}`);
+    if (host && !hosts[host]) r.bad("host", `no host ${show(host)}; hosts: ${Object.keys(hosts).join(", ") || "none"}`);
+    const workRepos = stack ? (stacks[stack]?.repos ?? []) : (agentRepos ?? []);
+    // A builder runs where its worktrees are, and they are under its repos' checkouts.
+    if (role === "builder") {
+      const away = workRepos.find((k) => repos[k] && repos[k]!.host !== host);
+      if (away !== undefined) {
+        const rh = repos[away]!.host;
+        r.bad(host ? "host" : stack ? "stack" : "repos",
+          `repo ${away} lives on ${rh ? `host ${rh}` : "this machine"}, and a builder runs where its worktrees are, so ${name} needs ${rh ? `host = ${show(rh)}` : "no host"}`);
+      }
+      if (host)
+        for (const a of appendix.filter((x) => x.startsWith("repo:")))
+          r.bad("appendix", `${a} is read from the checkout on this machine, and ${name}'s checkouts are on host ${host}`);
+    }
+    // An --add-dir is a path on the machine that runs the session.
+    for (const k of addDirs ?? (role ? roles[role]?.addDirs : undefined) ?? [])
+      if (repos[k]?.host && repos[k]!.host !== host)
+        r.bad(addDirs ? "add_dirs" : "role", `repo ${k} lives on host ${repos[k]!.host}, and ${name} runs ${host ? `on host ${host}` : "on this machine"}, so it cannot be an --add-dir${addDirs ? "" : ` (from roles.${role}.add_dirs)`}`);
     agents.push({
       name,
       role,
       stack,
-      repos: stack ? (stacks[stack]?.repos ?? []) : (agentRepos ?? []),
+      repos: workRepos,
       appendix: resolved,
       addDirs,
       remoteControl: r.bool("remote_control") ?? false,
+      cwd,
+      permissionMode: r.str("permission_mode"),
+      autocompact: r.str("autocompact"),
+      host,
     });
     r.done();
   });
@@ -398,6 +513,10 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   const board = { host: b.str("host") ?? "localhost", port: b.int("port", false, 1, 65535) ?? 8787 };
   b.done();
 
+  const pe = reader(problems, "peers", top.table("peers") ?? {});
+  const peers = { isolateMachines: pe.bool("isolate_machines") ?? true };
+  pe.done();
+
   const g = reader(problems, "gate", top.table("gate") ?? {});
   const gate = { proseRemark: g.int("prose_remark", false, 1), reviewBot: g.str("review_bot") };
   g.done();
@@ -407,8 +526,19 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     queueEveryMinutes: w.int("queue_every_minutes", false, 1),
     roundMinute: w.int("round_minute", false, 0, 59),
     model: w.str("model"),
-    relayModel: w.str("relay_model"),
+    facts: [] as FactsFile[],
   };
+  const factsV = w.raw("facts");
+  if (factsV !== undefined && !Array.isArray(factsV)) problems.push(`watchers.facts: must be an array of tables ([[watchers.facts]]), got ${show(factsV)}`);
+  (Array.isArray(factsV) ? factsV : []).forEach((v, i) => {
+    const where = `watchers.facts[${i}]`;
+    if (!isTable(v)) return void problems.push(`${where}: must be a table, got ${show(v)}`);
+    const f = reader(problems, where, v);
+    const file = path(f, "file", f.str("file", true));
+    const ff = { file: file ?? "", maxAgeMinutes: f.int("max_age_minutes", false, 1), escalate: f.strs("escalate") ?? [], everyLineIn: f.strs("every_line_in") ?? [] };
+    f.done();
+    if (file) watchers.facts.push(ff);
+  });
   w.done();
 
   const wt = reader(problems, "worktree", top.table("worktree") ?? {});
@@ -420,6 +550,6 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   return {
     file: resolve(file), dir,
     human: { name: humanName, legacyMessageKind },
-    github, paths, repos, stacks, roles, agents, tracker, board, gate, watchers, worktree,
+    github, paths, repos, stacks, hosts, roles, agents, tracker, board, peers, gate, watchers, worktree,
   };
 }

@@ -8,7 +8,9 @@ machine or a company lives in a workspace that the program reads.
 ## Install
 
 You need Node 22 or later, Claude Code, the GitHub CLI `gh` (logged in), and git 2.31 or later.
-macOS is the only platform built so far.
+macOS is the platform built in full. On Linux, `factory schedule run` is the scheduler in place of
+launchd and serves the board (see "Off macOS" below), and the inbox lock uses util-linux's
+`flock(1)`.
 
 ```sh
 git clone <this repo> superfactory
@@ -40,11 +42,13 @@ A workspace contains:
 | File | When it is needed |
 |---|---|
 | `factory.toml` | Always. |
-| `CLAUDE.md` in `roles.lead.cwd` | Always. The lead reads it first. Skills in `.claude/skills/` next to it load too. |
-| `CLAUDE.md` in `roles.reviewer.cwd` | When config has a reviewer. |
-| `CLAUDE.md` in `roles.designer.cwd` | When config has a designer. The `designer` settings template lets it write only in `work/` there, which the launch creates; ignore that directory in git. |
-| `prompts/round.md`, `prompts/relay.md` | Always. The relay prompt must contain `{text}`. |
+| `CLAUDE.md` in `roles.lead.cwd` | When the lead has no `cwd` of its own. The lead reads it first. Skills in `.claude/skills/` next to it load too. |
+| `CLAUDE.md` in `roles.reviewer.cwd` | When config has a reviewer without its own `cwd`. |
+| `CLAUDE.md` in `roles.designer.cwd` | When config has a designer without its own `cwd`. The `designer` settings template lets it write only in `work/` there, which the launch creates; ignore that directory in git. |
+| Each `[[watchers.facts]]` `file` | When config names one. Something outside the factory writes it; the round reads it as more facts. |
 | `prompts/queue.md` | When `tracker.kind` is not `"none"`. |
+| `CLAUDE.md` in an agent's own `cwd` | When an agent gives one. It starts there instead of in its role's `cwd`. The `designer` template's `work/` goes there too; ignore it in git. |
+| `[hosts.<name>]` `token_file` and `hash_files` | When an agent names a `host`. Its sessions run on that machine, and every session operation is a request to the factory daemon there. `hash_files` names exactly two files: the daemon's config, then the workspace config it launches from. The agent's `cwd`, or its role's, is a path on that machine: absolute, with no `~` or `$`. A host that does not answer leaves its agents unknown, never stopped or dropped, wherever the fleet is shown. A builder runs where its worktrees are, so a builder with a `host` needs every one of its repos to name that `host` too, with an absolute `path` there. Such a repo is in no stack, no agent elsewhere has it as an `--add-dir`, and its builder takes no `repo:` appendix items. `git_over` is `"https"` unless set: every git that reaches GitHub there, the daemon's fetches and the sessions' pushes, goes over https through gh. Set `git_over = "ssh"` for a machine with an ssh key for GitHub and no gh login, and they use each checkout's origin as it is. |
 | Each file in an agent's `appendix` | When an agent names it. A `repo:` entry lives in the repo checkout instead. |
 | Each `stacks.<name>.script` | When a stack names one. [examples/stacks/app.sh](examples/stacks/app.sh) is a minimal one to start from; the contract is in [docs/design.md](docs/design.md). |
 | A settings or `mcp_config` file | When a role names one by path. |
@@ -111,7 +115,8 @@ The human:
 | `factory status` | Sessions, and every open work item. |
 | `factory messages [-n 20]` | The last messages on the message page. |
 | `factory board [--stop]` | Start or stop the board alone. |
-| `factory schedule install\|uninstall\|status` | The launchd jobs for the watchers. |
+| `factory schedule install\|uninstall\|status` | The launchd jobs for the watchers. Off macOS, `status` reads the scheduler and the other two point at it. |
+| `factory schedule run` | Off macOS: the scheduler, in the foreground. |
 
 The lead:
 
@@ -154,3 +159,48 @@ Scripts and hooks. Nobody types these; they are listed so you can recognise them
 
 [docs/design.md](docs/design.md) covers the program and workspace split, `factory.toml`, the stack
 contract and the Claude Code integration.
+
+## Off macOS
+
+launchd runs the watchers' jobs on macOS. Elsewhere `factory schedule run` does: one long-running
+process per workspace that runs the same jobs at the same calendar times, serves the board, and
+keeps its state in `logs/run/scheduler.json`, which `schedule status`, the doctor and the round
+read. It reads `[watchers]` when it starts, so a config change takes a restart. A run in flight is
+detached and outlives a restart of the scheduler, which finds it again by pid and start time. Over
+`--memory-limit-mb` (512) it exits 75. On each check it also looks for a message from the human that
+the lead has not seen for `--unanswered-minutes` (12), and posts one alert to the message log for
+it, which the page shows. The lead seeing that message, or a later one, ends the episode. When a run
+ends, including one that ended while the scheduler was down, it kills what the run left in its
+process group, as launchd does: on Linux, only within the scheduler's own cgroup, and never a claude
+process or a process still running under one. While no claude is found at `CLAUDE_BIN` (or on
+PATH), the group is kept and nothing is killed until one is found. Run it as a systemd user unit:
+
+```ini
+# ~/.config/systemd/user/factory-scheduler.service
+[Unit]
+Description=superfactory scheduler
+
+[Service]
+# the jobs need claude and gh on PATH, which a user unit's own PATH may not have
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env factory --workspace %h/my-workspace schedule run
+Restart=on-failure
+# a run in flight outlives a restart of the scheduler; the scheduler clears what an ended run leaves
+KillMode=process
+
+[Install]
+WantedBy=default.target
+```
+
+Then `systemctl --user enable --now factory-scheduler`, and `loginctl enable-linger` so it runs while
+you are logged out.
+
+On Linux the inbox lock is a `flock(1)` on `logs/run/inbox.lock`, held by the board's sweep or by
+`factory board --inbox`, and gone when its holder exits. It needs util-linux's `flock`: one without
+`-E`, such as busybox's, is refused rather than trusted. `FLOCK_BIN` names another binary. A broken
+lock does not show in the lead's session: its Stop hook reads a lock it cannot take as held.
+`factory board --inbox` exits with the flock error in its own output. The board's sweep, in
+`schedule run` or a standalone `board --serve`, logs it to stderr and to
+`logs/watcher-failures.log`, but it takes the lock only when a message is pending, so a broken lock
+stays silent until a message arrives, and that message is not delivered while the lock stays
+broken. A `flock(1)` killed at its 2 s timeout fails the same way.

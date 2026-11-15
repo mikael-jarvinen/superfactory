@@ -1,11 +1,13 @@
-import { accessSync, constants, existsSync, readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
-import type { Agent, RoleName } from "./config.js";
+import { existsSync, statSync } from "node:fs";
+import type { Agent, Repo, RoleName } from "./config.js";
 import { allRecs, BUSY, IN_REVIEW, type Rec } from "./state.js";
 import type { Workspace } from "./workspace.js";
-import { die, pyRepr, pyStr, run, sleep } from "./util.js";
-import { branchPushed, worktreeDirty } from "./worktree.js";
+import { ask, Unreachable } from "./remote.js";
+import { agentSessions, isAgentSession, pick, type Transport, transportFor, transports } from "./transport.js";
+import { die, pyRepr, pyStr, realpathLoose, sleep } from "./util.js";
+import { branchPushed, worktreeDirty, worktreesDir } from "./worktree.js";
+
+export { claudeBin, executable } from "./claude-bin.js";
 
 export interface Session {
   id?: string;
@@ -15,25 +17,10 @@ export interface Session {
   status?: string;
   cwd?: string;
   updatedAt?: string;
-  startedAt?: string;
+  // epoch milliseconds in `claude agents --json`, which gives no other time
+  startedAt?: string | number;
   createdAt?: string;
   [k: string]: unknown;
-}
-
-export const executable = (p: string) => {
-  try {
-    accessSync(p, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-// $CLAUDE_BIN, else claude on PATH, else ~/.local/bin/claude.
-export function claudeBin(env: NodeJS.ProcessEnv = process.env): string {
-  if (env.CLAUDE_BIN) return env.CLAUDE_BIN;
-  for (const d of (env.PATH ?? "").split(delimiter)) if (d && executable(join(d, "claude"))) return join(d, "claude");
-  return join(homedir(), ".local", "bin", "claude");
 }
 
 export const agents = (ws: Workspace) => ws.config.agents;
@@ -50,71 +37,81 @@ export function agentOrDie(ws: Workspace, name: string): Agent {
   return a;
 }
 
-export function sessions(includeDone = false): Session[] {
-  const r = run(claudeBin(), ["agents", "--json", ...(includeDone ? ["--all"] : [])]);
-  if (r.status !== 0) die(`\`claude agents --json\` failed: ${r.stderr.trim()}`);
-  try {
-    return JSON.parse(r.stdout || "[]") as Session[];
-  } catch {
-    return die("`claude agents --json` returned something that is not JSON");
-  }
+export function findSession(t: Transport, name: string, includeDone = false): Session | null {
+  return pick(t, t.sessions(includeDone).filter(isAgentSession(name)));
 }
 
-// `claude agents --json` is a registry, not a probe: after the daemon retires an idle worker and
-// exits, the listing keeps the session at its last state. The roster names the supervisor pid; a
-// dead pid or a missing control socket means no background session is alive, whatever the listing
-// says. These are undocumented Claude Code internals, so they stay behind this one function.
-// Probed on every call, never cached.
-export function daemonAlive(): boolean {
-  try {
-    const roster = JSON.parse(readFileSync(join(homedir(), ".claude", "daemon", "roster.json"), "utf8")) as { supervisorPid?: unknown };
-    const pid = Number.parseInt(String(roster.supervisorPid), 10);
-    if (!Number.isInteger(pid)) return false;
-    process.kill(pid, 0);
-    const base = join("/tmp", `cc-daemon-${process.getuid?.() ?? ""}`);
-    return readdirSync(base).some((d) => !d.startsWith(".") && existsSync(join(base, d, "control.sock")));
-  } catch {
-    return false;
-  }
-}
-
-// A background session that has not stopped or failed, behind a daemon that is running. "done"
-// means it finished a turn and is idle; it still wakes on SendMessage, so it counts as alive.
-export function sessionAlive(s: Session | null | undefined): s is Session {
-  return !!s && s.kind === "background" && s.state !== "stopped" && s.state !== "failed" && daemonAlive();
-}
-
-export function findSession(name: string, includeDone = false): Session | null {
-  const hits = sessions(includeDone).filter((s) => s.name === name);
-  const live = hits.filter(sessionAlive);
-  return live[0] ?? hits[0] ?? null;
-}
-
-export function waitForName(name: string, timeoutS = 90): Session | null {
+// A host that cannot be asked on one poll is asked again on the next.
+export function waitForName(t: Transport, name: string, timeoutS = 90, pollMs = 3000): Session | null {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutS * 1000) {
-    const s = findSession(name);
-    if (sessionAlive(s)) return s;
-    sleep(3000);
+    const s = ask(() => findSession(t, name));
+    if (!(s instanceof Unreachable) && t.alive(s)) return s;
+    sleep(pollMs);
   }
   return null;
 }
 
-export function stopSession(s: Session | null, remove = true): void {
+export function stopSession(t: Transport, s: Session | null, remove = true): void {
   const id = s?.id;
   if (!id) return;
-  run(claudeBin(), ["stop", id]);
-  if (remove) run(claudeBin(), ["rm", id]);
+  t.stop(s.name ?? "", id, remove);
 }
 
 // What stopping a builder would lose from its worktree, as the refusal to give, or null if nothing.
 export function leftWork(ws: Workspace, name: string, cwd: string): string | null {
-  const left = worktreeDirty(cwd, ws.config.worktree.toolWritten);
-  if (left.length) return `${name}'s worktree ${cwd} has uncommitted changes: ${left.slice(0, 4).join(", ")}. Ask them to commit and push, or --force to lose it.`;
   let base = "main";
   for (const r of Object.values(ws.config.repos)) if (cwd.startsWith(r.path + "/")) base = r.base;
-  if (!branchPushed(cwd, base)) return `${name}'s branch in ${cwd} is not fully pushed. Ask them to push, or --force.`;
+  const d = worktreeDirty(cwd, ws.config.worktree.toolWritten);
+  return leftSaid(name, cwd, d.paths, d.unreadable, () => branchPushed(cwd, base));
+}
+
+function leftSaid(name: string, cwd: string, dirty: string[], unreadable: string | undefined, pushed: () => boolean): string | null {
+  if (unreadable) return `${name}'s worktree ${cwd} could not be read (${unreadable}), so what stopping it would lose is unknown. Look there, or --force.`;
+  if (dirty.length) return `${name}'s worktree ${cwd} has uncommitted changes: ${dirty.slice(0, 4).join(", ")}. Ask them to commit and push, or --force to lose it.`;
+  if (!pushed()) return `${name}'s branch in ${cwd} is not fully pushed. Ask them to push, or --force.`;
   return null;
+}
+
+const isDir = (p: string) => existsSync(p) && statSync(p).isDirectory();
+
+// Which of the builder's worktrees a session's cwd is, by repo and work item: the cwd is
+// <checkout>/.claude/worktrees/<item>. Paths here are compared as realpaths, as registeredWorktrees
+// does; paths on a host are compared as that host's config gives them.
+export function worktreeOf(ws: Workspace, agent: Agent, cwd: string): { repo: Repo; ticket: string } | null {
+  const real = (p: string) => (agent.host ? p : realpathLoose(p));
+  const dir = real(cwd).replace(/\/+$/, "");
+  for (const key of agent.repos) {
+    const repo = ws.config.repos[key]!;
+    const pre = `${real(worktreesDir(repo.path))}/`;
+    if (dir.startsWith(pre) && dir.length > pre.length && !dir.slice(pre.length).includes("/")) return { repo, ticket: dir.slice(pre.length) };
+  }
+  return null;
+}
+
+// leftWork for any builder. On this machine it is leftWork on a cwd that is a directory. For a
+// builder with a host the worktree is looked at there, by repo and item, and a session with no cwd
+// or one that is none of its worktrees, or a host that does not answer, is a refusal: what it would
+// lose is unknown.
+export function builderLeft(ws: Workspace, agent: Agent, t: Transport, cwd: string | undefined): string | null {
+  if (!agent.host) return cwd && isDir(cwd) ? leftWork(ws, agent.name, cwd) : null;
+  if (!cwd) return `${agent.name}'s session on ${agent.host} gives no cwd, so what stopping it would lose is unknown. Look there, or --force.`;
+  const w = worktreeOf(ws, agent, cwd);
+  if (!w) return `${agent.name}'s session is in ${cwd} on ${agent.host}, which is none of its worktrees, so what stopping it would lose is unknown. Look there, or --force.`;
+  const got = ask(() => t.worktreeLeft({ agent, repo: w.repo, ticket: w.ticket, toolWritten: ws.config.worktree.toolWritten }));
+  if (got instanceof Unreachable) return `${agent.name}'s worktree ${cwd} could not be checked (${got.brief}). Look there, or --force.`;
+  if (!got.exists) return null;
+  return leftSaid(agent.name, cwd, got.dirty, got.unreadable, () => got.pushed);
+}
+
+// Removes a builder's worktree when asked, here or on its host, and returns the line to print.
+// Null when cwd is not one of its worktrees.
+export function stopWorktree(ws: Workspace, agent: Agent, t: Transport, cwd: string | undefined, remove: boolean): string | null {
+  const at = cwd ? worktreeOf(ws, agent, cwd) : null;
+  if (!at || (!agent.host && !isDir(cwd as string))) return null;
+  if (!remove) return `worktree kept${agent.host ? ` on ${agent.host}` : ""}: ${cwd}`;
+  const r = t.removeWorktree({ agent, repo: at.repo, ticket: at.ticket, toolWritten: ws.config.worktree.toolWritten });
+  return r.ok ? "worktree removed" : `worktree kept: ${r.said}`;
 }
 
 // A builder owed nothing but items in review is free, with or without a session: the next dispatch
@@ -124,17 +121,77 @@ export function reviewOnly(recs: Rec[], name: string): Rec[] {
   return mine.some((r) => BUSY.has(r.state as string)) ? [] : mine.filter((r) => IN_REVIEW.has(r.state as string));
 }
 
+// A record in a working state: its agent is owed a session, and is not free for other work.
+export const owesSession = (r: Rec): r is Rec & { agent: string; state: string } => !!r.agent && !!r.state && BUSY.has(r.state);
+
+// Where the agent a record owes a session stands: running, on a host that could not be asked, or
+// dropped. Null when the record is not in a working state or names no agent.
+export type Owed = { is: "live" } | { is: "unknown"; why: string } | { is: "dropped" };
+
+export function owed(r: Rec, live: ReadonlySet<string> | ReadonlyMap<string, unknown>, unknown: ReadonlyMap<string, string>): Owed | null {
+  if (!owesSession(r)) return null;
+  if (live.has(r.agent)) return { is: "live" };
+  const why = unknown.get(r.agent);
+  return why !== undefined ? { is: "unknown", why } : { is: "dropped" };
+}
+
+// Where each output labels an owed session that is not live: `factory status` prints mark before
+// the line and tail after it, and the round and the idle check print theirs before it.
+interface OwedLabel {
+  mark: string;
+  tail: string;
+  round: string;
+  idle: string;
+}
+
+const OWED_LABEL: Record<Exclude<Owed["is"], "live">, OwedLabel> = {
+  unknown: { mark: "??", tail: "", round: "UNKNOWN", idle: "unknown" },
+  dropped: { mark: "!!", tail: " -- dropped delegation?", round: "NO SESSION", idle: "dropped" },
+};
+
+function owedSays(r: Rec, o: Exclude<Owed, { is: "live" }>): string {
+  switch (o.is) {
+    case "unknown":
+      return `${r.agent}'s host could not be asked (${o.why}) while ${r.ticket} is ${r.state}`;
+    case "dropped":
+      return `${r.agent} has no live session while ${r.ticket} is ${r.state}`;
+  }
+}
+
+// The label and text every output prints for a record's owed session; null when it owes none or is live.
+export function owedNote(r: Rec, live: ReadonlySet<string> | ReadonlyMap<string, unknown>, unknown: ReadonlyMap<string, string>): { label: OwedLabel; says: string } | null {
+  const o = owed(r, live, unknown);
+  if (!o || o.is === "live") return null;
+  return { label: OWED_LABEL[o.is], says: owedSays(r, o) };
+}
+
 const field = (s: Session, k: string) => (k in s ? pyStr(s[k]) : "?");
 
-// One line per fleet member: live session, stale record, or nothing. Returns the live ones too.
-export function fleetLines(ws: Workspace): { lines: string[]; live: Map<string, Session> } {
+// A transport's listing, or why its host could not be asked.
+export function listing(t: Transport, includeDone = false): Session[] | Unreachable {
+  return ask(() => t.sessions(includeDone));
+}
+
+// One line per fleet member: live session, stale record, unknown, or nothing. Returns the live ones
+// too, and the unknown ones with why.
+export function fleetLines(ws: Workspace): { lines: string[]; live: Map<string, Session>; unknown: Map<string, string> } {
   const listed = new Map<string, Session>();
-  for (const s of sessions()) if (s.kind === "background" && s.name !== undefined) listed.set(s.name, s);
-  const live = new Map([...listed].filter(([, s]) => sessionAlive(s)));
+  const live = new Map<string, Session>();
+  const unknown = new Map<string, string>();
+  const rows = new Map(transports(ws).map((t) => [t.where, listing(t)]));
+  for (const { agent: a, t, hits } of agentSessions(ws, (where) => rows.get(where))) {
+    const s = pick(t, hits);
+    if (s) listed.set(a.name, s);
+    if (t.alive(s)) live.set(a.name, s);
+  }
   const recs = allRecs(ws);
   const lines = ws.config.agents.map((a) => {
     const s = listed.get(a.name);
-    const st = s && live.has(a.name)
+    const got = rows.get(transportFor(ws, a).where);
+    if (got instanceof Unreachable) unknown.set(a.name, got.brief);
+    const st = got instanceof Unreachable
+      ? `unknown (${got.message})`
+      : s && live.has(a.name)
       ? `${field(s, "status")}/${field(s, "state")} id=${pyStr(s.id)} cwd=${pyStr(s.cwd)}`
       : s
         ? `not running (stale record id=${pyStr(s.id)} says ${field(s, "state")}; the daemon is gone)`
@@ -143,5 +200,5 @@ export function fleetLines(ws: Workspace): { lines: string[]; live: Map<string, 
     const free = review.length ? `  -- free: ${review.map((r) => `${r.ticket} is ${r.state}`).join(", ")}` : "";
     return `  ${a.name.padEnd(10)} ${a.role.padEnd(9)} ${st}${free}`;
   });
-  return { lines, live };
+  return { lines, live, unknown };
 }

@@ -1,18 +1,22 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, get as httpGet, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { get as httpsGet } from "node:https";
 import type { AddressInfo } from "node:net";
 import { basename, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { claudeBin, lead, reviewOnly, type Session, sessionAlive } from "../fleet.js";
-import { statusFile } from "../hooks/status.js";
+import { lead, owesSession, reviewOnly, type Session } from "../fleet.js";
+import { leadStatus } from "../hooks/status.js";
+import { Unreachable } from "../remote.js";
+import { agentSessions, pick, transportFor, transports } from "../transport.js";
 import { isHuman, readTail } from "../messages.js";
-import { allRecs, BUSY, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
+import { allRecs, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { capitalize, run, sleep } from "../util.js";
-import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, type Relay, saveAttachment, sweep } from "./inbox.js";
+import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, saveAttachment } from "./inbox.js";
+import { tryFailure } from "../failures.js";
 import { type Fetch, ReviewCache } from "./reviews.js";
+import { isScheduler } from "../scheduler/state.js";
 
 // The board: a read-only picture of the fleet at `/`, and the thread between the human and the lead
 // at `/messages`. `/api` and `/api/messages` are the JSON behind them, and both pages re-fetch every
@@ -28,7 +32,7 @@ const CLI = fileURLToPath(new URL("../cli.js", import.meta.url));
 // stack, slot, name, worktree ("-" for a free slot), url, health url.
 export const stacksFile = (ws: Workspace) => join(ws.stateDir, "stacks.tsv");
 
-const pidFile = (ws: Workspace) => join(ws.logsDir, "board.pid");
+export const pidFile = (ws: Workspace) => join(ws.logsDir, "board.pid");
 const logFile = (ws: Workspace) => join(ws.logsDir, "board.log");
 const url = (ws: Workspace) => `http://${ws.config.board.host}:${ws.config.board.port}`;
 
@@ -77,27 +81,45 @@ const clock = () => new Date().toTimeString().slice(0, 8);
 // stops answering while the listing runs is a board that looks down.
 const SESSION_EVERY = 3000;
 
+// The listing of each transport the fleet uses, refreshed in the background, and each agent's
+// background session in it.
 class SessionCache {
-  rows: Session[] = [];
-  private busy = false;
+  private rows = new Map<string, Session[] | Unreachable>();
+  private busy = new Set<string>();
+
+  constructor(private ws: Workspace) {}
 
   refresh(): void {
-    if (this.busy) return;
-    this.busy = true;
-    execFile(claudeBin(), ["agents", "--json"], { timeout: 20_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
-      this.busy = false;
-      try {
-        this.rows = err ? [] : (JSON.parse(stdout || "[]") as Session[]);
-      } catch {
-        this.rows = [];
-      }
-    });
+    for (const t of transports(this.ws)) {
+      if (this.busy.has(t.where)) continue;
+      this.busy.add(t.where);
+      void t.sessionsAsync().then((rows) => {
+        this.busy.delete(t.where);
+        this.rows.set(t.where, rows);
+      });
+    }
   }
 
   background(): Map<string, Session> {
     const m = new Map<string, Session>();
-    for (const s of this.rows) if (s.kind === "background" && s.name !== undefined && !(m.has(s.name) && !sessionAlive(s))) m.set(s.name, s);
+    for (const { agent, t, hits } of agentSessions(this.ws, (where) => this.rows.get(where))) {
+      const s = pick(t, hits);
+      if (s) m.set(agent.name, s);
+    }
     return m;
+  }
+
+  // Why the agent's host could not be asked, or null.
+  unknown(name: string): string | null {
+    const a = this.ws.config.agents.find((x) => x.name === name);
+    const t = a ? transportFor(this.ws, a) : undefined;
+    const rows = t ? this.rows.get(t.where) : undefined;
+    return t && rows instanceof Unreachable ? rows.brief : null;
+  }
+
+  alive(name: string, s: Session | undefined): boolean {
+    const a = this.ws.config.agents.find((x) => x.name === name);
+    return !!a && transportFor(this.ws, a).alive(s);
   }
 }
 
@@ -244,7 +266,7 @@ function reviewKeys(ws: Workspace): string[] {
 
 // Builders group by their stack, or by their repos when they have none, so an agent added to the
 // config lands in the right group without the board changing.
-function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>) {
+function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>, alive: (name: string, s: Session | undefined) => boolean, unknown: (name: string) => string | null = () => null) {
   const groups = new Map<string, { key: string; title: string; scope: string; members: unknown[] }>();
   const reviewerRepos = ws.config.roles.reviewer?.addDirs ?? [];
   for (const a of ws.config.agents) {
@@ -258,12 +280,13 @@ function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>) {
     let g = groups.get(key);
     if (!g) groups.set(key, (g = { key, title, scope, members: [] }));
     const s = listed.get(a.name);
-    const alive = sessionAlive(s);
-    const rec = recs.find((r) => r.agent === a.name && r.state !== null && BUSY.has(r.state));
+    const live = alive(a.name, s);
+    const rec = recs.find((r) => r.agent === a.name && owesSession(r));
     g.members.push({
       name: a.name,
-      alive,
-      status: alive ? (s?.status ?? null) : null,
+      alive: live,
+      status: live ? (s?.status ?? null) : null,
+      unknown: unknown(a.name),
       ticket: rec?.ticket ?? null,
       state: rec?.state ?? null,
       since_min: rec ? ageMinutes(rec.since) : null,
@@ -349,7 +372,7 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
     columns: COLUMNS,
     descriptions,
     waiting_on_you: [...WAITING_ON_YOU].sort(),
-    teams: teams(ws, recs, sessions.background()),
+    teams: teams(ws, recs, sessions.background(), (n, s) => sessions.alive(n, s), (n) => sessions.unknown(n)),
     stacks: stacks.view(ws, recs),
     tickets,
     plumbing: heartbeats(ws),
@@ -357,20 +380,11 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
   };
 }
 
-// The lead's status hook writes its last word there, with the transcript path the receipts read.
-function leadStatus(ws: Workspace): { words?: string; transcript?: string } {
-  try {
-    return JSON.parse(readFileSync(statusFile(ws, lead(ws).name), "utf8"));
-  } catch {
-    return {};
-  }
-}
-
 function messagesView(ws: Workspace, sessions: SessionCache, receipts: Receipts) {
   const st = leadStatus(ws);
   receipts.read(st.transcript);
   const leadName = lead(ws).name;
-  const status = sessionAlive(sessions.background().get(leadName)) ? (st.words ?? null) : "offline";
+  const status = sessions.alive(leadName, sessions.background().get(leadName)) ? (st.words ?? null) : sessions.unknown(leadName) ? "unknown" : "offline";
   const rows = readTail(ws.messages).reverse().slice(0, 60).map((r) => {
     const human = isHuman(ws, r.kind);
     return { ...r, from: human ? "human" : "lead", age_min: ageMinutes(r.t), receipt: human && r.id ? receipts.receipt(r.id) : null };
@@ -423,11 +437,10 @@ function sameSite(req: IncomingMessage): boolean {
 export interface ServeOptions {
   host?: string;
   port?: number;
-  // Step in for the lead while no monitor holds the inbox. Without one, messages wait in the log
-  // and the next monitor prints them from its cursor.
-  relay?: Relay;
   // How the review badges read GitHub; gh by default.
   reviews?: Fetch;
+  // The lead's receipts, shared with the scheduler's watchdog in the same process.
+  receipts?: Receipts;
 }
 
 export interface Board {
@@ -441,9 +454,9 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
   const files = new Map<string, Buffer>();
   for (const f of readdirSync(STATIC)) files.set(f, readFileSync(join(STATIC, f)));
 
-  const sessions = new SessionCache();
+  const sessions = new SessionCache(ws);
   const stacks = new StackChecks();
-  const receipts = new Receipts();
+  const receipts = opts.receipts ?? new Receipts();
   const reviews = new ReviewCache(opts.reviews);
   const readReviews = () => {
     try {
@@ -465,15 +478,6 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
     stacks.check(ws).catch(() => {}).finally(() => (checking = false));
   });
   every(REVIEW_EVERY, readReviews);
-  const relay = opts.relay;
-  if (relay)
-    every(500, () => {
-      try {
-        sweep(ws, relay);
-      } catch {
-        // an unreadable log or cursor is tried again on the next pass
-      }
-    });
 
   const handle = (req: IncomingMessage, res: ServerResponse) => {
     const path = (req.url ?? "/").split("?")[0] as string;
@@ -592,8 +596,11 @@ export function boardPid(ws: Workspace): number | null {
     return null;
   }
   const cmd = run("ps", ["-o", "command=", "-p", String(pid)]).stdout;
-  return cmd.includes("board --serve") && cmd.includes(ws.dir) ? pid : null;
+  if (cmd.includes("board --serve") && cmd.includes(ws.dir)) return pid;
+  // Off macOS the scheduler serves the board in its own process; its pid file names it.
+  return isScheduler(ws, pid) ? pid : null;
 }
+
 
 export const boardLine = (ws: Workspace) => {
   const pid = boardPid(ws);
@@ -658,6 +665,11 @@ export function stopBoard(ws: Workspace, quiet = false, out = console.log): void
   const pid = boardPid(ws);
   if (!pid) {
     if (!quiet) out("board is not running");
+    return;
+  }
+  // The scheduler's board is up as long as it is: stopping it would stop the scheduler too.
+  if (isScheduler(ws, pid)) {
+    if (!quiet) out(`board is the scheduler's (pid ${pid}) and stays up with it`);
     return;
   }
   try {

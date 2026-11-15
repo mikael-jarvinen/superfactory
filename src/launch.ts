@@ -1,20 +1,25 @@
-import { randomBytes } from "node:crypto";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
-import type { Agent, Role } from "./config.js";
-import { claudeBin, lead, type Session, waitForName } from "./fleet.js";
+import type { Agent, GitOver, Role } from "./config.js";
+import { lead, type Session, waitForName } from "./fleet.js";
 import { renderSettings } from "./settings.js";
 import { branchFor, isLocal } from "./state.js";
+import { type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
-import { capitalize, die, run } from "./util.js";
+import { capitalize, die } from "./util.js";
 
 export type Phase = "build" | undefined;
 
+// The agent's own cwd, permission_mode and autocompact win over its role's.
 export function roleOf(ws: Workspace, agent: Agent): Role {
   const role = ws.config.roles[agent.role];
   if (!role) return die(`roles.${agent.role} is not configured`);
-  return role;
+  return {
+    ...role,
+    cwd: agent.cwd ?? role.cwd,
+    permissionMode: agent.permissionMode ?? role.permissionMode,
+    autocompact: agent.autocompact ?? role.autocompact,
+  };
 }
 
 // A builder's stack environment. Claude Code takes a settings env value literally and sets it on the
@@ -39,8 +44,9 @@ export function settingsFile(ws: Workspace, agent: Agent): string {
   });
 }
 
-export function buildAppendix(ws: Workspace, agent: Agent, repoDir: string | undefined): string | null {
+export function buildAppendix(ws: Workspace, agent: Agent, repoDir: string | undefined): { text: string; labels: string[] } | null {
   const parts: string[] = [];
+  const labels: string[] = [];
   for (const item of agent.appendix) {
     let p = item;
     if (item.startsWith("repo:")) {
@@ -57,12 +63,10 @@ export function buildAppendix(ws: Workspace, agent: Agent, repoDir: string | und
     if (size === 0)
       die(`${agent.name}: appendix file ${p} is missing or empty. A session that starts without its brief looks fine and behaves like a stranger, so this refuses.`);
     const label = p.startsWith(ws.dir + sep) ? relative(ws.dir, p) : p;
+    labels.push(label);
     parts.push(`<!-- ${label} -->\n` + readFileSync(p, "utf8").trimEnd() + "\n");
   }
-  if (!parts.length) return null;
-  const path = join(tmpdir(), `sf-${agent.name}-${randomBytes(4).toString("hex")}.md`);
-  writeFileSync(path, parts.join("\n\n"), { flag: "wx" });
-  return path;
+  return parts.length ? { text: parts.join("\n\n"), labels } : null;
 }
 
 const addDirs = (ws: Workspace, agent: Agent) =>
@@ -102,14 +106,22 @@ export const GIT_HTTPS_ENV = {
   GIT_CONFIG_KEY_0: "url.https://github.com/.insteadOf",
   GIT_CONFIG_VALUE_0: "git@github.com:",
 };
+// What a session's environment adds for git on a machine whose [hosts] git_over is `over`: nothing
+// for "ssh", so its pushes use the checkout's origin and the machine's own key.
+export const gitEnv = (over: GitOver = "https"): Record<string, string> => (over === "ssh" ? {} : GIT_HTTPS_ENV);
 
-export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string, appendixPath: string | null = null, phase: Phase = undefined): Session {
-  const args = launchArgs(ws, agent, prompt, appendixPath, phase);
-  const r = run(claudeBin(), args, { cwd, env: { ...process.env, ...GIT_HTTPS_ENV } });
-  if (r.status !== 0) die(`claude --bg failed: ${r.stderr.trim() || r.stdout.trim()}`);
-  const sid = /backgrounded · (\w+) · /.exec(r.stdout)?.[1] ?? "?";
-  const s = waitForName(agent.name);
-  if (!s) die(`${agent.name} did not appear in \`claude agents\` within 90s (launch id ${sid}). Check \`claude logs ${sid}\`.`);
+export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string, appendix: string | null = null, phase: Phase = undefined, t: Transport = transportFor(ws, agent)): Session {
+  const sid = t.start({
+    agent, cwd, prompt, appendix, phase,
+    args: (appendixPath) => launchArgs(ws, agent, prompt, appendixPath, phase),
+    env: { ...process.env, ...GIT_HTTPS_ENV },
+  });
+  const s = waitForName(t, agent.name);
+  if (!s) {
+    const there = agent.host ? ` on host ${t.where}` : "";
+    const also = agent.host ? ` there, and \`factory doctor\` for whether ${t.where} answers` : "";
+    die(`${agent.name} did not appear in \`claude agents\`${there} within 90s (launch id ${sid}). Check \`claude logs ${sid}\`${also}.`);
+  }
   return s;
 }
 

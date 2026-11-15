@@ -38,6 +38,9 @@ export interface GuardContext {
   writeDirs: string[];
   org?: string;
   ownRepos: string[];
+  // [github] lead_merges: product repos where the lead, and only the lead, may `gh pr merge` a PR at a
+  // head it names with --match-head-commit. Which PRs it merges is its own call, not the guard's.
+  leadMerges?: string[];
   // Whether a branch of owner/repo is merged into the default branch. Tests stub it; the hook asks GitHub.
   isMerged?: (repo: string, branch: string) => boolean;
   // state/allow-close.jsonl: the product PRs the human has named for the lead to close. Without it the
@@ -512,6 +515,37 @@ function workspaceAllowClose(flag: string | undefined): string | undefined {
   }
 }
 
+// The flags `gh pr merge` takes on a lead_merges repo, and whether each takes a value. Anything else is
+// refused: --admin above all, which would merge past the repo's required checks and reviews.
+const LEAD_MERGE_FLAGS: Record<string, boolean> = {
+  "--repo": true, "-R": true, "--match-head-commit": true, "--squash": false, "-s": false, "--merge": false, "-m": false,
+  "--rebase": false, "-r": false, "--delete-branch": false, "-d": false, "--auto": false, "--subject": true, "-t": true,
+  "--body": true, "-b": true, "--body-file": true, "-F": true,
+};
+const HOW_TO_MERGE = "the lead merges a lead_merges PR as `gh pr merge <n> -R owner/repo --match-head-commit <40-hex sha> [--squash|--merge|--rebase]`";
+
+// Refuses a `gh pr merge` by the lead on a lead_merges repo unless it names an explicit -R, one PR by
+// number, and the exact head it was reviewed at, so a push after the review cannot ride along.
+function checkLeadMerge(args: string[]): void {
+  let repoFlag = false;
+  let head: string | undefined;
+  const sel: string[] = [];
+  for (let i = 2; i < args.length; i++) {
+    const a = args[i] as string;
+    const eq = a.startsWith("--") ? a.indexOf("=") : -1;
+    const name = eq > 0 ? a.slice(0, eq) : /^-[A-Za-z]./.test(a) ? a.slice(0, 2) : a;
+    if (!a.startsWith("-")) { sel.push(a); continue; }
+    if (!(name in LEAD_MERGE_FLAGS)) refuse(`${name} is not allowed when the lead merges a product PR; ${HOW_TO_MERGE}`);
+    let value: string | undefined;
+    if (LEAD_MERGE_FLAGS[name]) value = eq > 0 ? a.slice(eq + 1) : name !== a ? a.slice(2) : args[++i];
+    if (name === "--repo" || name === "-R") repoFlag = true;
+    if (name === "--match-head-commit") head = value;
+  }
+  if (!repoFlag) refuse(`merging a product PR needs an explicit -R owner/repo; ${HOW_TO_MERGE}`);
+  if (sel.length !== 1 || !/^[1-9]\d*$/.test(sel[0] as string)) refuse(`merging a product PR needs exactly one PR number; ${HOW_TO_MERGE}`);
+  if (head === undefined || !/^[0-9a-f]{40}$/i.test(head)) refuse(`merging a product PR needs --match-head-commit with the full 40-character head sha it was reviewed at; ${HOW_TO_MERGE}`);
+}
+
 const HOW_TO_CLOSE = "a product PR closes only once the human has named that exact PR and the lead has recorded it with " +
   "`factory allow-close <repo-key> <n> --words \"<the human's words>\"`";
 
@@ -523,6 +557,11 @@ function checkGhProtect(words: string[], ctx: GuardContext): void {
     const target = (repo as string).toLowerCase();
     // a factory-own repo (lyyti-factory / superfactory): the lead and its assistants may merge or close it.
     if (!ctx.ownRepos.some((r) => r.toLowerCase() === target)) {
+      // Mikko, 2026-11-14, asked whether the lead may merge test PRs and bug fixes again: "Yes".
+      if (args[1] === "merge" && ctx.role === "lead" && (ctx.leadMerges ?? []).some((r) => r.toLowerCase() === target)) {
+        checkLeadMerge(args);
+        return;
+      }
       if (args[1] !== "close") refuse(`${args[1]} of a PR on a product repo is the human's and colleagues' call, always`);
       const n = ghCloseNumber(args, repo as string);
       if (n === null) refuse(`closing a product PR needs its number or URL in the command, one selector and no --delete-branch, so the guard can check it; ${HOW_TO_CLOSE}`);
@@ -822,12 +861,13 @@ function context(argv: string[], workspace: string | undefined): GuardContext {
     options: {
       "role": { type: "string" }, "policy": { type: "string" }, "write-dir": { type: "string", multiple: true },
       "org": { type: "string" }, "own-repo": { type: "string", multiple: true }, "allow-close": { type: "string" },
+      "lead-merge": { type: "string", multiple: true },
     },
   });
   if (!values.role) throw new Error("--role is missing");
   if (!(POLICIES as readonly string[]).includes(values.policy ?? "")) throw new Error(`--policy must be one of ${POLICIES.join(", ")}`);
   return { role: values.role, policy: values.policy as Policy, writeDirs: values["write-dir"] ?? [], org: values.org, ownRepos: values["own-repo"] ?? [],
-    allowClose: values["allow-close"], workspace };
+    leadMerges: values["lead-merge"] ?? [], allowClose: values["allow-close"], workspace };
 }
 
 export function hook(argv: string[], input: string, workspace?: string): HookResult {

@@ -13,6 +13,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSyn
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Check } from "../check.js";
 import { lead } from "../fleet.js";
 import { trackerOf } from "../tracker/read.js";
 import type { Workspace } from "../workspace.js";
@@ -68,7 +69,7 @@ const xml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
 
 // The job's environment: the PATH of whoever installs it, since launchd's own finds neither claude
 // nor gh, and the variables that pin a run to this workspace with memory off.
-function environment(ws: Workspace, env: NodeJS.ProcessEnv): Record<string, string> {
+export function environment(ws: Workspace, env: NodeJS.ProcessEnv): Record<string, string> {
   const e: Record<string, string> = {
     PATH: env.PATH || "/usr/local/bin:/usr/bin:/bin",
     FACTORY_WORKSPACE: ws.dir,
@@ -149,12 +150,7 @@ function listed(): Map<string, { pid: string; status: string }> | null {
 
 // A job whose prompt is missing would run on schedule and fail every time, so it is not installed.
 function missingPrompts(ws: Workspace, js: Job[]): string[] {
-  const need = new Set<"queue" | "round" | "relay">();
-  for (const j of js) {
-    if (j.name === "queue") need.add("queue").add("relay");
-    if (j.name === "round") need.add("round");
-  }
-  return [...need].map((p) => promptPath(ws, p)).filter((p) => !existsSync(p));
+  return js.some((j) => j.name === "queue") && !existsSync(promptPath(ws, "queue")) ? [promptPath(ws, "queue")] : [];
 }
 
 export function install(ws: Workspace, out: (line: string) => void = console.log): number {
@@ -235,11 +231,23 @@ export function status(ws: Workspace, out: (line: string) => void = console.log)
 
 // For the round: what launchd says about each job config wants.
 export function loaded(ws: Workspace): string[] {
-  if (process.platform !== "darwin") return ["  launchd: not macOS, no scheduler to check"];
   const list = listed();
   if (list === null) return ["  launchd CANNOT list jobs"];
   return jobs(ws).map((j) => {
     const row = list.get(j.label);
     return row ? `  launchd ${j.label} pid=${row.pid} last_exit=${row.status}` : `  launchd ${j.label} NOT LOADED -- factory schedule install`;
   });
+}
+
+export function checks(ws: Workspace): Check[] {
+  const s = jobStates(ws);
+  const fix = "factory schedule install";
+  if (s.listFailed) return [{ status: "missing", what: "launchctl list, to see the watchers' jobs", fix: "run it by hand and read its error" }];
+  const out: Check[] = s.jobs.map(({ job, installed, loaded }) =>
+    installed === "no" ? { status: "missing", what: `launchd job ${job.label} installed`, fix }
+    : installed === "stale" ? { status: "missing", what: `launchd job ${job.label} as config renders it now`, fix }
+    : !loaded ? { status: "missing", what: `launchd job ${job.label} loaded`, fix }
+    : { status: "ok", what: `launchd job ${job.label} loaded` });
+  for (const l of s.unwanted) out.push({ status: "missing", what: `launchd job ${l} removed, since config no longer runs it`, fix });
+  return out;
 }

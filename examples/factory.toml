@@ -10,6 +10,7 @@ name = "Alex"                             # the person the fleet works for; the 
 org = "acme"
 bots = ["coderabbitai", "Copilot"]        # review bots the factory may answer, inside their own threads
 # own_repos = ["alex/factory"]            # repos with main as their only branch and no PRs; a push to main by URL is allowed
+# lead_merges = ["acme/web"]              # product repos where the lead may gh pr merge <n> -R … --match-head-commit <sha>
 
 [paths]
 repos = "~/src"                           # parent of the checkouts, for repos with a relative path
@@ -88,6 +89,18 @@ add_dirs = ["web", "api"]
 [[agents]]
 name = "rae"
 role = "reviewer"
+# cwd = "reviewers/rae"   # these three override the role's; a builder takes no cwd
+# permission_mode = "auto"
+# autocompact = "400k"
+# host = "studio"                         # its sessions run on that machine (not for a builder)
+
+# [hosts.studio]                          # another machine's factory daemon, for agents with host
+# url = "http://192.168.1.20:8787"
+# token_file = "~/.config/factory/token"  # the default; the daemon's shared token
+# hash_files = ["~/agents/factory/factory.toml", "~/agents/factory/workspace/factory.toml"]
+#                                         # the daemon's config, then the workspace config it launches from; order matters
+# git_over = "https"                       # the default: GitHub over https through gh there; "ssh" uses
+#                                         # each checkout's origin and that machine's own key, for one with no gh login
 
 [tracker]
 kind = "jira"                             # or "none"
@@ -105,16 +118,28 @@ done = "Done"
 host = "localhost"
 port = 8787
 
+[peers]
+isolate_machines = true                   # a message to a session on another machine waits for the
+                                          # account owner to approve it in the app, each time. false
+                                          # sends it straight away, as on one machine.
+
 [gate]
 prose_remark = 30                         # added comment lines at which the gate remarks on prose volume
 
 [watchers]                                # scheduled by `factory schedule install`, as launchd jobs
-                                          # named superfactory.<lead>.<job>. Their prompts are the
-                                          # workspace's prompts/queue.md, round.md and relay.md;
-                                          # examples/prompts/ has one of each to start from.
+                                          # named superfactory.<lead>.<job>. The queue watcher's
+                                          # prompt is the workspace's prompts/queue.md;
+                                          # examples/prompts/ has one to start from. The round
+                                          # has no model: it tells the lead its alarming lines.
 queue_every_minutes = 15                  # how often the queue watcher reads the tracker: a number
                                           # that divides 60, or whole hours that divide 24. No queue
                                           # watcher runs when tracker.kind is "none".
 round_minute = 7                          # the minute past each hour the round runs
-model = "sonnet"                          # the queue watcher and the round
-relay_model = "haiku"                     # the courier that carries a message to the lead
+model = "sonnet"                          # the queue watcher
+
+# [[watchers.facts]]                      # a file something else writes, read by the round
+# file = "logs/round-facts.txt"           # relative to this file
+# max_age_minutes = 90                    # older than this, by mtime, escalates; so does missing
+# escalate = ["DUE", "CANNOT", "FAILED"]  # a line with one of these words escalates
+# every_line_in = ["TODO"]                # every line under a "-- TODO... --" title escalates,
+#                                         # except one in parentheses such as "(none)"

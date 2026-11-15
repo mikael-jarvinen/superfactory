@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { attachmentsDir, inboxHeld, MAX_CHARS, pageText, postMessage, sweep } from "../src/board/inbox.js";
+import { attachmentsDir, inboxHeld, leaveNote, MAX_CHARS, pageText, postMessage } from "../src/board/inbox.js";
 import { serve } from "../src/board/server.js";
 import { transition } from "../src/state.js";
 import { readTail } from "../src/messages.js";
@@ -11,7 +11,7 @@ import { pyDumps } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
 import { CLI, tempWorkspace } from "./helpers.js";
 
-const macOnly = process.platform !== "darwin" && "the inbox lock is macOS-only";
+const noInboxLock = process.platform !== "darwin" && process.platform !== "linux" && "the inbox lock is built for macOS and Linux only";
 
 async function until(what: string, ok: () => boolean, ms = 5000): Promise<void> {
   for (const end = Date.now() + ms; !ok();) {
@@ -20,46 +20,53 @@ async function until(what: string, ok: () => boolean, ms = 5000): Promise<void> 
   }
 }
 
-// One owner at a time: while a monitor holds the inbox it prints the human's messages and the
-// board's sweep stands aside; once the monitor dies the sweep takes over from the same cursor.
-test("the inbox: held detection, the monitor, and the relay hook", { skip: macOnly }, async () => {
+// One owner at a time: a monitor holds the inbox and prints the human's messages and the watchers'
+// notes. Nothing else takes it, and a monitor that ends hands on its cursors to the next.
+test("the inbox: held detection, the monitor, the watchers' notes, and the next monitor", { skip: noInboxLock }, async () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
   const ws = openWorkspace(dir);
-  const relayed: string[] = [];
-  const relay = (_: unknown, text: string) => void relayed.push(text);
+  const arm = () => {
+    const mon = spawn(process.execPath, [CLI, "--workspace", dir, "board", "--inbox"], { env: { ...process.env, SF_NOTIFY: "0" } });
+    const m = { mon, out: "" };
+    mon.stdout.on("data", (b: Buffer) => (m.out += b));
+    after(() => mon.kill());
+    return m;
+  };
 
   postMessage(ws, "before any inbox");
+  leaveNote(ws, "[round]\nleft before any monitor");
   assert.equal(inboxHeld(ws), false);
-  const mon = spawn(process.execPath, [CLI, "--workspace", dir, "board", "--inbox"], { env: { ...process.env, SF_NOTIFY: "0" } });
-  let out = "";
-  mon.stdout.on("data", (b: Buffer) => (out += b));
-  after(() => mon.kill());
+  const a = arm();
   await until("the monitor to hold the inbox", () => inboxHeld(ws));
-  assert.equal(sweep(ws, relay), false, "the sweep stands aside while a monitor holds the inbox");
+  await until("the early note", () => a.out.includes("left before any monitor"));
+  assert.match(a.out, /^\[m:[0-9a-f]{6}\] \[round\]\nleft before any monitor\n$/, "a note is news whenever it was left; page history is not");
 
   postMessage(ws, "hello");
   appendFileSync(ws.messages, pyDumps({ t: "x", text: "the lead's own", ticket: null, kind: "note", link: null }) + "\n");
-  await until("the message on stdout", () => out.includes("hello"));
-  assert.match(out, /^\[from the message page\] \[m:[0-9a-f]{6}\] hello\n$/, "history before the first cursor is not news, and the lead's rows are not printed");
+  await until("the message on stdout", () => a.out.includes("hello"));
+  assert.match(a.out, /\[from the message page\] \[m:[0-9a-f]{6}\] hello\n$/, "the lead's rows are not printed");
 
-  mon.kill();
+  // Unarmed, both wait; the next monitor prints each once, from where the last one stopped.
+  a.mon.kill();
   await until("the lock to die with the monitor", () => !inboxHeld(ws));
-  postMessage(ws, "after the monitor");
-  assert.equal(sweep(ws, relay), true);
-  assert.equal(sweep(ws, relay), true);
-  assert.deepEqual(relayed.map((t) => t.replace(/\[m:\w+\] /, "")), ["[from the message page] after the monitor"]);
-
-  // `say` rotates the log to .1. The new file is found by its inode, not by being shorter.
+  postMessage(ws, "while unarmed");
+  leaveNote(ws, "[queue watcher]\nnoted while unarmed");
+  // `say` rotates the message log to .1. The new file is found by its inode, not by being shorter.
   renameSync(ws.messages, ws.messages + ".1");
   writeFileSync(ws.messages, "x".repeat(4096) + "\n");
   postMessage(ws, "in the new log");
-  sweep(ws, relay);
-  assert.equal(relayed.length, 2);
-  assert.match(relayed[1] as string, /in the new log$/);
+  const b = arm();
+  await until("both waiting lines and the rotated one", () => b.out.includes("noted while unarmed") && b.out.includes("in the new log"));
+  assert.ok(!b.out.includes("hello") && !b.out.includes("left before"), `nothing printed twice:\n${b.out}`);
+  assert.equal(b.out.split("] while unarmed").length - 1, 1, "the rolled log is read to its end once");
+  assert.equal(inboxHeld(ws), true);
+  const c = arm();
+  await until("the second monitor to stop", () => c.mon.exitCode !== null);
+  assert.match(c.out, /already armed in another monitor; this one stops/);
 });
 
-test("the server: pages, the snapshot, posting, and only the tail of the log", { skip: macOnly }, async () => {
+test("the server: pages, the snapshot, posting, and only the tail of the log", { skip: noInboxLock }, async () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
   process.env.CLAUDE_BIN = join(dir, "bin", "claude");
@@ -132,7 +139,7 @@ test("the server: pages, the snapshot, posting, and only the tail of the log", {
 
 // An agent with a file in portraits/avatars/ gets its URL on both pages; the route serves only a plain
 // avatar file name from that directory, cached, since the board redraws every two seconds.
-test("the server: agent avatars from the workspace", { skip: macOnly }, async () => {
+test("the server: agent avatars from the workspace", { skip: noInboxLock }, async () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
   process.env.CLAUDE_BIN = join(dir, "bin", "claude");
@@ -158,7 +165,7 @@ test("the server: agent avatars from the workspace", { skip: macOnly }, async ()
 });
 
 // A message reaches the lead as the human's own instruction, so another site's page must not post one.
-test("the message page refuses a cross-site post", { skip: macOnly }, async () => {
+test("the message page refuses a cross-site post", { skip: noInboxLock }, async () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
   process.env.CLAUDE_BIN = join(dir, "bin", "claude");

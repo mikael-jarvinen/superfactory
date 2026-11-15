@@ -32,8 +32,13 @@ src/
                   workspace-relative paths; one error per bad key, naming the key
   workspace.ts    resolution (above), state/, logs/, logs/run/
   state.ts        records, the transition graph, evidence rules, events.jsonl
-  fleet.ts        agents from config; sessions via `claude agents --json`; any undocumented
-                  daemon internals behind one function
+  fleet.ts        agents from config; finding, waiting for and stopping their sessions
+  transport.ts    where an agent's sessions live and every session operation; the local one
+                  runs `claude agents --json` and friends, with any undocumented daemon
+                  internals behind one function
+  claude-bin.ts   which claude binary to run
+  remote.ts       the transport for an agent with a host: each session operation is a request
+                  to the factory daemon there, and a host that cannot be asked is unknown
   launch.ts       the `claude --bg` command line, appendix assembly, the READY handshake
   settings.ts     render each role's Claude Code settings at launch into logs/run/
   worktree.ts     worktree per work item, push over https, dirty and pushed checks
@@ -150,7 +155,6 @@ review_bot = "coderabbitai"           # its review of the head is required befor
 queue_every_minutes = 15
 round_minute = 7
 model = "sonnet"
-relay_model = "haiku"
 ```
 
 The program carries no text addressed to a named person. Every instruction a session reads comes
@@ -203,7 +207,7 @@ container projects are the script's business, derived from `FACTORY_SLOT`.
   are computed from the workspace. Tracked files carry no absolute paths.
 - Sessions use `--bg`, `--remote-control`, `--add-dir` (before the prompt, since it is variadic),
   `--append-system-prompt-file`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `autoMemoryEnabled: false`,
-  `crossSessionInbound`, `isolatePeerMachines`, and a READY handshake on first contact. Each
+  `crossSessionInbound`, `isolatePeerMachines` (from `[peers] isolate_machines`, true unless set), and a READY handshake on first contact. Each
   worktree gets its own https push config, so pushes never depend on an ssh agent.
 - The claude binary is `$CLAUDE_BIN`, else `claude` on PATH, else `~/.local/bin/claude`.
 

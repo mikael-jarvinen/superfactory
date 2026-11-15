@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { ghBin } from "../gate/github.js";
+import { MAX_OUTPUT } from "../util.js";
 
 // Where each PR in review stands with its human reviewers, so the human can see from the board whether
 // a PR still has no reviews, has been reviewed, or is approved and ready to merge. GitHub is read in
@@ -128,7 +129,7 @@ export type Fetch = (query: string) => Promise<string>;
 const ghGraphql: Fetch = (query) =>
   new Promise((resolve) => {
     // gh exits non-zero when any one PR in the query fails, and still prints the rest of the answer
-    execFile(ghBin(), ["api", "graphql", "-f", `query=${query}`], { timeout: 60_000, maxBuffer: 16 * 1024 * 1024 }, (_err, stdout) => resolve(stdout || ""));
+    execFile(ghBin(), ["api", "graphql", "-f", `query=${query}`], { timeout: 60_000, maxBuffer: MAX_OUTPUT }, (_err, stdout) => resolve(stdout || ""));
   });
 
 export interface Cached extends ReviewStatus {

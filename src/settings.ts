@@ -80,7 +80,7 @@ function loadTemplate(file: string): Template {
 }
 
 // Set for every session whatever the template says: memory off, and the peer settings the design
-// lists under Claude Code integration.
+// lists under Claude Code integration. isolatePeerMachines comes from [peers].
 const BASE = { autoMemoryEnabled: false, crossSessionInbound: "accept", isolatePeerMachines: true };
 
 const DIALOGS = "EnterPlanMode|ExitPlanMode|AskUserQuestion";
@@ -169,7 +169,7 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
     if (!(HOOKS as readonly string[]).includes(h)) die(`settings for ${s.name}: extra hook ${JSON.stringify(h)} is not a hook; hooks are ${HOOKS.join(", ")}`);
   const names = [...new Set([...t.hooks, ...((s.extraHooks ?? []) as HookName[])])];
 
-  const out: Record<string, unknown> = { ...BASE };
+  const out: Record<string, unknown> = { ...BASE, isolatePeerMachines: ws.config.peers.isolateMachines };
   for (const [k, v] of Object.entries(structuredClone(t.settings))) if (!(k in BASE)) out[k] = v;
 
   const perms = (out.permissions ?? {}) as { deny?: string[]; allow?: string[]; defaultMode?: string };
@@ -206,7 +206,9 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
       const repos = t.guard === "protect" ? [...(org ? ["--org", org] : []), ...ws.config.github.ownRepos.flatMap((r) => ["--own-repo", r])] : [];
       // only the lead closes a product PR, and only one the human named
       const close = t.guard === "protect" && s.role === "lead" ? ["--allow-close", allowClosePath(ws.stateDir)] : [];
-      add("PreToolUse", "Bash|Read|Grep", ["hook", "guard", "--role", s.role, "--policy", t.guard as Policy, ...dirs, ...repos, ...close], 10);
+      // only the lead merges on a lead_merges repo; nobody else's settings name them
+      const merges = t.guard === "protect" && s.role === "lead" ? ws.config.github.leadMerges.flatMap((r) => ["--lead-merge", r]) : [];
+      add("PreToolUse", "Bash|Read|Grep", ["hook", "guard", "--role", s.role, "--policy", t.guard as Policy, ...dirs, ...repos, ...close, ...merges], 10);
     } else if (h === "no-dialogs") {
       add("PreToolUse", DIALOGS, ["hook", "no-dialogs", "--lead", leadName], 5);
     } else if (h === "no-side-channels") {
@@ -225,7 +227,7 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
 
   mkdirSync(ws.runDir, { recursive: true });
   const path = join(ws.runDir, `settings-${s.name}.json`);
-  // Through a temp file and a rename: the board's courier and a watcher can render the same file at
+  // Through a temp file and a rename: two watchers can render the same file at
   // once, and a session must never read one half written.
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(out, null, 2) + "\n");

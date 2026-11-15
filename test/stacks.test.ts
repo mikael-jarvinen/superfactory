@@ -260,6 +260,9 @@ test("a builder whose only items are in review is free, and stopping it loses no
   assert.match(st, /^ {2}fay +builder +not running$/m);
 
   assert.equal(leftWork(ws, "eve", web1), null, "no commits of its own yet");
+  const gone = leftWork(ws, "eve", join(web1, "gone")) ?? "";
+  assert.match(gone, /eve's worktree .*gone could not be read \(git status exited 128: .*\), so what stopping it would lose is unknown/);
+  assert.doesNotMatch(gone, /uncommitted/);
   writeFileSync(join(web1, "change.txt"), "x\n");
   assert.match(leftWork(ws, "eve", web1) ?? "", /eve's worktree .* has uncommitted changes: change\.txt/);
   must(web1, "add", "change.txt");
