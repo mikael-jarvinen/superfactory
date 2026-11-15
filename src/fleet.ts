@@ -17,8 +17,7 @@ export interface Session {
   status?: string;
   cwd?: string;
   updatedAt?: string;
-  // epoch milliseconds in `claude agents --json`, which gives no other time.
-  // A number in updatedAt or createdAt would be read as milliseconds too, so one in seconds would look older than every row stamped in milliseconds.
+  // epoch milliseconds in `claude agents --json`, which gives no other time
   startedAt?: string | number;
   createdAt?: string;
   [k: string]: unknown;
