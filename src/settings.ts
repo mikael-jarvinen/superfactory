@@ -156,7 +156,6 @@ export interface SessionSettings {
   extraHooks?: string[];
   permissionMode?: string;
   env?: Record<string, string>;
-  // The host the session runs on, for an agent with one.
   host?: string;
 }
 

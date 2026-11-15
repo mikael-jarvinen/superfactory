@@ -61,7 +61,6 @@ export interface Transport {
   // The launch id claude printed, or "?".
   start(req: StartRequest): string;
   // said: claude's stdout. why: its stderr (else stdout), read when the session does not come back.
-  // timeoutMs bounds the call, for a caller that has a deadline.
   respawn(name: string, id: string, timeoutMs?: number): { ok: boolean; said: string; why: string };
   stop(name: string, id: string, remove: boolean): void;
   // The worktree for the item, made or reused (worktree.ts's ensureWorktree); throws when it cannot.

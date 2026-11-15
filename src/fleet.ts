@@ -41,13 +41,16 @@ export function findSession(t: Transport, name: string, includeDone = false): Se
   return pick(t, t.sessions(includeDone).filter(isAgentSession(name)));
 }
 
-// A host that cannot be asked on one poll is asked again on the next.
-export function waitForName(t: Transport, name: string, timeoutS = 90, pollMs = 3000): Session | null {
+// A host that cannot be asked on one poll is asked again on the next. No poll starts after
+// lastPollAt (epoch ms).
+export function waitForName(t: Transport, name: string, timeoutS = 90, pollMs = 3000, lastPollAt = Infinity): Session | null {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutS * 1000) {
     const s = ask(() => findSession(t, name));
     if (!(s instanceof Unreachable) && t.alive(s)) return s;
-    sleep(pollMs);
+    const nap = Math.min(pollMs, lastPollAt - Date.now());
+    if (nap <= 0) return null;
+    sleep(nap);
   }
   return null;
 }

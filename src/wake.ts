@@ -5,10 +5,9 @@
 // Probed 2026-11-15: a respawn is listed live within 2 s, and on a host its Remote Control name took
 // up to 10 s more to be addressable from another machine, hence WAKE_SETTLE_S.
 import type { Agent } from "./config.js";
-import { findSession, type Session } from "./fleet.js";
+import { findSession, type Session, waitForName } from "./fleet.js";
 import { ask, CHILD_SLACK_MS, Unreachable } from "./remote.js";
 import { isAgentSession, LISTING_TIMEOUT_MS, newest, type Transport, transportFor } from "./transport.js";
-import { sleep } from "./util.js";
 import type { Workspace } from "./workspace.js";
 
 export const WAKE_SETTLE_S = 15;
@@ -54,22 +53,15 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   // stale "done" row would beat the newest stopped session.
   const old = newest(all.filter(isAgentSession(agent.name)));
   if (!old?.id || (o.match && !o.match(old))) return { is: "none" };
-  // the respawn leaves time for at least one listing after it
   const respawnMs = left() - budget - slack;
   if (respawnMs < 1000) return late(`respawning ${old.id}`);
   const r = t.respawn(agent.name, old.id, Number.isFinite(respawnMs) ? respawnMs : undefined);
   if (!r.ok) return { is: "failed", why: `respawn of ${old.id} failed: ${r.why || "no reason given"}` };
   const waitS = o.waitS ?? 60;
-  const pollMs = o.pollMs ?? 1000;
-  const t0 = Date.now();
-  while (Date.now() - t0 < waitS * 1000) {
-    const s = ask(() => findSession(t, agent.name));
-    if (!(s instanceof Unreachable) && t.alive(s)) return { is: "woke", s, from: old.id };
-    const nap = Math.min(pollMs, left() - budget);
-    if (nap <= 0) return { is: "failed", why: `respawned ${old.id}, and it was not listed live in the time the hook has` };
-    sleep(nap);
-  }
-  return { is: "failed", why: `respawned ${old.id}, and it was not listed live within ${waitS} s` };
+  const lastPollAt = (o.deadline ?? Infinity) - budget;
+  const s = waitForName(t, agent.name, waitS, o.pollMs ?? 1000, lastPollAt);
+  if (s) return { is: "woke", s, from: old.id };
+  return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };
 }
 
 // For the routes that keep context: wakes the session, prints what happened, and returns it once
