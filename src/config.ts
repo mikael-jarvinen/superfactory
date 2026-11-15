@@ -66,6 +66,8 @@ export interface Agent {
   addDirs?: string[];
   remoteControl: boolean;
   cwd?: string;
+  model?: string;
+  effort?: string;
   permissionMode?: string;
   autocompact?: string;
   // A [hosts] key: the agent's sessions run on that machine, through its factory daemon.
@@ -489,6 +491,8 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
       addDirs,
       remoteControl: r.bool("remote_control") ?? false,
       cwd,
+      model: r.str("model"),
+      effort: r.str("effort"),
       permissionMode: r.str("permission_mode"),
       autocompact: r.str("autocompact"),
       host,

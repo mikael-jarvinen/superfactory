@@ -10,13 +10,15 @@ import { capitalize, die } from "./util.js";
 
 export type Phase = "build" | undefined;
 
-// The agent's own cwd, permission_mode and autocompact win over its role's.
+// The agent's own cwd, model, effort, permission_mode and autocompact win over its role's.
 export function roleOf(ws: Workspace, agent: Agent): Role {
   const role = ws.config.roles[agent.role];
   if (!role) return die(`roles.${agent.role} is not configured`);
   return {
     ...role,
     cwd: agent.cwd ?? role.cwd,
+    model: agent.model ?? role.model,
+    effort: agent.effort ?? role.effort,
     permissionMode: agent.permissionMode ?? role.permissionMode,
     autocompact: agent.autocompact ?? role.autocompact,
   };
