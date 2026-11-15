@@ -113,6 +113,53 @@ case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; 
   assert.deepEqual(local.respawn("bea", "r0"), { ok: false, said: "", why: `hook failed\n${NO_BUS_249}` }, "claude's own failure, not a scope's");
 });
 
+// A scheduler job's label names its calls' scopes (scope.ts), so the reaper can find them, but is
+// stripped before claude runs: a session or supervisor a job starts must not name its calls after it.
+test("in a scheduler job, every claude call's scope is named after the run, and no claude sees the job", { skip: process.platform !== "linux" }, async () => {
+  const dir = tempDir();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const claude = join(dir, "claude");
+  const calls = join(dir, "claude-calls");
+  writeFileSync(claude, `#!/bin/sh
+echo "$1 job=$FACTORY_JOB" >> ${calls}
+case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; -p) cat > /dev/null; echo done ;; esac
+`);
+  chmodSync(claude, 0o755);
+  const scopes = fakeSystemdRun(dir);
+  const was = { bin: process.env.CLAUDE_BIN, job: process.env[JOB_ENV] };
+  process.env.CLAUDE_BIN = claude;
+  process.env[JOB_ENV] = "superfactory.bea.round";
+  after(() => {
+    for (const [k, v] of [["CLAUDE_BIN", was.bin], [JOB_ENV, was.job]] as const) v === undefined ? delete process.env[k] : (process.env[k] = v);
+  });
+  const ws = openWorkspace(tempWorkspace(), {});
+  after(() => rmSync(ws.dir, { recursive: true, force: true }));
+
+  local.sessions();
+  await local.sessionsAsync();
+  local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, env: process.env, args: () => ["--bg", "P"] });
+  local.respawn("bea", "r0");
+  local.stop("bea", "r1", false);
+  assert.equal(runClaude(ws, "round", "P", ["Read"], join(dir, "round.log")).status, 0);
+  assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["agents job=", "agents job=", "--bg job=", "respawn job=", "stop job=", "-p job="], "claude never sees the job");
+  const unit = new RegExp(`^--unit=factory-job-superfactory\\.bea\\.round-${procStat(process.pid)?.pgid}-${process.pid}-\\d+$`);
+  const got = lines(scopes);
+  assert.equal(got.length, 6);
+  for (const c of got) assert.match(c[1] as string, unit, c.join(" "));
+});
+
+test("on Linux a box with no systemd-run says so, and runs no claude bare", { skip: process.platform !== "linux" }, () => {
+  const dir = tempDir();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const was = process.env.PATH;
+  process.env.PATH = dir; // nothing here, systemd-run included
+  try {
+    assert.throws(() => local.sessions(), { message: "systemd-run did not start for claude agents: spawnSync systemd-run ENOENT" });
+  } finally {
+    process.env.PATH = was;
+  }
+});
+
 test("on Linux a watcher's claude -p runs in a scope too, and one that gets none is logged, then dies", { skip: process.platform !== "linux" }, () => {
   const dir = tempDir();
   after(() => rmSync(dir, { recursive: true, force: true }));

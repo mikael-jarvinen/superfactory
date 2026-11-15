@@ -47,11 +47,13 @@ export function claudeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
 
 // Dies when systemd-run, not claude, is what failed. In --scope mode systemd-run fails before it
 // execs claude, so its error is the first line of stderr; a bus error further down is claude's own
-// (a hook's, say), and stays that call's failure.
+// (a hook's, say), and stays that call's failure. Stderr alone cannot tell the two apart when the
+// first line is a bus error claude printed itself, or a warning of systemd-run's comes before its
+// error: either is then logged under the other's message, and the call fails all the same.
 export function scopeCheck(argv: string[], r: RunResult, platform: NodeJS.Platform = process.platform): RunResult {
   if (platform !== "linux") return r;
   const said = r.stderr.trim().split("\n")[0] ?? "";
-  if (r.status === 127 && /systemd-run/.test(r.stderr)) die(`systemd-run did not start for claude ${argv[0]}: ${said}`);
+  if (r.status === 127 && /systemd-run/.test(said)) die(`systemd-run did not start for claude ${argv[0]}: ${said}`);
   if (r.status !== 0 && SCOPE_FAILED.test(said)) die(`systemd-run made no scope for claude ${argv[0]}: ${said}`);
   return r;
 }
