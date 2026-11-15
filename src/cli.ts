@@ -32,6 +32,7 @@ import { schedule } from "./scheduler/index.js";
 import { render } from "./scheduler/launchd.js";
 import { runScheduler } from "./scheduler/run.js";
 import { cmdStack, STACK_USAGE } from "./stacks/command.js";
+import { cmdTicket, cmdWiki, TICKET_USAGE } from "./tickets/cli.js";
 import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/engine.js";
 import {
   allRecs, appendEvent, BUSY, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removeRec, saveRec, showRec, transition, validKey,
@@ -140,6 +141,7 @@ usage: factory [--workspace <dir>] <command> [options]
                                   a Claude Code hook, reading the event on stdin. The rendered
                                   settings in logs/run/ call these; nothing else needs to.
 ${STACK_USAGE}
+${TICKET_USAGE}
 
 The workspace is --workspace, else $FACTORY_WORKSPACE, else the nearest factory.toml above the
 current directory. Only this program writes the state store.
@@ -744,6 +746,8 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void>
   "pr-media": cmdPrMedia,
   "demo": cmdDemo,
   "stack": cmdStack,
+  "ticket": cmdTicket,
+  "wiki": cmdWiki,
   "watch": cmdWatch,
   "schedule": cmdSchedule,
   "doctor": cmdDoctor,

@@ -1,0 +1,86 @@
+/* The tickets and wiki pages, over base.css and messages.css. Phone first: one column, big tap targets. */
+.wrap{max-width:860px}
+h1{font-size:20px;line-height:1.3;margin:6px 0 10px;letter-spacing:-.01em}
+h2{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);font-weight:500;margin:0}
+h2 .n{color:var(--dim)}
+section{margin:22px 0}
+section>h2,.sh{margin-bottom:8px}
+.sh{display:flex;align-items:center;gap:10px;justify-content:space-between}
+.sh h1{margin:6px 0}
+.bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.bar h1{margin:0;margin-right:auto}
+input,select,textarea{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;
+  padding:9px 11px;font:15px/1.4 var(--sans);min-height:40px;max-width:100%}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--ok)}
+textarea{width:100%;resize:vertical;font:14px/1.5 var(--mono)}
+form.stack{display:flex;flex-direction:column;gap:10px;margin:0}
+form.inline,.inline{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0 0}
+form.inline input{flex:1;min-width:120px}
+button,.btn{background:transparent;color:var(--ok);border:1px solid var(--line);border-radius:6px;min-height:40px;
+  padding:0 16px;font-family:var(--mono);font-size:11px;letter-spacing:.11em;text-transform:uppercase;cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center;text-decoration:none}
+button:hover:not(:disabled),.btn:hover{border-color:var(--ok);text-decoration:none}
+button:disabled{color:var(--faint);cursor:default}
+form.stack>button{align-self:flex-start}
+button.lnk,a.lnk{border:0;padding:0 6px;min-height:0;color:var(--cool)}
+button.x{border:0;min-height:0;padding:0 6px;color:var(--faint);font-size:16px}
+#search{width:100%;margin:10px 0}
+.err{margin:6px 0;min-height:0}
+.chips{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+.chip{white-space:nowrap;font-family:var(--mono);font-size:11px;color:var(--dim);border:1px solid var(--line);
+  border-radius:999px;padding:6px 11px;text-decoration:none}
+.chip b{font-weight:500;color:var(--faint);margin-left:3px}
+.chip.on{color:var(--ink);border-color:var(--ink)}
+.chip:hover{text-decoration:none;border-color:var(--dim)}
+.rows{display:flex;flex-direction:column;border-top:1px solid var(--line-soft)}
+.row{display:grid;grid-template-columns:auto auto 1fr;grid-template-areas:"k s m" "t t t";gap:4px 8px;align-items:center;
+  padding:11px 4px;border-bottom:1px solid var(--line-soft);color:var(--ink);text-decoration:none}
+.row:hover{background:var(--raised);text-decoration:none}
+.row .k{grid-area:k;font-family:var(--mono);font-size:12px;color:var(--dim)}
+.row .state{grid-area:s}
+.row .ti{grid-area:t;font-size:15px;line-height:1.35}
+.row .meta{grid-area:m;display:flex;gap:6px;justify-content:flex-end;align-items:center;flex-wrap:wrap}
+.row.page{grid-template-columns:1fr auto;grid-template-areas:"t m";padding-left:calc(4px + var(--depth,0) * 18px)}
+@media (min-width:720px){
+  .row{grid-template-columns:80px 96px 1fr auto;grid-template-areas:"k s t m"}
+}
+.ago,.cm{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.lbl{font-family:var(--mono);font-size:10.5px;color:var(--dim);background:var(--raised);border:1px solid var(--line);border-radius:3px;padding:0 5px}
+.state{font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;border-radius:3px;padding:2px 6px;
+  border:1px solid var(--line);color:var(--dim);white-space:nowrap}
+.st-backlog{color:var(--you);border-color:var(--you);background:var(--you-bg)}
+.st-in-progress,.st-in-design{color:var(--cool);border-color:var(--cool)}
+.st-in-review,.st-in-testing{color:var(--you);border-color:var(--you)}
+.st-done{color:var(--ok);border-color:var(--ok);background:var(--ok-bg)}
+.st-cancelled{color:var(--faint);text-decoration:line-through}
+.tkhead{display:flex;align-items:center;gap:10px}
+.tkhead .k{font-family:var(--mono);font-size:13px;color:var(--dim)}
+.tkhead select{font-family:var(--mono);font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+h1.title{cursor:text}
+.labels{display:flex;flex-wrap:wrap;gap:6px}
+.lbl-pick{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:12px;color:var(--dim);
+  border:1px solid var(--line);border-radius:999px;padding:4px 10px 4px 7px;cursor:pointer}
+.lbl-pick:has(input:checked){color:var(--ink);border-color:var(--ink)}
+.lbl-pick input{min-height:0;margin:0}
+.filter{font-size:13px;color:var(--dim)}
+ul.rel{list-style:none;padding:0;margin:0}
+ul.rel li{padding:4px 0;display:flex;align-items:center;gap:6px;flex-wrap:wrap;overflow-wrap:anywhere}
+.rk{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.md{font-size:15px;line-height:1.6;overflow-wrap:anywhere}
+.md>:first-child{margin-top:0}
+.md :is(ul,ol){padding-left:22px}
+.md code{font-family:var(--mono);font-size:.88em;background:var(--raised);border:1px solid var(--line);border-radius:3px;padding:0 4px}
+.md pre{background:var(--raised);border:1px solid var(--line);border-radius:4px;padding:8px 10px;overflow-x:auto}
+.md pre code{background:none;border:0;padding:0}
+.md blockquote{margin-left:0;padding-left:10px;border-left:3px solid var(--line);color:var(--dim)}
+.md table{border-collapse:collapse;display:block;overflow-x:auto}
+.md :is(th,td){border:1px solid var(--line);padding:3px 8px}
+.md img{max-width:100%}
+.md h1{font-size:1.35em}.md h2{font-size:1.18em;font-family:var(--sans);letter-spacing:0;text-transform:none;color:var(--ink);font-weight:650;margin:1.1em 0 .4em}
+.md h3{font-size:1.05em}
+.foot{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.hist{margin-top:28px;font-size:13px;color:var(--dim)}
+.hist summary{cursor:pointer;font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+.sha{font-family:var(--mono);font-size:11px;color:var(--faint)}
+pre.theirs{white-space:pre-wrap;max-height:50vh;overflow:auto;background:var(--raised);border:1px solid var(--line);border-radius:4px;padding:8px 10px;font:12.5px/1.5 var(--mono)}
+form.edit textarea#body{min-height:55vh}

@@ -84,12 +84,25 @@ export interface Host {
   gitOver: GitOver;
 }
 
+// A project of the local tracker: its tickets are <KEY>-<n>, and its wiki pages sit under its key.
+export interface TrackerProject {
+  key: string;
+  name: string;
+  // When set, only these labels; otherwise any label of lower-case words, digits, ':' and '-'.
+  labels?: string[];
+}
+
 export interface Tracker {
-  kind: "jira" | "none";
+  kind: "jira" | "none" | "local";
   site?: string;
   queueJql?: string;
   keyPattern?: RegExp;
   status: Partial<Record<State, string>>;
+  // kind = "local" only: the projects, where their tickets and wiki live, and the files beside the
+  // message log that hold the human's own words (as "### <name> ..." sections) for the Backlog guard.
+  projects: TrackerProject[];
+  dir?: string;
+  askedFrom: string[];
 }
 
 export interface Config {
@@ -189,6 +202,9 @@ function reader(problems: string[], where: string, t: Table) {
   const raw = (k: string): unknown => get(k, false);
   return { at, bad, raw, str, int, bool, strs, ints, table, done };
 }
+
+export const PROJECT_KEY_RE = /^[A-Z][A-Z0-9]{1,9}$/;
+export const LABEL_RE = /^[a-z0-9][a-z0-9:-]{0,39}$/;
 
 // How the board compares roster titles: case and runs of spaces do not tell two apart.
 const foldTitle = (g: string) => g.toLowerCase().replace(/\s+/g, " ");
@@ -528,7 +544,7 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
 
   const t = reader(problems, "tracker", top.table("tracker") ?? {});
   const kind = t.str("kind") ?? "none";
-  if (kind !== "jira" && kind !== "none") t.bad("kind", `must be "jira" or "none", got ${show(kind)}`);
+  if (kind !== "jira" && kind !== "none" && kind !== "local") t.bad("kind", `must be "jira", "local" or "none", got ${show(kind)}`);
   const patternS = t.str("key_pattern", kind === "jira");
   let keyPattern: RegExp | undefined;
   if (patternS) {
@@ -548,7 +564,36 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   if (kind === "jira")
     for (const s of ["queued", "building", "colleague-review", "done"] as const)
       if (statusT[s] === undefined) problems.push(`tracker.status.${s}: missing; the tracker needs a status for it`);
-  const tracker: Tracker = { kind: kind as Tracker["kind"], site: t.str("site"), queueJql: t.str("queue_jql"), keyPattern, status };
+  const projects: TrackerProject[] = [];
+  const projectsV = t.raw("projects");
+  if (projectsV !== undefined && kind !== "local") t.bad("projects", `only a local tracker has projects; kind is ${show(kind)}`);
+  else if (projectsV !== undefined && !Array.isArray(projectsV)) t.bad("projects", `must be an array of tables ([[tracker.projects]]), got ${show(projectsV)}`);
+  (Array.isArray(projectsV) ? projectsV : []).forEach((v, i) => {
+    const where = `tracker.projects[${i}]`;
+    if (!isTable(v)) return void problems.push(`${where}: must be a table, got ${show(v)}`);
+    const pr = reader(problems, where, v);
+    const key = pr.str("key", true);
+    const name = pr.str("name") ?? key ?? "";
+    const labels = pr.strs("labels");
+    pr.done();
+    if (key === undefined) return;
+    if (!PROJECT_KEY_RE.test(key)) return void pr.bad("key", `must be 2 to 10 capital letters or digits, starting with a letter, got ${show(key)}`);
+    if (projects.some((x) => x.key === key)) return void pr.bad("key", `${show(key)} is already a project`);
+    const badLabel = labels?.find((l) => !LABEL_RE.test(l));
+    if (badLabel !== undefined) return void pr.bad("labels", `${show(badLabel)} is not a label: lower-case words, digits, ':' and '-'`);
+    projects.push({ key, name, ...(labels ? { labels } : {}) });
+  });
+  if (kind === "local" && projectsV === undefined) t.bad("projects", "missing; a local tracker needs at least one [[tracker.projects]]");
+  const trackerDir = path(t, "dir", t.str("dir"));
+  const askedFrom = (t.strs("asked_from") ?? []).map((f, i) => path(t, `asked_from[${i}]`, f) ?? "");
+  if (kind !== "local") {
+    if (trackerDir !== undefined) t.bad("dir", `only a local tracker has a dir; kind is ${show(kind)}`);
+    if (askedFrom.length) t.bad("asked_from", `only a local tracker reads it; kind is ${show(kind)}`);
+  }
+  const tracker: Tracker = {
+    kind: kind as Tracker["kind"], site: t.str("site"), queueJql: t.str("queue_jql"), keyPattern, status,
+    projects, ...(trackerDir ? { dir: trackerDir } : {}), askedFrom,
+  };
   t.done();
 
   const b = reader(problems, "board", top.table("board") ?? {});

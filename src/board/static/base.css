@@ -66,3 +66,5 @@ nav a.on{color:var(--ink)}
   nav{gap:10px;margin-left:0}
 }
 @media (max-width:400px){.theme{display:none}}
+nav a{white-space:nowrap}
+@media (max-width:480px){.pulse #at{display:none}}
