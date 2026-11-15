@@ -6,13 +6,13 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { claudeBin } from "./claude-bin.js";
 import type { Agent, Repo } from "./config.js";
 import type { Session } from "./fleet.js";
 import type { Phase } from "./launch.js";
 import { remote, type Unreachable } from "./remote.js";
+import { claudeEnv, claudeScoped, scopeCheck } from "./scope.js";
 import type { Workspace } from "./workspace.js";
-import { die, run } from "./util.js";
+import { die, MAX_OUTPUT, run } from "./util.js";
 import { branchPushed, ensureWorktree, git, worktreeDirty, worktreePath } from "./worktree.js";
 
 // What starting a session needs.
@@ -95,10 +95,11 @@ export function sessionAlive(s: Session | null | undefined): s is Session {
   return !!s && s.kind === "background" && s.state !== "stopped" && s.state !== "failed" && daemonAlive();
 }
 
+const scoped = (argv: string[]) => scopeCheck(argv, run(...claudeScoped(argv), { env: claudeEnv() }, `claude ${argv[0]}`));
 export const local: Transport = {
   where: "local",
   sessions(includeDone = false) {
-    const r = run(claudeBin(), ["agents", "--json", ...(includeDone ? ["--all"] : [])]);
+    const r = scoped(["agents", "--json", ...(includeDone ? ["--all"] : [])]);
     if (r.status !== 0) die(`\`claude agents --json\` failed: ${r.stderr.trim()}`);
     try {
       return parse(r.stdout);
@@ -106,9 +107,10 @@ export const local: Transport = {
       return die("`claude agents --json` returned something that is not JSON");
     }
   },
+  // As before, any failure here, a scope's included, is an empty listing.
   sessionsAsync() {
     return new Promise((res) => {
-      execFile(claudeBin(), ["agents", "--json"], { timeout: 20_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+      execFile(...claudeScoped(["agents", "--json"]), { timeout: 20_000, maxBuffer: MAX_OUTPUT, env: claudeEnv() }, (err, stdout) => {
         try {
           res(err ? [] : parse(stdout));
         } catch {
@@ -124,17 +126,18 @@ export const local: Transport = {
       path = join(tmpdir(), `sf-${req.agent.name}-${randomBytes(4).toString("hex")}.md`);
       writeFileSync(path, req.appendix, { flag: "wx" });
     }
-    const r = run(claudeBin(), req.args(path), { cwd: req.cwd, env: req.env });
+    const argv = req.args(path);
+    const r = scopeCheck(argv, run(...claudeScoped(argv), { cwd: req.cwd, env: claudeEnv(req.env) }, `claude ${argv[0]}`));
     if (r.status !== 0) die(`claude --bg failed: ${r.stderr.trim() || r.stdout.trim()}`);
     return /backgrounded · (\w+) · /.exec(r.stdout)?.[1] ?? "?";
   },
   respawn(_name, id) {
-    const r = run(claudeBin(), ["respawn", id]);
+    const r = scoped(["respawn", id]);
     return { ok: r.status === 0, said: r.stdout.trim(), why: r.stderr.trim() || r.stdout.trim() };
   },
   stop(_name, id, remove) {
-    run(claudeBin(), ["stop", id]);
-    if (remove) run(claudeBin(), ["rm", id]);
+    scoped(["stop", id]);
+    if (remove) scoped(["rm", id]);
   },
   worktree(q) {
     return ensureWorktree(q.repo.path, q.ticket, q.repo.base, q.repo.gitOver);

@@ -18,8 +18,21 @@ export interface RunResult {
   stderr: string;
 }
 
-export function run(cmd: string, args: string[], opts: SpawnSyncOptions = {}): RunResult {
-  const r = spawnSync(cmd, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, ...opts });
+// How much of a command's output is read, on every path that reads one. spawnSync counts stdout
+// and stderr together against it, execFile each on its own.
+export const MAX_OUTPUT = 64 * 1024 * 1024;
+const TAIL = 4096;
+
+// `name` is who the output is from, when that is not cmd: a claude run through systemd-run.
+export function run(cmd: string, args: string[], opts: SpawnSyncOptions = {}, name = cmd): RunResult {
+  const max = opts.maxBuffer ?? MAX_OUTPUT;
+  const r = spawnSync(cmd, args, { encoding: "utf8", ...opts, maxBuffer: max });
+  // ENOBUFS is a command that started and failed, not a missing one. The last TAIL characters of
+  // each stream are kept, to show what was being written.
+  if ((r.error as NodeJS.ErrnoException | undefined)?.code === "ENOBUFS") {
+    const err = String(r.stderr ?? "").slice(-TAIL);
+    return { status: 1, stdout: String(r.stdout ?? "").slice(-TAIL), stderr: `${name} wrote more than the ${max} bytes of output that are read${err ? `\n${err}` : ""}` };
+  }
   // 127 for a command that could not start, as a shell says; 124 for one killed at its timeout, as
   // timeout(1) says, so a slow or sleeping run is not read as a missing binary.
   if (r.error) return { status: (r.error as NodeJS.ErrnoException).code === "ETIMEDOUT" ? 124 : 127, stdout: "", stderr: String(r.error.message) };

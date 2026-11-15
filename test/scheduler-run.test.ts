@@ -58,7 +58,7 @@ async function setup(extraEnv: Record<string, string> = {}) {
   // sleep. Their pids go to stray.pid and session.pid, and the session's sleep goes to child.pid.
   // With stray-ignores-term in place, the stray ignores SIGTERM.
   writeFileSync(join(dir, "bin", "claude"), `#!/bin/sh
-echo "HOME=$HOME USER=$USER TMPDIR=$TMPDIR DBUS=$DBUS_SESSION_BUS_ADDRESS XDG=$XDG_RUNTIME_DIR SSH=$SSH_AUTH_SOCK NOT_INHERITED=$NOT_INHERITED args=$* parent=$(tr '\\0' ' ' < /proc/$PPID/cmdline)" >> ${seen}
+echo "HOME=$HOME USER=$USER TMPDIR=$TMPDIR DBUS=$DBUS_SESSION_BUS_ADDRESS XDG=$XDG_RUNTIME_DIR SSH=$SSH_AUTH_SOCK JOB=$FACTORY_JOB NOT_INHERITED=$NOT_INHERITED args=$* parent=$(tr '\\0' ' ' < /proc/$PPID/cmdline)" >> ${seen}
 if [ "$1" = agents ] && tr '\\0' ' ' < /proc/$PPID/cmdline | grep -q ' up $' && [ ! -e ${join(dir, "spawned")} ]; then
   touch ${join(dir, "spawned")}
   if [ -e ${join(dir, "stray-ignores-term")} ]; then sh -c "trap '' TERM; exec sleep 600" >/dev/null 2>&1 &
@@ -76,6 +76,22 @@ case "$1" in
 esac
 `);
   chmodSync(join(dir, "bin", "claude"), 0o755);
+  // A pass-through systemd-run that refuses a call from up whose scope is not named after up's run
+  // (factory-job-<label>-<up's group>-…), which is how the reaper finds what up's calls left. Each
+  // refusal goes to no-unit, which must stay empty.
+  const noUnit = join(dir, "no-unit");
+  writeFileSync(join(dir, "bin", "systemd-run"), `#!/bin/sh
+if tr '\\0' ' ' < /proc/$PPID/cmdline | grep -q ' up $'; then
+  case " $* " in
+    *" --unit=factory-job-${UP}-$(sed 's/.*) //' /proc/$PPID/stat | cut -d' ' -f3)-"*) ;;
+    *) echo "$*" >> ${noUnit}; echo "fake systemd-run: a call from up with no job unit" >&2; exit 2 ;;
+  esac
+fi
+while [ "$1" != "--" ]; do [ $# -gt 0 ] || exit 2; shift; done
+shift
+exec "$@"
+`);
+  chmodSync(join(dir, "bin", "systemd-run"), 0o755);
   writeFileSync(join(ws, "lead", "CLAUDE.md"), "You lead.\n");
   writeFileSync(join(ws, "prompts", "round.md"), "Judge the facts.\n");
   writeFileSync(join(ws, "factory.toml"), `[human]\nname = "Alex"\n\n[paths]\nrepos = "repos"\n\n[roles.lead]\ncwd = "lead"\nsettings = "lead"\n\n[[agents]]\nname = "ada"\nrole = "lead"\n\n[board]\nhost = "127.0.0.1"\nport = ${boardPort}\n`);
@@ -126,8 +142,10 @@ esac
       }
     }
     if (empty < 3) left = startedBy(dir);
+    const unnamed = existsSync(noUnit) ? readFileSync(noUnit, "utf8") : "";
     rmSync(dir, { recursive: true, force: true });
     assert.deepEqual(left.map(cmdline), [], "processes the test started, still running");
+    assert.equal(unnamed, "", "calls from up whose scope was not named after its run");
   });
   const post = (text: string) => fetch(`http://127.0.0.1:${boardPort}/api/messages`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }),
@@ -144,7 +162,7 @@ test("a job gets HOME, USER and TMPDIR as launchd would give it, and the session
   await until("up to call claude", () => fromUp() && t.upRunning());
   t.upPids.add(t.state().jobs[UP].pid);
   const line = fromUp() as string;
-  assert.match(line, new RegExp(`^HOME=${t.home} USER=factory-test TMPDIR=${t.dir} DBUS=unix:path=/run/user/1/bus XDG=/run/user/1 SSH=${t.dir}/agent.sock NOT_INHERITED= args=`), "an unlisted variable is refused: " + line);
+  assert.match(line, new RegExp(`^HOME=${t.home} USER=factory-test TMPDIR=${t.dir} DBUS=unix:path=/run/user/1/bus XDG=/run/user/1 SSH=${t.dir}/agent.sock JOB= NOT_INHERITED= args=`), "an unlisted variable is refused, and the job's label is the scope's alone: " + line);
   d.kill();
 });
 
@@ -271,7 +289,7 @@ test("what an ended run leaves in its process group is cleaned up, but never a c
   const [stray, session, child] = [t.pidIn("stray.pid") as number, t.pidIn("session.pid") as number, t.pidIn("child.pid") as number];
   process.kill(pid, "SIGKILL"); // up alone: its group lives on
   await until("the stray to be cleaned up", () => !runningNotZombie(stray));
-  assert.match(d.out, new RegExp(`job ${UP.replace(/\./g, "\\.")}: ended, leaving ${stray} \\(sleep\\) in its process group; SIGTERM`), d.out);
+  assert.match(d.out, new RegExp(`job ${UP.replace(/\./g, "\\.")}: ended, leaving ${stray} \\(sleep\\) in its process group or scopes; SIGTERM`), d.out);
   assert.ok(runningNotZombie(session), "a claude in the group is left alone");
   assert.ok(runningNotZombie(child), "and so is what runs under it");
   d.kill();

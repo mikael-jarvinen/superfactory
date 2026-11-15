@@ -11,6 +11,7 @@ import { findSession, type Session, waitForName } from "./fleet.js";
 import { armText } from "./hooks/status.js";
 import { commonFlags, GIT_HTTPS_ENV, launch, leadPrompt, roleOf } from "./launch.js";
 import type { Transport } from "./transport.js";
+import { FactoryError } from "./util.js";
 import type { Workspace } from "./workspace.js";
 
 export const resumePrompt = (ws: Workspace) => `You were restarted by \`factory up\`. ${armText(ws)}`;
@@ -55,7 +56,15 @@ function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId:
     return false;
   }
   // A resume that comes back under a new id leaves the old one listed, stopped; take it off the list.
-  if (old.id && back.id !== old.id) t.stop(ld.name, old.id, true);
+  // The lead is up by now, so a stop that dies (a scope systemd-run cannot make) only leaves the
+  // old entry listed; it is no reason to fail the bring-up. Any other error is a bug, and throws.
+  if (old.id && back.id !== old.id)
+    try {
+      t.stop(ld.name, old.id, true);
+    } catch (e) {
+      if (!(e instanceof FactoryError)) throw e;
+      out(`the old ${old.id} stays listed: ${e.message}`);
+    }
   out(`${ld.name} resumed from ${sessionId} as ${back.id}, told to arm the message page inbox`);
   return true;
 }

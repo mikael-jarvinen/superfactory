@@ -21,6 +21,7 @@ import { TEMPLATES_DIR, templateNames } from "./settings.js";
 import { stackDoctor } from "./stacks/engine.js";
 import { trackerOf } from "./tracker/read.js";
 import { ask, probe, Unreachable } from "./remote.js";
+import { SCOPE } from "./scope.js";
 import { repoTransport } from "./transport.js";
 import { local } from "./transport.js";
 import { promptPath } from "./watchers/job.js";
@@ -87,13 +88,26 @@ function tools(ws: Workspace): Check[] {
       loggedIn = false;
     }
     checks.push({ status: okIf(loggedIn), what: "claude logged in", fix: "claude auth login" });
+    // On Linux every claude call runs in a scope under agents.slice, and a call that gets none
+    // fails, the listing below included: that one is then the scope's fault, not claude's.
+    let scoped = true;
+    if (process.platform === "linux") {
+      const r = run("systemd-run", [...SCOPE, "true"]);
+      scoped = r.status === 0;
+      const said = r.stderr.trim().split("\n")[0];
+      checks.push({
+        status: okIf(scoped),
+        what: `systemd-run --user --scope under agents.slice, which every claude call runs in${scoped ? "" : ` (${said || `exit ${r.status}`})`}`,
+        fix: `a user systemd with its bus: loginctl enable-linger ${process.env.USER ?? "$USER"}, and run from a login session (not sudo, su or a container) so XDG_RUNTIME_DIR points at it`,
+      });
+    }
     let lists = false;
     try {
       lists = Array.isArray(local.sessions());
     } catch {
       lists = false;
     }
-    checks.push({ status: okIf(lists), what: "claude agents --json, which lists background sessions", fix: "claude update" });
+    checks.push({ status: okIf(lists), what: "claude agents --json, which lists background sessions", fix: scoped ? "claude update" : "fix the systemd-run scope above first" });
   }
 
   const gh = ghBin();

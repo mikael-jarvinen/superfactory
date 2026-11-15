@@ -3,7 +3,8 @@
 // does only what needs a model; fixed commands, set differences and file writes stay in the code.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { claudeBin, lead } from "../fleet.js";
+import { lead } from "../fleet.js";
+import { claudeEnv, claudeScoped, scopeCheck } from "../scope.js";
 import { ghBin } from "../gate/github.js";
 import { renderSettings } from "../settings.js";
 import { parseRead } from "../tracker/read.js";
@@ -80,7 +81,7 @@ export function watcherMode(ws: Workspace): string {
 }
 
 export const claudeOptions = (job: Job) => ({
-  env: { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" },
+  env: { ...claudeEnv(), CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" },
   timeout: TIMEOUT_S[job] * 1000,
   killSignal: "SIGTERM" as const,
 });
@@ -100,16 +101,20 @@ export interface ClaudeRun {
 // frozen, not stuck. On 2026-10-20 every "exit=127" in the failures log was one of these.
 const SLEPT_MARGIN_S = 120;
 
-// The run's reply and exit. A run killed at its timeout counts as failed.
+// The run's reply and exit. A run killed at its timeout counts as failed. A `claude -p` can start
+// the supervisor as a listing can, so it runs in a scope under agents.slice like every claude call;
+// one systemd-run cannot scope is logged, then dies.
 export function runClaude(ws: Workspace, job: Job, prompt: string, tools: string[], log: string): ClaudeRun {
   const t0 = Date.now();
-  const r = run(claudeBin(), claudeArgs(ws, job, tools), { ...claudeOptions(job), input: prompt });
+  const argv = claudeArgs(ws, job, tools);
+  const r = run(...claudeScoped(argv), { ...claudeOptions(job), input: prompt }, `claude ${argv[0]}`);
   const seconds = Math.round((Date.now() - t0) / 1000);
   const slept = r.status === TIMED_OUT && seconds > TIMEOUT_S[job] + SLEPT_MARGIN_S;
   logTo(log, r.stdout);
   if (r.stderr.trim()) logTo(log, r.stderr);
   const why = r.status === TIMED_OUT ? ` (timed out after ${seconds}s${slept ? "; the laptop slept during the run" : ""})` : "";
   logTo(log, `exit=${r.status}${why}`);
+  scopeCheck(argv, r);
   return { status: r.status, stdout: r.stdout, seconds, slept };
 }
 

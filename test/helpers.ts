@@ -1,11 +1,25 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ownCgroupProcs } from "../src/scheduler/leftovers.js";
 import { procStat } from "../src/stacks/process.js";
+
+// On Linux every claude call goes through systemd-run --user --scope. No test may open a real scope
+// or depend on this box's user bus, so every test file that imports this one runs with a
+// systemd-run first on PATH that runs what follows "--" in place. A test that wants systemd-run to
+// fail puts its own fake in front of this one. What no fake can show: that a call really lands in a
+// cgroup under agents.slice, that a timeout's kill reaches claude through systemd-run's exec, or
+// that --collect removes the scope. A detached child that outlives its test file finds this fake
+// removed, and reaches the next systemd-run on PATH.
+export const PASS_THROUGH_SYSTEMD_RUN = '#!/bin/sh\nwhile [ "$1" != "--" ]; do [ $# -gt 0 ] || exit 2; shift; done\nshift\nexec "$@"\n';
+const fakeBin = realpathSync(mkdtempSync(join(tmpdir(), "sf-systemd-run-")));
+writeFileSync(join(fakeBin, "systemd-run"), PASS_THROUGH_SYSTEMD_RUN);
+chmodSync(join(fakeBin, "systemd-run"), 0o755);
+process.env.PATH = `${fakeBin}${delimiter}${process.env.PATH ?? ""}`;
+process.on("exit", () => rmSync(fakeBin, { recursive: true, force: true }));
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
