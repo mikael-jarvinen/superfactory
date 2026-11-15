@@ -17,7 +17,7 @@ const ws = openWorkspace(dir, {});
 const ld = lead(ws);
 
 // A transport whose listing is `sessions`; whatever it starts or respawns comes up alive.
-function fake(sessions: Session[], opts: { startFails?: boolean } = {}) {
+function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boolean } = {}) {
   const started: { cwd: string; prompt: string; args: string[] }[] = [];
   const respawned: string[] = [];
   const removed: string[] = [];
@@ -39,6 +39,7 @@ function fake(sessions: Session[], opts: { startFails?: boolean } = {}) {
     },
     stop(_name, id, remove) {
       assert.equal(remove, true);
+      if (opts.stopFails) throw new Error("systemd-run made no scope for claude stop: Failed to connect to bus: No such file or directory");
       removed.push(id);
     },
     worktree: () => assert.fail("not used"),
@@ -68,6 +69,18 @@ test("a stopped lead is resumed with a first turn that arms the message page inb
   assert.ok(s!.args.includes("--name") && s!.args.includes("--settings"), "the lead's own flags, as at launch");
   assert.deepEqual(removed, ["d1079ed1"], "the old entry, which the resume copied, is taken off the list");
   assert.deepEqual(said, [`${ld.name} resumed from ${UUID} as new1, told to arm the message page inbox`]);
+});
+
+test("a resumed lead is up even when taking the old entry off the list fails", () => {
+  const { t, respawned, removed } = fake([stopped()], { stopFails: true });
+  const said: string[] = [];
+  bringUpLead(ws, ld, t, false, (l) => said.push(l), 1);
+  assert.deepEqual(respawned, [], "no respawn: the resume worked");
+  assert.deepEqual(removed, []);
+  assert.deepEqual(said, [
+    "the old d1079ed1 stays listed: systemd-run made no scope for claude stop: Failed to connect to bus: No such file or directory",
+    `${ld.name} resumed from ${UUID} as new1, told to arm the message page inbox`,
+  ]);
 });
 
 test("a resume that fails falls back to respawn, as before", () => {

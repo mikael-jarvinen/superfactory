@@ -55,7 +55,14 @@ function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId:
     return false;
   }
   // A resume that comes back under a new id leaves the old one listed, stopped; take it off the list.
-  if (old.id && back.id !== old.id) t.stop(ld.name, old.id, true);
+  // The lead is up by now, so a stop that fails (a scope systemd-run cannot make) only leaves
+  // the old entry listed; it is no reason to fail the bring-up.
+  if (old.id && back.id !== old.id)
+    try {
+      t.stop(ld.name, old.id, true);
+    } catch (e) {
+      out(`the old ${old.id} stays listed: ${(e as Error).message}`);
+    }
   out(`${ld.name} resumed from ${sessionId} as ${back.id}, told to arm the message page inbox`);
   return true;
 }

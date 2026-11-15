@@ -76,9 +76,6 @@ case "$1" in
 esac
 `);
   chmodSync(join(dir, "bin", "claude"), 0o755);
-  // Every claude call goes through systemd-run on Linux; this one runs the call in place.
-  writeFileSync(join(dir, "bin", "systemd-run"), `#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n`);
-  chmodSync(join(dir, "bin", "systemd-run"), 0o755);
   writeFileSync(join(ws, "lead", "CLAUDE.md"), "You lead.\n");
   writeFileSync(join(ws, "prompts", "round.md"), "Judge the facts.\n");
   writeFileSync(join(ws, "factory.toml"), `[human]\nname = "Alex"\n\n[paths]\nrepos = "repos"\n\n[roles.lead]\ncwd = "lead"\nsettings = "lead"\n\n[[agents]]\nname = "ada"\nrole = "lead"\n\n[board]\nhost = "127.0.0.1"\nport = ${boardPort}\n`);

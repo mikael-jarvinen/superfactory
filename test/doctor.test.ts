@@ -196,3 +196,16 @@ cwd = "panel"
     "MISSING panel/CLAUDE.md, instructions for sam, tia (sam's cwd, tia's cwd) [fix: create panel and write CLAUDE.md in it, or set sam's cwd or tia's cwd]",
   ]);
 });
+
+// On Linux every claude call runs in a scope, so a box whose user bus systemd-run cannot reach
+// lists no sessions either. doctor names the scope as the cause, not claude.
+test("on Linux doctor reports a scope systemd-run cannot make as that, not as a claude to update", { skip: process.platform !== "linux" }, async () => {
+  const w = workspace(base(await freePort()));
+  exe(join(w.dir, "bin", "systemd-run"), `echo "Failed to connect to bus: No such file or directory" >&2\nexit 1`);
+  const r = factory(w.dir, ["doctor"], { env: w.env });
+  const got = r.stdout.trimEnd().split("\n");
+  assert.equal(r.status, 1, r.stderr);
+  assert.ok(got.some((l) => /^MISSING systemd-run --user --scope under agents\.slice, which every claude call runs in \(Failed to connect to bus: No such file or directory\) \[fix: a user systemd with its bus: loginctl enable-linger /.test(l)), r.stdout);
+  assert.ok(got.includes("MISSING claude agents --json, which lists background sessions [fix: fix the systemd-run scope above first]"), r.stdout);
+  assert.ok(!got.some((l) => l.includes("claude update")), r.stdout);
+});

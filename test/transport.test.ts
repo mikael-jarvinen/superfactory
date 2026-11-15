@@ -5,6 +5,7 @@ import { after, test } from "node:test";
 import { agentOrDie, findSession, type Session } from "../src/fleet.js";
 import { claudeScoped, SCOPE } from "../src/scope.js";
 import { agentSessions, local, pick, type Transport } from "../src/transport.js";
+import { runClaude } from "../src/watchers/job.js";
 import { openWorkspace } from "../src/workspace.js";
 import { tempDir, tempWorkspace } from "./helpers.js";
 
@@ -19,7 +20,7 @@ function fakeSystemdRun(dir: string): string {
   writeFileSync(join(dir, "systemd-run"), `#!/bin/sh
 { printf 'systemd-run'; for a in "$@"; do printf '\\t%s' "$a"; done; echo; } >> ${log}
 [ -f ${dir}/scope-fail ] && { cat ${dir}/scope-fail >&2; echo >&2; exit 1; }
-while [ "$1" != "--" ]; do shift; done
+while [ "$1" != "--" ]; do [ $# -gt 0 ] || exit 2; shift; done
 shift
 command -v "$1" >/dev/null || { echo "Failed to find executable $1: No such file or directory" >&2; exit 1; }
 exec "$@"
@@ -101,6 +102,39 @@ case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; 
   const missing = `Failed to find executable ${gone}: No such file or directory`;
   assert.deepEqual(local.respawn("bea", "r0"), { ok: false, said: "", why: missing }, "a claude systemd-run cannot find is that call's failure, not a scope's");
   assert.throws(() => local.sessions(), { message: `\`claude agents --json\` failed: ${missing}` });
+
+  // systemd-run fails before it execs claude, so only its first line of stderr can be a scope's:
+  // a bus error further down is claude's own, from a hook say.
+  const hooked = join(dir, "hooked");
+  writeFileSync(hooked, `#!/bin/sh\necho "hook failed" >&2\necho "${NO_BUS_249}" >&2\nexit 1\n`);
+  chmodSync(hooked, 0o755);
+  process.env.CLAUDE_BIN = hooked;
+  assert.deepEqual(local.respawn("bea", "r0"), { ok: false, said: "", why: `hook failed\n${NO_BUS_249}` }, "claude's own failure, not a scope's");
+});
+
+test("on Linux a watcher's claude -p runs in a scope too, and one that gets none is logged, then dies", { skip: process.platform !== "linux" }, () => {
+  const dir = tempDir();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const claude = join(dir, "claude");
+  writeFileSync(claude, `#!/bin/sh\ncat > /dev/null\necho done\n`);
+  chmodSync(claude, 0o755);
+  const scopes = fakeSystemdRun(dir);
+  const was = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = claude;
+  after(() => (was === undefined ? delete process.env.CLAUDE_BIN : (process.env.CLAUDE_BIN = was)));
+  const ws = openWorkspace(tempWorkspace(), {});
+  after(() => rmSync(ws.dir, { recursive: true, force: true }));
+  const log = join(dir, "round.log");
+
+  const r = runClaude(ws, "round", "P", ["Read"], log);
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout.trim(), "done");
+  const [call] = lines(scopes);
+  assert.deepEqual(call!.slice(0, SCOPE.length + 3), ["systemd-run", ...SCOPE, claude, "-p"]);
+
+  writeFileSync(join(dir, "scope-fail"), NO_BUS_259);
+  assert.throws(() => runClaude(ws, "round", "P", ["Read"], log), { message: `systemd-run made no scope for claude -p: ${NO_BUS_259}` });
+  assert.match(readFileSync(log, "utf8"), new RegExp(`${NO_BUS_259}\\n.*exit=1`), "logged before it dies");
 });
 
 test("where there is no systemd, claude runs bare", () => {
