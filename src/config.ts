@@ -500,7 +500,7 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   if (leads.length !== 1)
     problems.push(`agents: exactly one agent needs role = "lead", found ${leads.length}${leads.length ? ` (${leads.map((a) => a.name).join(", ")})` : ""}`);
   // A roster sits on the board where its role does, so one group cannot span two roles; teams() in
-  // board/server.ts takes a group's staff flag and rank from its first member and relies on this.
+  // board/server.ts takes a group's rank from its first member and relies on this.
   // Two spellings of one name would look like one roster drawn twice, so a group is spelled one way.
   const fold = foldTitle;
   // A group titled like a roster the board draws for ungrouped agents would show that title twice.

@@ -268,7 +268,8 @@ function reviewKeys(ws: Workspace): string[] {
 // Builders group by their stack, or by their repos when they have none, so an agent added to the
 // config lands in the right group without the board changing.
 function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>, alive: (name: string, s: Session | undefined) => boolean, unknown: (name: string) => string | null = () => null) {
-  // staff: an assistants' roster, drawn beside the lead rather than in the row of teams.
+  // staff: the ungrouped assistants' roster, drawn beside the lead. A named group is never staff and
+  // sits in the row of teams, whatever its role.
   const groups = new Map<string, { key: string; title: string; scope: string[]; staff: boolean; members: unknown[] }>();
   const ranks = new Map<string, number>();
   const reviewerRepos = ws.config.roles.reviewer?.addDirs ?? [];
@@ -279,14 +280,15 @@ function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>, alive: 
       : a.role === "reviewer" ? reviewerRepos
       : a.role === "designer" ? (ws.config.roles.designer?.addDirs ?? [])
       : a.repos;
-    // A group takes its staff flag and rank from its first member (see config.ts); its scope is
-    // every member's.
+    // A group takes its rank from its first member's role (see config.ts), except that a group of
+    // assistants ranks with the builders' teams, since only the assistants' roster sits beside the
+    // lead; its scope is every member's.
     const key = a.group ? `group:${a.group}` : own.key;
     const title = a.group ?? own.title;
     let g = groups.get(key);
     if (!g) {
-      groups.set(key, (g = { key, title, scope: [], staff: a.role === "assistant", members: [] }));
-      ranks.set(key, rank(own.key));
+      groups.set(key, (g = { key, title, scope: [], staff: !a.group && a.role === "assistant", members: [] }));
+      ranks.set(key, a.group && a.role === "assistant" ? 2 : rank(own.key));
     }
     for (const x of scope) if (!g.scope.includes(x)) g.scope.push(x);
     const s = listed.get(a.name);
