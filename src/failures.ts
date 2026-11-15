@@ -8,6 +8,10 @@ export const iso = (d = new Date()) => d.toISOString().replace(/\.\d+Z$/, "Z");
 
 export const failuresLog = (ws: Workspace) => join(ws.logsDir, "watcher-failures.log");
 
+// The wake hook's own errors, one JSON row each. Takes the logs dir, not the workspace: a workspace
+// whose config does not load still has its default one.
+export const wakeHookLog = (logsDir: string) => join(logsDir, "wake-hook.log");
+
 export function failure(ws: Workspace, line: string): void {
   mkdirSync(ws.logsDir, { recursive: true });
   appendFileSync(failuresLog(ws), `${iso()} ${line}\n`);

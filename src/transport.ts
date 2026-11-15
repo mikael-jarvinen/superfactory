@@ -9,7 +9,7 @@ import { join } from "node:path";
 import type { Agent, Repo } from "./config.js";
 import type { Session } from "./fleet.js";
 import type { Phase } from "./launch.js";
-import { remote, type Unreachable } from "./remote.js";
+import { ListingTimedOut, remote, Unreachable } from "./remote.js";
 import { claudeEnv, claudeScoped, scopeCheck } from "./scope.js";
 import type { Workspace } from "./workspace.js";
 import { die, MAX_OUTPUT, run } from "./util.js";
@@ -53,7 +53,8 @@ export interface WorktreeLeft {
 // the same `where` are taken for one.
 export interface Transport {
   readonly where: string;
-  // Throws Unreachable (remote.ts) when a host cannot be asked.
+  // Within LISTING_TIMEOUT_MS. Throws Unreachable (remote.ts) when a host cannot be asked, or a local
+  // listing timed out.
   sessions(includeDone?: boolean): Session[];
   // For the board, which must not block on a listing. Resolves to Unreachable rather than throwing it.
   sessionsAsync(): Promise<Session[] | Unreachable>;
@@ -61,7 +62,8 @@ export interface Transport {
   // The launch id claude printed, or "?".
   start(req: StartRequest): string;
   // said: claude's stdout. why: its stderr (else stdout), read when the session does not come back.
-  respawn(name: string, id: string): { ok: boolean; said: string; why: string };
+  // Within timeoutMs; one too short for a respawn is a failure, not a longer call.
+  respawn(name: string, id: string, timeoutMs?: number): { ok: boolean; said: string; why: string };
   stop(name: string, id: string, remove: boolean): void;
   // The worktree for the item, made or reused (worktree.ts's ensureWorktree); throws when it cannot.
   worktree(q: WorktreeRequest): { wt: string; how: string };
@@ -73,7 +75,31 @@ export interface Transport {
 
 const isDir = (p: string) => existsSync(p) && statSync(p).isDirectory();
 
-const parse = (stdout: string): Session[] => JSON.parse(stdout || "[]") as Session[];
+// When a session last did anything: its transcript's mtime, under claude's projects/ by the cwd with
+// every character but a letter or digit made "-". The listing gives a session only startedAt, and one
+// started earlier may have talked since. Undefined when the transcript is not found.
+export function transcriptAt(s: Session): number | undefined {
+  if (typeof s.sessionId !== "string" || !/^[\w-]+$/.test(s.sessionId) || typeof s.cwd !== "string") return undefined;
+  const dir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+  try {
+    return statSync(join(dir, "projects", s.cwd.replace(/[^A-Za-z0-9]/g, "-"), `${s.sessionId}.jsonl`)).mtimeMs;
+  } catch {
+    return undefined;
+  }
+}
+
+const withActivity = (rows: Session[]): Session[] =>
+  rows.map((s) => {
+    const at = transcriptAt(s);
+    return at === undefined ? s : { ...s, activeAt: at };
+  });
+
+// Rows that are not a list, `{}` say, are as unreadable as text that is not JSON.
+const parse = (stdout: string): Session[] => {
+  const rows: unknown = JSON.parse(stdout || "[]");
+  if (!Array.isArray(rows)) throw new SyntaxError("not a list");
+  return rows as Session[];
+};
 
 // `claude agents --json` is a registry, not a probe: after the daemon retires an idle worker and
 // exits, the listing keeps the session at its last state. The roster names the supervisor pid; a
@@ -99,24 +125,30 @@ export function sessionAlive(s: Session | null | undefined): s is Session {
   return !!s && s.kind === "background" && s.state !== "stopped" && s.state !== "failed" && daemonAlive();
 }
 
-const scoped = (argv: string[]) => scopeCheck(argv, run(...claudeScoped(argv), { env: claudeEnv() }, `claude ${argv[0]}`));
+// A listing that hangs is cut off here, so a caller with a deadline can count on it.
+export const LISTING_TIMEOUT_MS = 20_000;
+
+const scoped = (argv: string[], timeout?: number) => scopeCheck(argv, run(...claudeScoped(argv), { env: claudeEnv(), ...(timeout ? { timeout } : {}) }, `claude ${argv[0]}`));
 export const local: Transport = {
   where: "local",
   sessions(includeDone = false) {
-    const r = scoped(["agents", "--json", ...(includeDone ? ["--all"] : [])]);
+    const r = scoped(["agents", "--json", ...(includeDone ? ["--all"] : [])], LISTING_TIMEOUT_MS);
+    if (r.status === 124) throw new ListingTimedOut(`\`claude agents --json\` did not answer in ${LISTING_TIMEOUT_MS / 1000} s`);
     if (r.status !== 0) die(`\`claude agents --json\` failed: ${r.stderr.trim()}`);
+    let rows: Session[];
     try {
-      return parse(r.stdout);
+      rows = parse(r.stdout);
     } catch {
-      return die("`claude agents --json` returned something that is not JSON");
+      return die("`claude agents --json` returned something that is not a JSON list");
     }
+    return withActivity(rows);
   },
   // As before, any failure here, a scope's included, is an empty listing.
   sessionsAsync() {
     return new Promise((res) => {
-      execFile(...claudeScoped(["agents", "--json"]), { timeout: 20_000, maxBuffer: MAX_OUTPUT, env: claudeEnv() }, (err, stdout) => {
+      execFile(...claudeScoped(["agents", "--json"]), { timeout: LISTING_TIMEOUT_MS, maxBuffer: MAX_OUTPUT, env: claudeEnv() }, (err, stdout) => {
         try {
-          res(err ? [] : parse(stdout));
+          res(err ? [] : withActivity(parse(stdout)));
         } catch {
           res([]);
         }
@@ -134,8 +166,8 @@ export const local: Transport = {
     if (r.status !== 0) die(`claude --bg failed: ${r.stderr.trim() || r.stdout.trim()}`);
     return /backgrounded · (\w+) · /.exec(r.stdout)?.[1] ?? "?";
   },
-  respawn(_name, id) {
-    const r = scoped(["respawn", id]);
+  respawn(_name, id, timeoutMs) {
+    const r = scoped(["respawn", id], timeoutMs);
     return { ok: r.status === 0, said: r.stdout.trim(), why: r.stderr.trim() || r.stdout.trim() };
   },
   stop(_name, id, remove) {
@@ -212,14 +244,20 @@ export function transports(ws: Workspace): Transport[] {
 
 // A number is epoch milliseconds; Date.parse would read it as text and give NaN.
 const instant = (x: unknown) => (typeof x === "number" ? x : typeof x === "string" ? Date.parse(x) : NaN);
-const stamp = (s: Session) => [s.updatedAt, s.startedAt, s.createdAt].map(instant).find(Number.isFinite) ?? -Infinity;
+const stamp = (s: Session) => [s.activeAt, s.updatedAt, s.startedAt, s.createdAt].map(instant).find(Number.isFinite) ?? -Infinity;
+
+// Newest first: the latest activity, else the latest timestamp the listing carries, as its order is
+// not documented.
+const byNewest = (hits: Session[]) => [...hits].sort((a, b) => (stamp(a) < stamp(b) ? 1 : stamp(a) > stamp(b) ? -1 : 0));
 
 // An agent's session among several by its name: the newest live one, else the newest.
-// The listing's order is not documented, so "newest" is the latest timestamp it carries.
 export function pick(t: Transport, hits: Session[]): Session | null {
-  const newest = [...hits].sort((a, b) => (stamp(a) < stamp(b) ? 1 : stamp(a) > stamp(b) ? -1 : 0));
+  const newest = byNewest(hits);
   return newest.find((s) => t.alive(s)) ?? newest[0] ?? null;
 }
+
+// The newest of them, live or not: the one a wake respawns, the one last active where that is known.
+export const newest = (hits: Session[]): Session | null => byNewest(hits)[0] ?? null;
 
 export const isAgentSession = (name: string) => (s: Session) => s.kind === "background" && s.name === name;
 

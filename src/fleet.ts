@@ -20,6 +20,9 @@ export interface Session {
   // epoch milliseconds in `claude agents --json`, which gives no other time
   startedAt?: string | number;
   createdAt?: string;
+  sessionId?: string;
+  // epoch ms the session's transcript was last written, added by the local listing (transport.ts)
+  activeAt?: number;
   [k: string]: unknown;
 }
 
@@ -41,15 +44,26 @@ export function findSession(t: Transport, name: string, includeDone = false): Se
   return pick(t, t.sessions(includeDone).filter(isAgentSession(name)));
 }
 
-// A host that cannot be asked on one poll is asked again on the next.
-export function waitForName(t: Transport, name: string, timeoutS = 90, pollMs = 3000): Session | null {
+// A host that cannot be asked on one poll is asked again on the next. No poll starts after
+// lastPollAt (epoch ms).
+export function waitForName(t: Transport, name: string, timeoutS = 90, pollMs = 3000, lastPollAt = Infinity): Session | null {
+  const s = pollForName(t, name, timeoutS, pollMs, lastPollAt);
+  return s instanceof Unreachable ? null : s;
+}
+
+// waitForName that, when the session never listed live, answers its last poll's Unreachable if that
+// poll could not be had.
+export function pollForName(t: Transport, name: string, timeoutS = 90, pollMs = 3000, lastPollAt = Infinity): Session | Unreachable | null {
   const t0 = Date.now();
+  let last: Session | Unreachable | null = null;
   while (Date.now() - t0 < timeoutS * 1000) {
-    const s = ask(() => findSession(t, name));
-    if (!(s instanceof Unreachable) && t.alive(s)) return s;
-    sleep(pollMs);
+    last = ask(() => findSession(t, name));
+    if (!(last instanceof Unreachable) && t.alive(last)) return last;
+    const nap = Math.min(pollMs, lastPollAt - Date.now());
+    if (nap <= 0) break;
+    sleep(nap);
   }
-  return null;
+  return last instanceof Unreachable ? last : null;
 }
 
 export function stopSession(t: Transport, s: Session | null, remove = true): void {
