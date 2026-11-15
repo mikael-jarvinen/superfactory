@@ -35,14 +35,13 @@ export function ensureWorktree(repoDir: string, ticket: string, base: string, ov
   const wt = worktreePath(repoDir, ticket);
   const branch = branchFor(ticket);
   const via = overArgs(over);
-  // A git ended by a signal ends the request. Several steps here ignore their status, and the
-  // daemon's SIGTERM is its last warning before a SIGKILL: a step started after it would begin a
-  // checkout that the SIGKILL cuts short, leaving the worktree locked "initializing".
-  const stopped = (r: RunResult) => {
-    if (r.signal) die(`git in ${repoDir} was ended by ${r.signal}, so the worktree was not made`);
+  const err = (r: RunResult) => (r.stderr.trim() ? `: ${r.stderr.trim()}` : "");
+  // Steps whose status is ignored still stop at a signal, so none runs into the daemon's SIGKILL.
+  const step = (...args: string[]) => {
+    const r = git(repoDir, ...args);
+    if (r.signal) die(`git ${args.find((a, i) => !a.startsWith("-") && args[i - 1] !== "-c")} in ${repoDir} was ended by ${r.signal}, so the worktree was not made${err(r)}`);
     return r;
   };
-  const step = (...args: string[]) => stopped(git(repoDir, ...args));
   const r = step(...via, "fetch", "-q", "origin", base);
   if (r.status !== 0) die(`git fetch failed in ${repoDir}: ${r.stderr.trim()}`);
   // the branch may already be on origin (a resumed item, a rebuilt laptop); a missing ref is fine
@@ -79,7 +78,7 @@ export function ensureWorktree(repoDir: string, ticket: string, base: string, ov
     }
   }
   // git translates the lock reason (en_GB writes "initialising"), and the check above expects "initializing".
-  const worktreeAdd = (...args: string[]) => stopped(run("git", ["-C", repoDir, "worktree", "add", ...args], { env: { ...process.env, LC_ALL: "C" } }));
+  const worktreeAdd = (...args: string[]) => run("git", ["-C", repoDir, "worktree", "add", ...args], { env: { ...process.env, LC_ALL: "C" } });
   let add;
   let how;
   if (haveBranch) {
@@ -92,7 +91,7 @@ export function ensureWorktree(repoDir: string, ticket: string, base: string, ov
     add = worktreeAdd("-b", branch, wt, `origin/${base}`);
     how = `new branch ${branch} from origin/${base}`;
   }
-  if (add.status !== 0) die(`git worktree add failed: ${add.stderr.trim()}`);
+  if (add.status !== 0) die(`git worktree add failed: ${add.stderr.trim()}${add.signal ? ` (ended by ${add.signal})` : ""}`);
   pushConfig(repoDir, wt, over);
   return { wt, how };
 }
