@@ -69,6 +69,9 @@ export function buildAppendix(ws: Workspace, agent: Agent, repoDir: string | und
   return parts.length ? { text: parts.join("\n\n"), labels } : null;
 }
 
+// The appendix of a session that starts in its role's cwd, with no checkout: every role but a builder.
+export const roleAppendix = (ws: Workspace, agent: Agent): string | null => buildAppendix(ws, agent, undefined)?.text ?? null;
+
 const addDirs = (ws: Workspace, agent: Agent) =>
   (agent.addDirs ?? roleOf(ws, agent).addDirs).map((k) => ws.config.repos[k]!.path);
 

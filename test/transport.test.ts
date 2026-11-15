@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { agentOrDie, findSession, type Session } from "../src/fleet.js";
@@ -9,7 +9,7 @@ import { agentSessions, local, pick, type Transport } from "../src/transport.js"
 import { runClaude } from "../src/watchers/job.js";
 import { run } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
-import { tempDir, tempWorkspace } from "./helpers.js";
+import { factory, tempDir, tempWorkspace, TOML } from "./helpers.js";
 
 // What a real systemd-run --user --scope said with no user bus: systemd 259 (niilo), 249 (turing).
 const NO_BUS_259 = "Failed to connect to user scope bus via local transport: No such file or directory";
@@ -73,6 +73,28 @@ echo "backgrounded · abc123 · rae"
   rmSync(join(dir, "appendix"));
   local.start({ ...req, appendix: null, args });
   assert.equal(readFileSync(join(dir, "args"), "utf8"), "--bg P\n");
+});
+
+// A reviewer here: `factory review` writes its brief to the file named on the command line.
+test("a reviewer started on demand here gets its appendix as the file it starts with", () => {
+  const dir = tempWorkspace(TOML.replace('name = "rae"\nrole = "reviewer"', 'name = "rae"\nrole = "reviewer"\nappendix = ["briefs/rae.md"]'));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "reviewers"));
+  mkdirSync(join(dir, "briefs"));
+  writeFileSync(join(dir, "briefs", "rae.md"), "rae's brief\n");
+  writeFileSync(join(dir, "bin", "claude"), `#!/bin/sh
+if [ "$1" = agents ]; then
+  if [ -f "${dir}/started" ]; then echo '[{"id":"abc123","name":"rae","kind":"background","state":"idle"}]'; else echo '[]'; fi
+  exit 0
+fi
+prev=
+for a in "$@"; do [ "$prev" = --append-system-prompt-file ] && cat "$a" > "${dir}/appendix" && rm "$a"; prev=$a; done
+touch "${dir}/started"
+echo "backgrounded · abc123 · rae"
+`);
+  const r = factory(dir, ["review"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(join(dir, "appendix"), "utf8"), "<!-- briefs/rae.md -->\nrae's brief\n");
 });
 
 test("on Linux every local claude call, each listing included, runs through systemd-run in a scope under agents.slice", { skip: process.platform !== "linux" }, async () => {
