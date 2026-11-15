@@ -181,13 +181,17 @@ test("the message page refuses a cross-site post", { skip: noInboxLock }, async 
   assert.deepEqual(readTail(ws.messages).map((r) => r.text), ["do something"]);
 });
 
-test("teams: a configured group titles its roster and keeps the role's place", { skip: noInboxLock }, async () => {
-  const dir = tempWorkspace(GROUPED);
+async function teamsOf(toml: string) {
+  const dir = tempWorkspace(toml);
   after(() => rmSync(dir, { recursive: true, force: true }));
   process.env.CLAUDE_BIN = join(dir, "bin", "claude");
   const board = await serve(openWorkspace(dir), { host: "127.0.0.1", port: 0 });
   after(() => board.close());
-  const snap = await (await fetch(board.url + "/api")).json();
+  return (await (await fetch(board.url + "/api")).json()).teams;
+}
+
+test("teams: a configured group titles its roster and keeps the role's place", { skip: noInboxLock }, async () => {
+  const snap = { teams: await teamsOf(GROUPED) };
   // Within one place, rosters keep the order of their first member in the config.
   type Group = { key: string; title: string; scope: string; staff: boolean; members: { name: string }[] };
   assert.deepEqual(snap.teams.map((g: Group) => [g.key, g.title, g.staff, g.members.map((m) => m.name).join(" ")]), [
@@ -197,5 +201,11 @@ test("teams: a configured group titles its roster and keeps the role's place", {
     ["group:Product", "Product", false, "bea cal"],
     ["reviewers", "Reviewers", false, "rae"],
   ]);
-  assert.equal(snap.teams[3].scope, "web, api", "the first member's scope, here bea's stack");
+  assert.equal(snap.teams[3].scope, "web, api", "bea's stack, and cal's api already in it");
+
+  // A member's repo that the first lacks is in the scope too, after the first's.
+  const docs = GROUPED.replace("[stacks.app]", '[repos.docs]\nremote = "acme/docs"\n\n[stacks.app]')
+    .replace('repos = ["api"]', 'repos = ["api", "docs"]');
+  const product = (await teamsOf(docs)).find((g: { key: string }) => g.key === "group:Product");
+  assert.equal(product.scope, "web, api, docs");
 });

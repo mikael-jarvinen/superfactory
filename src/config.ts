@@ -190,6 +190,9 @@ function reader(problems: string[], where: string, t: Table) {
   return { at, bad, raw, str, int, bool, strs, ints, table, done };
 }
 
+// The board's own roster titles, which a group would draw a second copy of.
+const BUILT_IN_TITLES = new Set(["lead", "assistants", "reviewers", "designers", "builders"]);
+
 export function expandPath(value: string, base: string, env: NodeJS.ProcessEnv = process.env): string {
   let p = value.replace(/\$\{(\w+)\}|\$(\w+)/g, (m, a: string | undefined, b: string | undefined) => {
     const name = (a ?? b) as string;
@@ -444,6 +447,8 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const group = r.str("group");
     if (group !== undefined && !group.trim()) r.bad("group", "must not be empty");
     if (group !== undefined && role === "lead") r.bad("group", "the lead has its own place on the board");
+    if (group !== undefined && BUILT_IN_TITLES.has(group.trim().toLowerCase()))
+      r.bad("group", `${show(group.trim())} is a built-in roster's title`);
     if (host && !hosts[host]) r.bad("host", `no host ${show(host)}; hosts: ${Object.keys(hosts).join(", ") || "none"}`);
     const workRepos = stack ? (stacks[stack]?.repos ?? []) : (agentRepos ?? []);
     // A builder runs where its worktrees are, and they are under its repos' checkouts.
@@ -481,10 +486,16 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   const leads = agents.filter((a) => a.role === "lead");
   if (leads.length !== 1)
     problems.push(`agents: exactly one agent needs role = "lead", found ${leads.length}${leads.length ? ` (${leads.map((a) => a.name).join(", ")})` : ""}`);
-  // A roster sits on the board where its role does, so one group cannot span two roles.
-  for (const group of new Set(agents.map((a) => a.group).filter((g) => g !== undefined))) {
-    const a = agents.find((x) => x.group === group)!;
-    const other = agents.find((b) => b.group === group && b.role !== a.role);
+  // A roster sits on the board where its role does, so one group cannot span two roles; the board
+  // (teams() in board/server.ts) relies on this. Two spellings of one name would look like one
+  // roster drawn twice, so a group is spelled one way.
+  const fold = (g: string) => g.toLowerCase();
+  for (const group of new Set(agents.flatMap((a) => (a.group === undefined ? [] : [fold(a.group)])))) {
+    const members = agents.filter((x) => x.group !== undefined && fold(x.group) === group);
+    const a = members[0]!;
+    const spelled = members.find((b) => b.group !== a.group);
+    if (spelled) problems.push(`agents: group ${show(a.group)} is also spelled ${show(spelled.group)}; spell it one way`);
+    const other = members.find((b) => b.role !== a.role);
     if (other)
       problems.push(`agents: group ${show(a.group)} has ${show(a.name)} (${a.role}) and ${show(other.name)} (${other.role}); a group holds one role`);
   }

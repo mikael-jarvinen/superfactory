@@ -157,7 +157,6 @@ role = "builder"
 cwd = "cal"`)), ["agents[2].cwd: a builder starts in its worktree, so it takes no cwd"]);
 });
 
-
 test("an agent's group: trimmed, optional, never the lead's, one role to a group", () => {
   const ws = tempWorkspace(GROUPED);
   after(() => rmSync(ws, { recursive: true, force: true }));
@@ -172,4 +171,11 @@ role = "lead"
 group = "Top"`)), ["agents[0].group: the lead has its own place on the board"]);
   assert.deepEqual(problems(GROUPED.replace('group = " Servers "', 'group = "Product"')),
     ['agents: group "Product" has "bea" (builder) and "otto" (assistant); a group holds one role']);
+  assert.deepEqual(problems(GROUPED.replace('group = " Servers "', 'group = "reviewers"')),
+    ['agents[4].group: "reviewers" is a built-in roster\'s title']);
+  assert.deepEqual(problems(GROUPED.replace(`name = "cal"
+role = "builder"
+group = "Product"`, `name = "cal"
+role = "builder"
+group = "product"`)), ['agents: group "Product" is also spelled "product"; spell it one way']);
 });

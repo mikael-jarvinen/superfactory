@@ -269,6 +269,7 @@ function reviewKeys(ws: Workspace): string[] {
 function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>, alive: (name: string, s: Session | undefined) => boolean, unknown: (name: string) => string | null = () => null) {
   // staff: an assistants' roster, drawn beside the lead rather than in the row of teams.
   const groups = new Map<string, { key: string; title: string; scope: string; staff: boolean; members: unknown[] }>();
+  const scopes = new Map<string, string[]>();
   const ranks = new Map<string, number>();
   const reviewerRepos = ws.config.roles.reviewer?.addDirs ?? [];
   const rank = (k: string) => (k === "lead" ? 0 : k === "assistants" ? 1 : k === "designers" ? 1.5 : k === "reviewers" ? 3 : 2);
@@ -280,13 +281,21 @@ function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>, alive: 
       : a.role === "designer" ? ["designers", "Designers", (ws.config.roles.designer?.addDirs ?? []).join(", ")]
       : a.stack ? [`stack:${a.stack}`, ws.config.stacks[a.stack]?.label ?? capitalize(a.stack), a.repos.join(", ")]
       : [`repos:${a.repos.join(",")}`, a.repos.length === 1 ? capitalize(a.repos[0] as string) : "Builders", a.repos.join(", ")];
-    // A configured group replaces the title and keeps the scope and the role's place.
+    // A configured group replaces the title and keeps the role's place, so its staff flag and rank
+    // come from its first member: config.ts refuses a group that spans two roles. Its scope is every
+    // member's, in order, since builders of one group can work on different repos.
     const key = a.group ? `group:${a.group}` : byRole;
     const title = a.group ?? roleTitle;
     let g = groups.get(key);
     if (!g) {
       groups.set(key, (g = { key, title, scope, staff: a.role === "assistant", members: [] }));
       ranks.set(key, rank(byRole));
+      scopes.set(key, []);
+    }
+    if (a.group) {
+      const seen = scopes.get(key)!;
+      for (const s of scope.split(", ").filter((x) => x && !seen.includes(x))) seen.push(s);
+      g.scope = seen.join(", ");
     }
     const s = listed.get(a.name);
     const live = alive(a.name, s);
