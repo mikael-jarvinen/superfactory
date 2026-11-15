@@ -172,6 +172,10 @@ test("a command whose output passes what run reads failed, and is no command tha
   const out = run("sh", ["-c", "echo HEAD; head -c 5000 /dev/zero | tr '\\0' a; yes x | head -c 20000"], { maxBuffer: 16384 });
   assert.equal(out.stdout.length, 4096);
   assert.match(out.stdout, /^[x\n]+$/, "the tail of stdout, not its head");
+  // Each stream fits on its own, and only their sum passes the limit.
+  const both = (n: number) => run("sh", ["-c", `head -c ${n} /dev/zero >&2; head -c ${n} /dev/zero`], { maxBuffer: 16384 });
+  assert.equal(both(9000).stderr.split("\n")[0], "sh wrote more than the 16384 bytes of output that are read");
+  assert.equal(both(7000).status, 0);
   assert.equal(run("no-such-command-xyz", []).status, 127);
 });
 

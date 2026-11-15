@@ -27,9 +27,8 @@ const TAIL = 4096;
 export function run(cmd: string, args: string[], opts: SpawnSyncOptions = {}, name = cmd): RunResult {
   const max = opts.maxBuffer ?? MAX_OUTPUT;
   const r = spawnSync(cmd, args, { encoding: "utf8", ...opts, maxBuffer: max });
-  // Stdout and stderr together passing maxBuffer (ENOBUFS) is a command that started and failed,
-  // not a missing one.
-  // The last TAIL characters of each stream are kept, to show what flooded it.
+  // ENOBUFS is a command that started and failed, not a missing one. The last TAIL characters of
+  // each stream are kept, to show what was being written.
   if ((r.error as NodeJS.ErrnoException | undefined)?.code === "ENOBUFS") {
     const err = String(r.stderr ?? "").slice(-TAIL);
     return { status: 1, stdout: String(r.stdout ?? "").slice(-TAIL), stderr: `${name} wrote more than the ${max} bytes of output that are read${err ? `\n${err}` : ""}` };
