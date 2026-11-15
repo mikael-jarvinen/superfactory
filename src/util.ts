@@ -18,7 +18,8 @@ export interface RunResult {
   stderr: string;
 }
 
-// How much of a command's output is read, on every path that reads one.
+// How much of a command's output is read, on every path that reads one. spawnSync counts stdout
+// and stderr together against it, execFile each on its own.
 export const MAX_OUTPUT = 64 * 1024 * 1024;
 const TAIL = 4096;
 
@@ -26,7 +27,8 @@ const TAIL = 4096;
 export function run(cmd: string, args: string[], opts: SpawnSyncOptions = {}, name = cmd): RunResult {
   const max = opts.maxBuffer ?? MAX_OUTPUT;
   const r = spawnSync(cmd, args, { encoding: "utf8", ...opts, maxBuffer: max });
-  // Either stream passing maxBuffer (ENOBUFS) is a command that started and failed, not a missing one.
+  // Stdout and stderr together passing maxBuffer (ENOBUFS) is a command that started and failed,
+  // not a missing one.
   // The last TAIL characters of each stream are kept, to show what flooded it.
   if ((r.error as NodeJS.ErrnoException | undefined)?.code === "ENOBUFS") {
     const err = String(r.stderr ?? "").slice(-TAIL);

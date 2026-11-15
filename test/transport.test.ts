@@ -164,14 +164,14 @@ test("on Linux a box with no systemd-run says so, and runs no claude bare", { sk
 test("a command whose output passes what run reads failed, and is no command that did not start", () => {
   const sh = run("sh", ["-c", "head -c 2000 /dev/zero"], { maxBuffer: 1000 });
   assert.deepEqual([sh.status, sh.stderr], [1, "sh wrote more than the 1000 bytes of output that are read"]);
-  // Each stream's first and last 4096 characters differ, so only a tail passes.
-  const flood = "echo FIRST >&2; head -c 5000 /dev/zero | tr '\\0' b >&2; echo LAST >&2; echo HEAD; head -c 5000 /dev/zero | tr '\\0' a; yes x | head -c 20000";
-  const r = run("sh", ["-c", flood], { maxBuffer: 16384 }, "claude -p");
-  assert.equal(r.stderr, `claude -p wrote more than the 16384 bytes of output that are read\n${"b".repeat(4091)}LAST\n`, "named for who wrote it, with the tail of its stderr");
-  assert.ok(r.stdout.length > 0 && r.stdout.length <= 4096, `${r.stdout.length} characters of stdout`);
-  // maxBuffer is per stream, so only stdout overflows, and reading keeps the chunk that passes it:
-  // more than 16384 characters are read however the pipe splits them, and their last 4096 are x's.
-  assert.match(r.stdout, /^[x\n]+$/, "the tail of stdout, not its head");
+  // One stream floods per run, so neither tail depends on which pipe is read first. spawnSync
+  // counts both streams together and keeps the chunk that passes the limit, so more than 16384
+  // characters of the flooding stream are read, and their last 4096 are past its head.
+  const err = run("sh", ["-c", "echo FIRST >&2; head -c 20000 /dev/zero | tr '\\0' b >&2"], { maxBuffer: 16384 }, "claude -p");
+  assert.deepEqual([err.stdout, err.stderr], ["", `claude -p wrote more than the 16384 bytes of output that are read\n${"b".repeat(4096)}`], "named for who wrote it, with the tail of its stderr");
+  const out = run("sh", ["-c", "echo HEAD; head -c 5000 /dev/zero | tr '\\0' a; yes x | head -c 20000"], { maxBuffer: 16384 });
+  assert.equal(out.stdout.length, 4096);
+  assert.match(out.stdout, /^[x\n]+$/, "the tail of stdout, not its head");
   assert.equal(run("no-such-command-xyz", []).status, 127);
 });
 
