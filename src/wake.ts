@@ -5,7 +5,7 @@
 // Probed 2026-11-15: a respawn is listed live within 2 s, and on a host its Remote Control name took
 // up to 10 s more to be addressable from another machine, hence WAKE_SETTLE_S.
 import type { Agent } from "./config.js";
-import { findSession, type Session, waitForName } from "./fleet.js";
+import { findSession, pollForName, type Session } from "./fleet.js";
 import { ask, Unreachable } from "./remote.js";
 import { isAgentSession, LISTING_TIMEOUT_MS, newest, type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
@@ -54,11 +54,10 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   if (!r.ok) return { is: "failed", why: `respawn of ${old.id} failed: ${r.why || "no reason given"}` };
   const waitS = o.waitS ?? 60;
   const lastPollAt = (o.deadline ?? Infinity) - LISTING_TIMEOUT_MS;
-  let unknown: Unreachable | null = null;
-  const s = waitForName(t, agent.name, waitS, o.pollMs ?? 1000, lastPollAt, (p) => (unknown = p instanceof Unreachable ? p : null));
-  if (s) return { is: "woke", s, from: old.id };
+  const s = pollForName(t, agent.name, waitS, o.pollMs ?? 1000, lastPollAt);
   // Respawned, and the last listing could not be had: most likely live, so not failed.
-  if (unknown) return { is: "unknown", why: `respawned ${old.id}, then ${(unknown as Unreachable).brief}` };
+  if (s instanceof Unreachable) return { is: "unknown", why: `respawned ${old.id}, then ${s.brief}` };
+  if (s) return { is: "woke", s, from: old.id };
   return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };
 }
 

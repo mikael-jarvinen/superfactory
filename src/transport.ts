@@ -128,7 +128,6 @@ export const local: Transport = {
   where: "local",
   sessions(includeDone = false) {
     const r = scoped(["agents", "--json", ...(includeDone ? ["--all"] : [])], LISTING_TIMEOUT_MS);
-    // A listing that timed out is no answer, as for a host that cannot be asked.
     if (r.status === 124) throw new Unreachable("local", `\`claude agents --json\` did not answer in ${LISTING_TIMEOUT_MS / 1000} s`);
     if (r.status !== 0) die(`\`claude agents --json\` failed: ${r.stderr.trim()}`);
     let rows: Session[];

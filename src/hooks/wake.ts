@@ -28,8 +28,8 @@ import { openWorkspace, resolveWorkspace, type Workspace } from "../workspace.js
 
 export const WAKE_HOOK_TIMEOUT_S = 90;
 
-// What SendMessage says of a recipient that is off, or not there at all.
-const NOT_REACHABLE = /No agent named .* is reachable|\bis not reachable\b/;
+// What SendMessage says of a recipient that is off, or not there at all (test/fixtures/sendmessage-failed.json).
+const NOT_REACHABLE = /No agent named .* is reachable/;
 
 export const recipient = (to: unknown): string | null => {
   if (typeof to !== "string") return null;
@@ -72,8 +72,8 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
     sender = `session ${String(ev.session_id ?? "?")} in ${String(ev.cwd ?? "?")}${fromHost ? ` on ${fromHost}` : ""}`;
     to = recipient(ev.tool_input?.to);
     // Explained is only a send that failed as not reachable: a result with success false and that
-    // message (PostToolUse, recorded in the test fixtures), or a tool error saying it
-    // (PostToolUseFailure). Any other failure, a name two sessions share say, passes as it is.
+    // message (PostToolUse, as recorded), or a tool error saying it (PostToolUseFailure, not seen,
+    // assumed to say the same). Any other failure, a name two sessions share say, passes as it is.
     if (ev.hook_event_name === "PostToolUse" || ev.hook_event_name === "PostToolUseFailure") {
       const said = ev.hook_event_name === "PostToolUse" ? (ev.tool_response?.success === false ? ev.tool_response.message : undefined) : ev.error;
       if (!fromHost || typeof said !== "string" || !NOT_REACHABLE.test(said)) return { code: 0 };

@@ -46,18 +46,24 @@ export function findSession(t: Transport, name: string, includeDone = false): Se
 
 // A host that cannot be asked on one poll is asked again on the next. No poll starts after
 // lastPollAt (epoch ms).
-// polled, when given, hears each poll's answer.
-export function waitForName(t: Transport, name: string, timeoutS = 90, pollMs = 3000, lastPollAt = Infinity, polled?: (s: Session | null | Unreachable) => void): Session | null {
+export function waitForName(t: Transport, name: string, timeoutS = 90, pollMs = 3000, lastPollAt = Infinity): Session | null {
+  const s = pollForName(t, name, timeoutS, pollMs, lastPollAt);
+  return s instanceof Unreachable ? null : s;
+}
+
+// waitForName that, when the session never listed live, answers its last poll's Unreachable if that
+// poll could not be had.
+export function pollForName(t: Transport, name: string, timeoutS = 90, pollMs = 3000, lastPollAt = Infinity): Session | Unreachable | null {
   const t0 = Date.now();
+  let last: Session | Unreachable | null = null;
   while (Date.now() - t0 < timeoutS * 1000) {
-    const s = ask(() => findSession(t, name));
-    polled?.(s);
-    if (!(s instanceof Unreachable) && t.alive(s)) return s;
+    last = ask(() => findSession(t, name));
+    if (!(last instanceof Unreachable) && t.alive(last)) return last;
     const nap = Math.min(pollMs, lastPollAt - Date.now());
-    if (nap <= 0) return null;
+    if (nap <= 0) break;
     sleep(nap);
   }
-  return null;
+  return last instanceof Unreachable ? last : null;
 }
 
 export function stopSession(t: Transport, s: Session | null, remove = true): void {
