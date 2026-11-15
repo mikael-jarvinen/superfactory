@@ -52,6 +52,29 @@ test("a worktree per item, with its own push config, and the human's clone untou
   assert.equal(branchPushed(wt, "main"), true);
 });
 
+test("a git status that fails or is ended by a signal is not read as a clean worktree", () => {
+  const root = tempDir();
+  after(() => rmSync(root, { recursive: true, force: true }));
+  const wt = join(root, "wt");
+  must(root, "init", "-q", wt);
+  assert.deepEqual(worktreeDirty(wt), [], "a clean tree reads clean");
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  const realGit = run("sh", ["-c", "command -v git"]).stdout.trim();
+  writeFileSync(join(bin, "git"), `#!/bin/sh\ncase "$*" in *status*) echo "cut short" >&2; kill -TERM $$ ;; esac\nexec ${realGit} "$@"\n`);
+  chmodSync(join(bin, "git"), 0o755);
+  const was = process.env.PATH;
+  process.env.PATH = `${bin}:${was}`;
+  try {
+    assert.deepEqual(worktreeDirty(wt), ["(git status ended by SIGTERM: cut short)"]);
+  } finally {
+    process.env.PATH = was;
+  }
+  const plain = join(root, "plain");
+  mkdirSync(plain);
+  assert.match(worktreeDirty(plain).join(), /^\(git status exited 128: fatal: not a git repository/);
+});
+
 for (const { at, says } of [
   { at: "*+refs/heads/*", says: /^git fetch in .* was ended by SIGTERM, so the worktree was not made: cut short$/ },
   { at: "*worktree\\ add*", says: /^git worktree add failed: cut short \(ended by SIGTERM\)$/ },

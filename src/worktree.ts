@@ -131,7 +131,13 @@ export function porcelainPaths(out: string): string[] {
 export function worktreeDirty(wt: string, toolWritten: string[] = []): string[] {
   const dirs = toolWritten.filter((x) => x.endsWith("/"));
   const files = toolWritten.filter((x) => !x.endsWith("/"));
-  return porcelainPaths(git(wt, "status", "--porcelain").stdout)
+  const r = git(wt, "status", "--porcelain");
+  // A status that failed or was cut short says nothing about the tree, so it is not called clean.
+  if (r.status !== 0) {
+    const why = r.signal ? `ended by ${r.signal}` : `exited ${r.status}`;
+    return [`(git status ${why}${r.stderr.trim() ? `: ${r.stderr.trim().split("\n")[0]}` : ""})`];
+  }
+  return porcelainPaths(r.stdout)
     .filter((p) => !files.some((f) => p.endsWith(f)) && !dirs.some((d) => p.startsWith(d)));
 }
 
