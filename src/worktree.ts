@@ -39,7 +39,6 @@ export function ensureWorktree(repoDir: string, ticket: string, base: string, ov
   const branch = branchFor(ticket);
   const via = overArgs(over);
   // Steps whose status is ignored still stop at a signal, so none runs into the daemon's SIGKILL.
-  // A fetch goes over `over`.
   const step = (cmd: string, ...args: string[]) => {
     const r = git(repoDir, ...(cmd === "fetch" ? via : []), cmd, ...args);
     if (r.signal) die(`git ${cmd} in ${repoDir} was ended by ${r.signal}, so the worktree was not made${said(r)}`);

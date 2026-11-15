@@ -192,10 +192,9 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
         out.push(`  ${r.ticket}: ${sha.slice(0, 7)} ${Math.floor(age / 60)}m ago '${msg.join(" ").slice(0, 50)}' on ${r.agent}'s branch, not the recorded head`);
       // Tools rewrite some tracked files just by running, and [worktree] tool_written names them,
       // so a served worktree is not an hourly false alarm.
-      const dirty = worktreeDirty(r.worktree, ws.config.worktree.toolWritten);
-      if (dirty.unreadable) out.push(`  ${r.ticket}: worktree status could not be read while ${r.state}: ${dirty.unreadable}`);
-      else if (dirty.paths.length && !BUSY.has(r.state ?? ""))
-        out.push(`  ${r.ticket}: worktree has uncommitted changes while ${r.state}: ${dirty.paths.slice(0, 4).join(", ")}`);
+      const d = worktreeDirty(r.worktree, ws.config.worktree.toolWritten);
+      if (d.paths.length && !BUSY.has(r.state ?? ""))
+        out.push(`  ${r.ticket}: worktree has uncommitted changes while ${r.state}: ${d.paths.slice(0, 4).join(", ")}`);
     }
   }, () => true);
 
