@@ -50,9 +50,8 @@ section{padding:18px 20px 20px;border-bottom:1px solid var(--line)}
 .team .top .head{grid-column:2;position:relative;z-index:1;background:var(--ground);padding:0 20px 10px}
 .team .top .staff{grid-column:3;justify-self:start;position:relative;margin:34px 0 0 52px;min-width:236px}
 .team .top .staff::before{content:"";position:absolute;left:-52px;top:12px;width:44px;border-top:1px dashed var(--line)}
-/* Several assistants' rosters stack in one side column. A dashed spine runs from each heading to the
-   next one's, and a tick joins every heading to it. */
-/* --gap: the space between rosters, which the spine below spans to the next heading's tick. */
+/* Several assistants' rosters stack in one side column, --gap apart. A dashed spine runs from each
+   heading to the next one's, and a tick joins every heading to it. */
 .team .top .staff{--gap:28px}
 .team .top .staff .roster+.roster{margin-top:var(--gap)}
 .team .top .staff:has(.roster+.roster) .roster::before{content:"";position:absolute;left:-8px;top:12px;width:8px;

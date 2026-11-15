@@ -3,7 +3,7 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { ConfigError, loadConfig } from "../src/config.js";
+import { ConfigError, loadConfig, ROLES, roster } from "../src/config.js";
 import { factory, GROUPED, TOML, tempWorkspace } from "./helpers.js";
 
 const problems = (toml: string): string[] => {
@@ -197,4 +197,14 @@ role = "builder"
 group = "Product Team"`, `name = "cal"
 role = "builder"
 group = "Product  Team"`)), ['agents: group "Product Team" is also spelled "Product  Team"; spell it one way']);
+});
+
+test("roster: every role but the builder has a roster of its own, and builders split by stack and repos", () => {
+  const of = (role: (typeof ROLES)[number], stack?: string, repos: string[] = []) => roster({ role, stack, repos }, {});
+  assert.deepEqual(ROLES.filter((r) => r !== "builder").map((r) => of(r)),
+    [{ key: "lead", title: "Lead" }, { key: "reviewers", title: "Reviewers" }, { key: "assistants", title: "Assistants" },
+     { key: "designers", title: "Designers" }]);
+  assert.deepEqual(of("builder", "app", ["web"]), { key: "stack:app", title: "App" });
+  assert.deepEqual(of("builder", undefined, ["api"]), { key: "repos:api", title: "Api" });
+  assert.deepEqual(of("builder", undefined, ["api", "web"]), { key: "repos:api,web", title: "Builders" });
 });

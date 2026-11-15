@@ -193,14 +193,15 @@ function reader(problems: string[], where: string, t: Table) {
 // How the board compares roster titles: case and runs of spaces do not tell two apart.
 const foldTitle = (g: string) => g.toLowerCase().replace(/\s+/g, " ");
 
-// The title of the roster the board lists an agent without a group under (teams() in board/server.ts).
-export function rosterTitle(a: Pick<Agent, "role" | "stack" | "repos">, stacks: Record<string, Stack>): string {
-  return a.role === "lead" ? "Lead"
-    : a.role === "assistant" ? "Assistants"
-    : a.role === "reviewer" ? "Reviewers"
-    : a.role === "designer" ? "Designers"
-    : a.stack ? (stacks[a.stack]?.label ?? capitalize(a.stack))
-    : a.repos.length === 1 ? capitalize(a.repos[0] as string) : "Builders";
+// The roster the board lists an agent without a group under (teams() in board/server.ts): its key,
+// which also places it, and its title. One function, so a new role cannot get one and not the other.
+export function roster(a: Pick<Agent, "role" | "stack" | "repos">, stacks: Record<string, Stack>): { key: string; title: string } {
+  return a.role === "lead" ? { key: "lead", title: "Lead" }
+    : a.role === "assistant" ? { key: "assistants", title: "Assistants" }
+    : a.role === "reviewer" ? { key: "reviewers", title: "Reviewers" }
+    : a.role === "designer" ? { key: "designers", title: "Designers" }
+    : a.stack ? { key: `stack:${a.stack}`, title: stacks[a.stack]?.label ?? capitalize(a.stack) }
+    : { key: `repos:${a.repos.join(",")}`, title: a.repos.length === 1 ? capitalize(a.repos[0] as string) : "Builders" };
 }
 
 export function expandPath(value: string, base: string, env: NodeJS.ProcessEnv = process.env): string {
@@ -499,7 +500,7 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   // Two spellings of one name would look like one roster drawn twice, so a group is spelled one way.
   const fold = foldTitle;
   // A group titled like a roster the board draws for ungrouped agents would show that title twice.
-  const drawn = new Map(agents.filter((a) => a.group === undefined).map((a) => [fold(rosterTitle(a, stacks)), a.name]));
+  const drawn = new Map(agents.filter((a) => a.group === undefined).map((a) => [fold(roster(a, stacks).title), a.name]));
   for (const group of new Set(agents.flatMap((a) => (a.group === undefined ? [] : [fold(a.group)])))) {
     const members = agents.filter((x) => x.group !== undefined && fold(x.group) === group);
     const a = members[0]!;
