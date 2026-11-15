@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, posix } from "node:path";
 import type { GitOver } from "./config.js";
 import { branchFor } from "./state.js";
-import { die, realpathLoose, run } from "./util.js";
+import { die, realpathLoose, run, type RunResult } from "./util.js";
 
 export const git = (dir: string, ...args: string[]) => run("git", ["-C", dir, ...args]);
 
@@ -35,11 +35,19 @@ export function ensureWorktree(repoDir: string, ticket: string, base: string, ov
   const wt = worktreePath(repoDir, ticket);
   const branch = branchFor(ticket);
   const via = overArgs(over);
-  const r = git(repoDir, ...via, "fetch", "-q", "origin", base);
+  // A git ended by a signal ends the request. Several steps here ignore their status, and the
+  // daemon's SIGTERM is its last warning before a SIGKILL: a step started after it would begin a
+  // checkout that the SIGKILL cuts short, leaving the worktree locked "initializing".
+  const stopped = (r: RunResult) => {
+    if (r.signal) die(`git in ${repoDir} was ended by ${r.signal}, so the worktree was not made`);
+    return r;
+  };
+  const step = (...args: string[]) => stopped(git(repoDir, ...args));
+  const r = step(...via, "fetch", "-q", "origin", base);
   if (r.status !== 0) die(`git fetch failed in ${repoDir}: ${r.stderr.trim()}`);
   // the branch may already be on origin (a resumed item, a rebuilt laptop); a missing ref is fine
-  git(repoDir, ...via, "fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
-  git(repoDir, "worktree", "prune");
+  step(...via, "fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
+  step("worktree", "prune");
   if (existsSync(wt) && statSync(wt).isDirectory()) {
     const registered = worktreeList(repoDir).find((w) => w.path === realpathLoose(wt));
     if (registered) {
@@ -55,15 +63,15 @@ export function ensureWorktree(repoDir: string, ticket: string, base: string, ov
     die(`${wt} exists but is not a git worktree. Remove or rename it, then dispatch again.`);
   }
   mkdirSync(dirname(wt), { recursive: true });
-  const haveBranch = git(repoDir, "rev-parse", "--verify", "-q", `refs/heads/${branch}`).status === 0;
-  const haveRemote = git(repoDir, "rev-parse", "--verify", "-q", `refs/remotes/origin/${branch}`).status === 0;
+  const haveBranch = step("rev-parse", "--verify", "-q", `refs/heads/${branch}`).status === 0;
+  const haveRemote = step("rev-parse", "--verify", "-q", `refs/remotes/origin/${branch}`).status === 0;
   let note = "";
   if (haveBranch && haveRemote) {
-    const local = git(repoDir, "rev-parse", branch).stdout.trim();
-    const remote = git(repoDir, "rev-parse", `origin/${branch}`).stdout.trim();
+    const local = step("rev-parse", branch).stdout.trim();
+    const remote = step("rev-parse", `origin/${branch}`).stdout.trim();
     if (local !== remote) {
-      if (git(repoDir, "merge-base", "--is-ancestor", local, remote).status === 0) {
-        git(repoDir, "branch", "-f", branch, remote);
+      if (step("merge-base", "--is-ancestor", local, remote).status === 0) {
+        step("branch", "-f", branch, remote);
         note = `; local ${branch} was behind origin and was moved forward`;
       } else {
         note = `; WARNING local ${branch} and origin/${branch} have diverged, checked out the local one`;
@@ -71,7 +79,7 @@ export function ensureWorktree(repoDir: string, ticket: string, base: string, ov
     }
   }
   // git translates the lock reason (en_GB writes "initialising"), and the check above expects "initializing".
-  const worktreeAdd = (...args: string[]) => run("git", ["-C", repoDir, "worktree", "add", ...args], { env: { ...process.env, LC_ALL: "C" } });
+  const worktreeAdd = (...args: string[]) => stopped(run("git", ["-C", repoDir, "worktree", "add", ...args], { env: { ...process.env, LC_ALL: "C" } }));
   let add;
   let how;
   if (haveBranch) {
