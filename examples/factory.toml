@@ -128,7 +128,8 @@ done = "Done"
 # labels = ["task", "story"]              # the only labels it takes; any lower-case label without it
 # repo = "app"                            # a [repos] key or owner/repo; an agent's move into Done,
 #                                         # from any state, names its PR (`--merged '#N'`), and GitHub
-#                                         # must say it merged and that it names the ticket
+#                                         # must say it merged and that it names the ticket; with
+#                                         # nothing to merge, it quotes the human's ok (`--asked`)
 
 [board]
 host = "localhost"

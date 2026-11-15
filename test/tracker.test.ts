@@ -168,7 +168,7 @@ test("store: numbers per project, the floor, events folded, a bare number with o
   assert.equal(T.resolveKey(one, "12"), "RPE-12");
 });
 
-test("guard: Backlog needs the human's message, Done needs this ticket's merged PR from any state, the rest is free", async () => {
+test("guard: Backlog needs the human's message, Done this ticket's merged PR or the human's ok from any state, the rest is free", async () => {
   const dir = tempWorkspace(LOCAL());
   const ws = openWorkspace(dir);
   postMessage(ws, "ship the planner change once it is green");
@@ -187,8 +187,9 @@ test("guard: Backlog needs the human's message, Done needs this ticket's merged 
   appendFileSync(ws.messages, JSON.stringify({ t: "2026-11-15T00:00:00Z", id: "a1", text: "words an agent wrote for itself", kind: "ada" }) + "\n");
   await assert.rejects(checkMove(ws, tk, "Todo", agent, { asked: "words an agent wrote for itself" }), /not in any of Alex's messages/);
   assert.deepEqual(await checkMove(ws, tk, "Todo", ALEX), {}, "the human is never refused");
-  // Backlog straight to Done needs both
-  await assert.rejects(checkMove(ws, tk, "Done", agent, { asked: "ship the planner change" }), /Done is Alex's merge, from any state/);
+  // Backlog straight to Done: one quote answers both, or the quote and the PR
+  assert.deepEqual(await checkMove(ws, tk, "Done", agent, { asked: "ship the planner change" }), { asked: "ship the planner change" });
+  await assert.rejects(checkMove(ws, tk, "Done", agent, { merged: "#95" }), /REFUSED: RPE-1 is in Backlog/);
   assert.deepEqual(await checkMove(ws, tk, "Done", agent, { asked: "ship the planner change", merged: "#95" }), { asked: "ship the planner change", merged: "#95" });
   assert.deepEqual(await checkMove(ws, tk, "Cancelled", agent, { asked: "ship the planner change" }), { asked: "ship the planner change" }, "Cancelled needs no PR");
 
@@ -197,7 +198,11 @@ test("guard: Backlog needs the human's message, Done needs this ticket's merged 
   assert.equal(T.load(ws, "RPE-1").state, "Backlog");
   await T.move(ws, "RPE-1", "In Review", ALEX);
   const rev = T.load(ws, "RPE-1");
-  await assert.rejects(checkMove(ws, rev, "Done", agent), /Alex's merge/);
+  await assert.rejects(checkMove(ws, rev, "Done", agent), /Done is Alex's merge, or Alex's ok, from any state/);
+  // a ticket with nothing to merge goes to Done on the human's quoted ok, judged as out of Backlog
+  assert.deepEqual(await checkMove(ws, rev, "Done", agent, { asked: "ship the planner change" }), { asked: "ship the planner change" });
+  await assert.rejects(checkMove(ws, rev, "Done", agent, { asked: "words an agent wrote for itself" }), /not in any of Alex's messages/);
+  await assert.rejects(checkMove(ws, rev, "Done", agent, { asked: "ship" }), /at least 20/);
   await assert.rejects(checkMove(ws, rev, "Done", agent, { merged: "yes" }), /PR number/);
   await assert.rejects(checkMove(ws, rev, "Done", agent, { merged: "#96" }), /acme\/web#96 is OPEN, not merged/);
   await assert.rejects(checkMove(ws, rev, "Done", agent, { merged: "#1" }), /could not ask GitHub about acme\/web#1: error connecting/);
@@ -212,6 +217,13 @@ test("guard: Backlog needs the human's message, Done needs this ticket's merged 
   await assert.rejects(T.move(ws, "RPE-1", "Done", ADA, { merged: "#96" }), /not merged/);
   assert.equal(T.load(ws, "RPE-1").state, "In Progress");
   assert.equal((await T.move(ws, "RPE-1", "Done", ADA, { merged: "#95" })).ticket.state, "Done");
+  // the store records the ok it was given
+  await T.move(ws, "RPE-1", "In Progress", ADA);
+  await assert.rejects(T.move(ws, "RPE-1", "Done", ADA, { asked: "words an agent wrote for itself" }), /not in any/);
+  assert.equal((await T.move(ws, "RPE-1", "Done", ADA, { asked: "ship the planner change" })).ticket.state, "Done");
+  const ev = readFileSync(join(T.projectDir(ws, "RPE"), "RPE-1.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).pop();
+  assert.equal(ev.asked, "ship the planner change");
+  assert.equal(ev.merged, undefined);
   T.create(ws, { project: "WEB", title: "w" }, ADA);
   await assert.rejects(T.move(ws, "WEB-1", "Done", ADA, { asked: "ship the planner change", merged: "#95" }), /WEB names no repo/);
 
@@ -226,6 +238,8 @@ test("guard: a legacy message kind is shown as the human's but is never quotable
   appendFileSync(ws.messages, JSON.stringify({ t: "2026-11-15T00:00:00Z", id: "n1", text: "a note that reads like an order", kind: "alex" }) + "\n");
   const tk = T.create(ws, { project: "RPE", title: "t" }, ADA);
   await assert.rejects(checkMove(ws, tk, "Todo", ADA, { asked: "a note that reads like an order" }), /not in any of Alex's messages/);
+  await T.move(ws, "RPE-1", "In Testing", ALEX);
+  await assert.rejects(checkMove(ws, T.load(ws, "RPE-1"), "Done", ADA, { asked: "a note that reads like an order" }), /not in any of Alex's messages/, "nor is it an ok for Done");
 });
 
 test("store: GitHub is asked before the lock, so a slow answer holds up no other write", async () => {

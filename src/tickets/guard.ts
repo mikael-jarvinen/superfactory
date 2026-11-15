@@ -17,8 +17,9 @@ import type { Ticket, TicketState } from "./store.js";
 export type Actor = { human: true; name: string } | { human: false; name: string; importer?: boolean };
 
 export const MIN_QUOTE = 20;
-// Done says the human merged it, so an agent moving a ticket there names the merged PR, from any
-// state. Every other move after Backlog is free: back to work claims nothing about a merge, and
+// Done says the human merged it or said it is done, so an agent moving a ticket there, from any
+// state, names the merged PR or quotes the human's ok: a ticket whose work is evidence has nothing
+// to merge. Every other move after Backlog is free: back to work claims nothing about a merge, and
 // Cancelled says the work is not wanted.
 export const NEEDS_MERGE: ReadonlySet<TicketState> = new Set(["Done"]);
 const GH_TIMEOUT_MS = 30_000;
@@ -99,19 +100,22 @@ export interface MoveProof {
 }
 
 // What a move needs that is checked here and now, against the ticket as it is: the quote out of
-// Backlog, and that a merge was named for Done. The store runs it again under the lock. Returns
-// the quote to record, and whether GitHub must be asked about proof.merged.
+// Backlog, and for Done a merge named or the human's ok quoted. One quote may answer both. The
+// store runs it again under the lock. Returns the quote to record, and whether GitHub must be
+// asked about proof.merged.
 export function checkMoveNow(ws: Workspace, tk: Ticket, to: TicketState, actor: Actor, proof: MoveProof = {}): { asked?: string; askGitHub: boolean } {
   if (actor.human || tk.state === to) return { askGitHub: false };
   const out: { asked?: string; askGitHub: boolean } = { askGitHub: false };
   if (tk.state === "Backlog") out.asked = checkAsked(ws, proof.asked, `${tk.key} is in Backlog`);
   if (NEEDS_MERGE.has(to)) {
     const name = ws.config.human.name;
-    if (proof.merged === undefined)
-      throw new FactoryError(`REFUSED: ${to} is ${name}'s merge, from any state.\n` +
+    if (proof.merged !== undefined) out.askGitHub = true;
+    else if (proof.asked !== undefined) out.asked = checkAsked(ws, proof.asked, `${to} is ${name}'s to say`);
+    else
+      throw new FactoryError(`REFUSED: ${to} is ${name}'s merge, or ${name}'s ok, from any state.\n` +
         `  If ${name} HAS merged ${tk.key}'s PR, pass it, which is checked with GitHub: --merged '#<pr>'\n` +
+        `  If there is nothing to merge and ${name} said it is done, quote them: --asked "<their words>"\n` +
         `  If the work is not wanted, move it to Cancelled instead.`);
-    out.askGitHub = true;
   }
   return out;
 }
