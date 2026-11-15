@@ -188,8 +188,9 @@ export function transports(ws: Workspace): Transport[] {
   return [...m.values()];
 }
 
-const stamp = (s: Session) =>
-  [s.updatedAt, s.startedAt, s.createdAt].map((x) => Date.parse(x ?? "")).find(Number.isFinite) ?? -Infinity;
+// A number is epoch milliseconds; Date.parse would read it as text and give NaN.
+const instant = (x: unknown) => (typeof x === "number" ? x : typeof x === "string" ? Date.parse(x) : NaN);
+const stamp = (s: Session) => [s.updatedAt, s.startedAt, s.createdAt].map(instant).find(Number.isFinite) ?? -Infinity;
 
 // An agent's session among several by its name: the newest live one, else the newest.
 // The listing's order is not documented, so "newest" is the latest timestamp it carries.

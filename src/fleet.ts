@@ -17,7 +17,8 @@ export interface Session {
   status?: string;
   cwd?: string;
   updatedAt?: string;
-  startedAt?: string;
+  // epoch milliseconds in `claude agents --json`, which gives no other time
+  startedAt?: string | number;
   createdAt?: string;
   [k: string]: unknown;
 }

@@ -282,6 +282,15 @@ test("an agent's session is its newest live one, else its newest, and only its b
   const garbled = row("garbled", "failed", { updatedAt: "not a date", startedAt: "2026-11-13T08:00:00Z" });
   const clean = row("clean", "failed", { createdAt: "2026-11-10T08:00:00Z" });
   assert.equal(pick(t, [clean, garbled])?.id, "garbled");
+  // `claude agents --json --all` as it is: startedAt in epoch milliseconds, no other time
+  const listedNow = [
+    { id: "1c8affa6", cwd: "/w", kind: "background", startedAt: 1794674031535, sessionId: "s1", name: "bea", state: "stopped" },
+    { id: "2d9b00b7", cwd: "/w", kind: "background", startedAt: 1794708148625, sessionId: "s2", name: "bea", state: "stopped" },
+  ] as Session[];
+  assert.equal(pick(t, listedNow)?.id, "2d9b00b7", "the later start, though listed second");
+  assert.equal(pick(t, [...listedNow].reverse())?.id, "2d9b00b7");
+  const isoLater = row("iso", "failed", { startedAt: new Date(1794708148625 + 1000).toISOString() });
+  assert.equal(pick(t, [isoLater, ...listedNow])?.id, "iso", "a number and a date string compare as instants");
   assert.equal(pick(t, [garbled, clean])?.id, "garbled");
   // findSession goes by the same rule and never returns an interactive session
   const ft = { ...t, sessions: () => [row("i", "running", { kind: "interactive", updatedAt: "2026-11-13T12:00:00Z" }), old, recent] } as Transport;
