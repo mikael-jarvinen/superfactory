@@ -33,7 +33,6 @@ export interface WakeOptions {
   deadline?: number;
 }
 
-
 export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   const t = o.t ?? transportFor(ws, agent);
   const left = () => (o.deadline ?? Infinity) - Date.now();
@@ -63,11 +62,13 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };
 }
 
+export const wokeLine = (name: string, from: string) => `${name} was off; woke ${from} (its conversation kept)`;
+
 // For the routes that keep context: wakes the session, prints what happened, and returns it once
 // woken, or null when the caller is to start a fresh one.
 export function wakeForRound(ws: Workspace, agent: Agent, t: Transport, match?: (s: Session) => boolean): Session | null {
   const w = wake(ws, agent, { t, ...(match ? { match } : {}) });
-  if (w.is === "woke") console.log(`${agent.name} was off; woke ${w.from} (its conversation kept)`);
+  if (w.is === "woke") console.log(wokeLine(agent.name, w.from));
   else if (w.is === "failed" || w.is === "unknown") console.log(`  warning: ${agent.name} was off and did not wake (${w.why}); starting a fresh session`);
   return w.is === "woke" ? w.s : null;
 }

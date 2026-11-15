@@ -12,7 +12,7 @@ import { agentSessions, transportFor, transports } from "./transport.js";
 import type { Agent } from "./config.js";
 import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
 import { bringUpLead } from "./lead-up.js";
-import { wake, wakeForRound } from "./wake.js";
+import { wake, wakeForRound, wokeLine } from "./wake.js";
 import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
 import { hook as noSideChannelsHook } from "./hooks/no-side-channels.js";
@@ -496,7 +496,7 @@ function cmdAssistant(ws: Workspace, argv: string[]) {
     const ag = agentOrDie(ws, want);
     const w = wake(ws, ag);
     if (w.is === "woke") {
-      console.log(`${want} was off; woke ${w.from} (its conversation kept)`);
+      console.log(wokeLine(want, w.from));
       console.log(`  next: send it the task by message, or pass --force for a fresh session`);
       return;
     }
