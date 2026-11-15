@@ -268,35 +268,28 @@ function reviewKeys(ws: Workspace): string[] {
 // config lands in the right group without the board changing.
 function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>, alive: (name: string, s: Session | undefined) => boolean, unknown: (name: string) => string | null = () => null) {
   // staff: an assistants' roster, drawn beside the lead rather than in the row of teams.
-  const groups = new Map<string, { key: string; title: string; scope: string; staff: boolean; members: unknown[] }>();
-  const scopes = new Map<string, string[]>();
+  const groups = new Map<string, { key: string; title: string; scope: string[]; staff: boolean; members: unknown[] }>();
   const ranks = new Map<string, number>();
   const reviewerRepos = ws.config.roles.reviewer?.addDirs ?? [];
   const rank = (k: string) => (k === "lead" ? 0 : k === "assistants" ? 1 : k === "designers" ? 1.5 : k === "reviewers" ? 3 : 2);
   for (const a of ws.config.agents) {
     const [byRole, roleTitle, scope] =
-      a.role === "lead" ? ["lead", "Lead", ""]
-      : a.role === "assistant" ? ["assistants", "Assistants", ""]
-      : a.role === "reviewer" ? ["reviewers", "Reviewers", reviewerRepos.join(", ")]
-      : a.role === "designer" ? ["designers", "Designers", (ws.config.roles.designer?.addDirs ?? []).join(", ")]
-      : a.stack ? [`stack:${a.stack}`, ws.config.stacks[a.stack]?.label ?? capitalize(a.stack), a.repos.join(", ")]
-      : [`repos:${a.repos.join(",")}`, a.repos.length === 1 ? capitalize(a.repos[0] as string) : "Builders", a.repos.join(", ")];
-    // A configured group replaces the title and keeps the role's place, so its staff flag and rank
-    // come from its first member: config.ts refuses a group that spans two roles. Its scope is every
-    // member's, in order, since builders of one group can work on different repos.
+      a.role === "lead" ? ["lead", "Lead", []]
+      : a.role === "assistant" ? ["assistants", "Assistants", []]
+      : a.role === "reviewer" ? ["reviewers", "Reviewers", reviewerRepos]
+      : a.role === "designer" ? ["designers", "Designers", ws.config.roles.designer?.addDirs ?? []]
+      : a.stack ? [`stack:${a.stack}`, ws.config.stacks[a.stack]?.label ?? capitalize(a.stack), a.repos]
+      : [`repos:${a.repos.join(",")}`, a.repos.length === 1 ? capitalize(a.repos[0] as string) : "Builders", a.repos];
+    // A group takes its staff flag and rank from its first member (see config.ts); its scope is
+    // every member's.
     const key = a.group ? `group:${a.group}` : byRole;
     const title = a.group ?? roleTitle;
     let g = groups.get(key);
     if (!g) {
-      groups.set(key, (g = { key, title, scope, staff: a.role === "assistant", members: [] }));
+      groups.set(key, (g = { key, title, scope: [], staff: a.role === "assistant", members: [] }));
       ranks.set(key, rank(byRole));
-      scopes.set(key, []);
     }
-    if (a.group) {
-      const seen = scopes.get(key)!;
-      for (const s of scope.split(", ").filter((x) => x && !seen.includes(x))) seen.push(s);
-      g.scope = seen.join(", ");
-    }
+    for (const x of scope) if (!g.scope.includes(x)) g.scope.push(x);
     const s = listed.get(a.name);
     const live = alive(a.name, s);
     const rec = recs.find((r) => r.agent === a.name && owesSession(r));
@@ -312,7 +305,7 @@ function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>, alive: 
       in_review: a.role === "builder" ? reviewOnly(recs, a.name).map((r) => r.ticket) : [],
     });
   }
-  return [...groups.values()].sort((a, b) => ranks.get(a.key)! - ranks.get(b.key)!);
+  return [...groups.values()].sort((a, b) => ranks.get(a.key)! - ranks.get(b.key)!).map((g) => ({ ...g, scope: g.scope.join(", ") }));
 }
 
 // Each item's most recent note or evidence, so a card says why it sits where it does.

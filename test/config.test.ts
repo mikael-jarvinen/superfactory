@@ -171,11 +171,19 @@ role = "lead"
 group = "Top"`)), ["agents[0].group: the lead has its own place on the board"]);
   assert.deepEqual(problems(GROUPED.replace('group = " Servers "', 'group = "Product"')),
     ['agents: group "Product" has "bea" (builder) and "otto" (assistant); a group holds one role']);
-  assert.deepEqual(problems(GROUPED.replace('group = " Servers "', 'group = "reviewers"')),
-    ['agents[4].group: "reviewers" is a built-in roster\'s title']);
+  for (const [g, why] of [[" Reviewers ", "a built-in roster"], ["API", "repo api"], ["app", "stack app"]] as const)
+    assert.deepEqual(problems(GROUPED.replace('group = " Servers "', `group = "${g}"`)),
+      [`agents[4].group: "${g.trim()}" is already a roster's title on the board (${why})`]);
+  assert.deepEqual(problems(GROUPED.replace("[stacks.app]", '[stacks.app]\nlabel = "Shop"').replace('group = " Servers "', 'group = "shop"')),
+    ['agents[4].group: "shop" is already a roster\'s title on the board (stack app\'s label)']);
   assert.deepEqual(problems(GROUPED.replace(`name = "cal"
 role = "builder"
 group = "Product"`, `name = "cal"
 role = "builder"
 group = "product"`)), ['agents: group "Product" is also spelled "product"; spell it one way']);
+  assert.deepEqual(problems(GROUPED.replace(/group = "Product"/g, 'group = "Product Team"').replace(`name = "cal"
+role = "builder"
+group = "Product Team"`, `name = "cal"
+role = "builder"
+group = "Product  Team"`)), ['agents: group "Product Team" is also spelled "Product  Team"; spell it one way']);
 });
