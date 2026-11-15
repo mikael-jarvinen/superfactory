@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { agentOrDie } from "../src/fleet.js";
 import { settingsFile } from "../src/launch.js";
@@ -235,13 +236,13 @@ test("a hosted agent's settings tell the wake hook its host", () => {
   assert.match(wakeCmd("bea"), / hook wake$/);
 });
 
-test("a local listing that hangs is cut off, so the hook still answers inside its timeout", () => {
-  const { ws } = fakeFleet();
+test("a local listing that hangs is cut off and the send let through, as for a host that cannot be listed", () => {
+  const { ws, calls } = fakeFleet();
   writeFileSync(join(ws, "listing-hang"), "");
   const t0 = Date.now();
   const r = wakeHook(ws, "bea");
-  assert.equal(r.status, 2);
-  assert.match(r.stderr, /bea could not be checked or woken/);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!calls().some((c) => c.startsWith("respawn")), "nothing is woken on a guess");
   assert.ok(Date.now() - t0 < 30_000, `the hung listing took ${Date.now() - t0} ms`);
 });
 
@@ -261,20 +262,28 @@ test("a remote respawn leaves room for its child's slack and one listing after i
   assert.ok(given !== undefined && given <= 30_000 && given > 29_000, `respawn given ${given} ms of 60 000: 25 000 for a listing and 5 000 of child slack come off`);
 });
 
+// What a failed SendMessage hands a PostToolUse hook, recorded from a real one.
+const FAILED_SEND = JSON.parse(readFileSync(fileURLToPath(new URL("../../test/fixtures/sendmessage-failed.json", import.meta.url)), "utf8")) as {
+  hook_event_name: string; tool_input: Record<string, unknown>; tool_response: Record<string, unknown>;
+};
+
 test("from a host, a failed send to an agent it cannot wake says it is off and to tell the lead", () => {
   const { ws } = fakeFleet(HOSTED_TOML);
-  const post = (to: string, success: boolean) =>
-    factory(undefined, ["--workspace", ws, "hook", "wake", "--from-host", "far"], {
-      env: { CLAUDE_BIN: join(ws, "bin", "claude") },
-      input: JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "SendMessage", tool_input: { to, message: "hi" }, tool_response: { success } }),
-    });
-  const r = post("bea", false);
+  const run = (ev: Record<string, unknown>) =>
+    factory(undefined, ["--workspace", ws, "hook", "wake", "--from-host", "far"], { env: { CLAUDE_BIN: join(ws, "bin", "claude") }, input: JSON.stringify(ev) });
+  const failed = (to: string) => ({ ...FAILED_SEND, tool_input: { ...FAILED_SEND.tool_input, to } });
+  assert.equal(FAILED_SEND.hook_event_name, "PostToolUse");
+  const r = run(failed("bea"));
   assert.equal(r.status, 2);
   assert.match(r.stderr, /bea runs on the primary, not on far, and was not reachable: it is most likely off/);
   assert.match(r.stderr, /Tell ada that bea is off/);
-  assert.equal(post("bea", true).status, 0, "a send that went through");
-  assert.equal(post("ada", false).status, 0, "the lead: nobody else can wake it");
-  assert.equal(post("rae", false).status, 0, "an agent on far, which the PreToolUse half already tried");
+  assert.equal(run({ ...failed("bea"), tool_response: { success: true, message: "sent" } }).status, 0, "a send that went through");
+  assert.equal(run(failed("ada")).status, 0, "the lead: nobody else can wake it");
+  assert.equal(run(failed("rae")).status, 0, "an agent on far, which the PreToolUse half already tried");
+  // should a failed send come as a tool error instead
+  const err = run({ hook_event_name: "PostToolUseFailure", tool_name: "SendMessage", tool_input: { to: "bea", message: "hi" }, error: "No agent named 'bea' is reachable." });
+  assert.equal(err.status, 2);
+  assert.match(err.stderr, /Tell ada that bea is off/);
 });
 
 test("only a hosted agent's settings explain a failed send", () => {
@@ -282,10 +291,12 @@ test("only a hosted agent's settings explain a failed send", () => {
   after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, "token"), "t".repeat(40));
   const ws = openWorkspace(dir, {});
-  const post = (name: string) =>
-    ((JSON.parse(readFileSync(settingsFile(ws, agentOrDie(ws, name)), "utf8")).hooks.PostToolUse ?? []) as { matcher?: string; hooks: { command: string }[] }[])
-      .filter((h) => h.matcher === "SendMessage").map((h) => h.hooks[0]!.command);
-  assert.equal(post("rae").length, 1);
-  assert.match(post("rae")[0]!, / hook wake --from-host far$/);
-  assert.deepEqual(post("bea"), []);
+  for (const ev of ["PostToolUse", "PostToolUseFailure"]) {
+    const post = (name: string) =>
+      ((JSON.parse(readFileSync(settingsFile(ws, agentOrDie(ws, name)), "utf8")).hooks[ev] ?? []) as { matcher?: string; hooks: { command: string }[] }[])
+        .filter((h) => h.matcher === "SendMessage").map((h) => h.hooks[0]!.command);
+    assert.equal(post("rae").length, 1, ev);
+    assert.match(post("rae")[0]!, / hook wake --from-host far$/, ev);
+    assert.deepEqual(post("bea"), [], ev);
+  }
 });

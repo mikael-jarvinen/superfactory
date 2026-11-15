@@ -18,7 +18,7 @@ export type Woken =
   // no session under the name, or the newest is not the one the caller would wake
   | { is: "none" }
   | { is: "failed"; why: string }
-  // the host could not be asked
+  // the sessions could not be listed
   | { is: "unknown"; why: string };
 
 export interface WakeOptions {
@@ -43,11 +43,19 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   const budget = LISTING_TIMEOUT_MS + slack;
   const left = () => (o.deadline ?? Infinity) - Date.now();
   const late = (step: string): Woken => ({ is: "failed", why: `out of time before ${step}` });
-  const live = ask(() => findSession(t, agent.name));
+  // A listing that fails, a local one that timed out included, leaves the recipient unknown.
+  const listed = <T>(f: () => T): T | Unreachable => {
+    try {
+      return ask(f);
+    } catch (e) {
+      return new Unreachable(t.where, (e as Error).message);
+    }
+  };
+  const live = listed(() => findSession(t, agent.name));
   if (live instanceof Unreachable) return { is: "unknown", why: live.brief };
   if (t.alive(live)) return { is: "live", s: live };
   if (left() < budget) return late("the stopped sessions were listed");
-  const all = ask(() => t.sessions(true));
+  const all = listed(() => t.sessions(true));
   if (all instanceof Unreachable) return { is: "unknown", why: all.brief };
   // Not findSession: it prefers a row alive() passes, and locally that is a host-wide check, so a
   // stale "done" row would beat the newest stopped session.

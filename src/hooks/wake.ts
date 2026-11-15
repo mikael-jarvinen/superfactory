@@ -8,7 +8,7 @@
 //
 // A session on a host runs this with --from-host <host>. It can wake only an agent on that same
 // host, through its local claude; it cannot list the primary or another host, so a message to any
-// other agent passes through. If that send then fails, the same hook on PostToolUse says the agent
+// other agent passes through. If that send then fails, the same hook after it says the agent
 // is off and to have the lead wake it, rather than leave "not reachable" unexplained. The lead
 // being off is a known gap: nobody else can wake it.
 import { parseArgs } from "node:util";
@@ -40,8 +40,10 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   try {
     const ev = JSON.parse(input) as { hook_event_name?: unknown; tool_input?: { to?: unknown }; tool_response?: { success?: unknown } };
     to = recipient(ev.tool_input?.to);
-    if (ev.hook_event_name === "PostToolUse") {
-      if (!fromHost || ev.tool_response?.success !== false) return { code: 0 };
+    // A failed send is a result with success false (PostToolUse, recorded in the test fixture);
+    // should it come as a tool error instead, that is PostToolUseFailure.
+    if (ev.hook_event_name === "PostToolUse" || ev.hook_event_name === "PostToolUseFailure") {
+      if (!fromHost || (ev.hook_event_name === "PostToolUse" && ev.tool_response?.success !== false)) return { code: 0 };
       failedSend = true;
     }
   } catch {

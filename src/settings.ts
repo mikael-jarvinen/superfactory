@@ -208,7 +208,7 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
   const wakeArgs = ["--workspace", ws.dir, "hook", "wake", ...(s.host ? ["--from-host", s.host] : [])];
   add("PreToolUse", "SendMessage", wakeArgs, WAKE_HOOK_TIMEOUT_S);
   // a failed send from a host, to an agent it cannot wake, is explained
-  if (s.host) add("PostToolUse", "SendMessage", wakeArgs, 10);
+  if (s.host) for (const ev of ["PostToolUse", "PostToolUseFailure"]) add(ev, "SendMessage", wakeArgs, 10);
   for (const h of names) {
     if (h === "wake") continue;
     if (h === "guard") {
