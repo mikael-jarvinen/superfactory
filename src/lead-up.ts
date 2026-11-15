@@ -9,7 +9,7 @@
 import type { Agent } from "./config.js";
 import { findSession, type Session, waitForName } from "./fleet.js";
 import { armText } from "./hooks/status.js";
-import { commonFlags, GIT_HTTPS_ENV, launch, leadPrompt, roleAppendix, roleOf } from "./launch.js";
+import { GIT_HTTPS_ENV, launch, launchArgs, leadPrompt, roleAppendix, roleOf } from "./launch.js";
 import type { Transport } from "./transport.js";
 import { FactoryError } from "./util.js";
 import type { Workspace } from "./workspace.js";
@@ -17,9 +17,12 @@ import type { Workspace } from "./workspace.js";
 export const resumePrompt = (ws: Workspace) => `You were restarted by \`factory up\`. ${armText(ws)}`;
 
 // A resumed session gets its messages back, not the system prompt it started with, so the appendix
-// goes on the command line again.
-export const resumeArgs = (ws: Workspace, agent: Agent, sessionId: string, prompt: string, appendixPath: string | null): string[] =>
-  ["--bg", ...commonFlags(ws, agent, undefined), ...(appendixPath ? ["--append-system-prompt-file", appendixPath] : []), "--resume", sessionId, prompt];
+// goes on the command line again. A fresh launch's argv with `--resume <id>` before the prompt, so
+// the two cannot pass the appendix differently.
+export function resumeArgs(ws: Workspace, agent: Agent, sessionId: string, prompt: string, appendixPath: string | null): string[] {
+  const args = launchArgs(ws, agent, prompt, appendixPath, undefined);
+  return [...args.slice(0, -1), "--resume", sessionId, prompt];
+}
 
 export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boolean, out: (line: string) => void = console.log, waitS = 60): void {
   const s = findSession(t, ld.name);

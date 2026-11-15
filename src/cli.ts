@@ -251,7 +251,8 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   const repo = ws.config.repos[repoKey]!;
   const stack = ag.stack ?? repoKey;
   // The brief and the prompt file, read before any session is stopped or started: a missing one
-  // refuses with the live session kept.
+  // refuses with the live session kept. The read is lazy, done once at the first stop or the start,
+  // so a fix round on the live session and the "still on" refusal never need either.
   const promptFile = str(v["prompt-file"]);
   let read: { appendix: ReturnType<typeof buildAppendix>; given: string | null } | undefined;
   const inputs = () => (read ??= { appendix: buildAppendix(ws, ag, repo.path), given: promptFile ? readFileSync(promptFile, "utf8") : null });

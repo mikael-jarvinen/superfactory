@@ -432,7 +432,8 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     if (name && names.has(name)) r.bad("name", `${show(name)} is used by another agent`);
     names.add(name);
     const roleV = r.str("role", true);
-    if (roleV && !(ROLES as readonly string[]).includes(roleV)) r.bad("role", `must be one of ${ROLES.join(", ")}, got ${show(roleV)}`);
+    const known = !!roleV && (ROLES as readonly string[]).includes(roleV);
+    if (roleV && !known) r.bad("role", `must be one of ${ROLES.join(", ")}, got ${show(roleV)}`);
     const role = roleV as RoleName;
     const stack = r.str("stack");
     const agentRepos = repoKeys(r, "repos", r.strs("repos"));
@@ -447,7 +448,7 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     }
     const appendix = r.strs("appendix") ?? [];
     const resolved = appendix.map((a) => (a.startsWith("repo:") ? a : (path(r, "appendix", a) ?? a)));
-    if (roleV && role !== "builder" && (ROLES as readonly string[]).includes(roleV))
+    if (known && role !== "builder")
       for (const a of appendix.filter((x) => x.startsWith("repo:")))
         r.bad("appendix", `${a} is read from the agent's checkout, and only a builder has one`);
     const addDirs = repoKeys(r, "add_dirs", r.strs("add_dirs"));
