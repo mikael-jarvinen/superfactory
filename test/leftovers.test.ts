@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { accessSync, chmodSync, constants, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { type ClaudeInstall, cgroupProcsFile, claudeInstall, cleanUp, isClaude } from "../src/scheduler/leftovers.js";
+import { agentsSlice, type ClaudeInstall, cgroupProcsFile, claudeInstall, cleanUp, isClaude } from "../src/scheduler/leftovers.js";
+import { procStat } from "../src/stacks/process.js";
 import { linuxOnly, noCleanup, runningNotZombie } from "./helpers.js";
 
 const dir = mkdtempSync(join(tmpdir(), "leftovers-"));
@@ -118,6 +119,68 @@ test("without a claude, a group with nothing left is forgotten, and one with som
     else process.env.CLAUDE_BIN = bin;
     process.kill(full.left, "SIGKILL");
   }
+});
+
+// A run's claude calls each run in a scope of their own, out of the scheduler's cgroup, and named
+// after the run (scope.ts). The slice here is a stand-in directory, its cgroup.procs listing real
+// processes. Everything is in a session of its own, so only the scope can tie it to the run.
+test("what a run's claude calls left in their scopes is cleaned up, but a supervisor among it is not", { skip: noCleanup() }, async () => {
+  const bin = process.env.CLAUDE_BIN;
+  const at = join(dir, "scoped");
+  mkdirSync(join(at, "bin"), { recursive: true });
+  const claude = join(at, "bin", "claude");
+  writeFileSync(claude, `#!/bin/sh\nsleep 600 &\necho $! > ${join(at, "child.pid")}\nwait\n`);
+  chmodSync(claude, 0o755);
+  const sh = spawn("sh", ["-c", `setsid ${claude} >/dev/null 2>&1 & echo $!; setsid sleep 600 >/dev/null 2>&1 & echo $!; setsid sleep 600 >/dev/null 2>&1 & echo $!`], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  sh.stdout.on("data", (b) => (out += b));
+  await new Promise((r) => sh.once("close", r)); // exited, and its output read
+  const pgid = sh.pid as number; // its leader is gone, as an ended run's is
+  const [supervisor, orphan, other] = out.trim().split("\n").map(Number) as [number, number, number];
+  const pid = (f: string) => Number(readFileSync(join(at, f), "utf8"));
+  const slice = join(at, "agents.slice");
+  const scope = (name: string, pids: number[]) => {
+    mkdirSync(join(slice, name), { recursive: true });
+    writeFileSync(join(slice, name, "cgroup.procs"), pids.map((p) => `${p}\n`).join(""));
+  };
+  try {
+    const t0 = Date.now();
+    // until each has its own session: sh echoed the pid before setsid ran
+    const settledOut = () => existsSync(join(at, "child.pid")) && [supervisor, orphan, other].every((p) => procStat(p)?.pgid === p);
+    while (!settledOut() && Date.now() - t0 < 5000) await settle(20);
+    const child = pid("child.pid");
+    assert.equal(readFileSync(`/proc/${supervisor}/comm`, "utf8").trim(), "claude");
+    assert.notEqual(procStat(orphan)?.pgid, pgid, "out of the run's group");
+    scope(`factory-job-a.b_c-${pgid}-77-1.scope`, [supervisor, child, orphan]);
+    scope(`factory-job-a.b_c-${pgid + 1}-77-1.scope`, [other]); // another run's
+    process.env.CLAUDE_BIN = claude;
+    const lines: string[] = [];
+    const outcome = (s: string | null) => new Promise<boolean>((r) => cleanUp("a.b c", pgid, new Set(), (l) => lines.push(l), r, 200, s));
+    assert.equal(await outcome(null), false, "no slice, nothing found");
+    assert.deepEqual(lines, []);
+    assert.equal(await outcome(slice), false);
+    assert.deepEqual(lines, [`job a.b c: ended, leaving ${orphan} (sleep) in its process group or scopes; SIGTERM`]);
+    const t1 = Date.now();
+    while (runningNotZombie(orphan) && Date.now() - t1 < 5000) await settle(20);
+    assert.ok(!runningNotZombie(orphan), "the orphan is gone");
+    assert.ok(runningNotZombie(supervisor), "the supervisor is left alone");
+    assert.ok(runningNotZombie(child), "and so is what runs under it");
+    assert.ok(runningNotZombie(other), "and another run's scope is not this run's");
+  } finally {
+    if (bin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = bin;
+    for (const p of [supervisor, orphan, other, existsSync(join(at, "child.pid")) ? pid("child.pid") : 0]) {
+      try {
+        if (p) process.kill(p, "SIGKILL");
+      } catch {}
+    }
+  }
+});
+
+test("agents.slice is under the user's manager, at the cgroup v2 mount", () => {
+  assert.equal(agentsSlice(pureV2, 1000), "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/agents.slice");
+  assert.equal(agentsSlice(hybrid, 1000), "/sys/fs/cgroup/unified/user.slice/user-1000.slice/user@1000.service/agents.slice");
+  assert.equal(agentsSlice(hybrid.split("\n")[2] as string, 1000), null, "no cgroup2 mount");
 });
 
 const pureV2 = "29 1 0:26 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime shared:4 - cgroup2 cgroup2 rw,nsdelegate\n";

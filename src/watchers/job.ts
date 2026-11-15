@@ -4,7 +4,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { lead } from "../fleet.js";
-import { claudeScoped, scopeCheck } from "../scope.js";
+import { claudeEnv, claudeScoped, scopeCheck } from "../scope.js";
 import { ghBin } from "../gate/github.js";
 import { renderSettings } from "../settings.js";
 import { parseRead } from "../tracker/read.js";
@@ -81,7 +81,7 @@ export function watcherMode(ws: Workspace): string {
 }
 
 export const claudeOptions = (job: Job) => ({
-  env: { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" },
+  env: { ...claudeEnv(), CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" },
   timeout: TIMEOUT_S[job] * 1000,
   killSignal: "SIGTERM" as const,
 });

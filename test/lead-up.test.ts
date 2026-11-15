@@ -7,6 +7,7 @@ import { lead } from "../src/fleet.js";
 import { leadPrompt } from "../src/launch.js";
 import { bringUpLead, resumePrompt } from "../src/lead-up.js";
 import type { StartRequest, Transport } from "../src/transport.js";
+import { FactoryError } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
 import { tempWorkspace } from "./helpers.js";
 
@@ -17,7 +18,7 @@ const ws = openWorkspace(dir, {});
 const ld = lead(ws);
 
 // A transport whose listing is `sessions`; whatever it starts or respawns comes up alive.
-function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boolean } = {}) {
+function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boolean; stopBug?: boolean } = {}) {
   const started: { cwd: string; prompt: string; args: string[] }[] = [];
   const respawned: string[] = [];
   const removed: string[] = [];
@@ -39,7 +40,8 @@ function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boo
     },
     stop(_name, id, remove) {
       assert.equal(remove, true);
-      if (opts.stopFails) throw new Error("systemd-run made no scope for claude stop: Failed to connect to bus: No such file or directory");
+      if (opts.stopBug) throw new TypeError("a bug in stop");
+      if (opts.stopFails) throw new FactoryError("systemd-run made no scope for claude stop: Failed to connect to bus: No such file or directory");
       removed.push(id);
     },
     worktree: () => assert.fail("not used"),
@@ -81,6 +83,7 @@ test("a resumed lead is up even when taking the old entry off the list fails", (
     "the old d1079ed1 stays listed: systemd-run made no scope for claude stop: Failed to connect to bus: No such file or directory",
     `${ld.name} resumed from ${UUID} as new1, told to arm the message page inbox`,
   ]);
+  assert.throws(() => bringUpLead(ws, ld, fake([stopped()], { stopBug: true }).t, false, () => {}, 1), TypeError, "a bug in stop is no die: it throws");
 });
 
 test("a resume that fails falls back to respawn, as before", () => {

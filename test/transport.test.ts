@@ -3,7 +3,8 @@ import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { agentOrDie, findSession, type Session } from "../src/fleet.js";
-import { claudeScoped, SCOPE } from "../src/scope.js";
+import { claudeEnv, claudeScoped, JOB_ENV, SCOPE } from "../src/scope.js";
+import { procStat } from "../src/stacks/process.js";
 import { agentSessions, local, pick, type Transport } from "../src/transport.js";
 import { runClaude } from "../src/watchers/job.js";
 import { openWorkspace } from "../src/workspace.js";
@@ -135,6 +136,21 @@ test("on Linux a watcher's claude -p runs in a scope too, and one that gets none
   writeFileSync(join(dir, "scope-fail"), NO_BUS_259);
   assert.throws(() => runClaude(ws, "round", "P", ["Read"], log), { message: `systemd-run made no scope for claude -p: ${NO_BUS_259}` });
   assert.match(readFileSync(log, "utf8"), new RegExp(`${NO_BUS_259}\\n.*exit=1`), "logged before it dies");
+});
+
+test("a scheduler job's calls get scopes named after its run, and claude never sees the job", () => {
+  const pgid = procStat(process.pid)?.pgid;
+  const [, first] = claudeScoped(["agents"], "linux", { [JOB_ENV]: "superfactory.ada up" });
+  const [, second] = claudeScoped(["agents"], "linux", { [JOB_ENV]: "superfactory.ada up" });
+  assert.match(first[0] as string, new RegExp(`^--unit=factory-job-superfactory\\.ada_up-${pgid}-${process.pid}-\\d+$`));
+  assert.notEqual(first[0], second[0], "a unit name per call");
+  assert.deepEqual(first.slice(1, SCOPE.length + 1), SCOPE);
+  assert.deepEqual(claudeScoped(["agents"], "linux", {})[1].slice(0, SCOPE.length), SCOPE, "no job, no unit name");
+  assert.deepEqual(claudeEnv({ [JOB_ENV]: "x", HOME: "/h" }), { HOME: "/h" });
+});
+
+test("the scope is asked for quietly, so systemd-run's own failure is stderr's first line", () => {
+  assert.ok(SCOPE.indexOf("--quiet") >= 0 && SCOPE.indexOf("--quiet") < SCOPE.indexOf("--"), "--quiet, before the --");
 });
 
 test("where there is no systemd, claude runs bare", () => {

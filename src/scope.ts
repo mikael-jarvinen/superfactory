@@ -11,14 +11,38 @@
 // cannot find ("Failed to find executable …", exit 1 on both) is no scope failure: it is that
 // call's own. The factory daemon in the agents repo does the same for its calls.
 import { claudeBin } from "./claude-bin.js";
+import { procStat } from "./stacks/process.js";
 import { die, type RunResult } from "./util.js";
 
+// --quiet keeps "Running scope as unit …" off stderr, so a failure of systemd-run's own is stderr's
+// first line, the only one scopeCheck reads. Dropping it makes every scope failure claude's.
 export const SCOPE = ["--user", "--scope", "--collect", "--slice=agents.slice", "--quiet", "-p", "ManagedOOMPreference=avoid", "--"];
 const SCOPE_FAILED = /^(Failed to (start transient scope unit|connect to .*bus|create bus connection)|Unknown assignment)/;
 
+// A scheduler job run's calls leave its cgroup for their scopes, so the leftovers reaper finds
+// them by name instead: the scheduler sets FACTORY_JOB to the job's label, and each call's scope is
+// factory-job-<label>-<the run's process group>-<pid>-<n>.scope. The reaper reads the scopes of an
+// ended run's group by this prefix. FACTORY_JOB never reaches claude (claudeEnv), so a session or a
+// supervisor a run starts does not name its own calls after the run.
+export const JOB_ENV = "FACTORY_JOB";
+export const jobUnitPrefix = (label: string, pgid: number) => `factory-job-${label.replace(/[^A-Za-z0-9_.:-]/g, "_")}-${pgid}-`;
+let jobCalls = 0;
+function jobUnit(env: NodeJS.ProcessEnv): string[] {
+  const label = env[JOB_ENV];
+  if (!label) return [];
+  const pgid = procStat(process.pid)?.pgid ?? process.pid;
+  return [`--unit=${jobUnitPrefix(label, pgid)}${process.pid}-${++jobCalls}`];
+}
+
 // The command and arguments that run `claude argv`, in a scope where there is systemd.
-export function claudeScoped(argv: string[], platform: NodeJS.Platform = process.platform): [string, string[]] {
-  return platform === "linux" ? ["systemd-run", [...SCOPE, claudeBin(), ...argv]] : [claudeBin(), argv];
+export function claudeScoped(argv: string[], platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): [string, string[]] {
+  return platform === "linux" ? ["systemd-run", [...jobUnit(env), ...SCOPE, claudeBin(), ...argv]] : [claudeBin(), argv];
+}
+
+// The environment a claude call runs with: env, without FACTORY_JOB.
+export function claudeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const { [JOB_ENV]: _job, ...rest } = env;
+  return rest;
 }
 
 // Dies when systemd-run, not claude, is what failed. In --scope mode systemd-run fails before it

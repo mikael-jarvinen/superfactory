@@ -9,6 +9,7 @@ import type { Workspace } from "../workspace.js";
 import { startStamp } from "../stacks/process.js";
 import { nextDue, runAlive } from "./daemon.js";
 import { type Job, environment, jobs } from "./launchd.js";
+import { JOB_ENV } from "../scope.js";
 import { cleanUp } from "./leftovers.js";
 import { watchdog } from "./watchdog.js";
 import { type JobRun, readState, stateFile } from "./state.js";
@@ -72,7 +73,7 @@ export async function runScheduler(ws: Workspace, opts: RunOptions = {}): Promis
     const fd = openSync(join(ws.logsDir, `scheduler-${j.name}.log`), "a");
     let child;
     try {
-      child = spawn(j.args[0] as string, j.args.slice(1), { cwd: ws.dir, env: jobEnv(), stdio: ["ignore", fd, fd], detached: true });
+      child = spawn(j.args[0] as string, j.args.slice(1), { cwd: ws.dir, env: { ...jobEnv(), [JOB_ENV]: j.label }, stdio: ["ignore", fd, fd], detached: true });
     } finally {
       closeSync(fd);
     }

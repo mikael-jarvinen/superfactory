@@ -1,10 +1,13 @@
-// On Linux, kills what an ended run left in its process group, as launchd does on macOS. The unit's
+// On Linux, kills what an ended run left in its process group, as launchd does on macOS, and what
+// its claude calls left in their scopes: each runs in factory-job-<label>-<group>-….scope under
+// agents.slice (scope.ts), out of the scheduler's cgroup. The unit's
 // KillMode=process keeps a run alive across a scheduler restart, so nothing else would. A group is
 // touched only while its leader's pid is free, since a live pid means the group belongs to a
 // running run or to an unrelated process.
-import { readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve, sep } from "node:path";
 import { claudeBin } from "../fleet.js";
+import { jobUnitPrefix } from "../scope.js";
 import { procStat, signalAll, startStamp } from "../stacks/process.js";
 
 const real = (p: string): string | null => {
@@ -113,11 +116,8 @@ const noCgroup = (why: string, log: (line: string) => void) => {
   log(`no cgroup v2 for the scheduler (${why}): leftovers are not killed and will not be retried`);
 };
 
-// The processes left in group pgid, an ended run's; null when one is left and there is no claude to
-// tell a session from a leftover. live holds the pids of runs still recorded as going, whose groups
-// are not to be touched.
-function leftovers(pgid: number, live: Set<number>, log: (line: string) => void): Leftover[] | null {
-  if (process.platform !== "linux" || !pgid || procStat(pgid) || live.has(pgid)) return [];
+// What group pgid left in the scheduler's own cgroup.
+function inOwnCgroup(pgid: number, log: (line: string) => void): number[] {
   let pids: number[];
   if (cgroupProcs === undefined) {
     const own = ownCgroupProcs();
@@ -137,7 +137,47 @@ function leftovers(pgid: number, live: Set<number>, log: (line: string) => void)
       return [];
     }
   }
-  const inGroup = pids.filter((pid) => pid !== process.pid && procStat(pid)?.pgid === pgid);
+  return pids.filter((pid) => pid !== process.pid && procStat(pid)?.pgid === pgid);
+}
+
+// This user's agents.slice in the cgroup v2 tree, where every claude call's scope is.
+export function agentsSlice(mountinfo = readFileSync("/proc/self/mountinfo", "utf8"), uid = process.getuid?.() ?? 0): string | null {
+  for (const line of mountinfo.split("\n")) {
+    const [pre, post] = line.split(" - ");
+    if (!pre || post?.split(" ")[0] !== "cgroup2") continue;
+    const [, , , root, mount] = pre.split(" ");
+    if (root === "/" && mount) return `${mount}/user.slice/user-${uid}.slice/user@${uid}.service/agents.slice`.replace(/\/{2,}/g, "/");
+  }
+  return null;
+}
+
+// Everything in the scopes the run's claude calls were given, whatever its process group: the
+// scope is the run's by its name. None when there is no such slice or scope.
+export function inJobScopes(label: string, pgid: number, slice: string | null): number[] {
+  if (!slice) return [];
+  const prefix = jobUnitPrefix(label, pgid);
+  let names: string[];
+  try {
+    names = readdirSync(slice).filter((n) => n.startsWith(prefix) && n.endsWith(".scope"));
+  } catch {
+    return [];
+  }
+  return names.flatMap((n) => {
+    try {
+      return readProcs(`${slice}/${n}/cgroup.procs`);
+    } catch {
+      return []; // emptied and collected since
+    }
+  });
+}
+
+// The processes left by run pgid of job label, an ended one: in its group in the scheduler's
+// cgroup, and in its claude calls' scopes. null when one is left and there is no claude to tell a
+// session from a leftover. live holds the pids of runs still recorded as going, whose groups are
+// not to be touched.
+function leftovers(label: string, pgid: number, live: Set<number>, log: (line: string) => void, slice: string | null): Leftover[] | null {
+  if (process.platform !== "linux" || !pgid || procStat(pgid) || live.has(pgid)) return [];
+  const inGroup = [...new Set([...inOwnCgroup(pgid, log), ...inJobScopes(label, pgid, slice)])].filter((pid) => pid !== process.pid);
   if (!inGroup.length) return [];
   const c = claudeInstall(claudeBin());
   if (!c) {
@@ -156,10 +196,11 @@ function leftovers(pgid: number, live: Set<number>, log: (line: string) => void)
 
 // SIGTERM, then SIGKILL after graceMs. settled runs once, after this returns if anything was signalled; when
 // deferred, keep the group and call again, otherwise forget it.
-export function cleanUp(label: string, pgid: number, live: Set<number>, log: (line: string) => void, settled: (deferred: boolean) => void, graceMs = 10_000): void {
+// slice is where the run's claude calls' scopes are, agentsSlice() unless a test says otherwise.
+export function cleanUp(label: string, pgid: number, live: Set<number>, log: (line: string) => void, settled: (deferred: boolean) => void, graceMs = 10_000, slice?: string | null): void {
   let found: Leftover[] | null;
   try {
-    found = leftovers(pgid, live, log);
+    found = leftovers(label, pgid, live, log, slice === undefined ? agentsSlice() : slice);
   } catch (e) {
     log(`job ${label}: leftovers of process group ${pgid} not cleaned up: ${(e as Error).message}`);
     settled(false);
@@ -173,7 +214,7 @@ export function cleanUp(label: string, pgid: number, live: Set<number>, log: (li
     settled(false);
     return;
   }
-  log(`job ${label}: ended, leaving ${found.map((p) => `${p.pid} (${p.comm})`).join(", ")} in its process group; SIGTERM`);
+  log(`job ${label}: ended, leaving ${found.map((p) => `${p.pid} (${p.comm})`).join(", ")} in its process group or scopes; SIGTERM`);
   // only what is still the same process: its pid may have gone to another since
   const same = (ps: Leftover[]) =>
     ps.filter((p) => {
