@@ -10,7 +10,7 @@ import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owe
 import { Unreachable } from "./remote.js";
 import { agentSessions, transportFor, transports } from "./transport.js";
 import type { Agent } from "./config.js";
-import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleOf } from "./launch.js";
+import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
 import { bringUpLead } from "./lead-up.js";
 import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
@@ -250,6 +250,12 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (!allowed.includes(repoKey)) throw new FactoryError(`${name} works in [${allowed.map(pyRepr).join(", ")}]; --repo ${repoKey} is another stack`);
   const repo = ws.config.repos[repoKey]!;
   const stack = ag.stack ?? repoKey;
+  // The brief and the prompt file, read before any session is stopped or started: a missing one
+  // refuses with the live session kept. The read is lazy, done once at the first stop or the start,
+  // so a fix round on the live session and the "still on" refusal never need either.
+  const promptFile = str(v["prompt-file"]);
+  let read: { appendix: ReturnType<typeof buildAppendix>; given: string | null } | undefined;
+  const inputs = () => (read ??= { appendix: buildAppendix(ws, ag, repo.path), given: promptFile ? readFileSync(promptFile, "utf8") : null });
   // A builder keeps its session across the rounds of one work item and is cleared only when it
   // starts a different one. A fix round on the item the live session is already on keeps that
   // session and its context: the brief goes to it by SendMessage, and this only records the state.
@@ -270,11 +276,13 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
     }
     const onState = on ? loadRec(ws, on)?.state : null;
     if (force) {
+      inputs();
       console.log(`${name} is running (${s.id}); --force given, stopping it`);
       stopSession(t, s);
     } else if (onState && IN_REVIEW.has(onState)) {
       const left = builderLeft(ws, ag, t, s.cwd);
       if (left) throw new FactoryError(`${on} is ${onState}, so ${name} is free for ${ticket}, but ${left}`);
+      inputs();
       stopSession(t, s);
       console.log(`${name}'s item ${on} is ${onState}, so ${name} is free: stopped ${s.id}, worktree kept: ${s.cwd}`);
     } else {
@@ -291,13 +299,12 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (!DISPATCHABLE.has(cur) && !force)
     throw new FactoryError(`${ticket} is ${cur}; a dispatch makes no sense there. Use \`factory state\` first, ` +
       `or --force if you mean it (a verification run on a sent PR, say).`);
+  const { appendix, given } = inputs();
   const { wt, how } = t.worktree({ agent: ag, repo, ticket, toolWritten: ws.config.worktree.toolWritten });
-  const appendix = buildAppendix(ws, ag, repo.path);
-  const promptFile = str(v["prompt-file"]);
   // A hosted builder has no stack, so there is no slot to check.
   const noSlot = ag.host ? null : slotless(ws, stack, ticket, wt);
   if (noSlot) console.log(`  warning: ${noSlot}`);
-  const prompt = (promptFile ? readFileSync(promptFile, "utf8") : buildingPrompt(ws, ag, ticket)) + (noSlot ? `\n\n${noSlot}` : "");
+  const prompt = (given ?? buildingPrompt(ws, ag, ticket)) + (noSlot ? `\n\n${noSlot}` : "");
   const started = launch(ws, ag, wt, prompt, appendix?.text ?? null, "build");
   if (rec === null || cur === "queued") {
     transition(ws, ticket, "building", { agent: name, stack, worktree: wt, evidence: `building session ${started.id}` });
@@ -316,6 +323,14 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   console.log(`  next: SendMessage to ${name}: what to build or fix, the scope, and notify_when_idle`);
 }
 
+// Reads the prompt and the appendix, and refuses on either, before anything is stopped; the launch
+// it returns starts the session in the role's cwd with both.
+function onDemand(ws: Workspace, ag: Agent, prompt: () => string): () => Session {
+  const text = prompt();
+  const appendix = roleAppendix(ws, ag);
+  return () => launch(ws, ag, roleOf(ws, ag).cwd as string, text, appendix);
+}
+
 // A designer reads every repo and writes none, so it has no worktree or stack: one session in the
 // designers' shared cwd per item. Another round on the same item, after the human sent the design
 // back, goes to the live session if it is still the one that drew it, so it keeps its context.
@@ -332,6 +347,8 @@ function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boole
   const human = ws.config.human.name;
   const d = rec?.design;
   const links = d && (d.canvas || d.slides) ? `  the last round: canvas ${d.canvas ?? "-"} slides ${d.slides ?? "-"}` : "";
+  const ready = () => onDemand(ws, ag, () => (promptFile ? readFileSync(promptFile, "utf8") : designerPrompt(ws, ag, ticket)));
+  let go: (() => Session) | undefined;
   const t = transportFor(ws, ag);
   const s = findSession(t, name);
   if (t.alive(s)) {
@@ -345,11 +362,11 @@ function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boole
     }
     if (on?.state === "designing" && !force)
       throw new FactoryError(`${name} is still designing ${on.ticket} (${s.id}). Use another designer, or --force.`);
+    go = ready();
     stopSession(t, s);
     console.log(`${name} stopped (${s.id})${on ? `: ${on.ticket} is ${on.state}, so ${name} is free` : ""}`);
   }
-  const prompt = promptFile ? readFileSync(promptFile, "utf8") : designerPrompt(ws, ag, ticket);
-  const started = launch(ws, ag, roleOf(ws, ag).cwd as string, prompt);
+  const started = (go ?? ready())();
   if (cur === "designing") {
     const r = rec as Rec;
     r.agent = name;
@@ -402,11 +419,7 @@ function cmdReview(ws: Workspace, argv: string[]) {
     names = [want];
   }
   const promptFile = str(v["prompt-file"]);
-  const start = (name: string) => {
-    const ag = agentOrDie(ws, name);
-    const prompt = promptFile ? readFileSync(promptFile, "utf8") : reviewerPrompt(ws);
-    return launch(ws, ag, roleOf(ws, ag).cwd as string, prompt);
-  };
+  const ready = (name: string) => onDemand(ws, agentOrDie(ws, name), () => (promptFile ? readFileSync(promptFile, "utf8") : reviewerPrompt(ws)));
   const busy: string[] = [];
   for (const name of names) {
     const t = via(ws, name);
@@ -415,14 +428,15 @@ function cmdReview(ws: Workspace, argv: string[]) {
       busy.push(`${name} (${s.id})`);
       continue;
     }
-    console.log(`${name} started (${start(name).id})`);
+    console.log(`${name} started (${ready(name)().id})`);
     return;
   }
   if (v.force && busy.length) {
     const name = names[0] as string;
+    const go = ready(name);
     const t = via(ws, name);
     stopSession(t, findSession(t, name));
-    console.log(`${name} restarted (${start(name).id})`);
+    console.log(`${name} restarted (${go().id})`);
     return;
   }
   throw new FactoryError(`every reviewer is busy: ${busy.join(", ")}. Stop one, or pass --force to restart the first.`);
@@ -443,11 +457,7 @@ function cmdAssistant(ws: Workspace, argv: string[]) {
     names = [want];
   }
   const promptFile = str(v["prompt-file"]);
-  const start = (name: string) => {
-    const ag = agentOrDie(ws, name);
-    const prompt = promptFile ? readFileSync(promptFile, "utf8") : assistantPrompt(ws);
-    return launch(ws, ag, roleOf(ws, ag).cwd as string, prompt);
-  };
+  const ready = (name: string) => onDemand(ws, agentOrDie(ws, name), () => (promptFile ? readFileSync(promptFile, "utf8") : assistantPrompt(ws)));
   const busy: string[] = [];
   for (const name of names) {
     const t = via(ws, name);
@@ -456,14 +466,15 @@ function cmdAssistant(ws: Workspace, argv: string[]) {
       busy.push(`${name} (${s.id})`);
       continue;
     }
-    console.log(`${name} started (${start(name).id})`);
+    console.log(`${name} started (${ready(name)().id})`);
     return;
   }
   if (v.force && busy.length) {
     const name = names[0] as string;
+    const go = ready(name);
     const t = via(ws, name);
     stopSession(t, findSession(t, name));
-    console.log(`${name} restarted (${start(name).id})`);
+    console.log(`${name} restarted (${go().id})`);
     return;
   }
   // A named assistant already running is not an error: the lead just messages the live session.
