@@ -2,9 +2,9 @@
 // transport; the local one runs claude on this machine, and an agent with a host goes through that
 // host's daemon (remote.ts).
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Agent, Repo } from "./config.js";
 import type { Session } from "./fleet.js";
@@ -23,6 +23,8 @@ export interface StartRequest {
   cwd: string;
   prompt: string;
   appendix: string | null;
+  // The workspace's logs/run/, where a local start writes the appendix file.
+  runDir: string;
   phase: Phase;
   args: (appendixPath: string | null) => string[];
   env: NodeJS.ProcessEnv;
@@ -125,8 +127,7 @@ export const local: Transport = {
   start(req) {
     let path: string | null = null;
     if (req.appendix) {
-      path = join(tmpdir(), `sf-${req.agent.name}-${randomBytes(4).toString("hex")}.md`);
-      writeFileSync(path, req.appendix, { flag: "wx" });
+      path = appendixFile(req.runDir, req.agent.name, req.appendix);
     }
     const argv = req.args(path);
     const r = scopeCheck(argv, run(...claudeScoped(argv), { cwd: req.cwd, env: claudeEnv(req.env) }, `claude ${argv[0]}`));
@@ -163,6 +164,22 @@ export const local: Transport = {
     return { top: top.stdout.trim(), origin: git(repo.path, "remote", "get-url", "origin").stdout.trim() };
   },
 };
+
+// A session's appendix file. `claude respawn` reruns the session's old command line, and claude
+// refuses a --append-system-prompt-file that is gone, so the file lives in the workspace's
+// logs/run/, which a reboot keeps as it does not keep /tmp. It is named by its content: a respawn
+// reads the brief its session started with even after the brief changed, and a brief launched again
+// unchanged reuses its file. Written beside it and renamed, so a reader never sees half of one.
+export function appendixFile(runDir: string, name: string, text: string): string {
+  mkdirSync(runDir, { recursive: true });
+  const path = join(runDir, `appendix-${name}-${createHash("sha256").update(text).digest("hex").slice(0, 16)}.md`);
+  if (!existsSync(path) || readFileSync(path, "utf8") !== text) {
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, text);
+    renameSync(tmp, path);
+  }
+  return path;
+}
 
 // One remote transport per host and workspace, so the agents on a host share it.
 const remotes = new WeakMap<Workspace, Map<string, Transport>>();

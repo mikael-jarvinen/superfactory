@@ -115,7 +115,7 @@ export const gitEnv = (over: GitOver = "https"): Record<string, string> => (over
 
 export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string, appendix: string | null = null, phase: Phase = undefined, t: Transport = transportFor(ws, agent)): Session {
   const sid = t.start({
-    agent, cwd, prompt, appendix, phase,
+    agent, cwd, prompt, appendix, phase, runDir: ws.runDir,
     args: (appendixPath) => launchArgs(ws, agent, prompt, appendixPath, phase),
     env: { ...process.env, ...GIT_HTTPS_ENV },
   });

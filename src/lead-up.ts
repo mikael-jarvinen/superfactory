@@ -52,7 +52,7 @@ function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId:
   const prompt = resumePrompt(ws);
   const cwd = old.cwd ?? (roleOf(ws, ld).cwd as string);
   try {
-    t.start({ agent: ld, cwd, prompt, appendix, phase: undefined, args: (p) => resumeArgs(ws, ld, sessionId, prompt, p), env: { ...process.env, ...GIT_HTTPS_ENV } });
+    t.start({ agent: ld, cwd, prompt, appendix, runDir: ws.runDir, phase: undefined, args: (p) => resumeArgs(ws, ld, sessionId, prompt, p), env: { ...process.env, ...GIT_HTTPS_ENV } });
   } catch (e) {
     out(`resuming ${sessionId} failed (${(e as Error).message}); respawning instead`);
     return false;
