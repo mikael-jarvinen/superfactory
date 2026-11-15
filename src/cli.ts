@@ -316,6 +316,12 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   console.log(`  next: SendMessage to ${name}: what to build or fix, the scope, and notify_when_idle`);
 }
 
+// A session started for the role's own cwd, not a worktree: a designer, a reviewer or an assistant.
+// Its appendix goes with it, as dispatch's does, or a brief kept there never reaches the session.
+function launchOnDemand(ws: Workspace, ag: Agent, prompt: string) {
+  return launch(ws, ag, roleOf(ws, ag).cwd as string, prompt, buildAppendix(ws, ag, undefined)?.text ?? null);
+}
+
 // A designer reads every repo and writes none, so it has no worktree or stack: one session in the
 // designers' shared cwd per item. Another round on the same item, after the human sent the design
 // back, goes to the live session if it is still the one that drew it, so it keeps its context.
@@ -349,7 +355,7 @@ function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boole
     console.log(`${name} stopped (${s.id})${on ? `: ${on.ticket} is ${on.state}, so ${name} is free` : ""}`);
   }
   const prompt = promptFile ? readFileSync(promptFile, "utf8") : designerPrompt(ws, ag, ticket);
-  const started = launch(ws, ag, roleOf(ws, ag).cwd as string, prompt);
+  const started = launchOnDemand(ws, ag, prompt);
   if (cur === "designing") {
     const r = rec as Rec;
     r.agent = name;
@@ -405,7 +411,7 @@ function cmdReview(ws: Workspace, argv: string[]) {
   const start = (name: string) => {
     const ag = agentOrDie(ws, name);
     const prompt = promptFile ? readFileSync(promptFile, "utf8") : reviewerPrompt(ws);
-    return launch(ws, ag, roleOf(ws, ag).cwd as string, prompt);
+    return launchOnDemand(ws, ag, prompt);
   };
   const busy: string[] = [];
   for (const name of names) {
@@ -446,7 +452,7 @@ function cmdAssistant(ws: Workspace, argv: string[]) {
   const start = (name: string) => {
     const ag = agentOrDie(ws, name);
     const prompt = promptFile ? readFileSync(promptFile, "utf8") : assistantPrompt(ws);
-    return launch(ws, ag, roleOf(ws, ag).cwd as string, prompt);
+    return launchOnDemand(ws, ag, prompt);
   };
   const busy: string[] = [];
   for (const name of names) {

@@ -310,6 +310,43 @@ test("a host agent's cwd is the host's: launching it makes nothing here, and the
   assert.deepEqual(lines, [`NOT CHECKED ${there}/CLAUDE.md, instructions for rae: it is on host far, and the daemon there does not say`]);
 });
 
+// Only dispatch passed the appendix once, so a reviewer, an assistant or a designer started on
+// demand came up without its brief and looked fine. Each is rae here, on a host, so the brief is
+// the start request's body as the daemon gets it.
+test("a reviewer, an assistant and a designer started on demand each get their appendix", async () => {
+  const roles = `
+[roles.assistant]
+cwd = "assistants"
+model = "opus"
+permission_mode = "auto"
+settings = "readonly"
+
+[roles.designer]
+cwd = "designers"
+model = "opus"
+permission_mode = "auto"
+settings = "designer"
+
+[tracker]`;
+  const as = (url: string, role: string) =>
+    withHost(url).replace('cwd = "/far/rae"', 'cwd = "/far/rae"\nappendix = ["briefs/rae.md"]').replace(`name = "rae"
+role = "reviewer"`, `name = "rae"
+role = "${role}"`).replace("[tracker]", roles);
+  for (const [role, argv] of [["reviewer", ["review", "--force"]], ["assistant", ["assistant", "rae", "--force"]], ["designer", ["dispatch", "rae", "TEST-1"]]] as const) {
+    const dir = workspace(as("http://placeholder:1", role));
+    const d = await fakeDaemon(dir, sha(join(dir, "daemon.toml"), join(dir, "workspace.toml")));
+    after(() => d.proc.kill());
+    writeFileSync(join(dir, "factory.toml"), as(d.url, role));
+    mkdirSync(join(dir, "briefs"));
+    writeFileSync(join(dir, "briefs", "rae.md"), "rae's brief\n");
+    if (role === "designer") factory(dir, ["state", "TEST-1", "queued"]);
+    const r = factory(dir, [...argv]);
+    assert.equal(r.status, 0, `${role}: ${r.stderr}`);
+    const start = d.requests().find((q) => q.url === "/agents/rae/start");
+    assert.equal(start?.body?.appendix, "<!-- briefs/rae.md -->\nrae's brief\n", `${role}: the start carries the brief`);
+  }
+});
+
 test("a builder with a host: its repos are there, absolute, in no stack, and no agent here reads them", () => {
   const cfg = (f: (t: string) => string = (t) => t) => problems(f(hostedCal("http://x:1")));
   const ships = "and a builder runs where its worktrees are";
