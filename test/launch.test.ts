@@ -11,6 +11,8 @@ const TOML_WITH_ROB = TOML.replace("[tracker]", `[[agents]]
 name = "rob"
 role = "reviewer"
 cwd = "rob"
+model = "sonnet"
+effort = "low"
 permission_mode = "default"
 autocompact = "400k"
 
@@ -69,7 +71,7 @@ test("the READY prompt names the lead from config and keeps a LOCAL key off GitH
   assert.doesNotMatch(buildingPrompt(ws, agentOrDie(ws, "bea"), "WEB-12"), /leave it out/);
 });
 
-test("an agent's own cwd, permission mode and autocompact override its role's", () => {
+test("an agent's own cwd, model, effort, permission mode and autocompact override its role's", () => {
   const dir = tempWorkspace(TOML_WITH_ROB);
   after(() => rmSync(dir, { recursive: true, force: true }));
   const ws = openWorkspace(dir, {});
@@ -79,7 +81,7 @@ test("an agent's own cwd, permission mode and autocompact override its role's", 
   assert.equal(roleOf(ws, rae).cwd, join(dir, "reviewers"));
   const tail = (args: string[]) => args.slice(args.indexOf("--name"));
   assert.deepEqual(tail(launchArgs(ws, rob, "P", null, undefined)),
-    ["--name", "rob", "--model", "opus", "--effort", "high", "--autocompact", "400k", "--permission-mode", "default", "P"]);
+    ["--name", "rob", "--model", "sonnet", "--effort", "low", "--autocompact", "400k", "--permission-mode", "default", "P"]);
   assert.deepEqual(tail(launchArgs(ws, rae, "P", null, undefined)),
     ["--name", "rae", "--model", "opus", "--effort", "high", "--autocompact", "1M", "--permission-mode", "auto", "P"]);
   const mode = (name: string) => JSON.parse(readFileSync(join(dir, "logs", "run", `settings-${name}.json`), "utf8")).permissions.defaultMode;

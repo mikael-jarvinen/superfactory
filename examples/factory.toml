@@ -89,7 +89,9 @@ add_dirs = ["web", "api"]
 [[agents]]
 name = "rae"
 role = "reviewer"
-# cwd = "reviewers/rae"   # these three override the role's; a builder takes no cwd
+# cwd = "reviewers/rae"   # these five override the role's; a builder takes no cwd
+# model = "sonnet"
+# effort = "low"
 # permission_mode = "auto"
 # autocompact = "400k"
 # host = "studio"                         # its sessions run on that machine (not for a builder)
