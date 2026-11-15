@@ -4,11 +4,17 @@
 // is blocked with why, rather than failing with "not reachable" and nobody knowing it was off.
 //
 // A recipient that is not a fleet agent by name (`to` is "name" or "name [ref]") is left alone, and
-// so is one whose host cannot be asked or a workspace that does not load: the send then succeeds or
-// fails on its own, as it did before this hook.
+// so is one whose host cannot be listed, or a workspace that does not load: the send then succeeds or
+// fails on its own, as it did before this hook. A respawn that fails blocks, its host's failure
+// included, with why: the recipient is known to be off, so the send would fail anyway.
+//
+// A session on a host runs this with --from-host <host>. It can wake only an agent on that same
+// host, through its local claude; it cannot list the primary or another host, so a message to any
+// other agent passes through.
 import { parseArgs } from "node:util";
 import type { HookResult } from "../settings.js";
 import { sleep } from "../util.js";
+import { local } from "../transport.js";
 import { WAKE_SETTLE_S, wake } from "../wake.js";
 import { openWorkspace, resolveWorkspace } from "../workspace.js";
 
@@ -24,10 +30,13 @@ export const recipient = (to: unknown): string | null => {
 };
 
 export function hook(argv: string[], input: string, workspace?: string): HookResult {
-  const v = parseArgs({ args: argv, options: { "wait-seconds": { type: "string" }, "settle-seconds": { type: "string" } }, strict: false }).values;
+  const t0 = Date.now();
+  const v = parseArgs({ args: argv, options: { "wait-seconds": { type: "string" }, "settle-seconds": { type: "string" }, "from-host": { type: "string" }, "timeout-seconds": { type: "string" } }, strict: false }).values;
   const num = (x: unknown, d: number) => (typeof x === "string" && /^\d+$/.test(x) ? Number(x) : d);
   const waitS = num(v["wait-seconds"], 60);
   const settleS = num(v["settle-seconds"], WAKE_SETTLE_S);
+  const timeoutS = num(v["timeout-seconds"], WAKE_HOOK_TIMEOUT_S);
+  const fromHost = typeof v["from-host"] === "string" ? v["from-host"] : undefined;
   let to: string | null = null;
   try {
     const ev = JSON.parse(input) as { tool_input?: { to?: unknown } };
@@ -44,9 +53,14 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   }
   const agent = ws.config.agents.find((a) => a.name === to);
   if (!agent) return { code: 0 };
+  if (fromHost && agent.host !== fromHost) return { code: 0 };
+  // Listed live on its host is not yet addressable from another machine over Remote Control.
+  const settle = !fromHost && agent.host ? settleS : 0;
+  // Everything, the settle included, ends 5 s before the hook would be killed.
+  const deadline = t0 + (timeoutS - 5 - settle) * 1000;
   let w;
   try {
-    w = wake(ws, agent, { waitS });
+    w = wake(ws, agent, { waitS, deadline, ...(fromHost ? { t: local } : {}) });
   } catch (e) {
     return { code: 2, stderr: `${to} is off and did not wake: ${(e as Error).message}\n` };
   }
@@ -55,8 +69,7 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
     case "unknown":
       return { code: 0 };
     case "woke":
-      // Listed live on its host is not yet addressable from here over Remote Control.
-      if (agent.host && settleS > 0) sleep(settleS * 1000);
+      if (settle > 0) sleep(settle * 1000);
       return { code: 0 };
     case "none":
       return { code: 2, stderr: `${to} is off and has no session to wake. Start it the factory way (dispatch, review or assistant), then send.\n` };

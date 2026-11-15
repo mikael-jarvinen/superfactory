@@ -179,8 +179,8 @@ export function remote(h: Host): Transport {
       const r = callSync(h, "POST", agentPath(req.agent.name, "start"), { cwd: req.cwd, prompt: req.prompt, appendix: req.appendix, phase: req.phase ?? null }, 60_000);
       return typeof r.body.id === "string" ? r.body.id : "?";
     },
-    respawn(name, id) {
-      const r = ask(() => callSync(h, "POST", agentPath(name, "respawn"), { id }, 60_000));
+    respawn(name, id, timeoutMs = 60_000) {
+      const r = ask(() => callSync(h, "POST", agentPath(name, "respawn"), { id }, Math.min(60_000, timeoutMs)));
       if (r instanceof Unreachable) return { ok: false, said: "", why: r.message };
       return { ok: r.body.ok === true, said: String(r.body.said ?? ""), why: String(r.body.why ?? r.body.said ?? "") };
     },

@@ -13,9 +13,10 @@
 // in its host's listing as fast, but its Remote Control name took up to 10 s more to be
 // addressable from another machine, hence WAKE_SETTLE_S after a wake on a host.
 import type { Agent } from "./config.js";
-import { findSession, type Session, waitForName } from "./fleet.js";
+import { findSession, type Session } from "./fleet.js";
 import { ask, Unreachable } from "./remote.js";
 import { isAgentSession, newest, type Transport, transportFor } from "./transport.js";
+import { sleep } from "./util.js";
 import type { Workspace } from "./workspace.js";
 
 export const WAKE_SETTLE_S = 15;
@@ -36,22 +37,43 @@ export interface WakeOptions {
   pollMs?: number;
   // Wake only this one: false leaves the newest session off and answers none.
   match?: (s: Session) => boolean;
+  // Epoch ms by which wake must have answered, for a caller with a timeout (the hook). No step
+  // starts that could run past it; running out of time is failed, with why.
+  deadline?: number;
 }
+
+// The longest one listing may take: a remote one is bounded at 20 s plus its child's 5 s.
+const listingMs = (t: Transport) => (t.where === "local" ? 5_000 : 25_000);
 
 export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   const t = o.t ?? transportFor(ws, agent);
+  const budget = listingMs(t);
+  const left = () => (o.deadline ?? Infinity) - Date.now();
+  const late = (step: string): Woken => ({ is: "failed", why: `out of time before ${step}` });
   const live = ask(() => findSession(t, agent.name));
   if (live instanceof Unreachable) return { is: "unknown", why: live.brief };
   if (t.alive(live)) return { is: "live", s: live };
+  if (left() < budget) return late("the stopped sessions were listed");
   const all = ask(() => t.sessions(true));
   if (all instanceof Unreachable) return { is: "unknown", why: all.brief };
   const old = newest(all.filter(isAgentSession(agent.name)));
   if (!old?.id || (o.match && !o.match(old))) return { is: "none" };
-  const r = t.respawn(agent.name, old.id);
+  // the respawn leaves time for at least one listing after it
+  const respawnMs = left() - budget;
+  if (respawnMs < 1000) return late(`respawning ${old.id}`);
+  const r = t.respawn(agent.name, old.id, Number.isFinite(respawnMs) ? respawnMs : undefined);
   if (!r.ok) return { is: "failed", why: `respawn of ${old.id} failed: ${r.why || "no reason given"}` };
-  const s = waitForName(t, agent.name, o.waitS ?? 60, o.pollMs ?? 1000);
-  if (!s) return { is: "failed", why: `respawned ${old.id}, and it was not listed live within ${o.waitS ?? 60} s` };
-  return { is: "woke", s, from: old.id };
+  const waitS = o.waitS ?? 60;
+  const pollMs = o.pollMs ?? 1000;
+  const t0 = Date.now();
+  while (Date.now() - t0 < waitS * 1000) {
+    const s = ask(() => findSession(t, agent.name));
+    if (!(s instanceof Unreachable) && t.alive(s)) return { is: "woke", s, from: old.id };
+    const nap = Math.min(pollMs, left() - budget);
+    if (nap <= 0) return { is: "failed", why: `respawned ${old.id}, and it was not listed live in the time the hook has` };
+    sleep(nap);
+  }
+  return { is: "failed", why: `respawned ${old.id}, and it was not listed live within ${waitS} s` };
 }
 
 // For the routes that keep context: the line to print, or null when nothing was woken.

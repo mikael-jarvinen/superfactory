@@ -20,6 +20,18 @@ role = "assistant"
 
 [tracker]`);
 
+// rae on host far, which nothing answers.
+const HOSTED_TOML = TOML.replace(`name = "rae"
+role = "reviewer"`, `name = "rae"
+role = "reviewer"
+host = "far"
+cwd = "/far/rae"`) + `
+[hosts.far]
+url = "http://127.0.0.1:9"
+token_file = "token"
+hash_files = ["daemon.toml", "workspace.toml"]
+`;
+
 // A claude whose listings come from files: live.json for `agents --json`, all.json for --all. A
 // respawn of an id in respawnable copies after.json over live.json, as the session coming back; a
 // start logs itself. Every call is a line in calls.
@@ -31,7 +43,8 @@ D=${ws}
 echo "$*" >> $D/calls
 case "$1" in
   agents) if [ "$3" = --all ]; then cat $D/all.json 2>/dev/null || echo '[]'; else cat $D/live.json 2>/dev/null || echo '[]'; fi ;;
-  respawn) [ -f $D/respawn-fail ] && { cat $D/respawn-fail >&2; exit 1; }
+  respawn) [ -f $D/respawn-hang ] && sleep 30
+    [ -f $D/respawn-fail ] && { cat $D/respawn-fail >&2; exit 1; }
     [ -f $D/after.json ] && cp $D/after.json $D/live.json; echo "respawned $2" ;;
   --bg) n=; prev=; for a in "$@"; do [ "$prev" = --name ] && n=$a; prev=$a; done
     printf '[{"id":"new1","name":"%s","kind":"background","state":"idle"}]' "$n" > $D/live.json
@@ -39,6 +52,7 @@ case "$1" in
   *) exit 1 ;;
 esac
 `);
+  writeFileSync(join(ws, "token"), "t".repeat(40));
   const put = (f: string, rows: unknown[]) => writeFileSync(join(ws, f), JSON.stringify(rows));
   const calls = () => (existsSync(join(ws, "calls")) ? readFileSync(join(ws, "calls"), "utf8").trim().split("\n") : []);
   return { ws, put, calls };
@@ -167,4 +181,53 @@ test("a named assistant that is off is woken on its conversation; --force starts
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn v1"]);
   assert.ok(calls().some((c) => c.startsWith("--bg")), "--force starts a fresh one");
+});
+
+test("a session on a host wakes only agents on its own host, and lets a message to any other through", () => {
+  const { ws, put, calls } = fakeFleet(HOSTED_TOML);
+  // the lead and bea are on the primary, which a host cannot list: nothing is asked, the send goes
+  for (const to of ["ada", "bea"]) {
+    const r = wakeHook(ws, to, ["--from-host", "far"]);
+    assert.equal(r.status, 0, `${to}: ${r.stderr}`);
+  }
+  assert.deepEqual(calls(), []);
+  // rae is on far too, so far's own claude wakes it, with no settle
+  put("all.json", [sess("r1", "rae")]);
+  put("after.json", [sess("r1", "rae")]);
+  const t0 = Date.now();
+  const r = wakeHook(ws, "rae", ["--from-host", "far"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn r1"]);
+  assert.ok(Date.now() - t0 < 10_000, "no settle for a wake on the sender's own machine");
+});
+
+test("the wake hook answers inside its timeout: a respawn that hangs, or a session that never lists live, blocks in time", () => {
+  const { ws, put } = fakeFleet();
+  put("all.json", [sess("b1", "bea")]);
+  writeFileSync(join(ws, "respawn-hang"), "");
+  let t0 = Date.now();
+  let r = wakeHook(ws, "bea", ["--timeout-seconds", "12"]);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /bea is off and did not wake/);
+  assert.ok(Date.now() - t0 < 12_000, `the hung respawn took ${Date.now() - t0} ms`);
+
+  rmSync(join(ws, "respawn-hang"));
+  t0 = Date.now();
+  r = wakeHook(ws, "bea", ["--timeout-seconds", "12"]);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /respawned b1, and it was not listed live in the time the hook has/);
+  assert.ok(Date.now() - t0 < 12_000, `the wait took ${Date.now() - t0} ms`);
+});
+
+test("a hosted agent's settings tell the wake hook its host", () => {
+  const dir = tempWorkspace(HOSTED_TOML);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "token"), "t".repeat(40));
+  const ws = openWorkspace(dir, {});
+  const wakeCmd = (name: string) => {
+    const s = JSON.parse(readFileSync(settingsFile(ws, agentOrDie(ws, name)), "utf8"));
+    return (s.hooks.PreToolUse as { matcher?: string; hooks: { command: string }[] }[]).find((h) => h.matcher === "SendMessage")!.hooks[0]!.command;
+  };
+  assert.match(wakeCmd("rae"), / hook wake --from-host far$/);
+  assert.match(wakeCmd("bea"), / hook wake$/);
 });

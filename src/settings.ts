@@ -156,6 +156,8 @@ export interface SessionSettings {
   extraHooks?: string[];
   permissionMode?: string;
   env?: Record<string, string>;
+  // The host the session runs on, for an agent with one.
+  host?: string;
 }
 
 // Renders one session's settings into logs/run/settings-<name>.json and returns the path. Every
@@ -204,7 +206,7 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
   const leadName = lead(ws).name;
   // Every role sends messages, and a message to a session that is off is lost, so every role wakes
   // its recipient first.
-  add("PreToolUse", "SendMessage", ["--workspace", ws.dir, "hook", "wake"], WAKE_HOOK_TIMEOUT_S);
+  add("PreToolUse", "SendMessage", ["--workspace", ws.dir, "hook", "wake", ...(s.host ? ["--from-host", s.host] : [])], WAKE_HOOK_TIMEOUT_S);
   for (const h of names) {
     if (h === "wake") continue;
     if (h === "guard") {

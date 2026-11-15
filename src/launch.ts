@@ -40,7 +40,7 @@ export function settingsFile(ws: Workspace, agent: Agent): string {
   const role = roleOf(ws, agent);
   return renderSettings(ws, {
     name: agent.name, role: agent.role, template: role.settings, cwd: role.cwd, extraHooks: role.extraHooks, permissionMode: role.permissionMode,
-    env: sessionEnv(ws, agent),
+    env: sessionEnv(ws, agent), ...(agent.host ? { host: agent.host } : {}),
   });
 }
 

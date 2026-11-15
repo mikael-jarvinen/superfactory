@@ -61,7 +61,8 @@ export interface Transport {
   // The launch id claude printed, or "?".
   start(req: StartRequest): string;
   // said: claude's stdout. why: its stderr (else stdout), read when the session does not come back.
-  respawn(name: string, id: string): { ok: boolean; said: string; why: string };
+  // timeoutMs bounds the call, for a caller that has a deadline.
+  respawn(name: string, id: string, timeoutMs?: number): { ok: boolean; said: string; why: string };
   stop(name: string, id: string, remove: boolean): void;
   // The worktree for the item, made or reused (worktree.ts's ensureWorktree); throws when it cannot.
   worktree(q: WorktreeRequest): { wt: string; how: string };
@@ -99,7 +100,7 @@ export function sessionAlive(s: Session | null | undefined): s is Session {
   return !!s && s.kind === "background" && s.state !== "stopped" && s.state !== "failed" && daemonAlive();
 }
 
-const scoped = (argv: string[]) => scopeCheck(argv, run(...claudeScoped(argv), { env: claudeEnv() }, `claude ${argv[0]}`));
+const scoped = (argv: string[], timeout?: number) => scopeCheck(argv, run(...claudeScoped(argv), { env: claudeEnv(), ...(timeout ? { timeout } : {}) }, `claude ${argv[0]}`));
 export const local: Transport = {
   where: "local",
   sessions(includeDone = false) {
@@ -134,8 +135,8 @@ export const local: Transport = {
     if (r.status !== 0) die(`claude --bg failed: ${r.stderr.trim() || r.stdout.trim()}`);
     return /backgrounded · (\w+) · /.exec(r.stdout)?.[1] ?? "?";
   },
-  respawn(_name, id) {
-    const r = scoped(["respawn", id]);
+  respawn(_name, id, timeoutMs) {
+    const r = scoped(["respawn", id], timeoutMs);
     return { ok: r.status === 0, said: r.stdout.trim(), why: r.stderr.trim() || r.stdout.trim() };
   },
   stop(_name, id, remove) {
