@@ -145,8 +145,10 @@ test("what a run's claude calls left in their scopes is cleaned up, but a superv
   };
   try {
     const t0 = Date.now();
-    // until each has its own session: sh echoed the pid before setsid ran
-    const settledOut = () => existsSync(join(at, "child.pid")) && [supervisor, orphan, other].every((p) => procStat(p)?.pgid === p);
+    // until each has its own session and has exec'd past setsid: sh echoed the pid before either
+    const comm = (p: number) => (existsSync(`/proc/${p}/comm`) ? readFileSync(`/proc/${p}/comm`, "utf8").trim() : "");
+    const settledOut = () => existsSync(join(at, "child.pid")) && [supervisor, orphan, other].every((p) => procStat(p)?.pgid === p) &&
+      comm(supervisor) === "claude" && comm(orphan) === "sleep" && comm(other) === "sleep";
     while (!settledOut() && Date.now() - t0 < 5000) await settle(20);
     const child = pid("child.pid");
     assert.equal(readFileSync(`/proc/${supervisor}/comm`, "utf8").trim(), "claude");
