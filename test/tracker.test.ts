@@ -241,6 +241,20 @@ test("store: GitHub is asked before the lock, so a slow answer holds up no other
   assert.deepEqual(T.load(ws, "RPE-1").labels, ["task"]);
 });
 
+test("lock: a lock directory an earlier build left at the bare key blocks no ticket or page", async () => {
+  const ws = openWorkspace(tempWorkspace(LOCAL()));
+  T.create(ws, { project: "RPE", title: "t" }, ADA);
+  // the earlier build's lock was mkdir(.locks/<key>), and a crash left it there
+  mkdirSync(join(T.projectDir(ws, "RPE"), ".locks", "RPE-1"), { recursive: true });
+  mkdirSync(join(W.wikiDir(ws, "RPE"), ".locks", "notes"), { recursive: true });
+  await T.move(ws, "RPE-1", "In Review", ALEX);
+  T.label(ws, "RPE-1", "add", "task", "ada");
+  assert.equal(T.load(ws, "RPE-1").state, "In Review");
+  assert.deepEqual(T.load(ws, "RPE-1").labels, ["task"]);
+  W.save(ws, { project: "RPE", path: "notes", title: "Notes", body: "b", by: "ada", base: null });
+  assert.equal(W.read(ws, "RPE", "notes").body.trim(), "b");
+});
+
 test("store: a torn line costs one event, the next lands on a line of its own", () => {
   const ws = openWorkspace(tempWorkspace(LOCAL()));
   T.create(ws, { project: "RPE", title: "t" }, ADA);

@@ -519,15 +519,19 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
   });
   every(REVIEW_EVERY, readReviews);
 
+  // The tracker's answer, its 404 when the path is not one, or a 500 that says what threw.
+  const replyTracker = (res: ServerResponse, p: ReturnType<typeof trackerApi>) =>
+    p.then(
+      (r) => (r ? json(res, r.code, r.body) : send(res, 404, "not found", "text/plain; charset=utf-8")),
+      (e: unknown) => json(res, 500, { ok: false, error: String((e as Error)?.message ?? e) }),
+    );
+
   const handle = (req: IncomingMessage, res: ServerResponse) => {
     const path = (req.url ?? "/").split("?")[0] as string;
     if (req.method === "POST" && trackerEnabled(ws) && isTrackerApi(path)) {
       if (!sameSite(req)) return json(res, 403, { ok: false, error: "refused: not from the board" });
       readJson(req, res, (body) => {
-        trackerApi(ws, "POST", req.url ?? "/", body).then(
-          (r) => (r ? json(res, r.code, r.body) : send(res, 404, "not found", "text/plain; charset=utf-8")),
-          (e: unknown) => json(res, 500, { ok: false, error: String((e as Error)?.message ?? e) }),
-        );
+        replyTracker(res, trackerApi(ws, "POST", req.url ?? "/", body));
       });
       return;
     }
@@ -572,10 +576,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
     }
     if (path === "/api/messages") return json(res, 200, messagesView(ws, sessions, receipts));
     if (isTrackerApi(path)) {
-      trackerApi(ws, "GET", req.url ?? "/").then(
-        (r) => (r ? json(res, r.code, r.body) : send(res, 404, "not found", "text/plain; charset=utf-8")),
-        (e: unknown) => json(res, 500, { ok: false, error: String((e as Error)?.message ?? e) }),
-      );
+      replyTracker(res, trackerApi(ws, "GET", req.url ?? "/"));
       return;
     }
     if (path.startsWith("/attachments/")) {

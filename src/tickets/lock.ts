@@ -16,8 +16,19 @@ const O_EXLOCK = 0x20;
 const HELD = 75;
 const WAIT_MS = 10_000;
 
+// Anything but a regular file at the lock's path is the workspace's to sort out, said as such.
+function openLock(path: string, flags: number): number {
+  try {
+    return openSync(path, flags, 0o644);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "EAGAIN" || code === "EWOULDBLOCK") throw e;
+    throw new FactoryError(`the lock ${path} cannot be opened (${code ?? (e as Error).message}); nothing was written`);
+  }
+}
+
 function tryFlock(path: string): number | null {
-  const fd = openSync(path, constants.O_RDWR | constants.O_CREAT, 0o644);
+  const fd = openLock(path, constants.O_RDWR | constants.O_CREAT);
   // -E sets "held by someone else" apart from flock's own failures; -n never waits, so the
   // timeout only catches a flock(1) that hangs
   const r = run(process.env.FLOCK_BIN || "flock", ["-n", "-x", "-E", String(HELD), "3"], { stdio: ["ignore", "ignore", "pipe", fd], timeout: 2000 });
@@ -34,7 +45,7 @@ export function tryLock(path: string): number | null {
   if (process.platform === "linux") return tryFlock(path);
   if (process.platform !== "darwin") throw new FactoryError("the file lock is built for macOS and Linux only");
   try {
-    return openSync(path, constants.O_RDWR | constants.O_CREAT | constants.O_NONBLOCK | O_EXLOCK, 0o644);
+    return openLock(path, constants.O_RDWR | constants.O_CREAT | constants.O_NONBLOCK | O_EXLOCK);
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code === "EAGAIN" || code === "EWOULDBLOCK") return null;

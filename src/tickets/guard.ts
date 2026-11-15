@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { ghBin } from "../gate/github.js";
 import { HUMAN_KIND } from "../messages.js";
 import type { Workspace } from "../workspace.js";
-import { FactoryError } from "../util.js";
+import { FactoryError, MAX_OUTPUT } from "../util.js";
 import type { Ticket, TicketState } from "./store.js";
 
 // `importer` is a migration script's actor, which may give a ticket its old number and state. The
@@ -57,7 +57,7 @@ export function checkAsked(ws: Workspace, quote: string | undefined, what: strin
 
 function gh(args: string[]): Promise<{ ok: true; stdout: string } | { ok: false; why: string }> {
   return new Promise((resolve) => {
-    execFile(ghBin(), args, { timeout: GH_TIMEOUT_MS, maxBuffer: 4 << 20 }, (err, stdout, stderr) => {
+    execFile(ghBin(), args, { timeout: GH_TIMEOUT_MS, maxBuffer: MAX_OUTPUT }, (err, stdout, stderr) => {
       if (!err) return resolve({ ok: true, stdout: String(stdout) });
       const why = String(stderr || stdout).trim().split("\n")[0] || ((err as { killed?: boolean }).killed ? `no answer in ${GH_TIMEOUT_MS / 1000}s` : err.message);
       resolve({ ok: false, why });

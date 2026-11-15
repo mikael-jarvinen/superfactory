@@ -83,7 +83,9 @@ const floorFile = (ws: Workspace, project: string) => join(projectDir(ws, projec
 const PK = PROJECT_KEY_RE.source.slice(1, -1);
 const KEY_RE = new RegExp(`^(${PK})-([1-9][0-9]{0,6})$`);
 const FILE_RE = new RegExp(`^(${PK})-([1-9][0-9]*)\\.jsonl$`);
-const lockOf = (ws: Workspace, key: string) => join(projectDir(ws, parseKey(key).project), ".locks", key);
+// `.lock` files: an earlier build of the tracker took its locks as directories at the bare key, and
+// a crash left one behind; a new name never meets it.
+const lockOf = (ws: Workspace, key: string) => join(projectDir(ws, parseKey(key).project), ".locks", `${key}.lock`);
 
 export function parseKey(key: string): { project: string; number: number } {
   const m = KEY_RE.exec(key);

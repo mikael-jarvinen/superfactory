@@ -126,8 +126,9 @@ done = "Done"
 # key = "RPE"                             # the prefix: RPE-12
 # name = "RPE Training App"
 # labels = ["task", "story"]              # the only labels it takes; any lower-case label without it
-# repo = "app"                            # a [repos] key or owner/repo; `--merged '#N'` asks GitHub
-#                                         # whether that PR merged before a ticket leaves In Review
+# repo = "app"                            # a [repos] key or owner/repo; an agent's move into Done,
+#                                         # from any state, names its PR (`--merged '#N'`), and GitHub
+#                                         # must say it merged and that it names the ticket
 
 [board]
 host = "localhost"

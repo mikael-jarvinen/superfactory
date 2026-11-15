@@ -73,7 +73,6 @@ export const pageText = (ws: Workspace, row: Message): string =>
 // from the cursor, so a message is printed once.
 //
 // The lock is src/tickets/lock.ts's tryLock: a flock that goes when its descriptor closes.
-export { tryLock };
 
 // For the lead's Stop hook: is a monitor listening? Taking the lock is the only way to ask, so a
 // free lock is taken and dropped at once. Anything that stops the question being asked counts as
