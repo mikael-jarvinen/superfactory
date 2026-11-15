@@ -16,8 +16,10 @@ import type { Workspace } from "./workspace.js";
 
 export const resumePrompt = (ws: Workspace) => `You were restarted by \`factory up\`. ${armText(ws)}`;
 
-export const resumeArgs = (ws: Workspace, agent: Agent, sessionId: string, prompt: string): string[] =>
-  ["--bg", ...commonFlags(ws, agent, undefined), "--resume", sessionId, prompt];
+// A resumed session gets its messages back, not the system prompt it started with, so the appendix
+// goes on the command line again.
+export const resumeArgs = (ws: Workspace, agent: Agent, sessionId: string, prompt: string, appendixPath: string | null): string[] =>
+  ["--bg", ...commonFlags(ws, agent, undefined), ...(appendixPath ? ["--append-system-prompt-file", appendixPath] : []), "--resume", sessionId, prompt];
 
 export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boolean, out: (line: string) => void = console.log, waitS = 60): void {
   const s = findSession(t, ld.name);
@@ -25,10 +27,12 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
     out(`${ld.name} already running (${s.id})`);
     return;
   }
+  // Read before anything starts: a missing brief refuses here, not after a resume and a respawn.
+  const appendix = roleAppendix(ws, ld);
   const old = fresh ? null : findSession(t, ld.name, true);
   if (old) {
     const sid = old.id as string;
-    if (!ld.host && typeof old.sessionId === "string" && resume(ws, ld, t, old, old.sessionId, waitS, out)) return;
+    if (!ld.host && typeof old.sessionId === "string" && resume(ws, ld, t, old, old.sessionId, waitS, out, appendix)) return;
     const r = t.respawn(ld.name, sid);
     if (r.ok && waitForName(t, ld.name, waitS)) {
       out(`${ld.name} respawned from ${sid}: ${r.said}`);
@@ -37,15 +41,15 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
     out(`respawn of ${sid} did not come back (${r.why}); starting fresh`);
   }
   const cwd = roleOf(ws, ld).cwd as string;
-  const started = launch(ws, ld, cwd, leadPrompt(ws), roleAppendix(ws, ld), undefined, t);
+  const started = launch(ws, ld, cwd, leadPrompt(ws), appendix, undefined, t);
   out(`${ld.name} started (${started.id}) in ${cwd}${ld.remoteControl ? " with Remote Control" : ""}`);
 }
 
-function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId: string, waitS: number, out: (line: string) => void): boolean {
+function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId: string, waitS: number, out: (line: string) => void, appendix: string | null): boolean {
   const prompt = resumePrompt(ws);
   const cwd = old.cwd ?? (roleOf(ws, ld).cwd as string);
   try {
-    t.start({ agent: ld, cwd, prompt, appendix: null, phase: undefined, args: () => resumeArgs(ws, ld, sessionId, prompt), env: { ...process.env, ...GIT_HTTPS_ENV } });
+    t.start({ agent: ld, cwd, prompt, appendix, phase: undefined, args: (p) => resumeArgs(ws, ld, sessionId, prompt, p), env: { ...process.env, ...GIT_HTTPS_ENV } });
   } catch (e) {
     out(`resuming ${sessionId} failed (${(e as Error).message}); respawning instead`);
     return false;

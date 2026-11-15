@@ -403,6 +403,14 @@ test("a builder with a host: dispatch makes its worktree there and stop looks th
   assert.equal((started?.[1] as { cwd: string }).cwd, wt);
   assert.equal(loadRec(openWorkspace(dir), "TEST-1")?.worktree, wt);
 
+  // cal is live on TEST-1; with its brief gone, --force on another item refuses before stopping it
+  rmSync(join(dir, "briefs", "app.md"));
+  r = factory(dir, ["dispatch", "cal", "TEST-2", "--force"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /appendix file .*app\.md is missing or empty/);
+  assert.equal(posts().length, 3, "no stop, no worktree, no start");
+  writeFileSync(join(dir, "briefs", "app.md"), "the brief\n");
+
   // the host could not read its worktree's status: stop refuses, without calling it uncommitted
   r = factory(dir, ["stop", "cal"]);
   assert.notEqual(r.status, 0);

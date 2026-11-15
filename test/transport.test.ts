@@ -76,7 +76,7 @@ if [ "$1" = agents ]; then
   exit 0
 fi
 prev=
-for a in "$@"; do [ "$prev" = --append-system-prompt-file ] && cat "$a" > "${dir}/appendix"; prev=$a; done
+for a in "$@"; do [ "$prev" = --append-system-prompt-file ] && cat "$a" > "${dir}/appendix" && rm "$a"; prev=$a; done
 touch "${dir}/started"
 echo "backgrounded · abc123 · rae"
 `);

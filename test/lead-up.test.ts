@@ -29,7 +29,7 @@ function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boo
     alive: (s): s is Session => !!s && s.alive === true,
     start(req: StartRequest) {
       if (opts.startFails) throw new Error("claude --bg failed: no such session");
-      started.push({ cwd: req.cwd, prompt: req.prompt, args: req.args(null), appendix: req.appendix });
+      started.push({ cwd: req.cwd, prompt: req.prompt, args: req.args(req.appendix ? "/run/appendix.md" : null), appendix: req.appendix });
       sessions.push({ id: "new1", name: ld.name, kind: "background", alive: true });
       return "new1";
     },
@@ -116,13 +116,32 @@ test("a running lead is left alone, and --fresh starts a new one with the lead p
   assert.ok(!f.started[0]!.args.includes("--resume"));
 });
 
-test("a lead started fresh gets its appendix", () => {
+// ada with a brief: in a workspace of her own, so the others keep a lead without one.
+function briefed(brief: string | null) {
   const d = tempWorkspace(TOML.replace('name = "ada"\nrole = "lead"', 'name = "ada"\nrole = "lead"\nappendix = ["briefs/ada.md"]'));
   after(() => rmSync(d, { recursive: true, force: true }));
   mkdirSync(join(d, "briefs"));
-  writeFileSync(join(d, "briefs", "ada.md"), "ada's brief\n");
+  if (brief !== null) writeFileSync(join(d, "briefs", "ada.md"), brief);
   const w = openWorkspace(d, {});
+  return { w, ld: lead(w) };
+}
+const ADA = "<!-- briefs/ada.md -->\nada's brief\n";
+
+test("a lead gets its appendix whether it is resumed or started fresh", () => {
+  const { w, ld: a } = briefed("ada's brief\n");
+  const r = fake([stopped({ name: a.name })]);
+  bringUpLead(w, a, r.t, false, () => {}, 1);
+  assert.equal(r.started[0]!.appendix, ADA);
+  const args = r.started[0]!.args;
+  assert.ok(args.indexOf("--append-system-prompt-file") >= 0 && args.indexOf("--append-system-prompt-file") < args.indexOf("--resume"), args.join(" "));
   const f = fake([]);
-  bringUpLead(w, lead(w), f.t, true, () => {}, 1);
-  assert.equal(f.started[0]!.appendix, "<!-- briefs/ada.md -->\nada's brief\n");
+  bringUpLead(w, a, f.t, true, () => {}, 1);
+  assert.equal(f.started[0]!.appendix, ADA);
+});
+
+test("a lead whose brief is missing is refused before anything is resumed, respawned or started", () => {
+  const { w, ld: a } = briefed(null);
+  const r = fake([stopped({ name: a.name })]);
+  assert.throws(() => bringUpLead(w, a, r.t, false, () => {}, 1), /appendix file .*ada\.md is missing or empty/);
+  assert.deepEqual([r.started, r.respawned, r.removed], [[], [], []]);
 });

@@ -213,3 +213,8 @@ test("a repo: appendix item is a builder's only: no other role has a checkout to
   assert.deepEqual(problems(TOML.replace('name = "rae"\nrole = "reviewer"', 'name = "rae"\nrole = "reviewer"\nappendix = ["repo:AGENTS.md"]')),
     ["agents[3].appendix: repo:AGENTS.md is read from the agent's checkout, and only a builder has one"]);
 });
+
+test("an unknown role with a repo: appendix item gets only the role's problem", () => {
+  const got = problems(TOML.replace('name = "rae"\nrole = "reviewer"', 'name = "rae"\nrole = "reviwer"\nappendix = ["repo:AGENTS.md"]'));
+  assert.deepEqual(got.filter((p) => p.startsWith("agents[3]")).map((p) => p.split(":")[0]), ["agents[3].role"]);
+});

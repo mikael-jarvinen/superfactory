@@ -250,6 +250,11 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (!allowed.includes(repoKey)) throw new FactoryError(`${name} works in [${allowed.map(pyRepr).join(", ")}]; --repo ${repoKey} is another stack`);
   const repo = ws.config.repos[repoKey]!;
   const stack = ag.stack ?? repoKey;
+  // The brief and the prompt file, read before any session is stopped or started: a missing one
+  // refuses with the live session kept.
+  const promptFile = str(v["prompt-file"]);
+  let read: { appendix: ReturnType<typeof buildAppendix>; given: string | null } | undefined;
+  const inputs = () => (read ??= { appendix: buildAppendix(ws, ag, repo.path), given: promptFile ? readFileSync(promptFile, "utf8") : null });
   // A builder keeps its session across the rounds of one work item and is cleared only when it
   // starts a different one. A fix round on the item the live session is already on keeps that
   // session and its context: the brief goes to it by SendMessage, and this only records the state.
@@ -270,11 +275,13 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
     }
     const onState = on ? loadRec(ws, on)?.state : null;
     if (force) {
+      inputs();
       console.log(`${name} is running (${s.id}); --force given, stopping it`);
       stopSession(t, s);
     } else if (onState && IN_REVIEW.has(onState)) {
       const left = builderLeft(ws, ag, t, s.cwd);
       if (left) throw new FactoryError(`${on} is ${onState}, so ${name} is free for ${ticket}, but ${left}`);
+      inputs();
       stopSession(t, s);
       console.log(`${name}'s item ${on} is ${onState}, so ${name} is free: stopped ${s.id}, worktree kept: ${s.cwd}`);
     } else {
@@ -291,13 +298,12 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (!DISPATCHABLE.has(cur) && !force)
     throw new FactoryError(`${ticket} is ${cur}; a dispatch makes no sense there. Use \`factory state\` first, ` +
       `or --force if you mean it (a verification run on a sent PR, say).`);
+  const { appendix, given } = inputs();
   const { wt, how } = t.worktree({ agent: ag, repo, ticket, toolWritten: ws.config.worktree.toolWritten });
-  const appendix = buildAppendix(ws, ag, repo.path);
-  const promptFile = str(v["prompt-file"]);
   // A hosted builder has no stack, so there is no slot to check.
   const noSlot = ag.host ? null : slotless(ws, stack, ticket, wt);
   if (noSlot) console.log(`  warning: ${noSlot}`);
-  const prompt = (promptFile ? readFileSync(promptFile, "utf8") : buildingPrompt(ws, ag, ticket)) + (noSlot ? `\n\n${noSlot}` : "");
+  const prompt = (given ?? buildingPrompt(ws, ag, ticket)) + (noSlot ? `\n\n${noSlot}` : "");
   const started = launch(ws, ag, wt, prompt, appendix?.text ?? null, "build");
   if (rec === null || cur === "queued") {
     transition(ws, ticket, "building", { agent: name, stack, worktree: wt, evidence: `building session ${started.id}` });
