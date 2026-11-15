@@ -164,9 +164,13 @@ test("on Linux a box with no systemd-run says so, and runs no claude bare", { sk
 test("a command whose output passes what run reads failed, and is no command that did not start", () => {
   const sh = run("sh", ["-c", "head -c 2000 /dev/zero"], { maxBuffer: 1000 });
   assert.deepEqual([sh.status, sh.stderr], [1, "sh wrote more than the 1000 bytes of output that are read"]);
-  const r = run("sh", ["-c", "echo flooding >&2; yes x | head -c 9000"], { maxBuffer: 8192 }, "claude -p");
-  assert.equal(r.stderr, "claude -p wrote more than the 8192 bytes of output that are read\nflooding\n", "named for who wrote it, with what it wrote to stderr");
-  assert.ok(r.stdout.length > 0 && r.stdout.length <= 4096 && /^x\n/.test(r.stdout.slice(-2) + "\n"), `a tail of stdout, ${r.stdout.length} bytes`);
+  // Each stream's first and last 4096 characters differ, so only a tail passes.
+  const flood = "echo FIRST >&2; head -c 5000 /dev/zero | tr '\\0' b >&2; echo LAST >&2; echo HEAD; head -c 5000 /dev/zero | tr '\\0' a; yes x | head -c 9000";
+  const r = run("sh", ["-c", flood], { maxBuffer: 8192 }, "claude -p");
+  assert.equal(r.stderr, `claude -p wrote more than the 8192 bytes of output that are read\n${"b".repeat(4091)}LAST\n`, "named for who wrote it, with the tail of its stderr");
+  assert.ok(r.stdout.length > 0 && r.stdout.length <= 4096, `${r.stdout.length} characters of stdout`);
+  // Read in chunks, and the chunk that overflows is not kept, so the tail ends where reading did.
+  assert.match(r.stdout, /^[ax\n]+$/, "the tail of stdout, not its head");
   assert.equal(run("no-such-command-xyz", []).status, 127);
 });
 
@@ -215,9 +219,11 @@ test("on Linux a watcher's claude -p runs in a scope too, and one that gets none
   assert.match(readFileSync(log, "utf8"), new RegExp(`${NO_BUS_259}\\n.*exit=1`), "logged before it dies");
 
   rmSync(join(dir, "scope-fail"));
-  writeFileSync(claude, `#!/bin/sh\ncat > /dev/null\necho flooding >&2\nexec head -c ${64 * 1024 * 1024 + 1} /dev/zero\n`);
+  writeFileSync(claude, `#!/bin/sh\ncat > /dev/null\necho FIRST >&2\nhead -c 5000 /dev/zero | tr '\\0' b >&2\necho LAST >&2\necho HEAD\nexec head -c ${64 * 1024 * 1024 + 1} /dev/zero\n`);
   assert.equal(runClaude(ws, "round", "P", ["Read"], log).status, 1);
-  assert.match(readFileSync(log, "utf8"), new RegExp(`claude -p wrote more than the ${64 * 1024 * 1024} bytes of output that are read\\nflooding\\n.*exit=1`), "an overflow is claude's, logged with what it wrote");
+  const logged = readFileSync(log, "utf8");
+  assert.match(logged, new RegExp(`claude -p wrote more than the ${64 * 1024 * 1024} bytes of output that are read\\nb{4091}LAST\\n.*exit=1`), "an overflow is claude's, logged with the tail of its stderr");
+  assert.ok(!logged.includes("FIRST") && !logged.includes("HEAD"), "tails, not heads");
 });
 
 test("a scheduler job's calls get scopes named after its run, and claude never sees the job", () => {
