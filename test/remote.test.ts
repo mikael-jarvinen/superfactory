@@ -13,7 +13,7 @@ import { checkouts, hostChecks, line, workspaceFiles } from "../src/doctor.js";
 import { launch, roleOf, settingsFile } from "../src/launch.js";
 import { builderLeft, fleetLines, type Session, stopWorktree, waitForName, worktreeOf } from "../src/fleet.js";
 import { serveCheckout, serveWorktree, Unreachable } from "../src/remote.js";
-import { loadRec } from "../src/state.js";
+import { loadRec, saveRec } from "../src/state.js";
 import { local, type Transport, transportFor } from "../src/transport.js";
 import { openWorkspace } from "../src/workspace.js";
 import { FactoryError } from "../src/util.js";
@@ -58,12 +58,12 @@ const TOKEN = "t".repeat(40);
 const FAKE = `
 import { createServer } from "node:http";
 import { appendFileSync } from "node:fs";
-const { TOKEN, HASH, LOG } = process.env;
+const { TOKEN, HASH, LOG, CLEAN } = process.env;
 const sessions = [
   { id: "r1", name: "rae", kind: "background", state: "idle", status: "idle", alive: true },
   { id: "r0", name: "rae", kind: "background", state: "idle", alive: false }, // a stale record: its supervisor is gone,
 ];
-let lefts = 0; // the first look at cal's worktree finds an uncommitted file, later ones nothing
+let lefts = CLEAN ? 2 : 0; // the first look at cal's worktree cannot read it, the second finds an uncommitted file, later ones nothing
 createServer((req, res) => {
   let body = "";
   req.on("data", (b) => (body += b));
@@ -99,10 +99,10 @@ createServer((req, res) => {
 }).listen(0, "127.0.0.1", function () { console.log(this.address().port); });
 `;
 
-async function fakeDaemon(dir: string, hash: string): Promise<{ url: string; proc: ChildProcess; requests: () => { method: string; url: string; body: Record<string, unknown> | null }[] }> {
+async function fakeDaemon(dir: string, hash: string, clean = false): Promise<{ url: string; proc: ChildProcess; requests: () => { method: string; url: string; body: Record<string, unknown> | null }[] }> {
   const log = join(dir, "requests.jsonl");
   writeFileSync(log, "");
-  const proc = spawn(process.execPath, ["--input-type=module", "-e", FAKE], { env: { ...process.env, TOKEN, HASH: hash, LOG: log }, stdio: ["ignore", "pipe", "inherit"] });
+  const proc = spawn(process.execPath, ["--input-type=module", "-e", FAKE], { env: { ...process.env, TOKEN, HASH: hash, LOG: log, ...(clean ? { CLEAN: "1" } : {}) }, stdio: ["ignore", "pipe", "inherit"] });
   const port = await new Promise<string>((res, rej) => {
     proc.stdout?.once("data", (b) => res(String(b).trim()));
     proc.once("exit", (c) => rej(new Error(`fake daemon exited ${c}`)));
@@ -446,6 +446,45 @@ test("a builder with a host: dispatch makes its worktree there and stop looks th
   assert.throws(() => t.worktreeLeft(q7), refused, "left");
   assert.throws(() => t.removeWorktree(q7), refused, "remove");
   assert.throws(() => t.checkout({ ...ws.config.repos.api!, key: "gone" }), (e: unknown) => e instanceof Unreachable && /HTTP 422 not a refusal/.test(e.message));
+});
+
+// cal is live on TEST-1. A new item stops it only once the brief and the prompt file are read: with
+// either missing, the dispatch refuses and the session is left running, whether TEST-1 is in review
+// or --force is given.
+test("a builder's dispatch that would stop its live session refuses first on a missing brief or prompt file", async () => {
+  const dir = workspace(hostedCal("http://placeholder:1"));
+  const d = await fakeDaemon(dir, sha(join(dir, "daemon.toml"), join(dir, "workspace.toml")), true);
+  after(() => d.proc.kill());
+  writeFileSync(join(dir, "factory.toml"), hostedCal(d.url));
+  mkdirSync(join(dir, "briefs"));
+  writeFileSync(join(dir, "briefs", "app.md"), "the brief\n");
+  const posts = () => d.requests().filter((q) => q.method === "POST").map((q) => q.url);
+  assert.equal(factory(dir, ["dispatch", "cal", "TEST-1"]).status, 0);
+  const ws = openWorkspace(dir);
+  saveRec(ws, { ...loadRec(ws, "TEST-1")!, state: "your-review" });
+  const n = posts().length;
+  const noStop = (what: string) => assert.ok(!posts().slice(n).includes("/agents/cal/stop"), `${what}: no stop`);
+
+  rmSync(join(dir, "briefs", "app.md"));
+  let r = factory(dir, ["dispatch", "cal", "TEST-2"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /appendix file .*app\.md is missing or empty/);
+  noStop("in review, no brief");
+  writeFileSync(join(dir, "briefs", "app.md"), "the brief\n");
+
+  const gone = join(dir, "no-such-prompt.md");
+  for (const extra of [[], ["--force"]]) {
+    r = factory(dir, ["dispatch", "cal", "TEST-2", "--prompt-file", gone, ...extra]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /no-such-prompt\.md/);
+    noStop(`no prompt file ${extra.join(" ")}`);
+  }
+  assert.deepEqual(posts().slice(n).filter((u) => u !== "/agents/cal/worktree/left"), [], "nothing but the left check");
+
+  // with both there, the in-review dispatch does stop it and starts TEST-2
+  r = factory(dir, ["dispatch", "cal", "TEST-2"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(posts().slice(n).includes("/agents/cal/stop"));
 });
 
 test("a builder with a host, on the daemon's side: only its own builders, repos and item keys", () => {
