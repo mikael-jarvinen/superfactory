@@ -34,6 +34,7 @@ import { schedule } from "./scheduler/index.js";
 import { render } from "./scheduler/launchd.js";
 import { runScheduler } from "./scheduler/run.js";
 import { cmdStack, STACK_USAGE } from "./stacks/command.js";
+import { cmdTicket, cmdWiki, TICKET_USAGE } from "./tickets/cli.js";
 import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/engine.js";
 import {
   allRecs, appendEvent, BUSY, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removeRec, saveRec, showRec, transition, validKey,
@@ -147,6 +148,7 @@ usage: factory [--workspace <dir>] <command> [options]
                                   a Claude Code hook, reading the event on stdin. The rendered
                                   settings in logs/run/ call these; nothing else needs to.
 ${STACK_USAGE}
+${TICKET_USAGE}
 
 The workspace is --workspace, else $FACTORY_WORKSPACE, else the nearest factory.toml above the
 current directory. Only this program writes the state store.
@@ -763,7 +765,7 @@ function cmdDoctor(ws: Workspace, argv: string[]) {
   });
 }
 
-const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void> = {
+const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void | Promise<number>> = {
   "up": cmdUp,
   "down": cmdDown,
   "restart-lead": cmdRestartLead,
@@ -790,6 +792,8 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void>
   "pr-media": cmdPrMedia,
   "demo": cmdDemo,
   "stack": cmdStack,
+  "ticket": cmdTicket,
+  "wiki": cmdWiki,
   "watch": cmdWatch,
   "schedule": cmdSchedule,
   "doctor": cmdDoctor,
@@ -821,7 +825,7 @@ function cmdHook(argv: string[], workspace: string | undefined): number {
   return r.code;
 }
 
-export function main(argv: string[]): number {
+export function main(argv: string[]): number | Promise<number> {
   let workspace: string | undefined;
   let i = 0;
   for (; i < argv.length; i++) {
@@ -861,10 +865,19 @@ process.stdout.on("error", (e: NodeJS.ErrnoException) => {
   process.exit(0);
 });
 
-try {
-  process.exitCode = main(process.argv.slice(2));
-} catch (e) {
+const failed = (e: unknown): number => {
   if (!(e instanceof FactoryError)) throw e;
   console.error(`factory: ${e.message}`);
-  process.exitCode = e.code;
+  return e.code;
+};
+try {
+  const r = main(process.argv.slice(2));
+  if (typeof r === "number") process.exitCode = r;
+  else
+    r.then((code) => (process.exitCode = code), (e: unknown) => (process.exitCode = failed(e))).catch((e: unknown) => {
+      console.error(e);
+      process.exitCode = 1;
+    });
+} catch (e) {
+  process.exitCode = failed(e);
 }

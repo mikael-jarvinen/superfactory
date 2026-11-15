@@ -169,6 +169,7 @@ function work(d){
 
 function render(d){
   human = d.human; avatars = d.avatars || {};
+  trackerNav(d.tracker);
   const plumbing = d.plumbing.map(h => {
     const stale = h.age_s == null || h.age_s > 7800;
     const when = h.age_s == null ? 'never' : Math.floor(h.age_s / 60) + 'm ago';
