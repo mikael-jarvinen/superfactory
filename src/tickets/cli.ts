@@ -10,8 +10,8 @@ import * as W from "../wiki/store.js";
 
 export const TICKET_USAGE = `  ticket ...                      the local tracker, when [tracker] kind = "local"; else refused.
                                   <ref> is PROJ-12, or 12 with one project.
-    list [--project P] [--state S]... [--label L] [--all]
-                                  open tickets (all states with --all), one line each
+    list [--project P] [--state S]... [--label L] [--all] [--json]
+                                  open tickets (all states with --all), one line each, or as JSON
     show <ref> [--json]           the whole ticket: description, labels, relations, links, comments
     comments <ref>                its comments only
     create --project P --title T [--body B | --body-file F] [--label L]... [--as A]
@@ -82,12 +82,16 @@ export function cmdTicket(ws: Workspace, argv: string[]): number | Promise<numbe
   const [sub, ...rest] = argv;
   switch (sub) {
     case "list": {
-      const { v } = parse("ticket list", rest, { project: { type: "string" }, state: { type: "string", multiple: true }, label: { type: "string" }, all: { type: "boolean" } }, 0, 0);
+      const { v } = parse("ticket list", rest, { project: { type: "string" }, state: { type: "string", multiple: true }, label: { type: "string" }, all: { type: "boolean" }, json: { type: "boolean" } }, 0, 0);
       const states = ((v.state as string[] | undefined) ?? []).map(T.checkState);
       let tks = T.list(ws, s(v.project));
       if (states.length) tks = tks.filter((t) => states.includes(t.state));
       else if (!v.all) tks = tks.filter((t) => t.state !== "Done" && t.state !== "Cancelled");
       if (s(v.label)) tks = tks.filter((t) => t.labels.includes(s(v.label) as string));
+      if (v.json) {
+        console.log(JSON.stringify(tks, null, 2));
+        return 0;
+      }
       if (!tks.length) console.log("  (none)");
       for (const t of tks)
         console.log(`  ${t.key.padEnd(9)} ${t.state.padEnd(11)} ${ago(t.updated).padStart(4)}  [${t.labels.join(",") || "-"}] ${t.title.slice(0, 70)}`);

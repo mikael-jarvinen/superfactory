@@ -404,6 +404,9 @@ test("the CLI: create, list by project, move with its guards, describe appends, 
   assert.match(ok(["ticket", "list", "--project", "RPE"]), /RPE-1 +Backlog/);
   assert.doesNotMatch(ok(["ticket", "list", "--project", "RPE"]), /WEB-1/);
   assert.match(ok(["ticket", "list"]), /WEB-1/);
+  const listed = JSON.parse(ok(["ticket", "list", "--project", "RPE", "--json"])) as T.Ticket[];
+  assert.deepEqual(listed.map((t) => [t.key, t.state, t.title, t.labels]), [["RPE-1", "Backlog", "Plan view", ["task"]]]);
+  assert.ok(!Number.isNaN(Date.parse(listed[0]!.updated)), "with the exact updated time");
   no(["ticket", "move", "RPE-1", "Todo"], /REFUSED/);
   postMessage(openWorkspace(dir), "go ahead with the plan view please");
   no(["ticket", "move", "RPE-1", "Todo", "--asked", "the plan view"], /at least 20/);
@@ -416,6 +419,8 @@ test("the CLI: create, list by project, move with its guards, describe appends, 
   assert.match(log, /"asked":"go ahead with the plan view"/);
   assert.match(log, /"merged":"#95"/);
   ok(["ticket", "describe", "RPE-1", "second words"]);
+  no(["ticket", "describe", "RPE-1", "- a list item"], /Unknown option|unexpected|unknown/i);
+  ok(["ticket", "describe", "RPE-1", "--", "- a list item"]);
   ok(["ticket", "comment", "RPE-1", "a note", "--as", "cal"]);
   const shown = ok(["ticket", "show", "RPE-1"]);
   assert.match(shown, /first words\n\nsecond words/);
