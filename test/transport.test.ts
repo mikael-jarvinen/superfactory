@@ -165,12 +165,13 @@ test("a command whose output passes what run reads failed, and is no command tha
   const sh = run("sh", ["-c", "head -c 2000 /dev/zero"], { maxBuffer: 1000 });
   assert.deepEqual([sh.status, sh.stderr], [1, "sh wrote more than the 1000 bytes of output that are read"]);
   // Each stream's first and last 4096 characters differ, so only a tail passes.
-  const flood = "echo FIRST >&2; head -c 5000 /dev/zero | tr '\\0' b >&2; echo LAST >&2; echo HEAD; head -c 5000 /dev/zero | tr '\\0' a; yes x | head -c 9000";
-  const r = run("sh", ["-c", flood], { maxBuffer: 8192 }, "claude -p");
-  assert.equal(r.stderr, `claude -p wrote more than the 8192 bytes of output that are read\n${"b".repeat(4091)}LAST\n`, "named for who wrote it, with the tail of its stderr");
+  const flood = "echo FIRST >&2; head -c 5000 /dev/zero | tr '\\0' b >&2; echo LAST >&2; echo HEAD; head -c 5000 /dev/zero | tr '\\0' a; yes x | head -c 20000";
+  const r = run("sh", ["-c", flood], { maxBuffer: 16384 }, "claude -p");
+  assert.equal(r.stderr, `claude -p wrote more than the 16384 bytes of output that are read\n${"b".repeat(4091)}LAST\n`, "named for who wrote it, with the tail of its stderr");
   assert.ok(r.stdout.length > 0 && r.stdout.length <= 4096, `${r.stdout.length} characters of stdout`);
-  // Read in chunks, and the chunk that overflows is not kept, so the tail ends where reading did.
-  assert.match(r.stdout, /^[ax\n]+$/, "the tail of stdout, not its head");
+  // maxBuffer is per stream, so only stdout overflows, and reading keeps the chunk that passes it:
+  // more than 16384 characters are read however the pipe splits them, and their last 4096 are x's.
+  assert.match(r.stdout, /^[x\n]+$/, "the tail of stdout, not its head");
   assert.equal(run("no-such-command-xyz", []).status, 127);
 });
 
