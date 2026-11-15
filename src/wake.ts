@@ -1,17 +1,9 @@
-// Waking an agent whose session is off. An idle session can be stopped to give its memory back (by
-// the workspace's own daemon, or by Claude's, which retires a settled session after hours idle).
-// `claude stop` keeps the conversation, and `claude respawn <id>` reruns the session's command line
-// under the same id and session id, so its mode, settings and appendix come back with it and the
-// conversation carries on.
+// Waking an agent whose session is off. `claude stop` keeps the conversation, and `claude respawn
+// <id>` reruns the session's command line under the same ids, so it comes back as it was. A message
+// to a session that is off is not queued, so the session is woken before the message goes.
 //
-// A message to a session that is off is not queued: SendMessage fails with "No agent named ... is
-// reachable". So the session is woken before the message goes, never after: `factory wake`, the
-// wake hook on SendMessage, and the routes that keep an agent's context (a fix round, another
-// design round, a named assistant) all come through here.
-//
-// Probed 2026-11-15: a local respawn is listed live within 2 s. A session on a host comes back
-// in its host's listing as fast, but its Remote Control name took up to 10 s more to be
-// addressable from another machine, hence WAKE_SETTLE_S after a wake on a host.
+// Probed 2026-11-15: a respawn is listed live within 2 s, and on a host its Remote Control name took
+// up to 10 s more to be addressable from another machine, hence WAKE_SETTLE_S.
 import type { Agent } from "./config.js";
 import { findSession, type Session } from "./fleet.js";
 import { ask, Unreachable } from "./remote.js";
@@ -56,6 +48,8 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   if (left() < budget) return late("the stopped sessions were listed");
   const all = ask(() => t.sessions(true));
   if (all instanceof Unreachable) return { is: "unknown", why: all.brief };
+  // Not findSession: it prefers a row alive() passes, and locally that is a host-wide check, so a
+  // stale "done" row would beat the newest stopped session.
   const old = newest(all.filter(isAgentSession(agent.name)));
   if (!old?.id || (o.match && !o.match(old))) return { is: "none" };
   // the respawn leaves time for at least one listing after it
@@ -76,9 +70,11 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   return { is: "failed", why: `respawned ${old.id}, and it was not listed live within ${waitS} s` };
 }
 
-// For the routes that keep context: the line to print, or null when nothing was woken.
-export function wokeLine(name: string, w: Woken): string | null {
-  if (w.is === "woke") return `${name} was off; woke ${w.from} (its conversation kept)`;
-  if (w.is === "failed" || w.is === "unknown") return `${name} was off and did not wake (${w.why})`;
-  return null;
+// For the routes that keep context: wakes the session, prints what happened, and returns it once
+// woken, or null when the caller is to start a fresh one.
+export function wakeForRound(ws: Workspace, agent: Agent, t: Transport, match?: (s: Session) => boolean): Session | null {
+  const w = wake(ws, agent, { t, ...(match ? { match } : {}) });
+  if (w.is === "woke") console.log(`${agent.name} was off; woke ${w.from} (its conversation kept)`);
+  else if (w.is === "failed" || w.is === "unknown") console.log(`  warning: ${agent.name} was off and did not wake (${w.why}); starting a fresh session`);
+  return w.is === "woke" ? w.s : null;
 }

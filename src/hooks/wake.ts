@@ -1,7 +1,5 @@
-// PreToolUse hook for SendMessage, run as `factory --workspace W hook wake`, in every session's
-// settings. A message to an agent whose session is off fails, and nothing queues it, so this wakes
-// the recipient first and lets the send through once it is live. When it cannot wake it, the send
-// is blocked with why, rather than failing with "not reachable" and nobody knowing it was off.
+// PreToolUse hook for SendMessage, in every session's settings: wakes a recipient that is off and
+// lets the send through once it is live, or blocks the send with why it could not.
 //
 // A recipient that is not a fleet agent by name (`to` is "name" or "name [ref]") is left alone, and
 // so is one whose host cannot be listed, or a workspace that does not load: the send then succeeds or
@@ -18,11 +16,8 @@ import { local } from "../transport.js";
 import { WAKE_SETTLE_S, wake } from "../wake.js";
 import { openWorkspace, resolveWorkspace } from "../workspace.js";
 
-// The settings give the hook WAKE_HOOK_TIMEOUT_S, so the wait for the session to be listed, the
-// settle and the listings before it all fit inside it.
 export const WAKE_HOOK_TIMEOUT_S = 90;
 
-// The recipient's name, without the " [ref]" a listing may have given it.
 export const recipient = (to: unknown): string | null => {
   if (typeof to !== "string") return null;
   const n = to.replace(/\s*\[[^\]]*\]\s*$/, "").trim();

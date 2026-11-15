@@ -12,7 +12,7 @@ import { agentSessions, transportFor, transports } from "./transport.js";
 import type { Agent } from "./config.js";
 import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
 import { bringUpLead } from "./lead-up.js";
-import { wake, wokeLine } from "./wake.js";
+import { wake, wakeForRound } from "./wake.js";
 import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
 import { hook as noSideChannelsHook } from "./hooks/no-side-channels.js";
@@ -271,13 +271,8 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   const t = transportFor(ws, ag);
   const onItem = (x: Session) => basename((x.cwd ?? "").replace(/\/+$/, "")) === ticket;
   let s = findSession(t, name);
-  // A session on KEY that was stopped idle comes back for the fix round, conversation and all.
-  if (!t.alive(s) && !force) {
-    const w = wake(ws, ag, { t, match: onItem });
-    const said = wokeLine(name, w);
-    if (said) console.log(w.is === "woke" ? said : `  warning: ${said}; starting a fresh session`);
-    if (w.is === "woke") s = w.s;
-  }
+  // A session on KEY that was stopped idle comes back for the fix round.
+  if (!t.alive(s) && !force) s = wakeForRound(ws, ag, t, onItem) ?? s;
   if (t.alive(s)) {
     const on = basename((s.cwd ?? "").replace(/\/+$/, ""));
     if (on === ticket && !force) {
@@ -367,12 +362,7 @@ function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boole
   const t = transportFor(ws, ag);
   let s = findSession(t, name);
   // The session that drew the last round, stopped idle since, is woken for this one.
-  if (!t.alive(s) && !force && rec?.agent === name && rec.session) {
-    const w = wake(ws, ag, { t, match: (x) => x.id === rec.session });
-    const said = wokeLine(name, w);
-    if (said) console.log(w.is === "woke" ? said : `  warning: ${said}; starting a fresh session`);
-    if (w.is === "woke") s = w.s;
-  }
+  if (!t.alive(s) && !force && rec?.agent === name && rec.session) s = wakeForRound(ws, ag, t, (x) => x.id === rec.session) ?? s;
   if (t.alive(s)) {
     const on = allRecs(ws).find((r) => r.agent === name && r.session === s.id);
     if (on?.ticket === ticket && !force) {
@@ -500,16 +490,13 @@ function cmdAssistant(ws: Workspace, argv: string[]) {
     names = [want];
   }
   const promptFile = str(v["prompt-file"]);
-  // A named assistant that was stopped idle is mid-conversation with the lead: wake it rather than
-  // start it fresh. --force is the fresh start.
+  // A named assistant that was stopped idle is mid-conversation with the lead, so it is woken.
   if (want && !v.force) {
-    const w = wake(ws, agentOrDie(ws, want));
-    const said = wokeLine(want, w);
-    if (w.is === "woke") {
-      console.log(`${said}; send it the task by message, or pass --force for a fresh session.`);
+    const ag = agentOrDie(ws, want);
+    if (wakeForRound(ws, ag, transportFor(ws, ag))) {
+      console.log(`  next: send it the task by message, or pass --force for a fresh session`);
       return;
     }
-    if (said) console.log(`  warning: ${said}; starting a fresh session`);
   }
   const ready = (name: string) => onDemand(ws, agentOrDie(ws, name), () => (promptFile ? readFileSync(promptFile, "utf8") : assistantPrompt(ws)));
   const busy: string[] = [];

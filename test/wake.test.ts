@@ -174,7 +174,7 @@ test("a named assistant that is off is woken on its conversation; --force starts
   put("after.json", [sess("v1", "vega")]);
   let r = factory(ws, ["assistant", "vega"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /vega was off; woke v1 \(its conversation kept\); send it the task by message/);
+  assert.match(r.stdout, /vega was off; woke v1 \(its conversation kept\)\n  next: send it the task by message/);
   assert.ok(!calls().some((c) => c.startsWith("--bg")));
   rmSync(join(ws, "live.json"));
   r = factory(ws, ["assistant", "vega", "--force"]);
