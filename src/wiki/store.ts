@@ -117,7 +117,6 @@ export function save(ws: Workspace, s: SaveInput): Page {
   if (s.body.length > MAX_BODY) throw new FactoryError(`the page is ${s.body.length} characters, over ${MAX_BODY}`);
   const f = pageFile(ws, s.project, s.path);
   const text = render(title, s.body);
-  // `.lock` files, a name an earlier build's lock directories never had.
   return withLock(join(wikiDir(ws, s.project), ".locks", `${s.path.replace(/\//g, "~")}.lock`), () => {
     if (existsSync(f)) {
       const cur = read(ws, s.project, s.path);

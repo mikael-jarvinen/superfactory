@@ -19,8 +19,8 @@ export const TICKET_USAGE = `  ticket ...                      the local tracker
     move <ref> <State> [--asked "<the human's words>"] [--merged '#<pr>'] [--as A]
                                   out of Backlog needs --asked, quoting the human's message; into
                                   Done needs the ticket's PR, which GitHub must say is merged and
-                                  which names the ticket, or --asked quoting the human's ok when
-                                  there is nothing to merge. Every other move is free.
+                                  which names the ticket, or --asked quoting the human's ok. One
+                                  ok closes one ticket. Every other move is free.
     label <ref> add|rm <name> [--as A]
     describe <ref> (<text> | --file F) [--as A]
                                   append to the description; it is never replaced from here

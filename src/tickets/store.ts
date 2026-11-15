@@ -5,7 +5,7 @@
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { LABEL_RE, PROJECT_KEY_RE, type TrackerProject } from "../config.js";
-import { type Actor, checkCreate, checkMove, checkMoveNow, type MoveProof } from "./guard.js";
+import { type Actor, checkCreate, checkMove, checkMoveNow, type MoveProof, NEEDS_MERGE, type SpentOk } from "./guard.js";
 import { withLock } from "./lock.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError, now } from "../util.js";
@@ -83,8 +83,6 @@ const floorFile = (ws: Workspace, project: string) => join(projectDir(ws, projec
 const PK = PROJECT_KEY_RE.source.slice(1, -1);
 const KEY_RE = new RegExp(`^(${PK})-([1-9][0-9]{0,6})$`);
 const FILE_RE = new RegExp(`^(${PK})-([1-9][0-9]*)\\.jsonl$`);
-// `.lock` files: an earlier build of the tracker took its locks as directories at the bare key, and
-// a crash left one behind; a new name never meets it.
 const lockOf = (ws: Workspace, key: string) => join(projectDir(ws, parseKey(key).project), ".locks", `${key}.lock`);
 
 export function parseKey(key: string): { project: string; number: number } {
@@ -283,22 +281,41 @@ export function create(ws: Workspace, c: CreateInput, actor: Actor): Ticket {
   }
 }
 
+// The human's oks that other tickets' agent moves into Done used, from every project's logs.
+export function spentOks(ws: Workspace, except: string): SpentOk[] {
+  const out: SpentOk[] = [];
+  for (const p of projects(ws)) {
+    const d = projectDir(ws, p.key);
+    if (!existsSync(d)) continue;
+    for (const f of readdirSync(d)) {
+      const m = FILE_RE.exec(f);
+      const key = m && `${m[1]}-${m[2]}`;
+      if (!key || key === except) continue;
+      for (const e of readEvents(ws, key)) if (e.op === "move" && e.asked && NEEDS_MERGE.has(e.to)) out.push({ key, asked: e.asked });
+    }
+  }
+  return out;
+}
+
 // GitHub is asked first, without the lock: whether a PR merged does not depend on the ticket's
 // state, and a network call never runs under a lock. Then the state is read, checked again and
 // moved under the ticket's lock, so two moves cannot both start from the same state, and the
-// quote out of Backlog is judged against the state the move really leaves.
+// quote out of Backlog is judged against the state the move really leaves. A move into Done on a
+// quote also holds the project's ok lock, so two tickets cannot spend the same ok at once.
 export async function move(ws: Workspace, key: string, to: TicketState, actor: Actor, proof: MoveProof = {}): Promise<{ from: TicketState; ticket: Ticket }> {
   const before = load(ws, key);
   if (before.state === to) return { from: to, ticket: before };
-  const ok = await checkMove(ws, before, to, actor, proof);
-  return withLock(lockOf(ws, key), () => {
+  const spent = () => spentOks(ws, key);
+  const ok = await checkMove(ws, before, to, actor, proof, spent);
+  const write = () => {
     const tk = load(ws, key);
     if (tk.state === to) return { from: to, ticket: tk };
-    // moved meanwhile: the quote is judged again against the state it now leaves
-    const asked = tk.state === before.state ? ok.asked : checkMoveNow(ws, tk, to, actor, proof).asked;
+    const asked = checkMoveNow(ws, tk, to, actor, proof, spent).asked;
     append(ws, key, { t: now(), by: actor.name, op: "move", from: tk.state, to, ...(asked ? { asked } : {}), ...(ok.merged ? { merged: ok.merged } : {}) });
     return { from: tk.state, ticket: load(ws, key) };
-  });
+  };
+  const okLock = join(projectDir(ws, parseKey(key).project), ".locks", ".done-ok.lock");
+  return withLock(lockOf(ws, key), () => (ok.asked && NEEDS_MERGE.has(to) && !ok.merged ? withLock(okLock, write) : write()));
 }
 
 // Labels, comments, relations, links and titles are any agent's; a description is appended to by

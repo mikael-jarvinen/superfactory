@@ -231,6 +231,36 @@ test("guard: Backlog needs the human's message, Done this ticket's merged PR or 
   assert.ok(!mentions("RPE-10", "RPE-1") && !mentions("XRPE-1", "RPE-1") && !mentions("RPE-1a", "RPE-1"));
 });
 
+test("guard: one ok closes one ticket, and an empty quote gets the refusal that names both proofs", async () => {
+  const ws = openWorkspace(tempWorkspace(LOCAL()));
+  postMessage(ws, "please look at the backlog items today");
+  postMessage(ws, "the export work is done, close it");
+  const ok = "please look at the backlog items today";
+  for (let i = 0; i < 3; i++) T.create(ws, { project: "RPE", title: `t${i}` }, ADA);
+  // one quote covers Backlog straight to Done on A
+  assert.equal((await T.move(ws, "RPE-1", "Done", ADA, { asked: ok })).ticket.state, "Done");
+  await T.move(ws, "RPE-2", "In Review", ALEX);
+  await assert.rejects(T.move(ws, "RPE-2", "Done", ADA, { asked: ok }), /REFUSED: Alex's ok "please look at the backlog items today" was used on RPE-1; one ok closes one ticket/);
+  await assert.rejects(T.move(ws, "RPE-2", "Done", ADA, { asked: "look at the backlog items" }), /was used on RPE-1/, "a shorter cut of the same message is spent too");
+  await assert.rejects(T.move(ws, "RPE-3", "Done", ADA, { asked: ok }), /was used on RPE-1/, "Backlog to Done on another ticket too");
+  assert.equal(T.load(ws, "RPE-2").state, "In Review");
+  assert.equal(T.load(ws, "RPE-3").state, "Backlog");
+  // the ok it spent is still A's own
+  await T.move(ws, "RPE-1", "In Progress", ALEX);
+  assert.equal((await T.move(ws, "RPE-1", "Done", ADA, { asked: ok })).ticket.state, "Done");
+  // another message is a fresh ok; an ok is spent on Done only, not out of Backlog
+  assert.equal((await T.move(ws, "RPE-2", "Done", ADA, { asked: "the export work is done" })).ticket.state, "Done");
+  assert.equal((await T.move(ws, "RPE-3", "Todo", ADA, { asked: "the export work is done" })).ticket.state, "Todo");
+  // the human is never refused
+  assert.equal((await T.move(ws, "RPE-3", "Done", ALEX)).ticket.state, "Done");
+
+  // an empty quote is no quote
+  T.create(ws, { project: "RPE", title: "t3" }, ADA);
+  await T.move(ws, "RPE-4", "In Review", ALEX);
+  await assert.rejects(T.move(ws, "RPE-4", "Done", ADA, { asked: "" }), (e: Error) =>
+    /REFUSED: Done is Alex's merge, or Alex's ok, from any state/.test(e.message) && /--merged '#<pr>'/.test(e.message) && /--asked "<their words>"/.test(e.message));
+});
+
 test("guard: a legacy message kind is shown as the human's but is never quotable", async () => {
   // the test config's legacy_message_kind is "alex"
   const ws = openWorkspace(tempWorkspace(LOCAL()));
@@ -255,10 +285,9 @@ test("store: GitHub is asked before the lock, so a slow answer holds up no other
   assert.deepEqual(T.load(ws, "RPE-1").labels, ["task"]);
 });
 
-test("lock: a lock directory an earlier build left at the bare key blocks no ticket or page", async () => {
+test("lock: a directory at the bare key blocks no ticket or page", async () => {
   const ws = openWorkspace(tempWorkspace(LOCAL()));
   T.create(ws, { project: "RPE", title: "t" }, ADA);
-  // the earlier build's lock was mkdir(.locks/<key>), and a crash left it there
   mkdirSync(join(T.projectDir(ws, "RPE"), ".locks", "RPE-1"), { recursive: true });
   mkdirSync(join(W.wikiDir(ws, "RPE"), ".locks", "notes"), { recursive: true });
   await T.move(ws, "RPE-1", "In Review", ALEX);
