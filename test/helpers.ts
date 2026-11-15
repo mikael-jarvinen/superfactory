@@ -113,8 +113,16 @@ colleague-review = "In Review"
 done = "Done"
 `;
 
+// Every temp dir a test file makes is removed when its process exits, whether or not the test
+// removed it: node --test runs each file in its own process, and a dir a test forgot stayed in /tmp.
+const made: string[] = [];
+process.on("exit", () => {
+  for (const d of made) rmSync(d, { recursive: true, force: true });
+});
 export function tempDir(prefix = "sf-test-"): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  const d = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  made.push(d);
+  return d;
 }
 
 // A workspace with its config, and a claude that lists no sessions.
