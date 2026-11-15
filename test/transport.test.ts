@@ -7,6 +7,7 @@ import { claudeEnv, claudeScoped, JOB_ENV, SCOPE } from "../src/scope.js";
 import { procStat } from "../src/stacks/process.js";
 import { agentSessions, local, pick, type Transport } from "../src/transport.js";
 import { runClaude } from "../src/watchers/job.js";
+import { run } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
 import { tempDir, tempWorkspace } from "./helpers.js";
 
@@ -157,6 +158,27 @@ test("on Linux a box with no systemd-run says so, and runs no claude bare", { sk
     assert.throws(() => local.sessions(), { message: "systemd-run did not start for claude agents: spawnSync systemd-run ENOENT" });
   } finally {
     process.env.PATH = was;
+  }
+});
+
+test("a command whose output passes what run reads failed, and is no command that did not start", () => {
+  assert.deepEqual(run("sh", ["-c", "head -c 2000 /dev/zero"], { maxBuffer: 1000 }), { status: 1, stdout: "", stderr: "sh wrote more than the 1000 bytes of output that are read" });
+  assert.equal(run("no-such-command-xyz", []).status, 127);
+});
+
+test("on Linux a listing past 64 MB is said to be one, not a systemd-run that did not start", { skip: process.platform !== "linux" }, () => {
+  const dir = tempDir();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const claude = join(dir, "claude");
+  writeFileSync(claude, `#!/bin/sh\nexec head -c ${64 * 1024 * 1024 + 1} /dev/zero\n`);
+  chmodSync(claude, 0o755);
+  fakeSystemdRun(dir);
+  const was = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = claude;
+  try {
+    assert.throws(() => local.sessions(), { message: `\`claude agents --json\` failed: systemd-run wrote more than the ${64 * 1024 * 1024} bytes of output that are read` });
+  } finally {
+    was === undefined ? delete process.env.CLAUDE_BIN : (process.env.CLAUDE_BIN = was);
   }
 });
 
