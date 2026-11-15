@@ -1,11 +1,36 @@
 import assert from "node:assert/strict";
-import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { agentOrDie, findSession, type Session } from "../src/fleet.js";
+import { claudeScoped, SCOPE } from "../src/scope.js";
 import { agentSessions, local, pick, type Transport } from "../src/transport.js";
 import { openWorkspace } from "../src/workspace.js";
 import { tempDir, tempWorkspace } from "./helpers.js";
+
+// What a real systemd-run --user --scope said with no user bus: systemd 259 (niilo), 249 (turing).
+const NO_BUS_259 = "Failed to connect to user scope bus via local transport: No such file or directory";
+const NO_BUS_249 = "Failed to connect to bus: No such file or directory";
+// A systemd-run first on PATH: it logs its arguments, one call per line, tab-separated, then runs
+// what follows "--" as a real one does in a scope, and says so and exits 1 when that is no
+// executable. While <dir>/scope-fail exists it makes no scope and says what that file holds.
+function fakeSystemdRun(dir: string): string {
+  const log = join(dir, "scope-calls");
+  writeFileSync(join(dir, "systemd-run"), `#!/bin/sh
+{ printf 'systemd-run'; for a in "$@"; do printf '\\t%s' "$a"; done; echo; } >> ${log}
+[ -f ${dir}/scope-fail ] && { cat ${dir}/scope-fail >&2; echo >&2; exit 1; }
+while [ "$1" != "--" ]; do shift; done
+shift
+command -v "$1" >/dev/null || { echo "Failed to find executable $1: No such file or directory" >&2; exit 1; }
+exec "$@"
+`);
+  chmodSync(join(dir, "systemd-run"), 0o755);
+  const was = process.env.PATH;
+  process.env.PATH = `${dir}:${was}`;
+  after(() => (process.env.PATH = was));
+  return log;
+}
+const lines = (f: string) => (existsSync(f) ? readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => l.split("\t")) : []);
 
 test("the local start writes the appendix it is given and names it on the command line", () => {
   const dir = tempDir();
@@ -18,6 +43,7 @@ echo "$@" > "${dir}/args"
 echo "backgrounded · abc123 · rae"
 `);
   chmodSync(claude, 0o755);
+  fakeSystemdRun(dir);
   const was = process.env.CLAUDE_BIN;
   process.env.CLAUDE_BIN = claude;
   after(() => (was === undefined ? delete process.env.CLAUDE_BIN : (process.env.CLAUDE_BIN = was)));
@@ -32,6 +58,54 @@ echo "backgrounded · abc123 · rae"
   rmSync(join(dir, "appendix"));
   local.start({ ...req, appendix: null, args });
   assert.equal(readFileSync(join(dir, "args"), "utf8"), "--bg P\n");
+});
+
+test("on Linux every local claude call, each listing included, runs through systemd-run in a scope under agents.slice", { skip: process.platform !== "linux" }, async () => {
+  const dir = tempDir();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const claude = join(dir, "claude");
+  const calls = join(dir, "claude-calls");
+  writeFileSync(claude, `#!/bin/sh
+echo "$*" >> ${calls}
+case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; respawn) echo "respawned $2" ;; esac
+`);
+  chmodSync(claude, 0o755);
+  const scopes = fakeSystemdRun(dir);
+  const was = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = claude;
+  after(() => (was === undefined ? delete process.env.CLAUDE_BIN : (process.env.CLAUDE_BIN = was)));
+  const ws = openWorkspace(tempWorkspace(), {});
+  after(() => rmSync(ws.dir, { recursive: true, force: true }));
+
+  assert.deepEqual(local.sessions(true), []);
+  assert.deepEqual(await local.sessionsAsync(), []);
+  assert.equal(local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, env: process.env, args: () => ["--bg", "P"] }), "abc123");
+  assert.deepEqual(local.respawn("bea", "r0"), { ok: true, said: "respawned r0", why: "respawned r0" });
+  local.stop("bea", "r1", true);
+  assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["agents --json --all", "agents --json", "--bg P", "respawn r0", "stop r1", "rm r1"]);
+  const scoped = (...a: string[]) => ["systemd-run", ...SCOPE, claude, ...a];
+  assert.deepEqual(lines(scopes), [scoped("agents", "--json", "--all"), scoped("agents", "--json"), scoped("--bg", "P"), scoped("respawn", "r0"), scoped("stop", "r1"), scoped("rm", "r1")], "every call is scoped");
+
+  rmSync(calls);
+  for (const said of [NO_BUS_259, NO_BUS_249]) {
+    writeFileSync(join(dir, "scope-fail"), said);
+    assert.throws(() => local.sessions(), { message: `systemd-run made no scope for claude agents: ${said}` });
+    assert.throws(() => local.respawn("bea", "r0"), { message: `systemd-run made no scope for claude respawn: ${said}` });
+    assert.throws(() => local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, env: process.env, args: () => ["--bg", "P"] }), /systemd-run made no scope for claude --bg/);
+  }
+  assert.equal(existsSync(calls), false, "a call that could not be scoped never runs claude bare");
+
+  rmSync(join(dir, "scope-fail"));
+  const gone = join(dir, "no-claude");
+  process.env.CLAUDE_BIN = gone;
+  const missing = `Failed to find executable ${gone}: No such file or directory`;
+  assert.deepEqual(local.respawn("bea", "r0"), { ok: false, said: "", why: missing }, "a claude systemd-run cannot find is that call's failure, not a scope's");
+  assert.throws(() => local.sessions(), { message: `\`claude agents --json\` failed: ${missing}` });
+});
+
+test("where there is no systemd, claude runs bare", () => {
+  assert.deepEqual(claudeScoped(["respawn", "r0"], "darwin")[1], ["respawn", "r0"]);
+  assert.equal(claudeScoped(["respawn", "r0"], "linux")[0], "systemd-run");
 });
 
 test("an agent's session is its newest live one, else its newest, and only its background ones count", () => {
