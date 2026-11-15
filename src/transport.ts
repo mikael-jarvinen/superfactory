@@ -12,7 +12,7 @@ import type { Phase } from "./launch.js";
 import { remote, type Unreachable } from "./remote.js";
 import { claudeEnv, claudeScoped, scopeCheck } from "./scope.js";
 import type { Workspace } from "./workspace.js";
-import { die, run } from "./util.js";
+import { die, MAX_OUTPUT, run } from "./util.js";
 import { branchPushed, ensureWorktree, git, worktreeDirty, worktreePath } from "./worktree.js";
 
 // What starting a session needs.
@@ -95,7 +95,7 @@ export function sessionAlive(s: Session | null | undefined): s is Session {
   return !!s && s.kind === "background" && s.state !== "stopped" && s.state !== "failed" && daemonAlive();
 }
 
-const scoped = (argv: string[]) => scopeCheck(argv, run(...claudeScoped(argv), { env: claudeEnv() }));
+const scoped = (argv: string[]) => scopeCheck(argv, run(...claudeScoped(argv), { env: claudeEnv() }, `claude ${argv[0]}`));
 export const local: Transport = {
   where: "local",
   sessions(includeDone = false) {
@@ -110,7 +110,7 @@ export const local: Transport = {
   // As before, any failure here, a scope's included, is an empty listing.
   sessionsAsync() {
     return new Promise((res) => {
-      execFile(...claudeScoped(["agents", "--json"]), { timeout: 20_000, maxBuffer: 16 * 1024 * 1024, env: claudeEnv() }, (err, stdout) => {
+      execFile(...claudeScoped(["agents", "--json"]), { timeout: 20_000, maxBuffer: MAX_OUTPUT, env: claudeEnv() }, (err, stdout) => {
         try {
           res(err ? [] : parse(stdout));
         } catch {
@@ -127,7 +127,7 @@ export const local: Transport = {
       writeFileSync(path, req.appendix, { flag: "wx" });
     }
     const argv = req.args(path);
-    const r = scopeCheck(argv, run(...claudeScoped(argv), { cwd: req.cwd, env: claudeEnv(req.env) }));
+    const r = scopeCheck(argv, run(...claudeScoped(argv), { cwd: req.cwd, env: claudeEnv(req.env) }, `claude ${argv[0]}`));
     if (r.status !== 0) die(`claude --bg failed: ${r.stderr.trim() || r.stdout.trim()}`);
     return /backgrounded · (\w+) · /.exec(r.stdout)?.[1] ?? "?";
   },

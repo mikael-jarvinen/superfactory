@@ -107,7 +107,7 @@ const SLEPT_MARGIN_S = 120;
 export function runClaude(ws: Workspace, job: Job, prompt: string, tools: string[], log: string): ClaudeRun {
   const t0 = Date.now();
   const argv = claudeArgs(ws, job, tools);
-  const r = run(...claudeScoped(argv), { ...claudeOptions(job), input: prompt });
+  const r = run(...claudeScoped(argv), { ...claudeOptions(job), input: prompt }, `claude ${argv[0]}`);
   const seconds = Math.round((Date.now() - t0) / 1000);
   const slept = r.status === TIMED_OUT && seconds > TIMEOUT_S[job] + SLEPT_MARGIN_S;
   logTo(log, r.stdout);

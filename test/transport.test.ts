@@ -162,11 +162,15 @@ test("on Linux a box with no systemd-run says so, and runs no claude bare", { sk
 });
 
 test("a command whose output passes what run reads failed, and is no command that did not start", () => {
-  assert.deepEqual(run("sh", ["-c", "head -c 2000 /dev/zero"], { maxBuffer: 1000 }), { status: 1, stdout: "", stderr: "sh wrote more than the 1000 bytes of output that are read" });
+  const sh = run("sh", ["-c", "head -c 2000 /dev/zero"], { maxBuffer: 1000 });
+  assert.deepEqual([sh.status, sh.stderr], [1, "sh wrote more than the 1000 bytes of output that are read"]);
+  const r = run("sh", ["-c", "echo flooding >&2; yes x | head -c 9000"], { maxBuffer: 8192 }, "claude -p");
+  assert.equal(r.stderr, "claude -p wrote more than the 8192 bytes of output that are read\nflooding\n", "named for who wrote it, with what it wrote to stderr");
+  assert.ok(r.stdout.length > 0 && r.stdout.length <= 4096 && /^x\n/.test(r.stdout.slice(-2) + "\n"), `a tail of stdout, ${r.stdout.length} bytes`);
   assert.equal(run("no-such-command-xyz", []).status, 127);
 });
 
-test("on Linux a listing past 64 MB is said to be one, not a systemd-run that did not start", { skip: process.platform !== "linux" }, () => {
+test("on Linux a listing past 64 MB is claude's, not systemd-run's, and one under it parses on both paths", { skip: process.platform !== "linux" }, async () => {
   const dir = tempDir();
   after(() => rmSync(dir, { recursive: true, force: true }));
   const claude = join(dir, "claude");
@@ -176,7 +180,11 @@ test("on Linux a listing past 64 MB is said to be one, not a systemd-run that di
   const was = process.env.CLAUDE_BIN;
   process.env.CLAUDE_BIN = claude;
   try {
-    assert.throws(() => local.sessions(), { message: `\`claude agents --json\` failed: systemd-run wrote more than the ${64 * 1024 * 1024} bytes of output that are read` });
+    assert.throws(() => local.sessions(), { message: `\`claude agents --json\` failed: claude agents wrote more than the ${64 * 1024 * 1024} bytes of output that are read` });
+    // 20 MB, past the 16 MB the async listing used to read.
+    writeFileSync(claude, `#!/bin/sh\nprintf '[{"id":"s1","name":"bea","kind":"background","state":"idle"}'\nhead -c ${20 * 1024 * 1024} /dev/zero | tr '\\0' ' '\necho ']'\n`);
+    assert.equal(local.sessions().length, 1);
+    assert.deepEqual(await local.sessionsAsync(), local.sessions());
   } finally {
     was === undefined ? delete process.env.CLAUDE_BIN : (process.env.CLAUDE_BIN = was);
   }
@@ -205,6 +213,11 @@ test("on Linux a watcher's claude -p runs in a scope too, and one that gets none
   writeFileSync(join(dir, "scope-fail"), NO_BUS_259);
   assert.throws(() => runClaude(ws, "round", "P", ["Read"], log), { message: `systemd-run made no scope for claude -p: ${NO_BUS_259}` });
   assert.match(readFileSync(log, "utf8"), new RegExp(`${NO_BUS_259}\\n.*exit=1`), "logged before it dies");
+
+  rmSync(join(dir, "scope-fail"));
+  writeFileSync(claude, `#!/bin/sh\ncat > /dev/null\necho flooding >&2\nexec head -c ${64 * 1024 * 1024 + 1} /dev/zero\n`);
+  assert.equal(runClaude(ws, "round", "P", ["Read"], log).status, 1);
+  assert.match(readFileSync(log, "utf8"), new RegExp(`claude -p wrote more than the ${64 * 1024 * 1024} bytes of output that are read\\nflooding\\n.*exit=1`), "an overflow is claude's, logged with what it wrote");
 });
 
 test("a scheduler job's calls get scopes named after its run, and claude never sees the job", () => {
