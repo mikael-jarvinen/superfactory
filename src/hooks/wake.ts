@@ -1,26 +1,15 @@
-// PreToolUse hook for SendMessage, in every session's settings: wakes a recipient that is off and
-// lets the send through once it is live, or blocks the send with why it could not.
-//
-// A recipient that is not a fleet agent by name (`to` is "name" or "name [ref]") is left alone, and
-// so is one whose listing timed out or whose host cannot be asked, or a workspace that does not load:
-// the send then succeeds or fails on its own, as it did before this hook. Any other error in the hook
-// lets the send through too: the hook is there to wake, never to stop a message, and SendMessage
-// fails by itself on a recipient that is not reachable. That error, with its stack, is appended to
-// the workspace's logs/wake-hook.log and written to stderr, and the sender is told the message went
-// without a wake check. A respawn
-// that fails blocks, its host's failure included, with why: the recipient is known to be off, so the
-// send would fail anyway.
-//
-// A session on a host runs this with --from-host <host>. It can wake only an agent on that same
-// host, through its local claude; it cannot list the primary or another host, so a message to any
-// other agent passes through. If that send then fails, the same hook after it says the agent
-// is off and to have the lead wake it, rather than leave "not reachable" unexplained. The lead
-// being off is a known gap: nobody else can wake it.
+// PreToolUse hook for SendMessage, in every session's settings: wakes a recipient that is off, then
+// lets the send through. A recipient known to be off that does not wake blocks the send with why;
+// one not in the fleet, or whose listing cannot be had, passes. The hook never stops a message by
+// its own error: failOpen lets it through and says so. From a host (--from-host) it wakes only
+// agents on that host, and after a send to any other fails as not reachable it says to have the
+// lead wake it. The lead being off is a known gap: nobody else can wake it.
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { HookResult } from "../settings.js";
 import { sleep } from "../util.js";
+import { iso, wakeHookLog } from "../failures.js";
 import { lead } from "../fleet.js";
 import { local } from "../transport.js";
 import { WAKE_SETTLE_S, wake } from "../wake.js";
@@ -45,7 +34,7 @@ function failOpen(logsDir: string | null, sender: string, to: string, e: unknown
   let logged = logsDir ? "" : "\n(no workspace found, so not logged)";
   if (logsDir) try {
     mkdirSync(logsDir, { recursive: true });
-    appendFileSync(join(logsDir, "wake-hook.log"), `${JSON.stringify({ at: new Date().toISOString(), from: sender, to, error, stack })}\n`);
+    appendFileSync(wakeHookLog(logsDir), `${JSON.stringify({ at: iso(), from: sender, to, error, stack })}\n`);
   } catch (le) {
     logged = `\n(and it could not be logged: ${(le as Error).message})`;
   }

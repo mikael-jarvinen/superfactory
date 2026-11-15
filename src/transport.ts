@@ -9,7 +9,7 @@ import { join } from "node:path";
 import type { Agent, Repo } from "./config.js";
 import type { Session } from "./fleet.js";
 import type { Phase } from "./launch.js";
-import { remote, Unreachable } from "./remote.js";
+import { ListingTimedOut, remote, Unreachable } from "./remote.js";
 import { claudeEnv, claudeScoped, scopeCheck } from "./scope.js";
 import type { Workspace } from "./workspace.js";
 import { die, MAX_OUTPUT, run } from "./util.js";
@@ -133,7 +133,7 @@ export const local: Transport = {
   where: "local",
   sessions(includeDone = false) {
     const r = scoped(["agents", "--json", ...(includeDone ? ["--all"] : [])], LISTING_TIMEOUT_MS);
-    if (r.status === 124) throw new Unreachable("local", `\`claude agents --json\` did not answer in ${LISTING_TIMEOUT_MS / 1000} s`);
+    if (r.status === 124) throw new ListingTimedOut(`\`claude agents --json\` did not answer in ${LISTING_TIMEOUT_MS / 1000} s`);
     if (r.status !== 0) die(`\`claude agents --json\` failed: ${r.stderr.trim()}`);
     let rows: Session[];
     try {

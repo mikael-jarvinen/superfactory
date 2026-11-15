@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 import { agentOrDie } from "../src/fleet.js";
 import { settingsFile } from "../src/launch.js";
 import { recipient } from "../src/hooks/wake.js";
-import { Unreachable } from "../src/remote.js";
+import { ListingTimedOut, Unreachable } from "../src/remote.js";
 import { type Transport, transportFor } from "../src/transport.js";
 import { wake } from "../src/wake.js";
 import { openWorkspace } from "../src/workspace.js";
@@ -360,7 +360,8 @@ test("the hook's own error lets the send through, logged and told to the sender"
 });
 
 test("a local listing that timed out says so, not that a host is unknown", () => {
-  const u = new Unreachable("local", "`claude agents --json` did not answer in 20 s");
+  const u = new ListingTimedOut("`claude agents --json` did not answer in 20 s");
+  assert.ok(u instanceof Unreachable);
   assert.equal(u.message, "the local listing timed out: `claude agents --json` did not answer in 20 s");
   assert.equal(u.brief, u.message);
   assert.equal(new Unreachable("far", "ECONNREFUSED").message, "host far is unknown: ECONNREFUSED");
