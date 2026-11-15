@@ -107,7 +107,7 @@ role = "reviewer"
 #                                         # each checkout's origin and that machine's own key, for one with no gh login
 
 [tracker]
-kind = "jira"                             # or "none"
+kind = "jira"                             # or "none", or "local" (below)
 site = "acme.atlassian.net"
 queue_jql = 'assignee = currentUser() AND statusCategory = "To Do" AND sprint in openSprints() ORDER BY updated ASC'
 key_pattern = '^[A-Z][A-Z0-9]+-\d+$'      # what a ticket key looks like; LOCAL-<words> is always valid
@@ -117,6 +117,21 @@ queued = "To Do"
 building = "In Progress"                  # also every working state not named here
 colleague-review = "In Review"
 done = "Done"
+
+# kind = "local" keeps the tickets and a wiki in this workspace instead: `factory ticket`,
+# `factory wiki`, and /tickets and /wiki on the board, with "backlog (n)" and "wiki" in its header.
+# Off unless asked for: with "jira" or "none" none of it exists. Ticket numbers count per project.
+# [tracker]
+# kind = "local"
+# dir = "tracker"                         # where tickets/ and wiki/ live; state/tracker by default
+# [[tracker.projects]]
+# key = "RPE"                             # the prefix: RPE-12
+# name = "RPE Training App"
+# labels = ["task", "story"]              # the only labels it takes; any lower-case label without it
+# repo = "app"                            # a [repos] key or owner/repo; an agent's move into Done,
+#                                         # from any state, names its PR (`--merged '#N'`), and GitHub
+#                                         # must say it merged and that it names the ticket, or it
+#                                         # quotes an ok of the human's (`--asked`) no other ticket used
 
 [board]
 host = "localhost"

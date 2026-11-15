@@ -18,6 +18,8 @@ import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, saveAttachment } fro
 import { tryFailure } from "../failures.js";
 import { type Fetch, ReviewCache } from "./reviews.js";
 import { isScheduler } from "../scheduler/state.js";
+import { isTrackerApi, trackerApi, trackerSummary } from "../tickets/api.js";
+import { enabled as trackerEnabled } from "../tickets/store.js";
 
 // The board: a read-only picture of the fleet at `/`, and the thread between the human and the lead
 // at `/messages`. `/api` and `/api/messages` are the JSON behind them, and both pages re-fetch every
@@ -388,6 +390,7 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
     tickets,
     plumbing: heartbeats(ws),
     avatars: avatars(ws),
+    tracker: trackerSummary(ws),
   };
 }
 
@@ -418,6 +421,8 @@ const TYPES: Record<string, string> = {
   ".ico": "image/x-icon",
 };
 const PAGES: Record<string, string> = { "/": "board.html", "/messages": "messages.html" };
+// The local tracker's pages, served only when the workspace has one.
+const TRACKER_PAGES: Record<string, string> = { "/tickets": "tickets.html", "/wiki": "wiki.html" };
 // Large enough for several pasted screenshots; the POST is same-site only, so this is not a public surface.
 const MAX_BODY = 40 * 1024 * 1024;
 
@@ -443,6 +448,30 @@ function sameSite(req: IncomingMessage): boolean {
   } catch {
     return false;
   }
+}
+
+function readJson(req: IncomingMessage, res: ServerResponse, then: (body: Record<string, unknown>) => void): void {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  req.on("data", (c: Buffer) => {
+    size += c.length;
+    if (size > MAX_BODY) req.destroy();
+    else chunks.push(c);
+  });
+  req.on("end", () => {
+    let body: unknown;
+    try {
+      body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    } catch {
+      return json(res, 400, { ok: false, error: "bad json" });
+    }
+    if (typeof body !== "object" || body === null || Array.isArray(body)) return json(res, 400, { ok: false, error: "bad json" });
+    try {
+      then(body as Record<string, unknown>);
+    } catch (e) {
+      if (!res.headersSent) json(res, 500, { ok: false, error: (e as Error).message });
+    }
+  });
 }
 
 export interface ServeOptions {
@@ -490,8 +519,22 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
   });
   every(REVIEW_EVERY, readReviews);
 
+  // The tracker's answer, its 404 when the path is not one, or a 500 that says what threw.
+  const replyTracker = (res: ServerResponse, p: ReturnType<typeof trackerApi>) =>
+    p.then(
+      (r) => (r ? json(res, r.code, r.body) : send(res, 404, "not found", "text/plain; charset=utf-8")),
+      (e: unknown) => json(res, 500, { ok: false, error: String((e as Error)?.message ?? e) }),
+    );
+
   const handle = (req: IncomingMessage, res: ServerResponse) => {
     const path = (req.url ?? "/").split("?")[0] as string;
+    if (req.method === "POST" && trackerEnabled(ws) && isTrackerApi(path)) {
+      if (!sameSite(req)) return json(res, 403, { ok: false, error: "refused: not from the board" });
+      readJson(req, res, (body) => {
+        replyTracker(res, trackerApi(ws, "POST", req.url ?? "/", body));
+      });
+      return;
+    }
     if (req.method === "POST") {
       if (path !== "/api/messages") return send(res, 404, "not found", "text/plain; charset=utf-8");
       if (!sameSite(req)) return json(res, 403, { ok: false, error: "refused: not from the message page" });
@@ -532,6 +575,10 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
       return json(res, 200, snapshot(ws, sessions, stacks, reviews));
     }
     if (path === "/api/messages") return json(res, 200, messagesView(ws, sessions, receipts));
+    if (isTrackerApi(path)) {
+      replyTracker(res, trackerApi(ws, "GET", req.url ?? "/"));
+      return;
+    }
     if (path.startsWith("/attachments/")) {
       // A pasted screenshot, stored beside the message log. The name was minted server-side, so a
       // request for anything but a plain file name in that one directory is refused.
@@ -554,7 +601,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
         return send(res, 404, "not found", "text/plain; charset=utf-8");
       }
     }
-    const name = PAGES[path] ?? (path.startsWith("/static/") ? path.slice("/static/".length) : undefined);
+    const name = PAGES[path] ?? (trackerEnabled(ws) ? TRACKER_PAGES[path] : undefined) ?? (path.startsWith("/static/") ? path.slice("/static/".length) : undefined);
     const body = name !== undefined ? files.get(name) : undefined;
     if (body) return send(res, 200, body, TYPES[extname(name as string)] ?? "application/octet-stream");
     send(res, 404, "not found", "text/plain; charset=utf-8");

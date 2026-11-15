@@ -84,12 +84,13 @@ export function validKey(ws: Workspace, k: string): boolean {
   return isLocal(k) || (ws.config.tracker.keyPattern?.test(k) ?? false);
 }
 
-const TRACKER_LABEL = { jira: "Jira", none: "tracker" } as const;
+const TRACKER_LABEL = { jira: "Jira", none: "tracker", local: "tracker" } as const;
 
 export const KEY_HINT = "neither a ticket key nor a local key like LOCAL-fix-flaky-login";
 
-// No tracker means no ticket to keep in step, the same as a LOCAL key.
-const untracked = (ws: Workspace, k: string) => isLocal(k) || ws.config.tracker.kind === "none";
+// No tracker means no ticket to keep in step, the same as a LOCAL key. A local tracker's tickets
+// are not kept in step from records yet, so its records are untracked too.
+const untracked = (ws: Workspace, k: string) => isLocal(k) || ws.config.tracker.kind !== "jira";
 
 export function trackerFor(ws: Workspace, s: State): string {
   const st = ws.config.tracker.status;

@@ -4,16 +4,16 @@ import { closeSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { tryLock } from "../src/board/inbox.js";
+import { tryLock } from "../src/tickets/lock.js";
 
 const dir = mkdtempSync(join(tmpdir(), "inbox-lock-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
-const INBOX = new URL("../src/board/inbox.js", import.meta.url).href;
+const LOCK = new URL("../src/tickets/lock.js", import.meta.url).href;
 
 test("the inbox lock shuts out another process, and goes when its holder is killed", { skip: !["darwin", "linux"].includes(process.platform) && "the inbox lock is built for macOS and Linux only" }, async () => {
   const path = join(dir, "inbox.lock");
   const holder = spawn(process.execPath, ["--input-type=module", "-e", `
-    const { tryLock } = await import(${JSON.stringify(INBOX)});
+    const { tryLock } = await import(${JSON.stringify(LOCK)});
     console.log(tryLock(${JSON.stringify(path)}) === null ? "refused" : "held");
     setInterval(() => {}, 1e6);
   `], { stdio: ["ignore", "pipe", "inherit"] });
@@ -42,7 +42,7 @@ test("the inbox lock without flock(1) throws, rather than reading as free", { sk
   const bin = process.env.FLOCK_BIN;
   process.env.FLOCK_BIN = "/nonexistent";
   try {
-    assert.throws(() => tryLock(join(dir, "no-flock.lock")), /the inbox lock: flock\(1\) failed \(exit 127: .*ENOENT/);
+    assert.throws(() => tryLock(join(dir, "no-flock.lock")), /the lock \S+no-flock.lock: flock\(1\) failed \(exit 127: .*ENOENT/);
   } finally {
     if (bin === undefined) delete process.env.FLOCK_BIN;
     else process.env.FLOCK_BIN = bin;

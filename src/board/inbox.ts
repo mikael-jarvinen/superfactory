@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { appendFileSync, closeSync, constants, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { HUMAN_KIND, isHuman, type Message, rowImages } from "../messages.js";
+import { tryLock } from "../tickets/lock.js";
 import type { Workspace } from "../workspace.js";
-import { chars, die, now, pyDumps, run, sleep } from "../util.js";
+import { chars, now, pyDumps, sleep } from "../util.js";
 
 // What the human can type on the page. `factory say` has no limit: the lead's instructions keep it short.
 export const MAX_CHARS = 20_000;
@@ -71,41 +72,7 @@ export const pageText = (ws: Workspace, row: Message): string =>
 // a monitor in the lead's session. The lock dies with its holder, and the next monitor carries on
 // from the cursor, so a message is printed once.
 //
-// Node has no flock(2). macOS's open(2) takes the same lock atomically with O_EXLOCK, and it is
-// released when the descriptor closes, however the process ends. Linux has no such flag and would
-// ignore the bit, a lock that always succeeds.
-const O_EXLOCK = 0x20;
-
-const HELD = 75;
-
-// Linux: util-linux's flock(1) on this descriptor as its fd 3. A flock belongs to the open
-// file description, so it outlives flock(1) and goes when this descriptor closes. flock -n never
-// waits, so the timeout only catches a flock(1) that hangs.
-function tryFlock(path: string): number | null {
-  const fd = openSync(path, constants.O_RDWR | constants.O_CREAT, 0o644);
-  // -E sets "held by someone else" apart from flock's own failures
-  const r = run(process.env.FLOCK_BIN || "flock", ["-n", "-x", "-E", String(HELD), "3"], { stdio: ["ignore", "ignore", "pipe", fd], timeout: 2000 });
-  if (r.status === 0) return fd;
-  closeSync(fd);
-  if (r.status === HELD) return null;
-  return die(`the inbox lock: flock(1) failed (exit ${r.status}: ${r.stderr.trim()}); it needs util-linux's flock`);
-}
-
-export function tryLock(path: string): number | null {
-  if (process.platform === "linux") {
-    mkdirSync(dirname(path), { recursive: true });
-    return tryFlock(path);
-  }
-  if (process.platform !== "darwin") die("the inbox lock is built for macOS and Linux only");
-  mkdirSync(dirname(path), { recursive: true });
-  try {
-    return openSync(path, constants.O_RDWR | constants.O_CREAT | constants.O_NONBLOCK | O_EXLOCK, 0o644);
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === "EAGAIN" || code === "EWOULDBLOCK") return null;
-    throw e;
-  }
-}
+// The lock is src/tickets/lock.ts's tryLock: a flock that goes when its descriptor closes.
 
 // For the lead's Stop hook: is a monitor listening? Taking the lock is the only way to ask, so a
 // free lock is taken and dropped at once. Anything that stops the question being asked counts as
