@@ -3,8 +3,8 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { ConfigError, loadConfig } from "../src/config.js";
-import { factory, TOML, tempWorkspace } from "./helpers.js";
+import { ConfigError, loadConfig, ROLES, roster } from "../src/config.js";
+import { factory, GROUPED, TOML, tempWorkspace } from "./helpers.js";
 
 const problems = (toml: string): string[] => {
   const ws = tempWorkspace(toml);
@@ -155,4 +155,56 @@ autocompact = "400k"`));
 role = "builder"`, `name = "cal"
 role = "builder"
 cwd = "cal"`)), ["agents[2].cwd: a builder starts in its worktree, so it takes no cwd"]);
+});
+
+test("an agent's group: trimmed, optional, never the lead's, one role to a group", () => {
+  const ws = tempWorkspace(GROUPED);
+  after(() => rmSync(ws, { recursive: true, force: true }));
+  const c = loadConfig(join(ws, "factory.toml"), {});
+  assert.deepEqual(Object.fromEntries(c.agents.map((a) => [a.name, a.group])),
+    { ada: undefined, bea: "Product", cal: "Product", rae: undefined, otto: "Servers", nap: undefined });
+
+  assert.deepEqual(problems(GROUPED.replace('group = " Servers "', 'group = "  "')), ["agents[4].group: must not be empty"]);
+  assert.deepEqual(problems(GROUPED.replace(`name = "ada"
+role = "lead"`, `name = "ada"
+role = "lead"
+group = "Top"`)), ["agents[0].group: the lead has its own place on the board"]);
+  assert.deepEqual(problems(GROUPED.replace('group = " Servers "', 'group = "Product"')),
+    ['agents: group "Product" has "bea" (builder) and "otto" (assistant); a group holds one role']);
+  // A group may not take the title of a roster the board draws for agents without one.
+  for (const [g, who] of [[" Reviewers ", "rae"], ["assistants", "nap"]] as const)
+    assert.deepEqual(problems(GROUPED.replace('group = " Servers "', `group = "${g}"`)),
+      [`agents: group "${g.trim()}" has the title of "${who}"'s roster on the board; pick another`]);
+  const ungroup = (name: string) => GROUPED.replace(`name = "${name}"\nrole = "builder"\ngroup = "Product"`, `name = "${name}"\nrole = "builder"`);
+  assert.deepEqual(problems(ungroup("cal").replace('group = " Servers "', 'group = "API"')),
+    ['agents: group "API" has the title of "cal"\'s roster on the board; pick another']);
+  assert.deepEqual(problems(ungroup("bea").replace('group = " Servers "', 'group = "app"')),
+    ['agents: group "app" has the title of "bea"\'s roster on the board; pick another']);
+  // Only what the board draws: a relabelled stack frees its key, and a repo no ungrouped builder
+  // lists alone is free.
+  const shop = ungroup("bea").replace("[stacks.app]", '[stacks.app]\nlabel = "Shop"');
+  assert.deepEqual(problems(shop.replace('group = " Servers "', 'group = "App"')), []);
+  assert.deepEqual(problems(shop.replace('group = " Servers "', 'group = "shop"')),
+    ['agents: group "shop" has the title of "bea"\'s roster on the board; pick another']);
+  assert.deepEqual(problems(GROUPED.replace('group = " Servers "', 'group = "API"')), []);
+  assert.deepEqual(problems(GROUPED.replace(`name = "cal"
+role = "builder"
+group = "Product"`, `name = "cal"
+role = "builder"
+group = "product"`)), ['agents: group "Product" is also spelled "product"; spell it one way']);
+  assert.deepEqual(problems(GROUPED.replace(/group = "Product"/g, 'group = "Product Team"').replace(`name = "cal"
+role = "builder"
+group = "Product Team"`, `name = "cal"
+role = "builder"
+group = "Product  Team"`)), ['agents: group "Product Team" is also spelled "Product  Team"; spell it one way']);
+});
+
+test("roster: every role but the builder has a roster of its own, and builders split by stack and repos", () => {
+  const of = (role: (typeof ROLES)[number], stack?: string, repos: string[] = []) => roster({ role, stack, repos }, {});
+  assert.deepEqual(ROLES.filter((r) => r !== "builder").map((r) => of(r)),
+    [{ key: "lead", title: "Lead" }, { key: "reviewers", title: "Reviewers" }, { key: "assistants", title: "Assistants" },
+     { key: "designers", title: "Designers" }]);
+  assert.deepEqual(of("builder", "app", ["web"]), { key: "stack:app", title: "App" });
+  assert.deepEqual(of("builder", undefined, ["api"]), { key: "repos:api", title: "Api" });
+  assert.deepEqual(of("builder", undefined, ["api", "web"]), { key: "repos:api,web", title: "Builders" });
 });
