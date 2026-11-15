@@ -94,7 +94,7 @@ const withActivity = (rows: Session[]): Session[] =>
     return at === undefined ? s : { ...s, activeAt: at };
   });
 
-const parse = (stdout: string): Session[] => withActivity(JSON.parse(stdout || "[]") as Session[]);
+const parse = (stdout: string): Session[] => JSON.parse(stdout || "[]") as Session[];
 
 // `claude agents --json` is a registry, not a probe: after the daemon retires an idle worker and
 // exits, the listing keeps the session at its last state. The roster names the supervisor pid; a
@@ -131,18 +131,20 @@ export const local: Transport = {
     // A listing that timed out is no answer, as for a host that cannot be asked.
     if (r.status === 124) throw new Unreachable("local", `\`claude agents --json\` did not answer in ${LISTING_TIMEOUT_MS / 1000} s`);
     if (r.status !== 0) die(`\`claude agents --json\` failed: ${r.stderr.trim()}`);
+    let rows: Session[];
     try {
-      return parse(r.stdout);
+      rows = parse(r.stdout);
     } catch {
       return die("`claude agents --json` returned something that is not JSON");
     }
+    return withActivity(rows);
   },
   // As before, any failure here, a scope's included, is an empty listing.
   sessionsAsync() {
     return new Promise((res) => {
       execFile(...claudeScoped(["agents", "--json"]), { timeout: LISTING_TIMEOUT_MS, maxBuffer: MAX_OUTPUT, env: claudeEnv() }, (err, stdout) => {
         try {
-          res(err ? [] : parse(stdout));
+          res(err ? [] : withActivity(parse(stdout)));
         } catch {
           res([]);
         }

@@ -35,14 +35,15 @@ import { LISTING_TIMEOUT_MS, local, type Transport, type WorktreeRequest } from 
 import type { Workspace } from "./workspace.js";
 import { FactoryError } from "./util.js";
 
+// Also this machine's own listing that timed out (transport.ts), as host "local".
 export class Unreachable extends FactoryError {
   constructor(readonly host: string, readonly why: string) {
-    super(`host ${host} is unknown: ${why}`);
+    super(host === "local" ? `the local listing timed out: ${why}` : `host ${host} is unknown: ${why}`);
   }
 
   // Which host and why, for a line that already says the agent is unknown.
   get brief(): string {
-    return `host ${this.host}: ${this.why}`;
+    return this.host === "local" ? `the local listing timed out: ${this.why}` : `host ${this.host}: ${this.why}`;
   }
 }
 

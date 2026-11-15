@@ -2,22 +2,29 @@
 // lets the send through once it is live, or blocks the send with why it could not.
 //
 // A recipient that is not a fleet agent by name (`to` is "name" or "name [ref]") is left alone, and
-// so is one whose host cannot be listed, or a workspace that does not load: the send then succeeds or
-// fails on its own, as it did before this hook. A respawn that fails blocks, its host's failure
-// included, with why: the recipient is known to be off, so the send would fail anyway.
+// so is one whose listing timed out or whose host cannot be asked, or a workspace that does not load:
+// the send then succeeds or fails on its own, as it did before this hook. Any other error in the hook
+// lets the send through too: the hook is there to wake, never to stop a message, and SendMessage
+// fails by itself on a recipient that is not reachable. That error, with its stack, is appended to
+// the workspace's logs/wake-hook.log and written to stderr, and the sender is told the message went
+// without a wake check. A respawn
+// that fails blocks, its host's failure included, with why: the recipient is known to be off, so the
+// send would fail anyway.
 //
 // A session on a host runs this with --from-host <host>. It can wake only an agent on that same
 // host, through its local claude; it cannot list the primary or another host, so a message to any
 // other agent passes through. If that send then fails, the same hook after it says the agent
 // is off and to have the lead wake it, rather than leave "not reachable" unexplained. The lead
 // being off is a known gap: nobody else can wake it.
+import { appendFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { HookResult } from "../settings.js";
 import { sleep } from "../util.js";
 import { lead } from "../fleet.js";
 import { local } from "../transport.js";
 import { WAKE_SETTLE_S, wake } from "../wake.js";
-import { openWorkspace, resolveWorkspace } from "../workspace.js";
+import { openWorkspace, resolveWorkspace, type Workspace } from "../workspace.js";
 
 export const WAKE_HOOK_TIMEOUT_S = 90;
 
@@ -30,6 +37,25 @@ export const recipient = (to: unknown): string | null => {
   return n || null;
 };
 
+// The hook's own error: the send goes, and the error is logged and told to the sender.
+function failOpen(ws: Workspace, sender: string, to: string, e: unknown): HookResult {
+  const error = e instanceof Error ? e.message : String(e);
+  const stack = e instanceof Error ? (e.stack ?? error) : error;
+  let logged = "";
+  try {
+    mkdirSync(ws.logsDir, { recursive: true });
+    appendFileSync(join(ws.logsDir, "wake-hook.log"), `${JSON.stringify({ at: new Date().toISOString(), from: sender, to, error, stack })}\n`);
+  } catch (le) {
+    logged = `\n(and it could not be logged: ${(le as Error).message})`;
+  }
+  const said = `wake check failed: ${error}; message sent without a wake check`;
+  return {
+    code: 0,
+    stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: said } }),
+    stderr: `factory hook wake: ${said}\n${stack}${logged}\n`,
+  };
+}
+
 export function hook(argv: string[], input: string, workspace?: string): HookResult {
   const t0 = Date.now();
   const v = parseArgs({ args: argv, options: { "wait-seconds": { type: "string" }, "settle-seconds": { type: "string" }, "from-host": { type: "string" }, "timeout-seconds": { type: "string" } }, strict: false }).values;
@@ -40,8 +66,10 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   const fromHost = typeof v["from-host"] === "string" ? v["from-host"] : undefined;
   let to: string | null = null;
   let failedSend = false;
+  let sender = `session ? in ?${fromHost ? ` on ${fromHost}` : ""}`;
   try {
-    const ev = JSON.parse(input) as { hook_event_name?: unknown; tool_input?: { to?: unknown }; tool_response?: { success?: unknown; message?: unknown }; error?: unknown };
+    const ev = JSON.parse(input) as { hook_event_name?: unknown; session_id?: unknown; cwd?: unknown; tool_input?: { to?: unknown }; tool_response?: { success?: unknown; message?: unknown }; error?: unknown };
+    sender = `session ${String(ev.session_id ?? "?")} in ${String(ev.cwd ?? "?")}${fromHost ? ` on ${fromHost}` : ""}`;
     to = recipient(ev.tool_input?.to);
     // Explained is only a send that failed as not reachable: a result with success false and that
     // message (PostToolUse, recorded in the test fixtures), or a tool error saying it
@@ -77,7 +105,7 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   try {
     w = wake(ws, agent, { waitS, deadline, ...(fromHost ? { t: local } : {}) });
   } catch (e) {
-    return { code: 2, stderr: `${to} could not be checked or woken: ${(e as Error).message}\n` };
+    return failOpen(ws, sender, to, e);
   }
   switch (w.is) {
     case "live":

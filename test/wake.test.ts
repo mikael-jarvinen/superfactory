@@ -309,6 +309,38 @@ test("a remote respawn left too little time fails rather than run past it", () =
   assert.ok(Date.now() - t0 < 1_000, "nothing was asked");
 });
 
+test("the hook's own error lets the send through, logged and told to the sender", () => {
+  const { ws, put } = fakeFleet();
+  // a listing that is JSON but no array: reading its rows throws a TypeError
+  writeFileSync(join(ws, "live.json"), "{}");
+  put("all.json", [sess("b1", "bea")]);
+  const r = factory(undefined, ["--workspace", ws, "hook", "wake"], {
+    env: { CLAUDE_BIN: join(ws, "bin", "claude") },
+    input: JSON.stringify({ hook_event_name: "PreToolUse", session_id: "s-123", cwd: "/w/ada", tool_name: "SendMessage", tool_input: { to: "bea", message: "hi" } }),
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout) as { hookSpecificOutput: { hookEventName: string; additionalContext: string } };
+  assert.equal(out.hookSpecificOutput.hookEventName, "PreToolUse");
+  assert.match(out.hookSpecificOutput.additionalContext, /^wake check failed: \S+ is not a function; message sent without a wake check$/);
+  assert.match(r.stderr, /TypeError/);
+  assert.match(r.stderr, /\n\s+at /, "with the stack");
+  const lines = readFileSync(join(openWorkspace(ws, {}).logsDir, "wake-hook.log"), "utf8").trim().split("\n");
+  assert.equal(lines.length, 1);
+  const row = JSON.parse(lines[0]!) as Record<string, string>;
+  assert.equal(row.from, "session s-123 in /w/ada");
+  assert.equal(row.to, "bea");
+  assert.match(row.error!, /is not a function/);
+  assert.match(row.stack!, /TypeError[\s\S]*\n\s+at /);
+  assert.ok(!Number.isNaN(Date.parse(row.at!)));
+});
+
+test("a local listing that timed out says so, not that a host is unknown", () => {
+  const u = new Unreachable("local", "`claude agents --json` did not answer in 20 s");
+  assert.equal(u.message, "the local listing timed out: `claude agents --json` did not answer in 20 s");
+  assert.equal(u.brief, u.message);
+  assert.equal(new Unreachable("far", "ECONNREFUSED").message, "host far is unknown: ECONNREFUSED");
+});
+
 test("a respawn leaves room for one listing after it", () => {
   const dir = tempWorkspace(HOSTED_TOML);
   after(() => rmSync(dir, { recursive: true, force: true }));
