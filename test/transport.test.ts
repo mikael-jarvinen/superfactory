@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { agentOrDie, findSession, type Session } from "../src/fleet.js";
 import { claudeEnv, claudeScoped, JOB_ENV, SCOPE } from "../src/scope.js";
@@ -52,12 +52,24 @@ echo "backgrounded · abc123 · rae"
   after(() => (was === undefined ? delete process.env.CLAUDE_BIN : (process.env.CLAUDE_BIN = was)));
   const ws = openWorkspace(tempWorkspace(), {});
   after(() => rmSync(ws.dir, { recursive: true, force: true }));
-  const req = { agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, env: process.env };
+  const req = { agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, runDir: ws.runDir, env: process.env };
   const args = (p: string | null) => ["--bg", ...(p ? ["--append-system-prompt-file", p] : []), "P"];
+  const named = () => readFileSync(join(dir, "args"), "utf8").split(" ")[2] as string;
 
   assert.equal(local.start({ ...req, appendix: "the brief\n", args }), "abc123");
   assert.equal(readFileSync(join(dir, "appendix"), "utf8"), "the brief\n");
-  rmSync(readFileSync(join(dir, "args"), "utf8").split(" ")[2] as string);
+  // in logs/run/, which a reboot keeps, and left there for a later respawn of that session
+  const first = named();
+  assert.equal(dirname(first), ws.runDir);
+  assert.match(basename(first), /^appendix-bea-[0-9a-f]{16}\.md$/);
+  // the same brief again is the same file; a changed brief is another, and the first is kept as it was
+  local.start({ ...req, appendix: "the brief\n", args });
+  assert.equal(named(), first);
+  local.start({ ...req, appendix: "a new brief\n", args });
+  assert.notEqual(named(), first);
+  assert.equal(readFileSync(first, "utf8"), "the brief\n");
+  assert.equal(readFileSync(named(), "utf8"), "a new brief\n");
+  assert.deepEqual(readdirSync(ws.runDir).filter((n) => n.endsWith(".tmp")), []);
   rmSync(join(dir, "appendix"));
   local.start({ ...req, appendix: null, args });
   assert.equal(readFileSync(join(dir, "args"), "utf8"), "--bg P\n");
@@ -82,7 +94,7 @@ case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; 
 
   assert.deepEqual(local.sessions(true), []);
   assert.deepEqual(await local.sessionsAsync(), []);
-  assert.equal(local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, env: process.env, args: () => ["--bg", "P"] }), "abc123");
+  assert.equal(local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, runDir: ws.runDir, env: process.env, args: () => ["--bg", "P"] }), "abc123");
   assert.deepEqual(local.respawn("bea", "r0"), { ok: true, said: "respawned r0", why: "respawned r0" });
   local.stop("bea", "r1", true);
   assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["agents --json --all", "agents --json", "--bg P", "respawn r0", "stop r1", "rm r1"]);
@@ -94,7 +106,7 @@ case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; 
     writeFileSync(join(dir, "scope-fail"), said);
     assert.throws(() => local.sessions(), { message: `systemd-run made no scope for claude agents: ${said}` });
     assert.throws(() => local.respawn("bea", "r0"), { message: `systemd-run made no scope for claude respawn: ${said}` });
-    assert.throws(() => local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, env: process.env, args: () => ["--bg", "P"] }), /systemd-run made no scope for claude --bg/);
+    assert.throws(() => local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, runDir: ws.runDir, env: process.env, args: () => ["--bg", "P"] }), /systemd-run made no scope for claude --bg/);
   }
   assert.equal(existsSync(calls), false, "a call that could not be scoped never runs claude bare");
 
@@ -138,7 +150,7 @@ case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; 
 
   local.sessions();
   await local.sessionsAsync();
-  local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, env: process.env, args: () => ["--bg", "P"] });
+  local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, runDir: ws.runDir, env: process.env, args: () => ["--bg", "P"] });
   local.respawn("bea", "r0");
   local.stop("bea", "r1", false);
   assert.equal(runClaude(ws, "round", "P", ["Read"], join(dir, "round.log")).status, 0);

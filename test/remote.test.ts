@@ -207,7 +207,7 @@ test("the remote transport: each operation is a request to the host's daemon", a
 
   const rows = t.sessions(true);
   assert.deepEqual(rows.map((s) => [s.id, t.alive(s)]), [["r1", true], ["r0", false]], "alive is the daemon's word");
-  const id = t.start({ agent: rae, cwd: "/far/rae", prompt: "hello", appendix: "the appendix", phase: undefined, args: () => assert.fail("rendered on the host, not here"), env: { SECRET: "x" } });
+  const id = t.start({ agent: rae, cwd: "/far/rae", prompt: "hello", appendix: "the appendix", runDir: ws.runDir, phase: undefined, args: () => assert.fail("rendered on the host, not here"), env: { SECRET: "x" } });
   assert.equal(id, "launched1");
   assert.deepEqual(t.respawn("rae", "r0"), { ok: true, said: "back", why: "back" });
   t.stop("rae", "r1", true);
