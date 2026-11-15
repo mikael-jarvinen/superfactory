@@ -171,11 +171,22 @@ role = "lead"
 group = "Top"`)), ["agents[0].group: the lead has its own place on the board"]);
   assert.deepEqual(problems(GROUPED.replace('group = " Servers "', 'group = "Product"')),
     ['agents: group "Product" has "bea" (builder) and "otto" (assistant); a group holds one role']);
-  for (const [g, why] of [[" Reviewers ", "a built-in roster"], ["API", "repo api"], ["app", "stack app"]] as const)
+  // A group may not take the title of a roster the board draws for agents without one.
+  for (const [g, who] of [[" Reviewers ", "rae"], ["assistants", "nap"]] as const)
     assert.deepEqual(problems(GROUPED.replace('group = " Servers "', `group = "${g}"`)),
-      [`agents[4].group: "${g.trim()}" is already a roster's title on the board (${why})`]);
-  assert.deepEqual(problems(GROUPED.replace("[stacks.app]", '[stacks.app]\nlabel = "Shop"').replace('group = " Servers "', 'group = "shop"')),
-    ['agents[4].group: "shop" is already a roster\'s title on the board (stack app\'s label)']);
+      [`agents: group "${g.trim()}" has the title of "${who}"'s roster on the board; pick another`]);
+  const ungroup = (name: string) => GROUPED.replace(`name = "${name}"\nrole = "builder"\ngroup = "Product"`, `name = "${name}"\nrole = "builder"`);
+  assert.deepEqual(problems(ungroup("cal").replace('group = " Servers "', 'group = "API"')),
+    ['agents: group "API" has the title of "cal"\'s roster on the board; pick another']);
+  assert.deepEqual(problems(ungroup("bea").replace('group = " Servers "', 'group = "app"')),
+    ['agents: group "app" has the title of "bea"\'s roster on the board; pick another']);
+  // Only what the board draws: a relabelled stack frees its key, and a repo no ungrouped builder
+  // lists alone is free.
+  const shop = ungroup("bea").replace("[stacks.app]", '[stacks.app]\nlabel = "Shop"');
+  assert.deepEqual(problems(shop.replace('group = " Servers "', 'group = "App"')), []);
+  assert.deepEqual(problems(shop.replace('group = " Servers "', 'group = "shop"')),
+    ['agents: group "shop" has the title of "bea"\'s roster on the board; pick another']);
+  assert.deepEqual(problems(GROUPED.replace('group = " Servers "', 'group = "API"')), []);
   assert.deepEqual(problems(GROUPED.replace(`name = "cal"
 role = "builder"
 group = "Product"`, `name = "cal"

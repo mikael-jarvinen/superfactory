@@ -208,4 +208,10 @@ test("teams: a configured group titles its roster and keeps the role's place", {
     .replace('repos = ["api"]', 'repos = ["api", "docs"]');
   const product = (await teamsOf(docs)).find((g: { key: string }) => g.key === "group:Product");
   assert.equal(product.scope, "web, api, docs");
+
+  // An entry is kept whole: "a, b" and "b" are two repos, and neither swallows the other.
+  const odd = GROUPED.replace("[stacks.app]", '[repos."a, b"]\nremote = "acme/ab"\n\n[repos.b]\nremote = "acme/b"\n\n[stacks.app]')
+    .replace('repos = ["api"]', 'repos = ["a, b", "b"]');
+  const oddProduct = (await teamsOf(odd)).find((g: { key: string }) => g.key === "group:Product");
+  assert.equal(oddProduct.scope, "web, api, a, b, b");
 });

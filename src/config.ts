@@ -193,6 +193,16 @@ function reader(problems: string[], where: string, t: Table) {
 // How the board compares roster titles: case and runs of spaces do not tell two apart.
 const foldTitle = (g: string) => g.toLowerCase().replace(/\s+/g, " ");
 
+// The title of the roster the board lists an agent without a group under (teams() in board/server.ts).
+export function rosterTitle(a: Pick<Agent, "role" | "stack" | "repos">, stacks: Record<string, Stack>): string {
+  return a.role === "lead" ? "Lead"
+    : a.role === "assistant" ? "Assistants"
+    : a.role === "reviewer" ? "Reviewers"
+    : a.role === "designer" ? "Designers"
+    : a.stack ? (stacks[a.stack]?.label ?? capitalize(a.stack))
+    : a.repos.length === 1 ? capitalize(a.repos[0] as string) : "Builders";
+}
+
 export function expandPath(value: string, base: string, env: NodeJS.ProcessEnv = process.env): string {
   let p = value.replace(/\$\{(\w+)\}|\$(\w+)/g, (m, a: string | undefined, b: string | undefined) => {
     const name = (a ?? b) as string;
@@ -404,15 +414,6 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     if (repo.host && !hosts[repo.host])
       problems.push(`repos.${repo.key}.host: no host ${show(repo.host)}; hosts: ${Object.keys(hosts).join(", ") || "none"}`);
 
-  // Every title the board can give a roster of its own (teams() in board/server.ts), and why. A
-  // group with one of them would draw a second roster under the same title.
-  const drawn = new Map<string, string>(["Lead", "Assistants", "Reviewers", "Designers", "Builders"].map((t) => [foldTitle(t), "a built-in roster"]));
-  for (const k of Object.keys(repos)) drawn.set(foldTitle(k), `repo ${k}`);
-  for (const [k, st] of Object.entries(stacks)) {
-    drawn.set(foldTitle(k), `stack ${k}`);
-    if (!drawn.has(foldTitle(st.label))) drawn.set(foldTitle(st.label), `stack ${k}'s label`);
-  }
-
   const agents: Agent[] = [];
   const agentsV = top.raw("agents");
   const names = new Set<string>();
@@ -456,8 +457,6 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const group = r.str("group");
     if (group !== undefined && !group.trim()) r.bad("group", "must not be empty");
     if (group !== undefined && role === "lead") r.bad("group", "the lead has its own place on the board");
-    const clash = group === undefined ? undefined : drawn.get(foldTitle(group.trim()));
-    if (clash) r.bad("group", `${show(group!.trim())} is already a roster's title on the board (${clash})`);
     if (host && !hosts[host]) r.bad("host", `no host ${show(host)}; hosts: ${Object.keys(hosts).join(", ") || "none"}`);
     const workRepos = stack ? (stacks[stack]?.repos ?? []) : (agentRepos ?? []);
     // A builder runs where its worktrees are, and they are under its repos' checkouts.
@@ -499,10 +498,14 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   // board/server.ts takes a group's staff flag and rank from its first member and relies on this.
   // Two spellings of one name would look like one roster drawn twice, so a group is spelled one way.
   const fold = foldTitle;
+  // A group titled like a roster the board draws for ungrouped agents would show that title twice.
+  const drawn = new Map(agents.filter((a) => a.group === undefined).map((a) => [fold(rosterTitle(a, stacks)), a.name]));
   for (const group of new Set(agents.flatMap((a) => (a.group === undefined ? [] : [fold(a.group)])))) {
     const members = agents.filter((x) => x.group !== undefined && fold(x.group) === group);
     const a = members[0]!;
     const spelled = members.find((b) => b.group !== a.group);
+    const clash = drawn.get(group);
+    if (clash) problems.push(`agents: group ${show(a.group)} has the title of ${show(clash)}'s roster on the board; pick another`);
     if (spelled) problems.push(`agents: group ${show(a.group)} is also spelled ${show(spelled.group)}; spell it one way`);
     const other = members.find((b) => b.role !== a.role);
     if (other)

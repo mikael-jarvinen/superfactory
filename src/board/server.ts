@@ -12,6 +12,7 @@ import { agentSessions, pick, transportFor, transports } from "../transport.js";
 import { isHuman, readTail } from "../messages.js";
 import { allRecs, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
+import { rosterTitle } from "../config.js";
 import { capitalize, run, sleep } from "../util.js";
 import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, saveAttachment } from "./inbox.js";
 import { tryFailure } from "../failures.js";
@@ -273,17 +274,17 @@ function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>, alive: 
   const reviewerRepos = ws.config.roles.reviewer?.addDirs ?? [];
   const rank = (k: string) => (k === "lead" ? 0 : k === "assistants" ? 1 : k === "designers" ? 1.5 : k === "reviewers" ? 3 : 2);
   for (const a of ws.config.agents) {
-    const [byRole, roleTitle, scope] =
-      a.role === "lead" ? ["lead", "Lead", []]
-      : a.role === "assistant" ? ["assistants", "Assistants", []]
-      : a.role === "reviewer" ? ["reviewers", "Reviewers", reviewerRepos]
-      : a.role === "designer" ? ["designers", "Designers", ws.config.roles.designer?.addDirs ?? []]
-      : a.stack ? [`stack:${a.stack}`, ws.config.stacks[a.stack]?.label ?? capitalize(a.stack), a.repos]
-      : [`repos:${a.repos.join(",")}`, a.repos.length === 1 ? capitalize(a.repos[0] as string) : "Builders", a.repos];
+    const [byRole, scope] =
+      a.role === "lead" ? ["lead", []]
+      : a.role === "assistant" ? ["assistants", []]
+      : a.role === "reviewer" ? ["reviewers", reviewerRepos]
+      : a.role === "designer" ? ["designers", ws.config.roles.designer?.addDirs ?? []]
+      : a.stack ? [`stack:${a.stack}`, a.repos]
+      : [`repos:${a.repos.join(",")}`, a.repos];
     // A group takes its staff flag and rank from its first member (see config.ts); its scope is
     // every member's.
     const key = a.group ? `group:${a.group}` : byRole;
-    const title = a.group ?? roleTitle;
+    const title = a.group ?? rosterTitle(a, ws.config.stacks);
     let g = groups.get(key);
     if (!g) {
       groups.set(key, (g = { key, title, scope: [], staff: a.role === "assistant", members: [] }));

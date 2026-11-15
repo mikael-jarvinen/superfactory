@@ -52,10 +52,12 @@ section{padding:18px 20px 20px;border-bottom:1px solid var(--line)}
 .team .top .staff::before{content:"";position:absolute;left:-52px;top:12px;width:44px;border-top:1px dashed var(--line)}
 /* Several assistants' rosters stack in one side column. A dashed spine runs from each heading to the
    next one's, and a tick joins every heading to it. */
-.team .top .staff .roster+.roster{margin-top:28px}
+/* --gap: the space between rosters, which the spine below spans to the next heading's tick. */
+.team .top .staff{--gap:28px}
+.team .top .staff .roster+.roster{margin-top:var(--gap)}
 .team .top .staff:has(.roster+.roster) .roster::before{content:"";position:absolute;left:-8px;top:12px;width:8px;
      border-top:1px dashed var(--line)}
-.team .top .staff .roster:has(+.roster)::after{content:"";position:absolute;left:-8px;top:12px;bottom:-40px;
+.team .top .staff .roster:has(+.roster)::after{content:"";position:absolute;left:-8px;top:12px;bottom:calc(-1 * var(--gap) - 12px);
      border-left:1px dashed var(--line)}
 .rosters{display:grid;grid-template-columns:repeat(var(--n),minmax(0,1fr));gap:28px 22px;
          position:relative;padding-top:24px;align-items:start}
