@@ -6,6 +6,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { GIT_HTTPS_ENV, gitEnv } from "../src/launch.js";
 import { branchPushed, ensureWorktree, git, HTTPS, overArgs, worktreeDirty } from "../src/worktree.js";
+import { local, type WorktreeRequest } from "../src/transport.js";
 import { run } from "../src/util.js";
 import { tempDir, until } from "./helpers.js";
 
@@ -44,7 +45,7 @@ test("a worktree per item, with its own push config, and the human's clone untou
   assert.equal(branchPushed(wt, "main"), true, "no commits of its own yet");
   writeFileSync(join(wt, "schema.gen.ts"), "");
   writeFileSync(join(wt, "real.txt"), "");
-  assert.deepEqual(worktreeDirty(wt, ["schema.gen.ts", ".tool/"]), ["real.txt"]);
+  assert.deepEqual(worktreeDirty(wt, ["schema.gen.ts", ".tool/"]), { paths: ["real.txt"] });
   must(wt, "add", "real.txt");
   must(wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "work");
   assert.equal(branchPushed(wt, "main"), false);
@@ -57,7 +58,7 @@ test("a git status that fails or is ended by a signal is not read as a clean wor
   after(() => rmSync(root, { recursive: true, force: true }));
   const wt = join(root, "wt");
   must(root, "init", "-q", wt);
-  assert.deepEqual(worktreeDirty(wt), [], "a clean tree reads clean");
+  assert.deepEqual(worktreeDirty(wt), { paths: [] }, "a clean tree reads clean");
   const bin = join(root, "bin");
   mkdirSync(bin);
   const realGit = run("sh", ["-c", "command -v git"]).stdout.trim();
@@ -66,13 +67,30 @@ test("a git status that fails or is ended by a signal is not read as a clean wor
   const was = process.env.PATH;
   process.env.PATH = `${bin}:${was}`;
   try {
-    assert.deepEqual(worktreeDirty(wt), ["(git status ended by SIGTERM: cut short)"]);
+    assert.deepEqual(worktreeDirty(wt), { paths: [], unreadable: "git status ended by SIGTERM: cut short" });
   } finally {
     process.env.PATH = was;
   }
-  const plain = join(root, "plain");
-  mkdirSync(plain);
-  assert.match(worktreeDirty(plain).join(), /^\(git status exited 128: fatal: not a git repository/);
+  // A directory that is gone fails the same way wherever the test's temp dir is.
+  const d = worktreeDirty(join(root, "gone"));
+  assert.deepEqual(d.paths, []);
+  assert.match(d.unreadable ?? "", /^git status exited 128: fatal: cannot change to /);
+});
+
+test("a worktree whose status cannot be read is answered unreadable and not pushed, on a host's side", () => {
+  const root = tempDir();
+  after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, ".claude", "worktrees", "LOCAL-x"), { recursive: true });
+  const q = { repo: { path: root, base: "main" }, ticket: "LOCAL-x", toolWritten: [] } as unknown as WorktreeRequest;
+  const was = process.env.GIT_CEILING_DIRECTORIES;
+  process.env.GIT_CEILING_DIRECTORIES = root;
+  try {
+    const left = local.worktreeLeft(q);
+    assert.deepEqual({ ...left, unreadable: left.unreadable?.replace(/:.*/s, "") }, { exists: true, dirty: [], unreadable: "git status exited 128", pushed: false });
+  } finally {
+    if (was === undefined) delete process.env.GIT_CEILING_DIRECTORIES;
+    else process.env.GIT_CEILING_DIRECTORIES = was;
+  }
 });
 
 for (const { at, says } of [

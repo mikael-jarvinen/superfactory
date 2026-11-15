@@ -61,10 +61,12 @@ export function stopSession(t: Transport, s: Session | null, remove = true): voi
 export function leftWork(ws: Workspace, name: string, cwd: string): string | null {
   let base = "main";
   for (const r of Object.values(ws.config.repos)) if (cwd.startsWith(r.path + "/")) base = r.base;
-  return leftSaid(name, cwd, worktreeDirty(cwd, ws.config.worktree.toolWritten), () => branchPushed(cwd, base));
+  const d = worktreeDirty(cwd, ws.config.worktree.toolWritten);
+  return leftSaid(name, cwd, d.paths, d.unreadable, () => branchPushed(cwd, base));
 }
 
-function leftSaid(name: string, cwd: string, dirty: string[], pushed: () => boolean): string | null {
+function leftSaid(name: string, cwd: string, dirty: string[], unreadable: string | undefined, pushed: () => boolean): string | null {
+  if (unreadable) return `${name}'s worktree ${cwd} could not be read (${unreadable}), so what stopping it would lose is unknown. Look there, or --force.`;
   if (dirty.length) return `${name}'s worktree ${cwd} has uncommitted changes: ${dirty.slice(0, 4).join(", ")}. Ask them to commit and push, or --force to lose it.`;
   if (!pushed()) return `${name}'s branch in ${cwd} is not fully pushed. Ask them to push, or --force.`;
   return null;
@@ -98,7 +100,7 @@ export function builderLeft(ws: Workspace, agent: Agent, t: Transport, cwd: stri
   const got = ask(() => t.worktreeLeft({ agent, repo: w.repo, ticket: w.ticket, toolWritten: ws.config.worktree.toolWritten }));
   if (got instanceof Unreachable) return `${agent.name}'s worktree ${cwd} could not be checked (${got.brief}). Look there, or --force.`;
   if (!got.exists) return null;
-  return leftSaid(agent.name, cwd, got.dirty, () => got.pushed);
+  return leftSaid(agent.name, cwd, got.dirty, got.unreadable, () => got.pushed);
 }
 
 // Removes a builder's worktree when asked, here or on its host, and returns the line to print.

@@ -6,6 +6,9 @@ import { die, realpathLoose, run, type RunResult } from "./util.js";
 
 export const git = (dir: string, ...args: string[]) => run("git", ["-C", dir, ...args]);
 
+// git's stderr, after a ": ", when it said anything.
+const said = (r: RunResult) => (r.stderr.trim() ? `: ${r.stderr.trim()}` : "");
+
 export const HTTPS = ["-c", "url.https://github.com/.insteadOf=git@github.com:"];
 // The -c arguments a git that talks to GitHub takes: none when the checkout's origin is used as it is.
 export const overArgs = (over: GitOver): string[] => (over === "ssh" ? [] : HTTPS);
@@ -35,17 +38,17 @@ export function ensureWorktree(repoDir: string, ticket: string, base: string, ov
   const wt = worktreePath(repoDir, ticket);
   const branch = branchFor(ticket);
   const via = overArgs(over);
-  const err = (r: RunResult) => (r.stderr.trim() ? `: ${r.stderr.trim()}` : "");
   // Steps whose status is ignored still stop at a signal, so none runs into the daemon's SIGKILL.
-  const step = (...args: string[]) => {
-    const r = git(repoDir, ...args);
-    if (r.signal) die(`git ${args.find((a, i) => !a.startsWith("-") && args[i - 1] !== "-c")} in ${repoDir} was ended by ${r.signal}, so the worktree was not made${err(r)}`);
+  // A fetch goes over `over`.
+  const step = (cmd: string, ...args: string[]) => {
+    const r = git(repoDir, ...(cmd === "fetch" ? via : []), cmd, ...args);
+    if (r.signal) die(`git ${cmd} in ${repoDir} was ended by ${r.signal}, so the worktree was not made${said(r)}`);
     return r;
   };
-  const r = step(...via, "fetch", "-q", "origin", base);
+  const r = step("fetch", "-q", "origin", base);
   if (r.status !== 0) die(`git fetch failed in ${repoDir}: ${r.stderr.trim()}`);
   // the branch may already be on origin (a resumed item, a rebuilt laptop); a missing ref is fine
-  step(...via, "fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
+  step("fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
   step("worktree", "prune");
   if (existsSync(wt) && statSync(wt).isDirectory()) {
     const registered = worktreeList(repoDir).find((w) => w.path === realpathLoose(wt));
@@ -128,17 +131,14 @@ export function porcelainPaths(out: string): string[] {
 
 // Dirt that is not the builder's work: files that tools rewrite just by running. An entry ending
 // in "/" is a directory prefix; any other matches the end of a path.
-export function worktreeDirty(wt: string, toolWritten: string[] = []): string[] {
+// A status that failed or was cut short says nothing about the tree: `unreadable` says why, and
+// `paths` is then empty without meaning clean.
+export function worktreeDirty(wt: string, toolWritten: string[] = []): { paths: string[]; unreadable?: string } {
   const dirs = toolWritten.filter((x) => x.endsWith("/"));
   const files = toolWritten.filter((x) => !x.endsWith("/"));
   const r = git(wt, "status", "--porcelain");
-  // A status that failed or was cut short says nothing about the tree, so it is not called clean.
-  if (r.status !== 0) {
-    const why = r.signal ? `ended by ${r.signal}` : `exited ${r.status}`;
-    return [`(git status ${why}${r.stderr.trim() ? `: ${r.stderr.trim().split("\n")[0]}` : ""})`];
-  }
-  return porcelainPaths(r.stdout)
-    .filter((p) => !files.some((f) => p.endsWith(f)) && !dirs.some((d) => p.startsWith(d)));
+  if (r.status !== 0) return { paths: [], unreadable: `git status ${r.signal ? `ended by ${r.signal}` : `exited ${r.status}`}${said(r)}` };
+  return { paths: porcelainPaths(r.stdout).filter((p) => !files.some((f) => p.endsWith(f)) && !dirs.some((d) => p.startsWith(d))) };
 }
 
 // Nothing would be lost by removing this worktree: either the branch is on origin at this head, or

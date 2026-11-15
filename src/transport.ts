@@ -42,6 +42,8 @@ export interface WorktreeRequest {
 export interface WorktreeLeft {
   exists: boolean;
   dirty: string[];
+  // why git could not say what is uncommitted; `dirty` is then empty and `pushed` false
+  unreadable?: string;
   pushed: boolean;
 }
 
@@ -145,7 +147,10 @@ export const local: Transport = {
   worktreeLeft(q) {
     const wt = worktreePath(q.repo.path, q.ticket);
     if (!isDir(wt)) return { exists: false, dirty: [], pushed: true };
-    return { exists: true, dirty: worktreeDirty(wt, q.toolWritten), pushed: branchPushed(wt, q.repo.base) };
+    const d = worktreeDirty(wt, q.toolWritten);
+    // pushed false too, so a primary that predates `unreadable` still refuses to stop it.
+    if (d.unreadable) return { exists: true, dirty: [], unreadable: d.unreadable, pushed: false };
+    return { exists: true, dirty: d.paths, pushed: branchPushed(wt, q.repo.base) };
   },
   removeWorktree(q) {
     const r = git(q.repo.path, "worktree", "remove", worktreePath(q.repo.path, q.ticket));
