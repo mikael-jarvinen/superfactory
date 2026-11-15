@@ -214,12 +214,17 @@ export function transports(ws: Workspace): Transport[] {
 const instant = (x: unknown) => (typeof x === "number" ? x : typeof x === "string" ? Date.parse(x) : NaN);
 const stamp = (s: Session) => [s.updatedAt, s.startedAt, s.createdAt].map(instant).find(Number.isFinite) ?? -Infinity;
 
+// Newest first. The listing's order is not documented, so "newest" is the latest timestamp it carries.
+const byNewest = (hits: Session[]) => [...hits].sort((a, b) => (stamp(a) < stamp(b) ? 1 : stamp(a) > stamp(b) ? -1 : 0));
+
 // An agent's session among several by its name: the newest live one, else the newest.
-// The listing's order is not documented, so "newest" is the latest timestamp it carries.
 export function pick(t: Transport, hits: Session[]): Session | null {
-  const newest = [...hits].sort((a, b) => (stamp(a) < stamp(b) ? 1 : stamp(a) > stamp(b) ? -1 : 0));
+  const newest = byNewest(hits);
   return newest.find((s) => t.alive(s)) ?? newest[0] ?? null;
 }
+
+// The newest of them, live or not: the one a wake respawns.
+export const newest = (hits: Session[]): Session | null => byNewest(hits)[0] ?? null;
 
 export const isAgentSession = (name: string) => (s: Session) => s.kind === "background" && s.name === name;
 

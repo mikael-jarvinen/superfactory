@@ -12,10 +12,12 @@ import { agentSessions, transportFor, transports } from "./transport.js";
 import type { Agent } from "./config.js";
 import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
 import { bringUpLead } from "./lead-up.js";
+import { wake, wokeLine } from "./wake.js";
 import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
 import { hook as noSideChannelsHook } from "./hooks/no-side-channels.js";
 import { hook as statusHook } from "./hooks/status.js";
+import { hook as wakeHook } from "./hooks/wake.js";
 import { idleWork, idleWorkFor } from "./idle.js";
 import { comment } from "./gate/comment.js";
 import { deltaRange } from "./gate/delta.js";
@@ -59,10 +61,14 @@ usage: factory [--workspace <dir>] <command> [options]
   dispatch <agent> <KEY> [--repo <repo>] [--prompt-file <f>] [--force]
                                   fresh building session for one item in a per-item worktree.
                                   Dispatch from queued, building or fixing; anywhere else needs
-                                  --force. A live session already on KEY keeps its context.
+                                  --force. A live session already on KEY keeps its context, and
+                                  so does one that is off, woken unless --force.
                                   For a designer: a design session in the designers' cwd, no
                                   worktree, from queued (records designing) or design-review
                                   (another round).
+  wake <agent>                    bring back an agent whose session is off (stopped idle, or retired
+                                  by Claude's daemon): respawn its newest session, same conversation,
+                                  and wait until it is listed live. Exit 1 when it does not come back.
   stop <agent> [--force] [--remove-worktree]
                                   stop a teammate; refuses on uncommitted or unpushed work. Keeps
                                   the worktree unless --remove-worktree.
@@ -70,7 +76,8 @@ usage: factory [--workspace <dir>] <command> [options]
                                   a fresh reviewer for one review: the first free one
   assistant [name] [--prompt-file <f>] [--force]
                                   start a lead assistant (vega or cruz; first free if unnamed) to
-                                  take the lead's non-code work, then brief it by message
+                                  take the lead's non-code work, then brief it by message. A named
+                                  one that is off is woken on its conversation; --force starts fresh
   state <KEY>                     show one record
   state <KEY> --title "<words>"   what it is about, for the board. No transition.
   state <KEY> <new-state> [--agent A] [--stack S] [--evidence E] [--note N] [--title T]
@@ -262,7 +269,15 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   // A session whose item is in review holds the builder no longer: a new item stops it here, with
   // the checks `factory stop` makes.
   const t = transportFor(ws, ag);
-  const s = findSession(t, name);
+  const onItem = (x: Session) => basename((x.cwd ?? "").replace(/\/+$/, "")) === ticket;
+  let s = findSession(t, name);
+  // A session on KEY that was stopped idle comes back for the fix round, conversation and all.
+  if (!t.alive(s) && !force) {
+    const w = wake(ws, ag, { t, match: onItem });
+    const said = wokeLine(name, w);
+    if (said) console.log(w.is === "woke" ? said : `  warning: ${said}; starting a fresh session`);
+    if (w.is === "woke") s = w.s;
+  }
   if (t.alive(s)) {
     const on = basename((s.cwd ?? "").replace(/\/+$/, ""));
     if (on === ticket && !force) {
@@ -350,7 +365,14 @@ function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boole
   const ready = () => onDemand(ws, ag, () => (promptFile ? readFileSync(promptFile, "utf8") : designerPrompt(ws, ag, ticket)));
   let go: (() => Session) | undefined;
   const t = transportFor(ws, ag);
-  const s = findSession(t, name);
+  let s = findSession(t, name);
+  // The session that drew the last round, stopped idle since, is woken for this one.
+  if (!t.alive(s) && !force && rec?.agent === name && rec.session) {
+    const w = wake(ws, ag, { t, match: (x) => x.id === rec.session });
+    const said = wokeLine(name, w);
+    if (said) console.log(w.is === "woke" ? said : `  warning: ${said}; starting a fresh session`);
+    if (w.is === "woke") s = w.s;
+  }
   if (t.alive(s)) {
     const on = allRecs(ws).find((r) => r.agent === name && r.session === s.id);
     if (on?.ticket === ticket && !force) {
@@ -382,6 +404,27 @@ function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boole
 }
 
 const via = (ws: Workspace, name: string) => transportFor(ws, agentOrDie(ws, name));
+
+function cmdWake(ws: Workspace, argv: string[]): number {
+  const { p } = args("wake", argv, {}, [1, 1]);
+  const name = p[0] as string;
+  const w = wake(ws, agentOrDie(ws, name));
+  switch (w.is) {
+    case "live":
+      console.log(`${name} is already live (${w.s.id})`);
+      return 0;
+    case "woke":
+      console.log(`${name} woke: ${w.from} respawned, live as ${w.s.id}, same conversation`);
+      return 0;
+    case "none":
+      console.error(`${name} has no session to wake; start it the factory way`);
+      return 1;
+    case "failed":
+    case "unknown":
+      console.error(`${name} did not wake: ${w.why}`);
+      return 1;
+  }
+}
 
 function cmdStop(ws: Workspace, argv: string[]) {
   const { v, p } = args("stop", argv, { force: { type: "boolean" }, "remove-worktree": { type: "boolean" }, "keep-worktree": { type: "boolean" } }, [1, 1]);
@@ -457,6 +500,17 @@ function cmdAssistant(ws: Workspace, argv: string[]) {
     names = [want];
   }
   const promptFile = str(v["prompt-file"]);
+  // A named assistant that was stopped idle is mid-conversation with the lead: wake it rather than
+  // start it fresh. --force is the fresh start.
+  if (want && !v.force) {
+    const w = wake(ws, agentOrDie(ws, want));
+    const said = wokeLine(want, w);
+    if (w.is === "woke") {
+      console.log(`${said}; send it the task by message, or pass --force for a fresh session.`);
+      return;
+    }
+    if (said) console.log(`  warning: ${said}; starting a fresh session`);
+  }
   const ready = (name: string) => onDemand(ws, agentOrDie(ws, name), () => (promptFile ? readFileSync(promptFile, "utf8") : assistantPrompt(ws)));
   const busy: string[] = [];
   for (const name of names) {
@@ -727,6 +781,7 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void>
   "sessions": cmdSessions,
   "dispatch": cmdDispatch,
   "stop": cmdStop,
+  "wake": cmdWake,
   "review": cmdReview,
   "assistant": cmdAssistant,
   "state": cmdState,
@@ -754,6 +809,7 @@ const HOOK_FNS: Record<HookName, (argv: string[], input: string, workspace?: str
   "status": statusHook,
   "no-dialogs": noDialogsHook,
   "no-side-channels": noSideChannelsHook,
+  "wake": wakeHook,
 };
 
 // Runs before the workspace is opened: everything a hook needs is on its command line, and a

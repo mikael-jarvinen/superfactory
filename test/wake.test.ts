@@ -1,0 +1,170 @@
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { after, test } from "node:test";
+import { agentOrDie } from "../src/fleet.js";
+import { settingsFile } from "../src/launch.js";
+import { recipient } from "../src/hooks/wake.js";
+import { openWorkspace } from "../src/workspace.js";
+import { factory, TOML, tempWorkspace } from "./helpers.js";
+
+const ASSISTANT_TOML = TOML.replace("[tracker]", `[roles.assistant]
+cwd = "assistants"
+model = "opus"
+permission_mode = "auto"
+settings = "readonly"
+
+[[agents]]
+name = "vega"
+role = "assistant"
+
+[tracker]`);
+
+// A claude whose listings come from files: live.json for `agents --json`, all.json for --all. A
+// respawn of an id in respawnable copies after.json over live.json, as the session coming back; a
+// start logs itself. Every call is a line in calls.
+function fakeFleet(toml = TOML) {
+  const ws = tempWorkspace(toml);
+  after(() => rmSync(ws, { recursive: true, force: true }));
+  writeFileSync(join(ws, "bin", "claude"), `#!/bin/sh
+D=${ws}
+echo "$*" >> $D/calls
+case "$1" in
+  agents) if [ "$3" = --all ]; then cat $D/all.json 2>/dev/null || echo '[]'; else cat $D/live.json 2>/dev/null || echo '[]'; fi ;;
+  respawn) [ -f $D/respawn-fail ] && { cat $D/respawn-fail >&2; exit 1; }
+    [ -f $D/after.json ] && cp $D/after.json $D/live.json; echo "respawned $2" ;;
+  --bg) n=; prev=; for a in "$@"; do [ "$prev" = --name ] && n=$a; prev=$a; done
+    printf '[{"id":"new1","name":"%s","kind":"background","state":"idle"}]' "$n" > $D/live.json
+    echo "backgrounded · new1 · $n" ;;
+  *) exit 1 ;;
+esac
+`);
+  const put = (f: string, rows: unknown[]) => writeFileSync(join(ws, f), JSON.stringify(rows));
+  const calls = () => (existsSync(join(ws, "calls")) ? readFileSync(join(ws, "calls"), "utf8").trim().split("\n") : []);
+  return { ws, put, calls };
+}
+
+const sess = (id: string, name: string, extra: Record<string, unknown> = {}) => ({ id, name, kind: "background", state: "done", status: "idle", ...extra });
+const hookIn = (to: string) => JSON.stringify({ tool_name: "SendMessage", tool_input: { to, message: "hi" } });
+const wakeHook = (ws: string, to: string, extra: string[] = []) =>
+  factory(undefined, ["--workspace", ws, "hook", "wake", ...extra], { env: { CLAUDE_BIN: join(ws, "bin", "claude") }, input: hookIn(to) });
+
+test("the recipient is the name without the listing's [ref]", () => {
+  assert.equal(recipient("bea"), "bea");
+  assert.equal(recipient("bea [3fa9c1]"), "bea");
+  assert.equal(recipient("  "), null);
+  assert.equal(recipient(undefined), null);
+});
+
+test("the wake hook respawns the newest session of an agent that is off, then lets the send through", () => {
+  const { ws, put, calls } = fakeFleet();
+  put("all.json", [sess("old1", "bea", { startedAt: 1000 }), sess("new2", "bea", { startedAt: 2000 }), sess("x9", "cal", { startedAt: 3000 })]);
+  put("after.json", [sess("new2", "bea", { startedAt: 2000 })]);
+  const r = wakeHook(ws, "bea [aa11]");
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn new2"]);
+});
+
+test("the wake hook leaves a live recipient, and anyone not in the fleet, alone", () => {
+  const { ws, put, calls } = fakeFleet();
+  put("live.json", [sess("b1", "bea")]);
+  put("all.json", [sess("b1", "bea"), sess("o1", "otto")]);
+  assert.equal(wakeHook(ws, "bea").status, 0);
+  assert.equal(wakeHook(ws, "otto").status, 0);
+  assert.equal(wakeHook(ws, "main").status, 0);
+  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), []);
+  assert.ok(!calls().some((c) => c.includes("--all")), "a live recipient costs one listing, not the stopped ones too");
+});
+
+test("the wake hook blocks the send, saying why, when the recipient does not come back", () => {
+  const { ws, put } = fakeFleet();
+  let r = wakeHook(ws, "bea");
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /bea is off and has no session to wake/);
+
+  put("all.json", [sess("b1", "bea")]);
+  writeFileSync(join(ws, "respawn-fail"), "no such session");
+  r = wakeHook(ws, "bea");
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /bea is off and did not wake: respawn of b1 failed: no such session/);
+
+  rmSync(join(ws, "respawn-fail"));
+  r = wakeHook(ws, "bea", ["--wait-seconds", "1"]);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /bea is off and did not wake: respawned b1, and it was not listed live within 1 s/);
+});
+
+test("the wake hook lets the send through when the workspace does not load or the event is not JSON", () => {
+  const { ws } = fakeFleet();
+  assert.equal(factory(undefined, ["--workspace", join(ws, "nowhere"), "hook", "wake"], { input: hookIn("bea") }).status, 0);
+  assert.equal(factory(undefined, ["--workspace", ws, "hook", "wake"], { input: "not json" }).status, 0);
+});
+
+test("factory wake: already live, woken, or not", () => {
+  const { ws, put } = fakeFleet();
+  put("all.json", [sess("b1", "bea")]);
+  put("after.json", [sess("b1", "bea")]);
+  let r = factory(ws, ["wake", "bea"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /bea woke: b1 respawned, live as b1, same conversation/);
+  r = factory(ws, ["wake", "bea"]);
+  assert.match(r.stdout, /bea is already live \(b1\)/);
+  r = factory(ws, ["wake", "cal"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /cal has no session to wake/);
+});
+
+test("every role's settings wake the recipient before SendMessage, inside the hook's timeout", () => {
+  const dir = tempWorkspace(ASSISTANT_TOML);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const ws = openWorkspace(dir, {});
+  for (const name of ["ada", "bea", "rae", "vega"]) {
+    const s = JSON.parse(readFileSync(settingsFile(ws, agentOrDie(ws, name)), "utf8"));
+    const wakes = (s.hooks.PreToolUse as { matcher?: string; hooks: { command: string; timeout: number }[] }[]).filter((h) => h.matcher === "SendMessage");
+    assert.equal(wakes.length, 1, name);
+    assert.match(wakes[0]!.hooks[0]!.command, / --workspace \S+ hook wake$/, name);
+    assert.equal(wakes[0]!.hooks[0]!.timeout, 90, name);
+  }
+});
+
+test("a fix round on an item whose session was stopped idle wakes that session instead of starting one", () => {
+  const { ws, put, calls } = fakeFleet();
+  for (const args of [["queued", "--stack", "app"], ["building", "--agent", "bea"], ["pr-open", "--pr", "acme/web#1", "--head", "abc1234abc1234"],
+    ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "2 high"]]) {
+    const st = factory(ws, ["state", "TEST-3", ...args]);
+    assert.equal(st.status, 0, st.stderr);
+  }
+  const off = sess("b7", "bea", { cwd: join(ws, "repos", "web", ".claude", "worktrees", "TEST-3") });
+  put("all.json", [off]);
+  put("after.json", [off]);
+  const r = factory(ws, ["dispatch", "bea", "TEST-3"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /bea was off; woke b7 \(its conversation kept\)/);
+  assert.match(r.stdout, /bea is still on TEST-3 \(b7\), so it keeps its context/);
+  assert.ok(!calls().some((c) => c.startsWith("--bg")), "no new session");
+});
+
+test("a stopped session on another item is not woken for a dispatch, nor any with --force", () => {
+  const { ws, put, calls } = fakeFleet();
+  put("all.json", [sess("b7", "bea", { cwd: join(ws, "repos", "web", ".claude", "worktrees", "TEST-2") })]);
+  factory(ws, ["dispatch", "bea", "TEST-3"]);
+  put("all.json", [sess("b8", "bea", { cwd: join(ws, "repos", "web", ".claude", "worktrees", "TEST-3") })]);
+  factory(ws, ["dispatch", "bea", "TEST-3", "--force"]);
+  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), []);
+});
+
+test("a named assistant that is off is woken on its conversation; --force starts it fresh", () => {
+  const { ws, put, calls } = fakeFleet(ASSISTANT_TOML);
+  mkdirSync(join(ws, "assistants"));
+  put("all.json", [sess("v1", "vega")]);
+  put("after.json", [sess("v1", "vega")]);
+  let r = factory(ws, ["assistant", "vega"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /vega was off; woke v1 \(its conversation kept\); send it the task by message/);
+  assert.ok(!calls().some((c) => c.startsWith("--bg")));
+  rmSync(join(ws, "live.json"));
+  r = factory(ws, ["assistant", "vega", "--force"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn v1"]);
+  assert.ok(calls().some((c) => c.startsWith("--bg")), "--force starts a fresh one");
+});

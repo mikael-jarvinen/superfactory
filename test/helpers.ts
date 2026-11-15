@@ -142,13 +142,13 @@ export interface Ran {
   stderr: string;
 }
 
-export function factory(ws: string | undefined, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv; cli?: string } = {}): Ran {
+export function factory(ws: string | undefined, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv; cli?: string; input?: string } = {}): Ran {
   const env: NodeJS.ProcessEnv = { ...process.env, SF_NOTIFY: "0", ...opts.env };
   delete env.FACTORY_WORKSPACE;
   if (opts.env?.FACTORY_WORKSPACE) env.FACTORY_WORKSPACE = opts.env.FACTORY_WORKSPACE;
   if (ws) env.CLAUDE_BIN = join(ws, "bin", "claude");
   const r = spawnSync(process.execPath, [opts.cli ?? CLI, ...(ws ? ["--workspace", ws] : []), ...args], {
-    encoding: "utf8", cwd: opts.cwd ?? tmpdir(), env,
+    encoding: "utf8", cwd: opts.cwd ?? tmpdir(), env, ...(opts.input !== undefined ? { input: opts.input } : {}),
   });
   return { status: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
 }
