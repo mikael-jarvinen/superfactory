@@ -6,7 +6,7 @@
 // up to 10 s more to be addressable from another machine, hence WAKE_SETTLE_S.
 import type { Agent } from "./config.js";
 import { findSession, type Session, waitForName } from "./fleet.js";
-import { ask, CHILD_SLACK_MS, Unreachable } from "./remote.js";
+import { ask, Unreachable } from "./remote.js";
 import { isAgentSession, LISTING_TIMEOUT_MS, newest, type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
 
@@ -33,14 +33,9 @@ export interface WakeOptions {
   deadline?: number;
 }
 
-// How long past its own timeout a call may run: a remote one's child is killed CHILD_SLACK_MS later.
-const slackMs = (t: Transport) => (t.where === "local" ? 0 : CHILD_SLACK_MS);
 
 export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   const t = o.t ?? transportFor(ws, agent);
-  const slack = slackMs(t);
-  // the longest one listing may take
-  const budget = LISTING_TIMEOUT_MS + slack;
   const left = () => (o.deadline ?? Infinity) - Date.now();
   const late = (step: string): Woken => ({ is: "failed", why: `out of time before ${step}` });
   // A listing that fails, a local one that timed out included, leaves the recipient unknown.
@@ -54,19 +49,19 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   const live = listed(() => findSession(t, agent.name));
   if (live instanceof Unreachable) return { is: "unknown", why: live.brief };
   if (t.alive(live)) return { is: "live", s: live };
-  if (left() < budget) return late("the stopped sessions were listed");
+  if (left() < LISTING_TIMEOUT_MS) return late("the stopped sessions were listed");
   const all = listed(() => t.sessions(true));
   if (all instanceof Unreachable) return { is: "unknown", why: all.brief };
   // Not findSession: it prefers a row alive() passes, and locally that is a host-wide check, so a
   // stale "done" row would beat the newest stopped session.
   const old = newest(all.filter(isAgentSession(agent.name)));
   if (!old?.id || (o.match && !o.match(old))) return { is: "none" };
-  const respawnMs = left() - budget - slack;
+  const respawnMs = left() - LISTING_TIMEOUT_MS;
   if (respawnMs < 1000) return late(`respawning ${old.id}`);
   const r = t.respawn(agent.name, old.id, Number.isFinite(respawnMs) ? respawnMs : undefined);
   if (!r.ok) return { is: "failed", why: `respawn of ${old.id} failed: ${r.why || "no reason given"}` };
   const waitS = o.waitS ?? 60;
-  const lastPollAt = (o.deadline ?? Infinity) - budget;
+  const lastPollAt = (o.deadline ?? Infinity) - LISTING_TIMEOUT_MS;
   const s = waitForName(t, agent.name, waitS, o.pollMs ?? 1000, lastPollAt);
   if (s) return { is: "woke", s, from: old.id };
   return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };

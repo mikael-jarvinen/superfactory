@@ -169,7 +169,7 @@ export function remote(h: Host): Transport {
   return {
     where: h.name,
     sessions(includeDone = false) {
-      return listed(h, callSync(h, "GET", `/agents${includeDone ? "?all=1" : ""}`, undefined, LISTING_TIMEOUT_MS));
+      return listed(h, callSync(h, "GET", `/agents${includeDone ? "?all=1" : ""}`, undefined, LISTING_TIMEOUT_MS - CHILD_SLACK_MS));
     },
     sessionsAsync() {
       return call(h, "GET", "/agents", LISTING_TIMEOUT_MS).then((r) => listed(h, r)).catch(unreachable);
@@ -182,8 +182,10 @@ export function remote(h: Host): Transport {
       const r = callSync(h, "POST", agentPath(req.agent.name, "start"), { cwd: req.cwd, prompt: req.prompt, appendix: req.appendix, phase: req.phase ?? null }, 60_000);
       return typeof r.body.id === "string" ? r.body.id : "?";
     },
-    respawn(name, id, timeoutMs = 60_000) {
-      const r = ask(() => callSync(h, "POST", agentPath(name, "respawn"), { id }, Math.min(60_000, timeoutMs)));
+    // Inside timeoutMs, its child's slack included.
+    respawn(name, id, timeoutMs) {
+      const ms = timeoutMs === undefined ? 60_000 : Math.max(1_000, Math.min(60_000, timeoutMs - CHILD_SLACK_MS));
+      const r = ask(() => callSync(h, "POST", agentPath(name, "respawn"), { id }, ms));
       if (r instanceof Unreachable) return { ok: false, said: "", why: r.message };
       return { ok: r.body.ok === true, said: String(r.body.said ?? ""), why: String(r.body.why ?? r.body.said ?? "") };
     },

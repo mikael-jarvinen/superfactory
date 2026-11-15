@@ -246,7 +246,7 @@ test("a local listing that hangs is cut off and the send let through, as for a h
   assert.ok(Date.now() - t0 < 30_000, `the hung listing took ${Date.now() - t0} ms`);
 });
 
-test("a remote respawn leaves room for its child's slack and one listing after it", () => {
+test("a respawn leaves room for one listing after it", () => {
   const dir = tempWorkspace(HOSTED_TOML);
   after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, "token"), "t".repeat(40));
@@ -259,7 +259,7 @@ test("a remote respawn leaves room for its child's slack and one listing after i
     respawn: (_n: string, _id: string, ms?: number) => ((given = ms), { ok: false, said: "", why: "stop here" }),
   } as unknown as Transport;
   wake(ws, agentOrDie(ws, "rae"), { t: far, deadline: Date.now() + 60_000 });
-  assert.ok(given !== undefined && given <= 30_000 && given > 29_000, `respawn given ${given} ms of 60 000: 25 000 for a listing and 5 000 of child slack come off`);
+  assert.ok(given !== undefined && given <= 40_000 && given > 39_000, `respawn given ${given} ms of 60 000: 20 000 for a listing comes off`);
 });
 
 // What a failed SendMessage hands a PostToolUse hook, recorded from a real one.

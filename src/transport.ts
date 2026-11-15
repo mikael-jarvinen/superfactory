@@ -61,6 +61,7 @@ export interface Transport {
   // The launch id claude printed, or "?".
   start(req: StartRequest): string;
   // said: claude's stdout. why: its stderr (else stdout), read when the session does not come back.
+  // A transport keeps a sessions() and a respawn(timeoutMs) call inside those bounds.
   respawn(name: string, id: string, timeoutMs?: number): { ok: boolean; said: string; why: string };
   stop(name: string, id: string, remove: boolean): void;
   // The worktree for the item, made or reused (worktree.ts's ensureWorktree); throws when it cannot.
