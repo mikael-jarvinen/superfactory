@@ -208,3 +208,8 @@ test("roster: every role but the builder has a roster of its own, and builders s
   assert.deepEqual(of("builder", undefined, ["api"]), { key: "repos:api", title: "Api" });
   assert.deepEqual(of("builder", undefined, ["api", "web"]), { key: "repos:api,web", title: "Builders" });
 });
+
+test("a repo: appendix item is a builder's only: no other role has a checkout to read it from", () => {
+  assert.deepEqual(problems(TOML.replace('name = "rae"\nrole = "reviewer"', 'name = "rae"\nrole = "reviewer"\nappendix = ["repo:AGENTS.md"]')),
+    ["agents[3].appendix: repo:AGENTS.md is read from the agent's checkout, and only a builder has one"]);
+});

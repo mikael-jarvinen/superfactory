@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import type { Session } from "../src/fleet.js";
@@ -9,7 +9,7 @@ import { bringUpLead, resumePrompt } from "../src/lead-up.js";
 import type { StartRequest, Transport } from "../src/transport.js";
 import { FactoryError } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
-import { tempWorkspace } from "./helpers.js";
+import { TOML, tempWorkspace } from "./helpers.js";
 
 const dir = tempWorkspace();
 mkdirSync(join(dir, "lead"));
@@ -19,7 +19,7 @@ const ld = lead(ws);
 
 // A transport whose listing is `sessions`; whatever it starts or respawns comes up alive.
 function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boolean; stopBug?: boolean } = {}) {
-  const started: { cwd: string; prompt: string; args: string[] }[] = [];
+  const started: { cwd: string; prompt: string; args: string[]; appendix: string | null }[] = [];
   const respawned: string[] = [];
   const removed: string[] = [];
   const t: Transport = {
@@ -29,7 +29,7 @@ function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boo
     alive: (s): s is Session => !!s && s.alive === true,
     start(req: StartRequest) {
       if (opts.startFails) throw new Error("claude --bg failed: no such session");
-      started.push({ cwd: req.cwd, prompt: req.prompt, args: req.args(null) });
+      started.push({ cwd: req.cwd, prompt: req.prompt, args: req.args(null), appendix: req.appendix });
       sessions.push({ id: "new1", name: ld.name, kind: "background", alive: true });
       return "new1";
     },
@@ -114,4 +114,15 @@ test("a running lead is left alone, and --fresh starts a new one with the lead p
   assert.deepEqual(f.respawned, []);
   assert.equal(f.started[0]!.prompt, leadPrompt(ws));
   assert.ok(!f.started[0]!.args.includes("--resume"));
+});
+
+test("a lead started fresh gets its appendix", () => {
+  const d = tempWorkspace(TOML.replace('name = "ada"\nrole = "lead"', 'name = "ada"\nrole = "lead"\nappendix = ["briefs/ada.md"]'));
+  after(() => rmSync(d, { recursive: true, force: true }));
+  mkdirSync(join(d, "briefs"));
+  writeFileSync(join(d, "briefs", "ada.md"), "ada's brief\n");
+  const w = openWorkspace(d, {});
+  const f = fake([]);
+  bringUpLead(w, lead(w), f.t, true, () => {}, 1);
+  assert.equal(f.started[0]!.appendix, "<!-- briefs/ada.md -->\nada's brief\n");
 });

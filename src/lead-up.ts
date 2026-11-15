@@ -9,7 +9,7 @@
 import type { Agent } from "./config.js";
 import { findSession, type Session, waitForName } from "./fleet.js";
 import { armText } from "./hooks/status.js";
-import { commonFlags, GIT_HTTPS_ENV, launch, leadPrompt, roleOf } from "./launch.js";
+import { commonFlags, GIT_HTTPS_ENV, launch, leadPrompt, roleAppendix, roleOf } from "./launch.js";
 import type { Transport } from "./transport.js";
 import { FactoryError } from "./util.js";
 import type { Workspace } from "./workspace.js";
@@ -37,7 +37,7 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
     out(`respawn of ${sid} did not come back (${r.why}); starting fresh`);
   }
   const cwd = roleOf(ws, ld).cwd as string;
-  const started = launch(ws, ld, cwd, leadPrompt(ws), null, undefined, t);
+  const started = launch(ws, ld, cwd, leadPrompt(ws), roleAppendix(ws, ld), undefined, t);
   out(`${ld.name} started (${started.id}) in ${cwd}${ld.remoteControl ? " with Remote Control" : ""}`);
 }
 

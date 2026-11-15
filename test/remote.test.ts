@@ -310,9 +310,8 @@ test("a host agent's cwd is the host's: launching it makes nothing here, and the
   assert.deepEqual(lines, [`NOT CHECKED ${there}/CLAUDE.md, instructions for rae: it is on host far, and the daemon there does not say`]);
 });
 
-// Only dispatch passed the appendix once, so a reviewer, an assistant or a designer started on
-// demand came up without its brief and looked fine. Each is rae here, on a host, so the brief is
-// the start request's body as the daemon gets it.
+// rae is on a host, so the brief is the start request's body. rae is already running there, so each
+// command stops it first; with the brief missing it refuses before that, and rae is left running.
 test("a reviewer, an assistant and a designer started on demand each get their appendix", async () => {
   const roles = `
 [roles.assistant]
@@ -337,11 +336,16 @@ role = "${role}"`).replace("[tracker]", roles);
     const d = await fakeDaemon(dir, sha(join(dir, "daemon.toml"), join(dir, "workspace.toml")));
     after(() => d.proc.kill());
     writeFileSync(join(dir, "factory.toml"), as(d.url, role));
+    if (role === "designer") factory(dir, ["state", "TEST-1", "queued"]);
+    const no = factory(dir, [...argv]);
+    assert.notEqual(no.status, 0, `${role}: no brief, no start`);
+    assert.match(no.stderr, /appendix file .*rae\.md is missing or empty/, role);
+    assert.deepEqual(d.requests().filter((q) => q.method === "POST").map((q) => q.url), [], `${role}: nothing stopped or started`);
     mkdirSync(join(dir, "briefs"));
     writeFileSync(join(dir, "briefs", "rae.md"), "rae's brief\n");
-    if (role === "designer") factory(dir, ["state", "TEST-1", "queued"]);
     const r = factory(dir, [...argv]);
     assert.equal(r.status, 0, `${role}: ${r.stderr}`);
+    assert.deepEqual(d.requests().filter((q) => q.method === "POST").map((q) => q.url), ["/agents/rae/stop", "/agents/rae/start"], `${role}: the live rae is replaced`);
     const start = d.requests().find((q) => q.url === "/agents/rae/start");
     assert.equal(start?.body?.appendix, "<!-- briefs/rae.md -->\nrae's brief\n", `${role}: the start carries the brief`);
   }

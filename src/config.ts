@@ -447,6 +447,9 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     }
     const appendix = r.strs("appendix") ?? [];
     const resolved = appendix.map((a) => (a.startsWith("repo:") ? a : (path(r, "appendix", a) ?? a)));
+    if (role && role !== "builder")
+      for (const a of appendix.filter((x) => x.startsWith("repo:")))
+        r.bad("appendix", `${a} is read from the agent's checkout, and only a builder has one`);
     const addDirs = repoKeys(r, "add_dirs", r.strs("add_dirs"));
     const rawCwd = r.str("cwd");
     const host = r.str("host");

@@ -10,7 +10,7 @@ import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owe
 import { Unreachable } from "./remote.js";
 import { agentSessions, transportFor, transports } from "./transport.js";
 import type { Agent } from "./config.js";
-import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleOf } from "./launch.js";
+import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
 import { bringUpLead } from "./lead-up.js";
 import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
@@ -316,10 +316,12 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   console.log(`  next: SendMessage to ${name}: what to build or fix, the scope, and notify_when_idle`);
 }
 
-// A session started for the role's own cwd, not a worktree: a designer, a reviewer or an assistant.
-// Its appendix goes with it, as dispatch's does, or a brief kept there never reaches the session.
-function launchOnDemand(ws: Workspace, ag: Agent, prompt: string) {
-  return launch(ws, ag, roleOf(ws, ag).cwd as string, prompt, buildAppendix(ws, ag, undefined)?.text ?? null);
+// Reads the prompt and the appendix, and refuses on either, before anything is stopped; the launch
+// it returns starts the session in the role's cwd with both.
+function onDemand(ws: Workspace, ag: Agent, prompt: () => string): () => Session {
+  const text = prompt();
+  const appendix = roleAppendix(ws, ag);
+  return () => launch(ws, ag, roleOf(ws, ag).cwd as string, text, appendix);
 }
 
 // A designer reads every repo and writes none, so it has no worktree or stack: one session in the
@@ -338,6 +340,8 @@ function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boole
   const human = ws.config.human.name;
   const d = rec?.design;
   const links = d && (d.canvas || d.slides) ? `  the last round: canvas ${d.canvas ?? "-"} slides ${d.slides ?? "-"}` : "";
+  const ready = () => onDemand(ws, ag, () => (promptFile ? readFileSync(promptFile, "utf8") : designerPrompt(ws, ag, ticket)));
+  let go: (() => Session) | undefined;
   const t = transportFor(ws, ag);
   const s = findSession(t, name);
   if (t.alive(s)) {
@@ -351,11 +355,11 @@ function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boole
     }
     if (on?.state === "designing" && !force)
       throw new FactoryError(`${name} is still designing ${on.ticket} (${s.id}). Use another designer, or --force.`);
+    go = ready();
     stopSession(t, s);
     console.log(`${name} stopped (${s.id})${on ? `: ${on.ticket} is ${on.state}, so ${name} is free` : ""}`);
   }
-  const prompt = promptFile ? readFileSync(promptFile, "utf8") : designerPrompt(ws, ag, ticket);
-  const started = launchOnDemand(ws, ag, prompt);
+  const started = (go ?? ready())();
   if (cur === "designing") {
     const r = rec as Rec;
     r.agent = name;
@@ -408,11 +412,7 @@ function cmdReview(ws: Workspace, argv: string[]) {
     names = [want];
   }
   const promptFile = str(v["prompt-file"]);
-  const start = (name: string) => {
-    const ag = agentOrDie(ws, name);
-    const prompt = promptFile ? readFileSync(promptFile, "utf8") : reviewerPrompt(ws);
-    return launchOnDemand(ws, ag, prompt);
-  };
+  const ready = (name: string) => onDemand(ws, agentOrDie(ws, name), () => (promptFile ? readFileSync(promptFile, "utf8") : reviewerPrompt(ws)));
   const busy: string[] = [];
   for (const name of names) {
     const t = via(ws, name);
@@ -421,14 +421,15 @@ function cmdReview(ws: Workspace, argv: string[]) {
       busy.push(`${name} (${s.id})`);
       continue;
     }
-    console.log(`${name} started (${start(name).id})`);
+    console.log(`${name} started (${ready(name)().id})`);
     return;
   }
   if (v.force && busy.length) {
     const name = names[0] as string;
+    const go = ready(name);
     const t = via(ws, name);
     stopSession(t, findSession(t, name));
-    console.log(`${name} restarted (${start(name).id})`);
+    console.log(`${name} restarted (${go().id})`);
     return;
   }
   throw new FactoryError(`every reviewer is busy: ${busy.join(", ")}. Stop one, or pass --force to restart the first.`);
@@ -449,11 +450,7 @@ function cmdAssistant(ws: Workspace, argv: string[]) {
     names = [want];
   }
   const promptFile = str(v["prompt-file"]);
-  const start = (name: string) => {
-    const ag = agentOrDie(ws, name);
-    const prompt = promptFile ? readFileSync(promptFile, "utf8") : assistantPrompt(ws);
-    return launchOnDemand(ws, ag, prompt);
-  };
+  const ready = (name: string) => onDemand(ws, agentOrDie(ws, name), () => (promptFile ? readFileSync(promptFile, "utf8") : assistantPrompt(ws)));
   const busy: string[] = [];
   for (const name of names) {
     const t = via(ws, name);
@@ -462,14 +459,15 @@ function cmdAssistant(ws: Workspace, argv: string[]) {
       busy.push(`${name} (${s.id})`);
       continue;
     }
-    console.log(`${name} started (${start(name).id})`);
+    console.log(`${name} started (${ready(name)().id})`);
     return;
   }
   if (v.force && busy.length) {
     const name = names[0] as string;
+    const go = ready(name);
     const t = via(ws, name);
     stopSession(t, findSession(t, name));
-    console.log(`${name} restarted (${start(name).id})`);
+    console.log(`${name} restarted (${go().id})`);
     return;
   }
   // A named assistant already running is not an error: the lead just messages the live session.
