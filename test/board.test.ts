@@ -192,16 +192,17 @@ async function teamsOf(toml: string) {
 
 test("teams: a configured group titles its roster and keeps the role's place", { skip: noInboxLock }, async () => {
   const snap = { teams: await teamsOf(GROUPED) };
-  // Within one place, rosters keep the order of their first member in the config.
+  // Within one place, rosters keep the order of their first member in the config. Only the ungrouped
+  // assistants are staff, beside the lead; a group of assistants sits in the row with the builders.
   type Group = { key: string; title: string; scope: string; staff: boolean; members: { name: string }[] };
   assert.deepEqual(snap.teams.map((g: Group) => [g.key, g.title, g.staff, g.members.map((m) => m.name).join(" ")]), [
     ["lead", "Lead", false, "ada"],
-    ["group:Servers", "Servers", true, "otto"],
     ["assistants", "Assistants", true, "nap"],
     ["group:Product", "Product", false, "bea cal"],
+    ["group:Servers", "Servers", false, "otto"],
     ["reviewers", "Reviewers", false, "rae"],
   ]);
-  assert.equal(snap.teams[3].scope, "web, api", "bea's stack, and cal's api already in it");
+  assert.equal(snap.teams[2].scope, "web, api", "bea's stack, and cal's api already in it");
 
   // A member's repo that the first lacks is in the scope too, after the first's.
   const docs = GROUPED.replace("[stacks.app]", '[repos.docs]\nremote = "acme/docs"\n\n[stacks.app]')
