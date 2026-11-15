@@ -188,7 +188,6 @@ export function transports(ws: Workspace): Transport[] {
   return [...m.values()];
 }
 
-// A number is epoch milliseconds; Date.parse would read it as text and give NaN.
 const instant = (x: unknown) => (typeof x === "number" ? x : typeof x === "string" ? Date.parse(x) : NaN);
 const stamp = (s: Session) => [s.updatedAt, s.startedAt, s.createdAt].map(instant).find(Number.isFinite) ?? -Infinity;
 
