@@ -4,7 +4,7 @@
 // unless the workspace has `[tracker] kind = "local"`.
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
-import { type Actor, checkMove } from "./guard.js";
+import type { Actor } from "./guard.js";
 import * as T from "./store.js";
 import * as W from "../wiki/store.js";
 
@@ -61,7 +61,7 @@ function ticketsPost(ws: Workspace, rest: string, b: Record<string, unknown>): R
   if (!rest) {
     const labels = Array.isArray(b.labels) ? b.labels.filter((l): l is string => typeof l === "string") : [];
     const state = b.state === undefined ? "Backlog" : T.checkState(str(b.state, "state"));
-    const tk = T.create(ws, { project: str(b.project, "project"), title: str(b.title, "title"), body: typeof b.body === "string" ? b.body : "", labels, state, by: human.name });
+    const tk = T.create(ws, { project: str(b.project, "project"), title: str(b.title, "title"), body: typeof b.body === "string" ? b.body : "", labels, state }, human);
     return ok({ ok: true, ticket: tk });
   }
   const key = T.resolveKey(ws, decodeURIComponent(rest));
@@ -70,8 +70,7 @@ function ticketsPost(ws: Workspace, rest: string, b: Record<string, unknown>): R
   switch (b.op) {
     case "move": {
       const to = T.checkState(str(b.to, "to"));
-      checkMove(ws, T.load(ws, key), to, human);
-      tk = T.move(ws, key, to, human.name).ticket;
+      tk = T.move(ws, key, to, human).ticket;
       break;
     }
     case "label": {
@@ -84,7 +83,7 @@ function ticketsPost(ws: Workspace, rest: string, b: Record<string, unknown>): R
       tk = T.load(ws, key);
       break;
     case "body":
-      tk = T.rewrite(ws, key, str(b.body, "body"), human.name);
+      tk = T.rewrite(ws, key, str(b.body, "body"), human);
       break;
     case "title":
       tk = T.retitle(ws, key, str(b.title, "title"), human.name);
@@ -106,7 +105,7 @@ function ticketsPost(ws: Workspace, rest: string, b: Record<string, unknown>): R
 
 // /api/wiki/<PROJECT>/<path>
 function wikiRef(rest: string): { project: string; path: string } {
-  const m = /^([A-Z][A-Z0-9]{1,9})\/(.+)$/.exec(decodeURIComponent(rest));
+  const m = W.PAGE_REF_RE.exec(decodeURIComponent(rest));
   if (!m) throw new FactoryError(`${JSON.stringify(rest)} is not PROJECT/page`);
   return { project: m[1] as string, path: W.checkPath(m[2] as string) };
 }

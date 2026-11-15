@@ -90,6 +90,8 @@ export interface TrackerProject {
   name: string;
   // When set, only these labels; otherwise any label of lower-case words, digits, ':' and '-'.
   labels?: string[];
+  // A [repos] key or owner/repo: where a ticket's PRs merge, which `--merged` asks GitHub about.
+  repo?: string;
 }
 
 export interface Tracker {
@@ -102,7 +104,6 @@ export interface Tracker {
   // message log that hold the human's own words (as "### <name> ..." sections) for the Backlog guard.
   projects: TrackerProject[];
   dir?: string;
-  askedFrom: string[];
 }
 
 export interface Config {
@@ -575,24 +576,24 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const key = pr.str("key", true);
     const name = pr.str("name") ?? key ?? "";
     const labels = pr.strs("labels");
+    const repo = pr.str("repo");
     pr.done();
+    if (repo !== undefined && !repos[repo] && !/^[\w.-]+\/[\w.-]+$/.test(repo)) pr.bad("repo", `must be a [repos] key or owner/repo, got ${show(repo)}`);
     if (key === undefined) return;
     if (!PROJECT_KEY_RE.test(key)) return void pr.bad("key", `must be 2 to 10 capital letters or digits, starting with a letter, got ${show(key)}`);
     if (projects.some((x) => x.key === key)) return void pr.bad("key", `${show(key)} is already a project`);
     const badLabel = labels?.find((l) => !LABEL_RE.test(l));
     if (badLabel !== undefined) return void pr.bad("labels", `${show(badLabel)} is not a label: lower-case words, digits, ':' and '-'`);
-    projects.push({ key, name, ...(labels ? { labels } : {}) });
+    projects.push({ key, name, ...(labels ? { labels } : {}), ...(repo ? { repo } : {}) });
   });
   if (kind === "local" && projectsV === undefined) t.bad("projects", "missing; a local tracker needs at least one [[tracker.projects]]");
   const trackerDir = path(t, "dir", t.str("dir"));
-  const askedFrom = (t.strs("asked_from") ?? []).map((f, i) => path(t, `asked_from[${i}]`, f) ?? "");
   if (kind !== "local") {
     if (trackerDir !== undefined) t.bad("dir", `only a local tracker has a dir; kind is ${show(kind)}`);
-    if (askedFrom.length) t.bad("asked_from", `only a local tracker reads it; kind is ${show(kind)}`);
   }
   const tracker: Tracker = {
     kind: kind as Tracker["kind"], site: t.str("site"), queueJql: t.str("queue_jql"), keyPattern, status,
-    projects, ...(trackerDir ? { dir: trackerDir } : {}), askedFrom,
+    projects, ...(trackerDir ? { dir: trackerDir } : {}),
   };
   t.done();
 

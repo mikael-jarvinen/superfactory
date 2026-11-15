@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
-import { checkCreate, checkMove, cliActor } from "./guard.js";
+import { cliActor } from "./guard.js";
 import * as T from "./store.js";
 import * as W from "../wiki/store.js";
 
@@ -17,8 +17,9 @@ export const TICKET_USAGE = `  ticket ...                      the local tracker
     create --project P --title T [--body B | --body-file F] [--label L]... [--as A]
                                   file into Backlog; an agent files nowhere else
     move <ref> <State> [--asked "<the human's words>"] [--merged '#<pr>'] [--as A]
-                                  out of Backlog needs --asked, quoting the human; onward out of
-                                  In Review needs the merged PR. Back to work from In Review is free.
+                                  out of Backlog needs --asked, quoting the human's message; onward
+                                  out of In Review needs the PR, which GitHub must say is merged.
+                                  Back to work from In Review is free.
     label <ref> add|rm <name> [--as A]
     describe <ref> (<text> | --file F) [--as A]
                                   append to the description; it is never replaced from here
@@ -112,9 +113,8 @@ export function cmdTicket(ws: Workspace, argv: string[]): number {
       if (!project) throw new FactoryError("ticket create: --project is needed; there is more than one", 2);
       if (!s(v.title)) throw new FactoryError("ticket create: --title is needed", 2);
       if (v.body !== undefined && v["body-file"] !== undefined) throw new FactoryError("ticket create: --body or --body-file, not both", 2);
-      checkCreate(ws, "Backlog", actor);
       const body = typeof v["body-file"] === "string" ? readFileSync(v["body-file"], "utf8") : (s(v.body) ?? "");
-      const tk = T.create(ws, { project, title: s(v.title) as string, body, labels: (v.label as string[] | undefined) ?? [], by: actor.name });
+      const tk = T.create(ws, { project, title: s(v.title) as string, body, labels: (v.label as string[] | undefined) ?? [] }, actor);
       console.log(`  ${tk.key} filed in ${tk.state}: ${tk.title}`);
       return 0;
     }
@@ -123,14 +123,8 @@ export function cmdTicket(ws: Workspace, argv: string[]): number {
       const actor = cliActor(ws, s(v.as));
       const key = T.resolveKey(ws, p[0] as string);
       const to = T.checkState(p[1] as string);
-      const tk = T.load(ws, key);
-      if (tk.state === to) {
-        console.log(`  ${key} already ${to}`);
-        return 0;
-      }
-      const proof = checkMove(ws, tk, to, actor, { ...(s(v.asked) ? { asked: s(v.asked) } : {}), ...(s(v.merged) !== undefined ? { merged: s(v.merged) } : {}) });
-      const r = T.move(ws, key, to, actor.name, proof);
-      console.log(`  ${key}: ${r.from} -> ${to}`);
+      const r = T.move(ws, key, to, actor, { ...(s(v.asked) ? { asked: s(v.asked) } : {}), ...(s(v.merged) !== undefined ? { merged: s(v.merged) } : {}) });
+      console.log(r.from === to ? `  ${key} already ${to}` : `  ${key}: ${r.from} -> ${to}`);
       return 0;
     }
     case "label": {
@@ -190,7 +184,7 @@ export function cmdTicket(ws: Workspace, argv: string[]): number {
 }
 
 export function pageRef(ws: Workspace, ref: string): { project: string; path: string } {
-  const m = /^([A-Z][A-Z0-9]{1,9})\/(.+)$/.exec(ref);
+  const m = W.PAGE_REF_RE.exec(ref);
   if (m) {
     T.projectOf(ws, m[1] as string);
     return { project: m[1] as string, path: W.checkPath(m[2] as string) };

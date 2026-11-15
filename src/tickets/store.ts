@@ -1,15 +1,12 @@
-// The local tracker's tickets. Off unless the workspace sets `[tracker] kind = "local"`: every entry
-// point checks enabled() first, so a workspace on Jira or on no tracker never reaches this file.
-//
-// A ticket is an append-only log of events, one JSON row a line, at <dir>/<PROJECT>/<KEY>.jsonl. What
-// the ticket says now is the fold of its log, so its history costs nothing more and a bad write can
-// be read back past. A number is taken by creating its file with O_EXCL, so two writers can never
-// get the same one, and no counter has to be kept under a lock. A `.floor` file in the project's
-// directory holds the lowest number a new ticket may take, so numbers an import skipped (tickets
-// deleted on the old tracker) are not handed out again.
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+// The local tracker's tickets, off unless `[tracker] kind = "local"`. A ticket is an append-only
+// log of JSON events at <dir>/tickets/<PROJECT>/<KEY>.jsonl, and what it says now is their fold. A
+// number is taken by creating its file with O_EXCL; `.floor` is the lowest a new one may take, so
+// numbers of tickets deleted before an import are not handed out again.
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { LABEL_RE, type TrackerProject } from "../config.js";
+import { LABEL_RE, PROJECT_KEY_RE, type TrackerProject } from "../config.js";
+import { type Actor, checkCreate, checkMove, type MoveProof } from "./guard.js";
+import { withLock } from "./lock.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError, now } from "../util.js";
 
@@ -83,7 +80,10 @@ export const projectDir = (ws: Workspace, project: string) => join(trackerDir(ws
 const ticketFile = (ws: Workspace, key: string) => join(projectDir(ws, parseKey(key).project), `${key}.jsonl`);
 const floorFile = (ws: Workspace, project: string) => join(projectDir(ws, project), ".floor");
 
-const KEY_RE = /^([A-Z][A-Z0-9]{1,9})-([1-9][0-9]{0,6})$/;
+const PK = PROJECT_KEY_RE.source.slice(1, -1);
+const KEY_RE = new RegExp(`^(${PK})-([1-9][0-9]{0,6})$`);
+const FILE_RE = new RegExp(`^(${PK})-([1-9][0-9]*)\\.jsonl$`);
+const lockOf = (ws: Workspace, key: string) => join(projectDir(ws, parseKey(key).project), ".locks", key);
 
 export function parseKey(key: string): { project: string; number: number } {
   const m = KEY_RE.exec(key);
@@ -165,7 +165,8 @@ export function fold(key: string, events: Event[]): Ticket {
 export function readEvents(ws: Workspace, key: string): Event[] {
   const f = ticketFile(ws, key);
   if (!existsSync(f)) throw new FactoryError(`no ticket ${key}`);
-  // A line cut short by a crash is the last one; skip it rather than lose the ticket.
+  // A line cut short by a crash is skipped and the rest still read: append() starts the next event
+  // on a line of its own, so one torn write costs that event only.
   return readFileSync(f, "utf8").split("\n").filter((l) => l.trim()).flatMap((l) => {
     try {
       return [JSON.parse(l) as Event];
@@ -186,10 +187,10 @@ export function list(ws: Workspace, project?: string): Ticket[] {
     const d = projectDir(ws, p);
     if (!existsSync(d)) continue;
     for (const f of readdirSync(d)) {
-      const m = /^([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)\.jsonl$/.exec(f);
+      const m = FILE_RE.exec(f);
       if (!m) continue;
       try {
-        out.push(load(ws, m[1] as string));
+        out.push(load(ws, `${m[1]}-${m[2]}`));
       } catch {
         // a ticket whose log cannot be folded is left out of the list, and `show` says why
       }
@@ -198,8 +199,17 @@ export function list(ws: Workspace, project?: string): Ticket[] {
   return out.sort((a, b) => (a.project < b.project ? -1 : a.project > b.project ? 1 : a.number - b.number));
 }
 
+// One write of the whole row, on a line of its own even if the last write was torn short.
 function append(ws: Workspace, key: string, e: Event): void {
-  appendFileSync(ticketFile(ws, key), JSON.stringify(e) + "\n");
+  const fd = openSync(ticketFile(ws, key), "a+");
+  try {
+    const size = fstatSync(fd).size;
+    const last = Buffer.alloc(1);
+    const lead = size > 0 && readSync(fd, last, 0, 1, size - 1) === 1 && last[0] !== 0x0a ? "\n" : "";
+    writeSync(fd, `${lead}${JSON.stringify(e)}\n`);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function readFloor(ws: Workspace, project: string): number {
@@ -221,8 +231,8 @@ function maxNumber(ws: Workspace, project: string): number {
   if (!existsSync(d)) return 0;
   let max = 0;
   for (const f of readdirSync(d)) {
-    const m = /^[A-Z][A-Z0-9]{1,9}-([1-9][0-9]*)\.jsonl$/.exec(f);
-    if (m) max = Math.max(max, Number(m[1]));
+    const m = FILE_RE.exec(f);
+    if (m && m[1] === project) max = Math.max(max, Number(m[2]));
   }
   return max;
 }
@@ -233,15 +243,19 @@ export interface CreateInput {
   body?: string;
   state?: TicketState;
   labels?: string[];
-  by: string;
   // An import keeps the old number and time; anything else takes the next number, now.
   number?: number;
   t?: string;
   source?: Record<string, unknown>;
 }
 
-export function create(ws: Workspace, c: CreateInput): Ticket {
+// The guards are here, under every caller: guard.ts decides what the actor may do. Only an
+// importer's actor may give a number, a time or a source.
+export function create(ws: Workspace, c: CreateInput, actor: Actor): Ticket {
   const p = projectOf(ws, c.project);
+  checkCreate(ws, c.state ?? "Backlog", actor);
+  if ((c.number !== undefined || c.t !== undefined || c.source !== undefined) && (actor.human || !actor.importer))
+    throw new FactoryError("only an import gives a ticket its number, time or source");
   const title = checkText("the title", c.title.trim(), MAX_TITLE);
   const body = checkText("the description", c.body ?? "", MAX_BODY, true);
   const labels = [...new Set(c.labels ?? [])];
@@ -249,7 +263,7 @@ export function create(ws: Workspace, c: CreateInput): Ticket {
   const dir = projectDir(ws, p.key);
   mkdirSync(dir, { recursive: true });
   const e = (number: number): Event => ({
-    t: c.t ?? now(), by: c.by, op: "create", title, body, state: c.state ?? "Backlog", labels, ...(c.source ? { source: c.source } : {}),
+    t: c.t ?? now(), by: actor.name, op: "create", title, body, state: c.state ?? "Backlog", labels, ...(c.source ? { source: c.source } : {}),
   });
   if (c.number !== undefined) {
     const key = `${p.key}-${c.number}`;
@@ -267,16 +281,25 @@ export function create(ws: Workspace, c: CreateInput): Ticket {
   }
 }
 
-// The writes below do no permission checks: guard.ts decides who may move what, and the CLI and
-// the board each call it before these.
-export function move(ws: Workspace, key: string, to: TicketState, by: string, extra: { asked?: string; merged?: string; t?: string } = {}): { from: TicketState; ticket: Ticket } {
-  const tk = load(ws, key);
-  if (tk.state === to) return { from: to, ticket: tk };
-  append(ws, key, { t: extra.t ?? now(), by, op: "move", from: tk.state, to, ...(extra.asked ? { asked: extra.asked } : {}), ...(extra.merged ? { merged: extra.merged } : {}) });
-  return { from: tk.state, ticket: load(ws, key) };
+// The state is read, checked and moved under the ticket's lock, so two moves cannot both start
+// from the same state, and the guard never judges a state that has already changed.
+export function move(ws: Workspace, key: string, to: TicketState, actor: Actor, proof: MoveProof = {}): { from: TicketState; ticket: Ticket } {
+  return withLock(lockOf(ws, key), () => {
+    const tk = load(ws, key);
+    if (tk.state === to) return { from: to, ticket: tk };
+    const ok = checkMove(ws, tk, to, actor, proof);
+    append(ws, key, { t: now(), by: actor.name, op: "move", from: tk.state, to, ...(ok.asked ? { asked: ok.asked } : {}), ...(ok.merged ? { merged: ok.merged } : {}) });
+    return { from: tk.state, ticket: load(ws, key) };
+  });
 }
 
+// The writes below change nothing guard.ts rules on; the CLI's actor is still one named agent.
+
 export function label(ws: Workspace, key: string, op: "add" | "rm", name: string, by: string): { changed: boolean; ticket: Ticket } {
+  return withLock(lockOf(ws, key), () => labelLocked(ws, key, op, name, by));
+}
+
+function labelLocked(ws: Workspace, key: string, op: "add" | "rm", name: string, by: string): { changed: boolean; ticket: Ticket } {
   const tk = load(ws, key);
   if (op === "add") checkLabel(ws, tk.project, name);
   const has = tk.labels.includes(name);
@@ -299,9 +322,10 @@ export function describe(ws: Workspace, key: string, text: string, by: string): 
 }
 
 // Replaces the description. Only the board offers it, to the human, whose words they are.
-export function rewrite(ws: Workspace, key: string, body: string, by: string): Ticket {
+export function rewrite(ws: Workspace, key: string, body: string, actor: Actor): Ticket {
+  if (!actor.human) throw new FactoryError(`REFUSED: only ${ws.config.human.name} replaces a description; an agent appends with describe.`);
   load(ws, key);
-  append(ws, key, { t: now(), by, op: "body", body: checkText("the description", body, MAX_BODY, true) });
+  append(ws, key, { t: now(), by: actor.name, op: "body", body: checkText("the description", body, MAX_BODY, true) });
   return load(ws, key);
 }
 

@@ -1,13 +1,13 @@
-// The local tracker's wiki: one markdown file a page, at <dir>/wiki/<PROJECT>/<path>.md, so an agent
-// reads a page with cat and searches them all with grep. A child page sits in a directory named
-// after its parent's path. Each save also appends the whole page to <path>.jsonl under .history/,
-// so any edit can be read back and undone. A save names the sha of the text it started from, and is
-// refused when the page changed since: two edits never silently overwrite each other.
+// The local tracker's wiki: one markdown file a page, <dir>/wiki/<PROJECT>/<path>.md, which cat and
+// grep read. Each save appends the whole page to .history/<path>.jsonl first. A save names the sha
+// it started from and is refused if the page changed since; the check and the write share a lock.
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Workspace } from "../workspace.js";
 import { FactoryError, now } from "../util.js";
+import { PROJECT_KEY_RE } from "../config.js";
+import { withLock } from "../tickets/lock.js";
 import { MAX_BODY, MAX_TITLE, projectOf, trackerDir } from "../tickets/store.js";
 
 export interface Page {
@@ -27,6 +27,8 @@ export interface PageEntry {
 }
 
 const PATH_RE = /^[a-z0-9][a-z0-9-]{0,79}(\/[a-z0-9][a-z0-9-]{0,79}){0,5}$/;
+// PROJECT/path, as the CLI and the board name a page.
+export const PAGE_REF_RE = new RegExp(`^(${PROJECT_KEY_RE.source.slice(1, -1)})\\/(.+)$`);
 
 export function checkPath(path: string): string {
   if (!PATH_RE.test(path)) throw new FactoryError(`${JSON.stringify(path)} is not a page path: lower-case words and '-', with '/' for a child page`);
@@ -114,21 +116,26 @@ export function save(ws: Workspace, s: SaveInput): Page {
   if (title.length > MAX_TITLE) throw new FactoryError(`the title is ${title.length} characters, over ${MAX_TITLE}`);
   if (s.body.length > MAX_BODY) throw new FactoryError(`the page is ${s.body.length} characters, over ${MAX_BODY}`);
   const f = pageFile(ws, s.project, s.path);
-  if (existsSync(f)) {
-    const cur = read(ws, s.project, s.path);
-    if (s.base !== cur.sha) throw new Conflict(cur);
-  } else if (s.base !== null) {
-    throw new FactoryError(`no page ${s.project}/${s.path} to save over; it was moved or never made`);
-  }
   const text = render(title, s.body);
-  mkdirSync(dirname(f), { recursive: true });
-  const tmp = `${f}.${process.pid}.tmp`;
-  writeFileSync(tmp, text);
-  renameSync(tmp, f);
-  const h = historyFile(ws, s.project, s.path);
-  mkdirSync(dirname(h), { recursive: true });
-  appendFileSync(h, JSON.stringify({ t: s.t ?? now(), by: s.by, sha: sha(text), title, body: s.body }) + "\n");
-  return read(ws, s.project, s.path);
+  return withLock(join(wikiDir(ws, s.project), ".locks", s.path.replace(/\//g, "~")), () => {
+    if (existsSync(f)) {
+      const cur = read(ws, s.project, s.path);
+      // A retry of a save that landed finds its own text: that is the save, not a conflict.
+      if (cur.sha === sha(text)) return cur;
+      if (s.base !== cur.sha) throw new Conflict(cur);
+    } else if (s.base !== null) {
+      throw new FactoryError(`no page ${s.project}/${s.path} to save over; it was moved or never made`);
+    }
+    // History first: a page is never on disk without its history line.
+    const h = historyFile(ws, s.project, s.path);
+    mkdirSync(dirname(h), { recursive: true });
+    appendFileSync(h, JSON.stringify({ t: s.t ?? now(), by: s.by, sha: sha(text), title, body: s.body }) + "\n");
+    mkdirSync(dirname(f), { recursive: true });
+    const tmp = `${f}.${process.pid}.tmp`;
+    writeFileSync(tmp, text);
+    renameSync(tmp, f);
+    return read(ws, s.project, s.path);
+  });
 }
 
 export function history(ws: Workspace, project: string, path: string): { t: string; by: string; sha: string }[] {

@@ -122,12 +122,12 @@ done = "Done"
 # [tracker]
 # kind = "local"
 # dir = "tracker"                         # where tickets/ and wiki/ live; state/tracker by default
-# asked_from = ["lead/conversation.md"]   # more of the human's words, as "### <name>" sections, that
-#                                         # an agent may quote to move a ticket out of Backlog
 # [[tracker.projects]]
 # key = "RPE"                             # the prefix: RPE-12
 # name = "RPE Training App"
 # labels = ["task", "story"]              # the only labels it takes; any lower-case label without it
+# repo = "app"                            # a [repos] key or owner/repo; `--merged '#N'` asks GitHub
+#                                         # whether that PR merged before a ticket leaves In Review
 
 [board]
 host = "localhost"
