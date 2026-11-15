@@ -9,7 +9,7 @@ import { join } from "node:path";
 import type { Agent, Repo } from "./config.js";
 import type { Session } from "./fleet.js";
 import type { Phase } from "./launch.js";
-import { remote, type Unreachable } from "./remote.js";
+import { remote, Unreachable } from "./remote.js";
 import { claudeEnv, claudeScoped, scopeCheck } from "./scope.js";
 import type { Workspace } from "./workspace.js";
 import { die, MAX_OUTPUT, run } from "./util.js";
@@ -53,7 +53,8 @@ export interface WorktreeLeft {
 // the same `where` are taken for one.
 export interface Transport {
   readonly where: string;
-  // Throws Unreachable (remote.ts) when a host cannot be asked.
+  // Within LISTING_TIMEOUT_MS. Throws Unreachable (remote.ts) when a host cannot be asked, or a local
+  // listing timed out.
   sessions(includeDone?: boolean): Session[];
   // For the board, which must not block on a listing. Resolves to Unreachable rather than throwing it.
   sessionsAsync(): Promise<Session[] | Unreachable>;
@@ -61,7 +62,7 @@ export interface Transport {
   // The launch id claude printed, or "?".
   start(req: StartRequest): string;
   // said: claude's stdout. why: its stderr (else stdout), read when the session does not come back.
-  // A transport keeps a sessions() and a respawn(timeoutMs) call inside those bounds.
+  // Within timeoutMs; one too short for a respawn is a failure, not a longer call.
   respawn(name: string, id: string, timeoutMs?: number): { ok: boolean; said: string; why: string };
   stop(name: string, id: string, remove: boolean): void;
   // The worktree for the item, made or reused (worktree.ts's ensureWorktree); throws when it cannot.
@@ -127,6 +128,8 @@ export const local: Transport = {
   where: "local",
   sessions(includeDone = false) {
     const r = scoped(["agents", "--json", ...(includeDone ? ["--all"] : [])], LISTING_TIMEOUT_MS);
+    // A listing that timed out is no answer, as for a host that cannot be asked.
+    if (r.status === 124) throw new Unreachable("local", `\`claude agents --json\` did not answer in ${LISTING_TIMEOUT_MS / 1000} s`);
     if (r.status !== 0) die(`\`claude agents --json\` failed: ${r.stderr.trim()}`);
     try {
       return parse(r.stdout);

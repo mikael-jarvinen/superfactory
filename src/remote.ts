@@ -184,7 +184,8 @@ export function remote(h: Host): Transport {
     },
     // Inside timeoutMs, its child's slack included.
     respawn(name, id, timeoutMs) {
-      const ms = timeoutMs === undefined ? 60_000 : Math.max(1_000, Math.min(60_000, timeoutMs - CHILD_SLACK_MS));
+      const ms = timeoutMs === undefined ? 60_000 : Math.min(60_000, timeoutMs - CHILD_SLACK_MS);
+      if (ms < 1_000) return { ok: false, said: "", why: `${timeoutMs} ms is too little for a respawn on ${h.name}` };
       const r = ask(() => callSync(h, "POST", agentPath(name, "respawn"), { id }, ms));
       if (r instanceof Unreachable) return { ok: false, said: "", why: r.message };
       return { ok: r.body.ok === true, said: String(r.body.said ?? ""), why: String(r.body.why ?? r.body.said ?? "") };

@@ -6,7 +6,8 @@ import { after, test } from "node:test";
 import { agentOrDie } from "../src/fleet.js";
 import { settingsFile } from "../src/launch.js";
 import { recipient } from "../src/hooks/wake.js";
-import type { Transport } from "../src/transport.js";
+import { Unreachable } from "../src/remote.js";
+import { type Transport, transportFor } from "../src/transport.js";
 import { wake } from "../src/wake.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, TOML, tempWorkspace } from "./helpers.js";
@@ -49,7 +50,8 @@ case "$1" in
     if [ "$3" = --all ]; then cat $D/all.json 2>/dev/null || echo '[]'; else cat $D/live.json 2>/dev/null || echo '[]'; fi ;;
   respawn) [ -f $D/respawn-hang ] && sleep 30
     [ -f $D/respawn-fail ] && { cat $D/respawn-fail >&2; exit 1; }
-    [ -f $D/after.json ] && cp $D/after.json $D/live.json; echo "respawned $2" ;;
+    [ -f $D/after.json ] && cp $D/after.json $D/live.json
+    [ -f $D/hang-after-respawn ] && touch $D/listing-hang; echo "respawned $2" ;;
   --bg) n=; prev=; for a in "$@"; do [ "$prev" = --name ] && n=$a; prev=$a; done
     printf '[{"id":"new1","name":"%s","kind":"background","state":"idle"}]' "$n" > $D/live.json
     echo "backgrounded · new1 · $n" ;;
@@ -284,6 +286,29 @@ test("a local listing that hangs is cut off and the send let through, as for a h
   assert.ok(Date.now() - t0 < 30_000, `the hung listing took ${Date.now() - t0} ms`);
 });
 
+test("a listing that hangs after the respawn leaves the recipient unknown, and the send is let through", () => {
+  const { ws, put, calls } = fakeFleet();
+  put("all.json", [sess("b1", "bea")]);
+  put("after.json", [sess("b1", "bea")]);
+  writeFileSync(join(ws, "hang-after-respawn"), "");
+  const r = wakeHook(ws, "bea", ["--wait-seconds", "1", "--settle-seconds", "0"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn b1"]);
+});
+
+test("a remote respawn left too little time fails rather than run past it", () => {
+  const dir = tempWorkspace(HOSTED_TOML);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "token"), "t".repeat(40));
+  const ws = openWorkspace(dir, {});
+  const t = transportFor(ws, agentOrDie(ws, "rae"));
+  const t0 = Date.now();
+  const r = t.respawn("rae", "r1", 5_500);
+  assert.equal(r.ok, false);
+  assert.match(r.why, /5500 ms is too little for a respawn on far/);
+  assert.ok(Date.now() - t0 < 1_000, "nothing was asked");
+});
+
 test("a respawn leaves room for one listing after it", () => {
   const dir = tempWorkspace(HOSTED_TOML);
   after(() => rmSync(dir, { recursive: true, force: true }));
@@ -298,6 +323,17 @@ test("a respawn leaves room for one listing after it", () => {
   } as unknown as Transport;
   wake(ws, agentOrDie(ws, "rae"), { t: far, deadline: Date.now() + 60_000 });
   assert.ok(given !== undefined && given <= 40_000 && given > 39_000, `respawn given ${given} ms of 60 000: 20 000 for a listing comes off`);
+});
+
+test("a listing that breaks, rather than cannot be had, is thrown on and not taken for unknown", () => {
+  const dir = tempWorkspace(HOSTED_TOML);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "token"), "t".repeat(40));
+  const ws = openWorkspace(dir, {});
+  const broken = { where: "far", sessions: () => { throw new TypeError("a malformed row"); }, alive: () => false } as unknown as Transport;
+  assert.throws(() => wake(ws, agentOrDie(ws, "rae"), { t: broken }), /a malformed row/);
+  const away = { where: "far", sessions: () => { throw new Unreachable("far", "ECONNREFUSED"); }, alive: () => false } as unknown as Transport;
+  assert.deepEqual(wake(ws, agentOrDie(ws, "rae"), { t: away }), { is: "unknown", why: "host far: ECONNREFUSED" });
 });
 
 // What a failed SendMessage hands a PostToolUse hook, recorded from a real one.
@@ -322,6 +358,12 @@ test("from a host, a failed send to an agent it cannot wake says it is off and t
   const err = run({ hook_event_name: "PostToolUseFailure", tool_name: "SendMessage", tool_input: { to: "bea", message: "hi" }, error: "No agent named 'bea' is reachable." });
   assert.equal(err.status, 2);
   assert.match(err.stderr, /Tell ada that bea is off/);
+  // Any other failed send passes as it is: a name two sessions share (as Claude Code answered it),
+  // or a send interrupted or refused for its input.
+  const twoNamed = { ...failed("bea"), tool_response: { success: false, message: "2 agents are named 'bea'. Re-send with the ref of the one you mean: bea [aa11], bea [bb22]" } };
+  assert.equal(run(twoNamed).status, 0, "two sessions named bea");
+  assert.equal(run({ hook_event_name: "PostToolUseFailure", tool_name: "SendMessage", tool_input: { to: "bea", message: "hi" }, error: "Interrupted by user", is_interrupt: true }).status, 0, "interrupted");
+  assert.equal(run({ hook_event_name: "PostToolUseFailure", tool_name: "SendMessage", tool_input: { to: "bea" } }).status, 0, "no error said");
 });
 
 test("only a hosted agent's settings explain a failed send", () => {

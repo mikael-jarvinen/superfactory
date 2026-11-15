@@ -46,10 +46,12 @@ export function findSession(t: Transport, name: string, includeDone = false): Se
 
 // A host that cannot be asked on one poll is asked again on the next. No poll starts after
 // lastPollAt (epoch ms).
-export function waitForName(t: Transport, name: string, timeoutS = 90, pollMs = 3000, lastPollAt = Infinity): Session | null {
+// polled, when given, hears each poll's answer.
+export function waitForName(t: Transport, name: string, timeoutS = 90, pollMs = 3000, lastPollAt = Infinity, polled?: (s: Session | null | Unreachable) => void): Session | null {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutS * 1000) {
     const s = ask(() => findSession(t, name));
+    polled?.(s);
     if (!(s instanceof Unreachable) && t.alive(s)) return s;
     const nap = Math.min(pollMs, lastPollAt - Date.now());
     if (nap <= 0) return null;

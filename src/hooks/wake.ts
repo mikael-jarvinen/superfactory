@@ -21,6 +21,9 @@ import { openWorkspace, resolveWorkspace } from "../workspace.js";
 
 export const WAKE_HOOK_TIMEOUT_S = 90;
 
+// What SendMessage says of a recipient that is off, or not there at all.
+const NOT_REACHABLE = /No agent named .* is reachable|\bis not reachable\b/;
+
 export const recipient = (to: unknown): string | null => {
   if (typeof to !== "string") return null;
   const n = to.replace(/\s*\[[^\]]*\]\s*$/, "").trim();
@@ -38,12 +41,14 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   let to: string | null = null;
   let failedSend = false;
   try {
-    const ev = JSON.parse(input) as { hook_event_name?: unknown; tool_input?: { to?: unknown }; tool_response?: { success?: unknown } };
+    const ev = JSON.parse(input) as { hook_event_name?: unknown; tool_input?: { to?: unknown }; tool_response?: { success?: unknown; message?: unknown }; error?: unknown };
     to = recipient(ev.tool_input?.to);
-    // A failed send is a result with success false (PostToolUse, recorded in the test fixture);
-    // should it come as a tool error instead, that is PostToolUseFailure.
+    // Explained is only a send that failed as not reachable: a result with success false and that
+    // message (PostToolUse, recorded in the test fixtures), or a tool error saying it
+    // (PostToolUseFailure). Any other failure, a name two sessions share say, passes as it is.
     if (ev.hook_event_name === "PostToolUse" || ev.hook_event_name === "PostToolUseFailure") {
-      if (!fromHost || (ev.hook_event_name === "PostToolUse" && ev.tool_response?.success !== false)) return { code: 0 };
+      const said = ev.hook_event_name === "PostToolUse" ? (ev.tool_response?.success === false ? ev.tool_response.message : undefined) : ev.error;
+      if (!fromHost || typeof said !== "string" || !NOT_REACHABLE.test(said)) return { code: 0 };
       failedSend = true;
     }
   } catch {

@@ -38,19 +38,12 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   const t = o.t ?? transportFor(ws, agent);
   const left = () => (o.deadline ?? Infinity) - Date.now();
   const late = (step: string): Woken => ({ is: "failed", why: `out of time before ${step}` });
-  // A listing that fails, a local one that timed out included, leaves the recipient unknown.
-  const listed = <T>(f: () => T): T | Unreachable => {
-    try {
-      return ask(f);
-    } catch (e) {
-      return new Unreachable(t.where, (e as Error).message);
-    }
-  };
-  const live = listed(() => findSession(t, agent.name));
+  // A listing that cannot be had, a local one that timed out included, leaves the recipient unknown.
+  const live = ask(() => findSession(t, agent.name));
   if (live instanceof Unreachable) return { is: "unknown", why: live.brief };
   if (t.alive(live)) return { is: "live", s: live };
   if (left() < LISTING_TIMEOUT_MS) return late("the stopped sessions were listed");
-  const all = listed(() => t.sessions(true));
+  const all = ask(() => t.sessions(true));
   if (all instanceof Unreachable) return { is: "unknown", why: all.brief };
   // Not findSession: it prefers a row alive() passes, and locally that is a host-wide check, so a
   // stale "done" row would beat the newest stopped session.
@@ -62,8 +55,11 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   if (!r.ok) return { is: "failed", why: `respawn of ${old.id} failed: ${r.why || "no reason given"}` };
   const waitS = o.waitS ?? 60;
   const lastPollAt = (o.deadline ?? Infinity) - LISTING_TIMEOUT_MS;
-  const s = waitForName(t, agent.name, waitS, o.pollMs ?? 1000, lastPollAt);
+  let unknown: Unreachable | null = null;
+  const s = waitForName(t, agent.name, waitS, o.pollMs ?? 1000, lastPollAt, (p) => (unknown = p instanceof Unreachable ? p : null));
   if (s) return { is: "woke", s, from: old.id };
+  // Respawned, and the last listing could not be had: most likely live, so not failed.
+  if (unknown) return { is: "unknown", why: `respawned ${old.id}, then ${(unknown as Unreachable).brief}` };
   return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };
 }
 
