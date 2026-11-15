@@ -7,12 +7,21 @@ import { after, test } from "node:test";
 import { postMessage } from "../src/board/inbox.js";
 import { serve } from "../src/board/server.js";
 import { ConfigError, loadConfig } from "../src/config.js";
-import { type Actor, checkMove, cliActor, mentions } from "../src/tickets/guard.js";
+import { type Actor, checkMove as checkMoveSpent, cliActor, mentions, type MoveProof } from "../src/tickets/guard.js";
 import { withLock } from "../src/tickets/lock.js";
 import * as T from "../src/tickets/store.js";
 import * as W from "../src/wiki/store.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, TOML, tempDir, tempWorkspace } from "./helpers.js";
+
+// The guard with no oks spent elsewhere.
+const checkMove = (ws: Parameters<typeof checkMoveSpent>[0], tk: T.Ticket, to: T.TicketState, a: Actor, p: MoveProof = {}) => checkMoveSpent(ws, tk, to, a, p, () => []);
+// A Done move on an ok also names the message it spent; the board's ids are random.
+const withoutOk = (p: MoveProof) => {
+  const { ok, ...rest } = p;
+  assert.match(String(ok), /^[0-9a-f]{6}$/);
+  return rest;
+};
 
 const NO_TRACKER = TOML.replace(/\[tracker\][\s\S]*?done = "Done"\n/, "");
 const LOCAL = (extra = "") => `${NO_TRACKER}
@@ -188,7 +197,7 @@ test("guard: Backlog needs the human's message, Done this ticket's merged PR or 
   await assert.rejects(checkMove(ws, tk, "Todo", agent, { asked: "words an agent wrote for itself" }), /not in any of Alex's messages/);
   assert.deepEqual(await checkMove(ws, tk, "Todo", ALEX), {}, "the human is never refused");
   // Backlog straight to Done: one quote answers both, or the quote and the PR
-  assert.deepEqual(await checkMove(ws, tk, "Done", agent, { asked: "ship the planner change" }), { asked: "ship the planner change" });
+  assert.deepEqual(withoutOk(await checkMove(ws, tk, "Done", agent, { asked: "ship the planner change" })), { asked: "ship the planner change" });
   await assert.rejects(checkMove(ws, tk, "Done", agent, { merged: "#95" }), /REFUSED: RPE-1 is in Backlog/);
   assert.deepEqual(await checkMove(ws, tk, "Done", agent, { asked: "ship the planner change", merged: "#95" }), { asked: "ship the planner change", merged: "#95" });
   assert.deepEqual(await checkMove(ws, tk, "Cancelled", agent, { asked: "ship the planner change" }), { asked: "ship the planner change" }, "Cancelled needs no PR");
@@ -200,7 +209,7 @@ test("guard: Backlog needs the human's message, Done this ticket's merged PR or 
   const rev = T.load(ws, "RPE-1");
   await assert.rejects(checkMove(ws, rev, "Done", agent), /Done is Alex's merge, or Alex's ok, from any state/);
   // a ticket with nothing to merge goes to Done on the human's quoted ok, judged as out of Backlog
-  assert.deepEqual(await checkMove(ws, rev, "Done", agent, { asked: "ship the planner change" }), { asked: "ship the planner change" });
+  assert.deepEqual(withoutOk(await checkMove(ws, rev, "Done", agent, { asked: "ship the planner change" })), { asked: "ship the planner change" });
   await assert.rejects(checkMove(ws, rev, "Done", agent, { asked: "words an agent wrote for itself" }), /not in any of Alex's messages/);
   await assert.rejects(checkMove(ws, rev, "Done", agent, { asked: "ship" }), /at least 20/);
   await assert.rejects(checkMove(ws, rev, "Done", agent, { merged: "yes" }), /PR number/);
@@ -223,6 +232,7 @@ test("guard: Backlog needs the human's message, Done this ticket's merged PR or 
   assert.equal((await T.move(ws, "RPE-1", "Done", ADA, { asked: "ship the planner change" })).ticket.state, "Done");
   const ev = readFileSync(join(T.projectDir(ws, "RPE"), "RPE-1.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).pop();
   assert.equal(ev.asked, "ship the planner change");
+  assert.match(ev.ok, /^[0-9a-f]{6}$/, "and the message it spent");
   assert.equal(ev.merged, undefined);
   T.create(ws, { project: "WEB", title: "w" }, ADA);
   await assert.rejects(T.move(ws, "WEB-1", "Done", ADA, { asked: "ship the planner change", merged: "#95" }), /WEB names no repo/);
@@ -231,7 +241,7 @@ test("guard: Backlog needs the human's message, Done this ticket's merged PR or 
   assert.ok(!mentions("RPE-10", "RPE-1") && !mentions("XRPE-1", "RPE-1") && !mentions("RPE-1a", "RPE-1"));
 });
 
-test("guard: one ok closes one ticket, and an empty quote gets the refusal that names both proofs", async () => {
+test("guard: one message closes one ticket, and an empty quote gets the refusal that names both proofs", async () => {
   const ws = openWorkspace(tempWorkspace(LOCAL()));
   postMessage(ws, "please look at the backlog items today");
   postMessage(ws, "the export work is done, close it");
@@ -240,18 +250,23 @@ test("guard: one ok closes one ticket, and an empty quote gets the refusal that 
   // one quote covers Backlog straight to Done on A
   assert.equal((await T.move(ws, "RPE-1", "Done", ADA, { asked: ok })).ticket.state, "Done");
   await T.move(ws, "RPE-2", "In Review", ALEX);
-  await assert.rejects(T.move(ws, "RPE-2", "Done", ADA, { asked: ok }), /REFUSED: Alex's ok "please look at the backlog items today" was used on RPE-1; one ok closes one ticket/);
-  await assert.rejects(T.move(ws, "RPE-2", "Done", ADA, { asked: "look at the backlog items" }), /was used on RPE-1/, "a shorter cut of the same message is spent too");
-  await assert.rejects(T.move(ws, "RPE-3", "Done", ADA, { asked: ok }), /was used on RPE-1/, "Backlog to Done on another ticket too");
+  await assert.rejects(T.move(ws, "RPE-2", "Done", ADA, { asked: ok }), /REFUSED: Alex's message with "please look at the backlog items today" already closed RPE-1; one message closes one ticket/);
+  await assert.rejects(T.move(ws, "RPE-2", "Done", ADA, { asked: "look at the backlog items" }), /already closed RPE-1/, "a shorter cut of the same message is the same message");
+  await assert.rejects(T.move(ws, "RPE-3", "Done", ADA, { asked: ok }), /already closed RPE-1/, "Backlog to Done on another ticket too");
   assert.equal(T.load(ws, "RPE-2").state, "In Review");
   assert.equal(T.load(ws, "RPE-3").state, "Backlog");
-  // the ok it spent is still A's own
+  // the message it spent is still A's own
   await T.move(ws, "RPE-1", "In Progress", ALEX);
   assert.equal((await T.move(ws, "RPE-1", "Done", ADA, { asked: ok })).ticket.state, "Done");
   // another message is a fresh ok; an ok is spent on Done only, not out of Backlog
   assert.equal((await T.move(ws, "RPE-2", "Done", ADA, { asked: "the export work is done" })).ticket.state, "Done");
   assert.equal((await T.move(ws, "RPE-3", "Todo", ADA, { asked: "the export work is done" })).ticket.state, "Todo");
+  // the same words sent again are a second message, and a second ok
+  await assert.rejects(T.move(ws, "RPE-3", "Done", ADA, { asked: ok }), /already closed RPE-1/);
+  postMessage(ws, "please look at the backlog items today");
+  assert.equal((await T.move(ws, "RPE-3", "Done", ADA, { asked: ok })).ticket.state, "Done", "a phrase sent twice closes two tickets");
   // the human is never refused
+  await T.move(ws, "RPE-3", "In Review", ALEX);
   assert.equal((await T.move(ws, "RPE-3", "Done", ALEX)).ticket.state, "Done");
 
   // an empty quote is no quote
@@ -259,6 +274,42 @@ test("guard: one ok closes one ticket, and an empty quote gets the refusal that 
   await T.move(ws, "RPE-4", "In Review", ALEX);
   await assert.rejects(T.move(ws, "RPE-4", "Done", ADA, { asked: "" }), (e: Error) =>
     /REFUSED: Done is Alex's merge, or Alex's ok, from any state/.test(e.message) && /--merged '#<pr>'/.test(e.message) && /--asked "<their words>"/.test(e.message));
+});
+
+test("guard: a message naming tickets closes each of them and no other, in any project", async () => {
+  const ws = openWorkspace(tempWorkspace(LOCAL()));
+  postMessage(ws, "RPE-1 and rpe-2 are done, close both");
+  postMessage(ws, "the WEB-1 copy change is done too");
+  for (let i = 0; i < 3; i++) T.create(ws, { project: "RPE", title: `t${i}` }, ADA);
+  T.create(ws, { project: "WEB", title: "w" }, ADA);
+  for (const k of ["RPE-1", "RPE-2", "RPE-3", "WEB-1"]) await T.move(ws, k, "In Review", ALEX);
+  assert.equal((await T.move(ws, "RPE-1", "Done", ADA, { asked: "RPE-1 and rpe-2 are done" })).ticket.state, "Done");
+  assert.equal((await T.move(ws, "RPE-2", "Done", ADA, { asked: "RPE-1 and rpe-2 are done" })).ticket.state, "Done", "each key it names");
+  await assert.rejects(T.move(ws, "RPE-3", "Done", ADA, { asked: "RPE-1 and rpe-2 are done" }), /names RPE-1, rpe-2, not RPE-3/);
+  await assert.rejects(T.move(ws, "RPE-3", "Done", ADA, { asked: "are done, close both" }), /names RPE-1, rpe-2, not RPE-3/, "a cut that leaves the keys out is still that message");
+  await assert.rejects(T.move(ws, "WEB-1", "Done", ADA, { asked: "RPE-1 and rpe-2 are done" }), /not WEB-1/, "nor one in another project");
+  await assert.rejects(T.move(ws, "RPE-3", "Done", ADA, { asked: "the WEB-1 copy change is done" }), /names WEB-1, not RPE-3/);
+  assert.equal((await T.move(ws, "WEB-1", "Done", ADA, { asked: "the WEB-1 copy change is done" })).ticket.state, "Done");
+  assert.equal(T.load(ws, "RPE-3").state, "In Review");
+});
+
+test("guard: an ok spent in one project is spent in all, and a merged move spends none", async () => {
+  const ws = openWorkspace(tempWorkspace(LOCAL()));
+  postMessage(ws, "that is finished, ship it whenever");
+  const ok = "that is finished, ship it whenever";
+  T.create(ws, { project: "RPE", title: "r" }, ADA);
+  T.create(ws, { project: "RPE", title: "r2" }, ADA);
+  T.create(ws, { project: "WEB", title: "w" }, ADA);
+  // Backlog to Done with both proofs: the merge is the proof, so the quote stays unspent
+  const merged = await T.move(ws, "RPE-1", "Done", ADA, { asked: ok, merged: "#95" });
+  assert.equal(merged.ticket.state, "Done");
+  const ev = readFileSync(join(T.projectDir(ws, "RPE"), "RPE-1.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).pop();
+  assert.equal(ev.merged, "#95");
+  assert.ok(!T.spentOks(ws, "RPE-2").length, "a merged move spends no ok");
+  assert.equal((await T.move(ws, "WEB-1", "Done", ADA, { asked: ok })).ticket.state, "Done");
+  await T.move(ws, "RPE-2", "In Review", ALEX);
+  await assert.rejects(T.move(ws, "RPE-2", "Done", ADA, { asked: ok }), /already closed WEB-1/);
+  assert.deepEqual(T.spentOks(ws, "RPE-2").map((s) => s.key), ["WEB-1"]);
 });
 
 test("guard: a legacy message kind is shown as the human's but is never quotable", async () => {

@@ -31,14 +31,20 @@ const squashWs = (s: string) => s.split(/\s+/).filter(Boolean).join(" ");
 // since that kind may be one an agent can post. Only the board's /api/messages writes a human
 // row (its composer, and Telegram through tg-forward); `factory say` cannot.
 export function humanWords(ws: Workspace): string[] {
-  const out: string[] = [];
+  return humanRows(ws).map((r) => r.text);
+}
+
+// The same rows, oldest first, each with the ref a Done move records: its id, else its time.
+export function humanRows(ws: Workspace): { ref: string; text: string }[] {
+  const out: { ref: string; text: string }[] = [];
   for (const f of [`${ws.messages}.1`, ws.messages]) {
     if (!existsSync(f)) continue;
     for (const l of readFileSync(f, "utf8").split("\n")) {
       if (!l.trim()) continue;
       try {
-        const row = JSON.parse(l) as { kind?: string; text?: unknown };
-        if (row.kind === HUMAN_KIND && typeof row.text === "string") out.push(squashWs(row.text));
+        const row = JSON.parse(l) as { kind?: string; text?: unknown; id?: unknown; t?: unknown };
+        if (row.kind === HUMAN_KIND && typeof row.text === "string")
+          out.push({ ref: String(row.id ?? row.t ?? `${f}:${out.length}`), text: squashWs(row.text) });
       } catch {
         // a torn line is not a message
       }
@@ -97,42 +103,56 @@ export async function checkMerged(ws: Workspace, tk: Ticket, merged: string): Pr
 export interface MoveProof {
   asked?: string;
   merged?: string;
+  // the human message whose ok closed the ticket
+  ok?: string;
 }
 
-// A quote that moved another ticket into Done: that ticket's key and the quote as recorded.
+// An ok another ticket's Done move used: that ticket's key and the message's ref.
 export interface SpentOk {
   key: string;
-  asked: string;
+  ok: string;
 }
 
-// One ok closes one ticket. A quote is spent when every message of the human's it is found in
-// already gave another ticket's Done move its quote, so a shorter cut of the same message is
-// spent too. The same ticket may use its own quote again.
-function checkUnspent(ws: Workspace, tk: Ticket, q: string, spent: SpentOk[]): void {
-  const used = humanWords(ws).filter((m) => m.includes(q)).map((m) => spent.find((s) => m.includes(s.asked)));
-  const first = used[0];
-  if (!first || used.some((u) => !u)) return;
+// The move event that spends an ok: into Done on the human's words, with no merge as the proof.
+export const spendsOk = (e: { op: string; to?: TicketState; ok?: string; merged?: string }) =>
+  e.op === "move" && !!e.ok && !e.merged && e.to !== undefined && NEEDS_MERGE.has(e.to);
+
+// The ticket keys a text names, as whole words, of the configured projects.
+const keysIn = (ws: Workspace, text: string) =>
+  ws.config.tracker.projects.flatMap((p) => text.match(new RegExp(`(?<![A-Za-z0-9])${p.key}-[1-9][0-9]*(?![A-Za-z0-9])`, "gi")) ?? []);
+
+// One message closes one ticket. A quote resolves to the newest message holding it that can still
+// close this one. A message that names ticket keys closes each ticket it names and no other; one
+// that names none closes the first ticket that quotes it.
+function pickOk(ws: Workspace, tk: Ticket, q: string, spent: SpentOk[]): string {
   const name = ws.config.human.name;
-  throw new FactoryError(`REFUSED: ${name}'s ok ${JSON.stringify(q)} was used on ${first.key}; one ok closes one ticket.\n` +
+  const rows = humanRows(ws).filter((r) => r.text.includes(q)).reverse();
+  const usable = (r: { ref: string; text: string }) =>
+    keysIn(ws, r.text).length ? mentions(r.text, tk.key) : !spent.some((s) => s.ok === r.ref);
+  const hit = rows.find(usable);
+  if (hit) return hit.ref;
+  const top = rows[0]!;
+  const named = keysIn(ws, top.text);
+  const why = named.length
+    ? `${name}'s message with ${JSON.stringify(q)} names ${named.join(", ")}, not ${tk.key}`
+    : `${name}'s message with ${JSON.stringify(q)} already closed ${spent.find((s) => s.ok === top.ref)!.key}; one message closes one ticket`;
+  throw new FactoryError(`REFUSED: ${why}.\n` +
     `  If ${name} HAS merged ${tk.key}'s PR, pass it: --merged '#<pr>'\n` +
     `  Otherwise ask ${name} about ${tk.key} and quote that answer: --asked "<their words>"`);
 }
 
-// What a move needs that is checked here and now, against the ticket as it is: the quote out of
-// Backlog, and for Done a merge named or an unspent ok of the human's quoted. One quote may answer
-// both. `spent` lists the oks other tickets' Done moves used, read only when one is needed. The
-// store runs this again under the lock. Returns the quote to record, and whether GitHub must be
-// asked about proof.merged.
-export function checkMoveNow(ws: Workspace, tk: Ticket, to: TicketState, actor: Actor, proof: MoveProof = {}, spent: () => SpentOk[] = () => []): { asked?: string; askGitHub: boolean } {
+// What a move needs, checked against the ticket as it is: the quote out of Backlog, and for Done a
+// merge or an unspent ok. One quote may answer both. The store runs it again under the lock.
+export function checkMoveNow(ws: Workspace, tk: Ticket, to: TicketState, actor: Actor, proof: MoveProof, spent: () => SpentOk[]): { asked?: string; ok?: string; askGitHub: boolean } {
   if (actor.human || tk.state === to) return { askGitHub: false };
-  const out: { asked?: string; askGitHub: boolean } = { askGitHub: false };
+  const out: { asked?: string; ok?: string; askGitHub: boolean } = { askGitHub: false };
   if (tk.state === "Backlog") out.asked = checkAsked(ws, proof.asked, `${tk.key} is in Backlog`);
   if (NEEDS_MERGE.has(to)) {
     const name = ws.config.human.name;
     if (proof.merged !== undefined) out.askGitHub = true;
     else if (proof.asked) {
       out.asked = checkAsked(ws, proof.asked, `${to} is ${name}'s to say`);
-      checkUnspent(ws, tk, out.asked, spent());
+      out.ok = pickOk(ws, tk, out.asked, spent());
     } else
       throw new FactoryError(`REFUSED: ${to} is ${name}'s merge, or ${name}'s ok, from any state.\n` +
         `  If ${name} HAS merged ${tk.key}'s PR, pass it, which is checked with GitHub: --merged '#<pr>'\n` +
@@ -143,10 +163,10 @@ export function checkMoveNow(ws: Workspace, tk: Ticket, to: TicketState, actor: 
 }
 
 // The whole check, GitHub included. Returns what to record with the move.
-export async function checkMove(ws: Workspace, tk: Ticket, to: TicketState, actor: Actor, proof: MoveProof = {}, spent?: () => SpentOk[]): Promise<MoveProof> {
+export async function checkMove(ws: Workspace, tk: Ticket, to: TicketState, actor: Actor, proof: MoveProof, spent: () => SpentOk[]): Promise<MoveProof> {
   const now = checkMoveNow(ws, tk, to, actor, proof, spent);
   if (now.askGitHub) await checkMerged(ws, tk, proof.merged as string);
-  return { ...(now.asked ? { asked: now.asked } : {}), ...(now.askGitHub ? { merged: proof.merged } : {}) };
+  return { ...(now.asked ? { asked: now.asked } : {}), ...(now.ok ? { ok: now.ok } : {}), ...(now.askGitHub ? { merged: proof.merged } : {}) };
 }
 
 // An agent files into Backlog only, the human's queue; the human moves it on. An importer keeps

@@ -5,7 +5,7 @@
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { LABEL_RE, PROJECT_KEY_RE, type TrackerProject } from "../config.js";
-import { type Actor, checkCreate, checkMove, checkMoveNow, type MoveProof, NEEDS_MERGE, type SpentOk } from "./guard.js";
+import { type Actor, checkCreate, checkMove, checkMoveNow, type MoveProof, type SpentOk, spendsOk } from "./guard.js";
 import { withLock } from "./lock.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError, now } from "../util.js";
@@ -57,7 +57,7 @@ export interface Ticket {
 // agent the CLI ran as.
 export type Event = { t: string; by: string } & (
   | { op: "create"; title: string; body: string; state: TicketState; labels: string[]; source?: Record<string, unknown> }
-  | { op: "move"; from: TicketState; to: TicketState; asked?: string; merged?: string }
+  | { op: "move"; from: TicketState; to: TicketState; asked?: string; ok?: string; merged?: string }
   | { op: "label"; add?: string; rm?: string }
   | { op: "title"; title: string }
   | { op: "describe"; append: string }
@@ -84,6 +84,8 @@ const PK = PROJECT_KEY_RE.source.slice(1, -1);
 const KEY_RE = new RegExp(`^(${PK})-([1-9][0-9]{0,6})$`);
 const FILE_RE = new RegExp(`^(${PK})-([1-9][0-9]*)\\.jsonl$`);
 const lockOf = (ws: Workspace, key: string) => join(projectDir(ws, parseKey(key).project), ".locks", `${key}.lock`);
+// One for the workspace, as the oks a Done move checks are read from every project.
+const okLockOf = (ws: Workspace) => join(trackerDir(ws), "tickets", ".locks", "done-ok.lock");
 
 export function parseKey(key: string): { project: string; number: number } {
   const m = KEY_RE.exec(key);
@@ -180,20 +182,24 @@ export const exists = (ws: Workspace, key: string) => existsSync(ticketFile(ws, 
 
 export const load = (ws: Workspace, key: string): Ticket => fold(key, readEvents(ws, key));
 
-export function list(ws: Workspace, project?: string): Ticket[] {
-  const keys = project ? [projectOf(ws, project).key] : projects(ws).map((p) => p.key);
-  const out: Ticket[] = [];
-  for (const p of keys) {
+function* keys(ws: Workspace, project?: string): Generator<string> {
+  for (const p of project ? [projectOf(ws, project).key] : projects(ws).map((p) => p.key)) {
     const d = projectDir(ws, p);
     if (!existsSync(d)) continue;
     for (const f of readdirSync(d)) {
       const m = FILE_RE.exec(f);
-      if (!m) continue;
-      try {
-        out.push(load(ws, `${m[1]}-${m[2]}`));
-      } catch {
-        // a ticket whose log cannot be folded is left out of the list, and `show` says why
-      }
+      if (m) yield `${m[1]}-${m[2]}`;
+    }
+  }
+}
+
+export function list(ws: Workspace, project?: string): Ticket[] {
+  const out: Ticket[] = [];
+  for (const key of keys(ws, project)) {
+    try {
+      out.push(load(ws, key));
+    } catch {
+      // a ticket whose log cannot be folded is left out of the list, and `show` says why
     }
   }
   return out.sort((a, b) => (a.project < b.project ? -1 : a.project > b.project ? 1 : a.number - b.number));
@@ -281,18 +287,12 @@ export function create(ws: Workspace, c: CreateInput, actor: Actor): Ticket {
   }
 }
 
-// The human's oks that other tickets' agent moves into Done used, from every project's logs.
+// The oks other tickets' Done moves spent, from every project.
 export function spentOks(ws: Workspace, except: string): SpentOk[] {
   const out: SpentOk[] = [];
-  for (const p of projects(ws)) {
-    const d = projectDir(ws, p.key);
-    if (!existsSync(d)) continue;
-    for (const f of readdirSync(d)) {
-      const m = FILE_RE.exec(f);
-      const key = m && `${m[1]}-${m[2]}`;
-      if (!key || key === except) continue;
-      for (const e of readEvents(ws, key)) if (e.op === "move" && e.asked && NEEDS_MERGE.has(e.to)) out.push({ key, asked: e.asked });
-    }
+  for (const key of keys(ws)) {
+    if (key === except) continue;
+    for (const e of readEvents(ws, key)) if (e.op === "move" && spendsOk(e)) out.push({ key, ok: e.ok as string });
   }
   return out;
 }
@@ -300,8 +300,8 @@ export function spentOks(ws: Workspace, except: string): SpentOk[] {
 // GitHub is asked first, without the lock: whether a PR merged does not depend on the ticket's
 // state, and a network call never runs under a lock. Then the state is read, checked again and
 // moved under the ticket's lock, so two moves cannot both start from the same state, and the
-// quote out of Backlog is judged against the state the move really leaves. A move into Done on a
-// quote also holds the project's ok lock, so two tickets cannot spend the same ok at once.
+// quote out of Backlog is judged against the state the move really leaves. A move that spends an
+// ok also holds the workspace's ok lock, so two tickets cannot spend one message.
 export async function move(ws: Workspace, key: string, to: TicketState, actor: Actor, proof: MoveProof = {}): Promise<{ from: TicketState; ticket: Ticket }> {
   const before = load(ws, key);
   if (before.state === to) return { from: to, ticket: before };
@@ -310,12 +310,11 @@ export async function move(ws: Workspace, key: string, to: TicketState, actor: A
   const write = () => {
     const tk = load(ws, key);
     if (tk.state === to) return { from: to, ticket: tk };
-    const asked = checkMoveNow(ws, tk, to, actor, proof, spent).asked;
-    append(ws, key, { t: now(), by: actor.name, op: "move", from: tk.state, to, ...(asked ? { asked } : {}), ...(ok.merged ? { merged: ok.merged } : {}) });
+    const re = checkMoveNow(ws, tk, to, actor, proof, spent);
+    append(ws, key, { t: now(), by: actor.name, op: "move", from: tk.state, to, ...(re.asked ? { asked: re.asked } : {}), ...(re.ok ? { ok: re.ok } : {}), ...(ok.merged ? { merged: ok.merged } : {}) });
     return { from: tk.state, ticket: load(ws, key) };
   };
-  const okLock = join(projectDir(ws, parseKey(key).project), ".locks", ".done-ok.lock");
-  return withLock(lockOf(ws, key), () => (ok.asked && NEEDS_MERGE.has(to) && !ok.merged ? withLock(okLock, write) : write()));
+  return withLock(lockOf(ws, key), () => (spendsOk({ op: "move", to, ...ok }) ? withLock(okLockOf(ws), write) : write()));
 }
 
 // Labels, comments, relations, links and titles are any agent's; a description is appended to by
