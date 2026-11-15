@@ -93,6 +93,8 @@ role = "reviewer"
 # permission_mode = "auto"
 # autocompact = "400k"
 # host = "studio"                         # its sessions run on that machine (not for a builder)
+# group = "QA"                            # the board roster it sits in, in place of its role's or stack's;
+#                                         # one role to a group, and never the lead
 
 # [hosts.studio]                          # another machine's factory daemon, for agents with host
 # url = "http://192.168.1.20:8787"

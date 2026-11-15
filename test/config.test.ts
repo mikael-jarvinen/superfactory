@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ConfigError, loadConfig } from "../src/config.js";
-import { factory, TOML, tempWorkspace } from "./helpers.js";
+import { factory, GROUPED, TOML, tempWorkspace } from "./helpers.js";
 
 const problems = (toml: string): string[] => {
   const ws = tempWorkspace(toml);
@@ -155,4 +155,21 @@ autocompact = "400k"`));
 role = "builder"`, `name = "cal"
 role = "builder"
 cwd = "cal"`)), ["agents[2].cwd: a builder starts in its worktree, so it takes no cwd"]);
+});
+
+
+test("an agent's group: trimmed, optional, never the lead's, one role to a group", () => {
+  const ws = tempWorkspace(GROUPED);
+  after(() => rmSync(ws, { recursive: true, force: true }));
+  const c = loadConfig(join(ws, "factory.toml"), {});
+  assert.deepEqual(Object.fromEntries(c.agents.map((a) => [a.name, a.group])),
+    { ada: undefined, bea: "Product", cal: "Product", rae: undefined, otto: "Servers", nap: undefined });
+
+  assert.deepEqual(problems(GROUPED.replace('group = " Servers "', 'group = "  "')), ["agents[4].group: must not be empty"]);
+  assert.deepEqual(problems(GROUPED.replace(`name = "ada"
+role = "lead"`, `name = "ada"
+role = "lead"
+group = "Top"`)), ["agents[0].group: the lead has its own place on the board"]);
+  assert.deepEqual(problems(GROUPED.replace('group = " Servers "', 'group = "Product"')),
+    ['agents: group "Product" has "bea" (builder) and "otto" (assistant); a group holds one role']);
 });

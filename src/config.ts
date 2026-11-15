@@ -70,6 +70,9 @@ export interface Agent {
   autocompact?: string;
   // A [hosts] key: the agent's sessions run on that machine, through its factory daemon.
   host?: string;
+  // The board's team title for this agent, in place of its role's or stack's. Agents with the same
+  // group share one roster.
+  group?: string;
 }
 
 // Another machine's factory daemon. remote.ts says what a request carries.
@@ -438,6 +441,9 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const there = rawCwd ?? (role ? rolesCwd[role] : undefined);
     if (host && there !== undefined && !(isAbsolute(there) && !/[~$]/.test(there)))
       r.bad(rawCwd ? "cwd" : "host", `${name} runs on host ${host}, so ${rawCwd ? "its cwd" : `roles.${role}.cwd`} must be an absolute path there, with no ~ or $, got ${show(there)}`);
+    const group = r.str("group");
+    if (group !== undefined && !group.trim()) r.bad("group", "must not be empty");
+    if (group !== undefined && role === "lead") r.bad("group", "the lead has its own place on the board");
     if (host && !hosts[host]) r.bad("host", `no host ${show(host)}; hosts: ${Object.keys(hosts).join(", ") || "none"}`);
     const workRepos = stack ? (stacks[stack]?.repos ?? []) : (agentRepos ?? []);
     // A builder runs where its worktrees are, and they are under its repos' checkouts.
@@ -468,12 +474,20 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
       permissionMode: r.str("permission_mode"),
       autocompact: r.str("autocompact"),
       host,
+      group: group?.trim() || undefined,
     });
     r.done();
   });
   const leads = agents.filter((a) => a.role === "lead");
   if (leads.length !== 1)
     problems.push(`agents: exactly one agent needs role = "lead", found ${leads.length}${leads.length ? ` (${leads.map((a) => a.name).join(", ")})` : ""}`);
+  // A roster sits on the board where its role does, so one group cannot span two roles.
+  for (const group of new Set(agents.map((a) => a.group).filter((g) => g !== undefined))) {
+    const a = agents.find((x) => x.group === group)!;
+    const other = agents.find((b) => b.group === group && b.role !== a.role);
+    if (other)
+      problems.push(`agents: group ${show(a.group)} has ${show(a.name)} (${a.role}) and ${show(other.name)} (${other.role}); a group holds one role`);
+  }
   for (const role of ROLES) {
     const user = agents.find((a) => a.role === role);
     if (user && !roles[role]) problems.push(`roles.${role}: missing, and agent ${show(user.name)} has that role`);

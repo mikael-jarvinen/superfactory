@@ -160,3 +160,27 @@ export function noCleanup(): string | false {
   const own = ownCgroupProcs();
   return "none" in own && `needs cgroup v2 for the scheduler's own cgroup (${own.none})`;
 }
+
+// Two assistants and the two builders, grouped; rae stays in the role's own roster.
+export const GROUPED = TOML.replace("[tracker]", `[[agents]]
+name = "otto"
+role = "assistant"
+group = " Servers "
+
+[[agents]]
+name = "nap"
+role = "assistant"
+
+[roles.assistant]
+cwd = "assistants"
+model = "opus"
+permission_mode = "auto"
+settings = "readonly"
+
+[tracker]`).replace(`name = "bea"
+role = "builder"`, `name = "bea"
+role = "builder"
+group = "Product"`).replace(`name = "cal"
+role = "builder"`, `name = "cal"
+role = "builder"
+group = "Product"`);

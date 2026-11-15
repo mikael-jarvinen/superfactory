@@ -9,7 +9,7 @@ import { transition } from "../src/state.js";
 import { readTail } from "../src/messages.js";
 import { pyDumps } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
-import { CLI, tempWorkspace } from "./helpers.js";
+import { CLI, GROUPED, tempWorkspace } from "./helpers.js";
 
 const noInboxLock = process.platform !== "darwin" && process.platform !== "linux" && "the inbox lock is built for macOS and Linux only";
 
@@ -179,4 +179,23 @@ test("the message page refuses a cross-site post", { skip: noInboxLock }, async 
   assert.equal((await post({ "Content-Type": "application/json", "Origin": "https://elsewhere.example" })).status, 403);
   assert.equal((await post({ "Content-Type": "application/json", "Origin": board.url })).status, 200);
   assert.deepEqual(readTail(ws.messages).map((r) => r.text), ["do something"]);
+});
+
+test("teams: a configured group titles its roster and keeps the role's place", { skip: noInboxLock }, async () => {
+  const dir = tempWorkspace(GROUPED);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  process.env.CLAUDE_BIN = join(dir, "bin", "claude");
+  const board = await serve(openWorkspace(dir), { host: "127.0.0.1", port: 0 });
+  after(() => board.close());
+  const snap = await (await fetch(board.url + "/api")).json();
+  // Within one place, rosters keep the order of their first member in the config.
+  type Group = { key: string; title: string; scope: string; staff: boolean; members: { name: string }[] };
+  assert.deepEqual(snap.teams.map((g: Group) => [g.key, g.title, g.staff, g.members.map((m) => m.name).join(" ")]), [
+    ["lead", "Lead", false, "ada"],
+    ["group:Servers", "Servers", true, "otto"],
+    ["assistants", "Assistants", true, "nap"],
+    ["group:Product", "Product", false, "bea cal"],
+    ["reviewers", "Reviewers", false, "rae"],
+  ]);
+  assert.equal(snap.teams[3].scope, "web, api", "the first member's scope, here bea's stack");
 });

@@ -51,8 +51,8 @@ function roster(g){
 // a dashed line, the teams below on a bar that joins them.
 function team(groups){
   const lead = groups.filter(g => g.key === 'lead').flatMap(g => g.members);
-  const staff = groups.filter(g => g.key === 'assistants');
-  const rest = groups.filter(g => g.key !== 'lead' && g.key !== 'assistants');
+  const staff = groups.filter(g => g.staff);
+  const rest = groups.filter(g => g.key !== 'lead' && !g.staff);
   const members = groups.flatMap(g => g.members);
   return `<section class="team"><div class="shead"><h2>Team</h2><span class="sum">${members.filter(p => p.alive).length} of ${members.length} running</span></div>
     <div class="top">${lead.length ? `<div class="head">${lead.map(p => member(p, 'big')).join('')}</div>` : ''}
