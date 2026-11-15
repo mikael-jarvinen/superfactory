@@ -8,10 +8,13 @@
 //
 // A session on a host runs this with --from-host <host>. It can wake only an agent on that same
 // host, through its local claude; it cannot list the primary or another host, so a message to any
-// other agent passes through.
+// other agent passes through. If that send then fails, the same hook on PostToolUse says the agent
+// is off and to have the lead wake it, rather than leave "not reachable" unexplained. The lead
+// being off is a known gap: nobody else can wake it.
 import { parseArgs } from "node:util";
 import type { HookResult } from "../settings.js";
 import { sleep } from "../util.js";
+import { lead } from "../fleet.js";
 import { local } from "../transport.js";
 import { WAKE_SETTLE_S, wake } from "../wake.js";
 import { openWorkspace, resolveWorkspace } from "../workspace.js";
@@ -33,9 +36,14 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   const timeoutS = num(v["timeout-seconds"], WAKE_HOOK_TIMEOUT_S);
   const fromHost = typeof v["from-host"] === "string" ? v["from-host"] : undefined;
   let to: string | null = null;
+  let failedSend = false;
   try {
-    const ev = JSON.parse(input) as { tool_input?: { to?: unknown } };
+    const ev = JSON.parse(input) as { hook_event_name?: unknown; tool_input?: { to?: unknown }; tool_response?: { success?: unknown } };
     to = recipient(ev.tool_input?.to);
+    if (ev.hook_event_name === "PostToolUse") {
+      if (!fromHost || ev.tool_response?.success !== false) return { code: 0 };
+      failedSend = true;
+    }
   } catch {
     return { code: 0 };
   }
@@ -48,6 +56,11 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   }
   const agent = ws.config.agents.find((a) => a.name === to);
   if (!agent) return { code: 0 };
+  if (failedSend) {
+    const ld = lead(ws).name;
+    if (agent.host === fromHost || agent.name === ld) return { code: 0 };
+    return { code: 2, stderr: `${to} runs on ${agent.host ?? "the primary"}, not on ${fromHost}, and was not reachable: it is most likely off (stopped idle), and a session on ${fromHost} cannot wake it. Tell ${ld} that ${to} is off, so ${ld} wakes it (\`factory wake ${to}\`); then send again.\n` };
+  }
   if (fromHost && agent.host !== fromHost) return { code: 0 };
   // Listed live on its host is not yet addressable from another machine over Remote Control.
   const settle = !fromHost && agent.host ? settleS : 0;
@@ -57,7 +70,7 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   try {
     w = wake(ws, agent, { waitS, deadline, ...(fromHost ? { t: local } : {}) });
   } catch (e) {
-    return { code: 2, stderr: `${to} is off and did not wake: ${(e as Error).message}\n` };
+    return { code: 2, stderr: `${to} could not be checked or woken: ${(e as Error).message}\n` };
   }
   switch (w.is) {
     case "live":

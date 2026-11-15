@@ -5,6 +5,8 @@ import { after, test } from "node:test";
 import { agentOrDie } from "../src/fleet.js";
 import { settingsFile } from "../src/launch.js";
 import { recipient } from "../src/hooks/wake.js";
+import type { Transport } from "../src/transport.js";
+import { wake } from "../src/wake.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, TOML, tempWorkspace } from "./helpers.js";
 
@@ -42,7 +44,8 @@ function fakeFleet(toml = TOML) {
 D=${ws}
 echo "$*" >> $D/calls
 case "$1" in
-  agents) if [ "$3" = --all ]; then cat $D/all.json 2>/dev/null || echo '[]'; else cat $D/live.json 2>/dev/null || echo '[]'; fi ;;
+  agents) [ -f $D/listing-hang ] && sleep 60
+    if [ "$3" = --all ]; then cat $D/all.json 2>/dev/null || echo '[]'; else cat $D/live.json 2>/dev/null || echo '[]'; fi ;;
   respawn) [ -f $D/respawn-hang ] && sleep 30
     [ -f $D/respawn-fail ] && { cat $D/respawn-fail >&2; exit 1; }
     [ -f $D/after.json ] && cp $D/after.json $D/live.json; echo "respawned $2" ;;
@@ -206,17 +209,17 @@ test("the wake hook answers inside its timeout: a respawn that hangs, or a sessi
   put("all.json", [sess("b1", "bea")]);
   writeFileSync(join(ws, "respawn-hang"), "");
   let t0 = Date.now();
-  let r = wakeHook(ws, "bea", ["--timeout-seconds", "12"]);
+  let r = wakeHook(ws, "bea", ["--timeout-seconds", "32"]);
   assert.equal(r.status, 2);
   assert.match(r.stderr, /bea is off and did not wake/);
-  assert.ok(Date.now() - t0 < 12_000, `the hung respawn took ${Date.now() - t0} ms`);
+  assert.ok(Date.now() - t0 < 32_000, `the hung respawn took ${Date.now() - t0} ms`);
 
   rmSync(join(ws, "respawn-hang"));
   t0 = Date.now();
-  r = wakeHook(ws, "bea", ["--timeout-seconds", "12"]);
+  r = wakeHook(ws, "bea", ["--timeout-seconds", "32"]);
   assert.equal(r.status, 2);
   assert.match(r.stderr, /respawned b1, and it was not listed live in the time the hook has/);
-  assert.ok(Date.now() - t0 < 12_000, `the wait took ${Date.now() - t0} ms`);
+  assert.ok(Date.now() - t0 < 32_000, `the wait took ${Date.now() - t0} ms`);
 });
 
 test("a hosted agent's settings tell the wake hook its host", () => {
@@ -230,4 +233,59 @@ test("a hosted agent's settings tell the wake hook its host", () => {
   };
   assert.match(wakeCmd("rae"), / hook wake --from-host far$/);
   assert.match(wakeCmd("bea"), / hook wake$/);
+});
+
+test("a local listing that hangs is cut off, so the hook still answers inside its timeout", () => {
+  const { ws } = fakeFleet();
+  writeFileSync(join(ws, "listing-hang"), "");
+  const t0 = Date.now();
+  const r = wakeHook(ws, "bea");
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /bea could not be checked or woken/);
+  assert.ok(Date.now() - t0 < 30_000, `the hung listing took ${Date.now() - t0} ms`);
+});
+
+test("a remote respawn leaves room for its child's slack and one listing after it", () => {
+  const dir = tempWorkspace(HOSTED_TOML);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "token"), "t".repeat(40));
+  const ws = openWorkspace(dir, {});
+  let given: number | undefined;
+  const far = {
+    where: "far",
+    sessions: (all = false) => (all ? [sess("r1", "rae")] : []),
+    alive: (s: unknown) => !!s && (s as { alive?: unknown }).alive === true,
+    respawn: (_n: string, _id: string, ms?: number) => ((given = ms), { ok: false, said: "", why: "stop here" }),
+  } as unknown as Transport;
+  wake(ws, agentOrDie(ws, "rae"), { t: far, deadline: Date.now() + 60_000 });
+  assert.ok(given !== undefined && given <= 30_000 && given > 29_000, `respawn given ${given} ms of 60 000: 25 000 for a listing and 5 000 of child slack come off`);
+});
+
+test("from a host, a failed send to an agent it cannot wake says it is off and to tell the lead", () => {
+  const { ws } = fakeFleet(HOSTED_TOML);
+  const post = (to: string, success: boolean) =>
+    factory(undefined, ["--workspace", ws, "hook", "wake", "--from-host", "far"], {
+      env: { CLAUDE_BIN: join(ws, "bin", "claude") },
+      input: JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "SendMessage", tool_input: { to, message: "hi" }, tool_response: { success } }),
+    });
+  const r = post("bea", false);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /bea runs on the primary, not on far, and was not reachable: it is most likely off/);
+  assert.match(r.stderr, /Tell ada that bea is off/);
+  assert.equal(post("bea", true).status, 0, "a send that went through");
+  assert.equal(post("ada", false).status, 0, "the lead: nobody else can wake it");
+  assert.equal(post("rae", false).status, 0, "an agent on far, which the PreToolUse half already tried");
+});
+
+test("only a hosted agent's settings explain a failed send", () => {
+  const dir = tempWorkspace(HOSTED_TOML);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "token"), "t".repeat(40));
+  const ws = openWorkspace(dir, {});
+  const post = (name: string) =>
+    ((JSON.parse(readFileSync(settingsFile(ws, agentOrDie(ws, name)), "utf8")).hooks.PostToolUse ?? []) as { matcher?: string; hooks: { command: string }[] }[])
+      .filter((h) => h.matcher === "SendMessage").map((h) => h.hooks[0]!.command);
+  assert.equal(post("rae").length, 1);
+  assert.match(post("rae")[0]!, / hook wake --from-host far$/);
+  assert.deepEqual(post("bea"), []);
 });

@@ -31,7 +31,7 @@ import { readFileSync } from "node:fs";
 import type { Host } from "./config.js";
 import { validKey } from "./state.js";
 import type { Session } from "./fleet.js";
-import { local, type Transport, type WorktreeRequest } from "./transport.js";
+import { LISTING_TIMEOUT_MS, local, type Transport, type WorktreeRequest } from "./transport.js";
 import type { Workspace } from "./workspace.js";
 import { FactoryError } from "./util.js";
 
@@ -117,10 +117,13 @@ function callSync(h: Host, method: string, path: string, body?: unknown, timeout
 const worktreeCall = (h: Host, op: string, q: WorktreeRequest, timeoutMs: number): Reply =>
   checked(h, exchange(h, "POST", agentPath(q.agent.name, op), names(q), timeoutMs), true);
 
+// The child that makes a request is killed this long after the request's own timeout.
+export const CHILD_SLACK_MS = 5000;
+
 function exchange(h: Host, method: string, path: string, body: unknown, timeoutMs: number): { reply: Reply; hash: string } {
   const { headers: hd, hash } = headers(h);
   const q = { url: h.url + path, method, headers: hd, body: body === undefined ? undefined : JSON.stringify(body), timeoutMs };
-  const r = spawnSync(process.execPath, ["--input-type=module", "-e", CHILD], { input: JSON.stringify(q), encoding: "utf8", timeout: timeoutMs + 5000 });
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", CHILD], { input: JSON.stringify(q), encoding: "utf8", timeout: timeoutMs + CHILD_SLACK_MS });
   let out: Partial<Reply> & { error?: string };
   try {
     out = JSON.parse(r.stdout);
@@ -166,10 +169,10 @@ export function remote(h: Host): Transport {
   return {
     where: h.name,
     sessions(includeDone = false) {
-      return listed(h, callSync(h, "GET", `/agents${includeDone ? "?all=1" : ""}`, undefined, 20_000));
+      return listed(h, callSync(h, "GET", `/agents${includeDone ? "?all=1" : ""}`, undefined, LISTING_TIMEOUT_MS));
     },
     sessionsAsync() {
-      return call(h, "GET", "/agents", 20_000).then((r) => listed(h, r)).catch(unreachable);
+      return call(h, "GET", "/agents", LISTING_TIMEOUT_MS).then((r) => listed(h, r)).catch(unreachable);
     },
     alive(s): s is Session {
       return !!s && s.kind === "background" && s.alive === true;

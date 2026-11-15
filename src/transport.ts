@@ -100,11 +100,14 @@ export function sessionAlive(s: Session | null | undefined): s is Session {
   return !!s && s.kind === "background" && s.state !== "stopped" && s.state !== "failed" && daemonAlive();
 }
 
+// A listing that hangs is cut off here, so a caller with a deadline can count on it.
+export const LISTING_TIMEOUT_MS = 20_000;
+
 const scoped = (argv: string[], timeout?: number) => scopeCheck(argv, run(...claudeScoped(argv), { env: claudeEnv(), ...(timeout ? { timeout } : {}) }, `claude ${argv[0]}`));
 export const local: Transport = {
   where: "local",
   sessions(includeDone = false) {
-    const r = scoped(["agents", "--json", ...(includeDone ? ["--all"] : [])]);
+    const r = scoped(["agents", "--json", ...(includeDone ? ["--all"] : [])], LISTING_TIMEOUT_MS);
     if (r.status !== 0) die(`\`claude agents --json\` failed: ${r.stderr.trim()}`);
     try {
       return parse(r.stdout);
@@ -115,7 +118,7 @@ export const local: Transport = {
   // As before, any failure here, a scope's included, is an empty listing.
   sessionsAsync() {
     return new Promise((res) => {
-      execFile(...claudeScoped(["agents", "--json"]), { timeout: 20_000, maxBuffer: MAX_OUTPUT, env: claudeEnv() }, (err, stdout) => {
+      execFile(...claudeScoped(["agents", "--json"]), { timeout: LISTING_TIMEOUT_MS, maxBuffer: MAX_OUTPUT, env: claudeEnv() }, (err, stdout) => {
         try {
           res(err ? [] : parse(stdout));
         } catch {

@@ -206,7 +206,10 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
   const leadName = lead(ws).name;
   // Every role sends messages, and a message to a session that is off is lost, so every role wakes
   // its recipient first.
-  add("PreToolUse", "SendMessage", ["--workspace", ws.dir, "hook", "wake", ...(s.host ? ["--from-host", s.host] : [])], WAKE_HOOK_TIMEOUT_S);
+  const wakeArgs = ["--workspace", ws.dir, "hook", "wake", ...(s.host ? ["--from-host", s.host] : [])];
+  add("PreToolUse", "SendMessage", wakeArgs, WAKE_HOOK_TIMEOUT_S);
+  // a failed send from a host, to an agent it cannot wake, is explained
+  if (s.host) add("PostToolUse", "SendMessage", wakeArgs, 10);
   for (const h of names) {
     if (h === "wake") continue;
     if (h === "guard") {

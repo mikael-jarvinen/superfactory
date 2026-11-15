@@ -6,8 +6,8 @@
 // up to 10 s more to be addressable from another machine, hence WAKE_SETTLE_S.
 import type { Agent } from "./config.js";
 import { findSession, type Session } from "./fleet.js";
-import { ask, Unreachable } from "./remote.js";
-import { isAgentSession, newest, type Transport, transportFor } from "./transport.js";
+import { ask, CHILD_SLACK_MS, Unreachable } from "./remote.js";
+import { isAgentSession, LISTING_TIMEOUT_MS, newest, type Transport, transportFor } from "./transport.js";
 import { sleep } from "./util.js";
 import type { Workspace } from "./workspace.js";
 
@@ -34,12 +34,14 @@ export interface WakeOptions {
   deadline?: number;
 }
 
-// The longest one listing may take: a remote one is bounded at 20 s plus its child's 5 s.
-const listingMs = (t: Transport) => (t.where === "local" ? 5_000 : 25_000);
+// How long past its own timeout a call may run: a remote one's child is killed CHILD_SLACK_MS later.
+const slackMs = (t: Transport) => (t.where === "local" ? 0 : CHILD_SLACK_MS);
 
 export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   const t = o.t ?? transportFor(ws, agent);
-  const budget = listingMs(t);
+  const slack = slackMs(t);
+  // the longest one listing may take
+  const budget = LISTING_TIMEOUT_MS + slack;
   const left = () => (o.deadline ?? Infinity) - Date.now();
   const late = (step: string): Woken => ({ is: "failed", why: `out of time before ${step}` });
   const live = ask(() => findSession(t, agent.name));
@@ -53,7 +55,7 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   const old = newest(all.filter(isAgentSession(agent.name)));
   if (!old?.id || (o.match && !o.match(old))) return { is: "none" };
   // the respawn leaves time for at least one listing after it
-  const respawnMs = left() - budget;
+  const respawnMs = left() - budget - slack;
   if (respawnMs < 1000) return late(`respawning ${old.id}`);
   const r = t.respawn(agent.name, old.id, Number.isFinite(respawnMs) ? respawnMs : undefined);
   if (!r.ok) return { is: "failed", why: `respawn of ${old.id} failed: ${r.why || "no reason given"}` };
