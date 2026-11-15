@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync 
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
+import { defaultLogsDir } from "../src/config.js";
+import { wakeHookLog } from "../src/failures.js";
 import { agentOrDie } from "../src/fleet.js";
 import { settingsFile } from "../src/launch.js";
 import { recipient } from "../src/hooks/wake.js";
@@ -130,7 +132,7 @@ test("the wake hook lets the send through when the workspace does not load or th
   assert.equal(r.status, 0, r.stderr);
   assert.match(told(r), /^wake check failed: \S+factory\.toml has 1 problem:[\s\S]*not valid TOML[\s\S]*; message sent without a wake check$/);
   assert.match(r.stderr, /\n\s+at /, "with the stack");
-  const lines = readFileSync(join(ws, "logs", "wake-hook.log"), "utf8").trim().split("\n");
+  const lines = readFileSync(wakeHookLog(defaultLogsDir(ws)), "utf8").trim().split("\n");
   assert.equal(lines.length, 1);
   const row = JSON.parse(lines[0]!) as Record<string, string>;
   assert.equal(row.to, "bea");
@@ -349,7 +351,7 @@ test("the hook's own error lets the send through, logged and told to the sender"
   assert.equal(out.hookSpecificOutput.hookEventName, "PreToolUse");
   assert.equal(out.hookSpecificOutput.additionalContext, "wake check failed: `claude agents --json` returned something that is not a JSON list; message sent without a wake check");
   assert.match(r.stderr, /\n\s+at /, "with the stack");
-  const lines = readFileSync(join(openWorkspace(ws, {}).logsDir, "wake-hook.log"), "utf8").trim().split("\n");
+  const lines = readFileSync(wakeHookLog(openWorkspace(ws, {}).logsDir), "utf8").trim().split("\n");
   assert.equal(lines.length, 1);
   const row = JSON.parse(lines[0]!) as Record<string, string>;
   assert.equal(row.from, "session s-123 in /w/ada");
@@ -437,7 +439,7 @@ test("from a host, a failed send whose workspace does not load is answered as th
   r = run({ hook_event_name: "PostToolUseFailure", tool_name: "SendMessage", tool_input: { to: "bea", message: "hi" }, error: "No agent named 'bea' is reachable." });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(answered(r).hookEventName, "PostToolUseFailure");
-  assert.equal(readFileSync(join(ws, "logs", "wake-hook.log"), "utf8").trim().split("\n").length, 2);
+  assert.equal(readFileSync(wakeHookLog(defaultLogsDir(ws)), "utf8").trim().split("\n").length, 2);
   r = run({ ...FAILED_SEND, hook_event_name: "PreToolUse", tool_input: { ...FAILED_SEND.tool_input, to: "bea" } });
   assert.equal(answered(r).hookEventName, "PreToolUse");
 });

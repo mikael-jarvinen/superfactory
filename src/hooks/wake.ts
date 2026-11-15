@@ -5,10 +5,10 @@
 // agents on that host, and after a send to any other fails as not reachable it says to have the
 // lead wake it. The lead being off is a known gap: nobody else can wake it.
 import { appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { HookResult } from "../settings.js";
 import { sleep } from "../util.js";
+import { defaultLogsDir } from "../config.js";
 import { iso, wakeHookLog } from "../failures.js";
 import { lead } from "../fleet.js";
 import { local } from "../transport.js";
@@ -84,7 +84,7 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
     dir = resolveWorkspace({ flag: workspace });
     ws = openWorkspace(dir);
   } catch (e) {
-    return failOpen(event, dir && join(dir, "logs"), sender, to, e);
+    return failOpen(event, dir && defaultLogsDir(dir), sender, to, e);
   }
   const agent = ws.config.agents.find((a) => a.name === to);
   if (!agent) return { code: 0 };

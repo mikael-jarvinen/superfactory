@@ -219,6 +219,9 @@ export function expandPath(value: string, base: string, env: NodeJS.ProcessEnv =
 // A settings value is a template name unless it looks like a path.
 export const isSettingsPath = (s: string) => s.includes("/") || s.endsWith(".json");
 
+// Where logs go when [paths] names none, also for a workspace whose config does not load.
+export const defaultLogsDir = (dir: string) => join(dir, "logs");
+
 export function loadConfig(file: string, env: NodeJS.ProcessEnv = process.env): Config {
   let text: string;
   try {
@@ -270,7 +273,7 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   const paths = {
     repos: path(p, "repos", p.str("repos")) ?? dir,
     state: path(p, "state", p.str("state")) ?? join(dir, "state"),
-    logs: path(p, "logs", p.str("logs")) ?? join(dir, "logs"),
+    logs: path(p, "logs", p.str("logs")) ?? defaultLogsDir(dir),
   };
   p.done();
 
