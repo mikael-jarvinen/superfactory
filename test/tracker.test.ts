@@ -504,7 +504,7 @@ test("the board: tickets and wiki pages, the API writes as the human, a stale wi
   assert.deepEqual(tk.labels, ["story", "task"]);
   assert.equal(tk.comments[0]?.by, "Alex");
   const list = (await get("/api/tickets?project=RPE")).body as { tickets: { key: string; comments: number }[] };
-  assert.deepEqual(list.tickets.map((t) => [t.key, t.comments]), [["RPE-1", 1], ["RPE-2", 0]]);
+  assert.deepEqual(list.tickets.map((t) => [t.key, t.comments]), [["RPE-2", 0], ["RPE-1", 1]], "the open one first, then the Done one");
 
   const w1 = await post("/api/wiki/RPE/vision", { title: "Vision", body: "v1", base: null });
   assert.equal(w1.status, 200);
