@@ -78,4 +78,4 @@ form button:disabled{color:var(--faint);cursor:default}
 .shot{margin-top:7px}
 .shot img{max-width:100%;max-height:420px;border:1px solid var(--line-soft);border-radius:8px;
   box-shadow:var(--shadow);display:block}
-@media (max-width:720px){.wrap{padding:14px}header{padding:11px 14px;gap:12px}}
+@media (max-width:720px){.wrap{padding:14px}header{padding-left:14px;padding-right:14px}}
