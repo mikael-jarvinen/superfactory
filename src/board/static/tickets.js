@@ -62,7 +62,7 @@ async function listView(p, n, ms){
 // above and below it, its result is shown at once, and the list, if it is still shown, is read again
 // from the server, whose order is the real one. One drop is sent at a time: no drag starts until that
 // read is drawn or has failed, and as the drop and the read each give up after RANK_MS, the lock
-// always clears.
+// always clears. The lock is taken at the press, so a second finger on another grip waits too.
 let ranking = false, RANK_MS = 15000;
 function dragToRank(list){
   if(!list) return;
@@ -74,6 +74,7 @@ function dragToRank(list){
     // selects text
     e.preventDefault();
     if(ranking) return;
+    ranking = true;
     const row = grip.closest('.row'), was = row.previousElementSibling;
     const grab = e.clientY - row.getBoundingClientRect().top;
     let y = e.clientY;
@@ -105,25 +106,33 @@ function dragToRank(list){
       grip.removeEventListener('pointerup', end);
       grip.removeEventListener('pointercancel', end);
       row.classList.remove('dragging'); row.style.transform = '';
-      if(ev.type === 'pointercancel' || row.previousElementSibling === was) return route();
+      const back = () => was ? was.after(row) : list.prepend(row);
+      // a cancelled drag goes back, and a press that moved nothing has nothing to send or read
+      if(ev.type === 'pointercancel') back();
+      if(ev.type === 'pointercancel' || row.previousElementSibling === was) { ranking = false; return; }
       const key = el => el?.dataset.key || null;
       let failed = '';
-      ranking = true;
       document.body.classList.add('ranking');
       try {
         try {
           await api('/api/tickets/' + encodeURIComponent(row.dataset.key), {op: 'rank', after: key(row.previousElementSibling), before: key(row.nextElementSibling)}, RANK_MS);
-        } catch(err){ failed = `${row.dataset.key}: ${err.message}${err.timeout ? '; the drop may still land' : ''}`; }
+        } catch(err){
+          failed = `${row.dataset.key}: ${err.message}${err.timeout ? '; the drop may still land' : ''}`;
+          // the board answered and did not move it
+          if(err.status) back();
+        }
         // a ticket or the new-ticket form opened while the drop was sent has drawn itself, and the
         // result is not about it
         const p = q();
         if(!isList(p)) return;
-        if(failed) flash(failed);
-        // A failed read keeps the list on screen with its error, as the drop may have landed. The
-        // drawn list has a fresh #err, so the drop's result is shown again in it.
+        // shown at once, which also clears an earlier drop's error
+        flash(failed);
+        // If the read fails, the list stays, with both errors. The drawn list has a fresh #err, so
+        // the drop's result is shown again in it. A read a newer view has overtaken shows nothing.
+        const n = ++routes;
         try {
-          if(await listView(p, ++routes, RANK_MS) && failed) flash(failed);
-        } catch(err){ flash([failed, `the list was not read again: ${err.message}`].filter(Boolean).join('; ')); }
+          if(await listView(p, n, RANK_MS)) flash(failed);
+        } catch(err){ if(n === routes) flash([failed, `the list was not read again: ${err.message}`].filter(Boolean).join('; ')); }
       } finally {
         ranking = false;
         document.body.classList.remove('ranking');

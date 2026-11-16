@@ -29,8 +29,14 @@ function board(opts: { reply?: () => Promise<Reply>; read?: () => Promise<void>;
         return { ok: r.ok, status: r.ok ? 200 : 400, json: async () => (r.ok ? { ok: true } : { ok: false, error: r.error }) };
       }
       await Promise.race([(opts.read ?? (async () => {}))(), aborted(o?.signal)]);
-      if (url.split("?")[0] === "/api/tickets") lists++;
-      return { ok: true, status: 200, json: async () => ({ tickets, projects: [{ key: "RPE", name: "R" }], states: ["Todo", "Done", "Cancelled"] }) };
+      const path = url.split("?")[0] as string;
+      if (path.startsWith("/api/tickets/")) {
+        const key = decodeURIComponent(path.slice("/api/tickets/".length));
+        const t = { ...tickets.find((x) => x.key === key), body: "", relations: [], links: [], comments: [], created: "2026-01-01T00:00:00Z", by: "Alex" };
+        return { ok: true, status: 200, json: async () => t };
+      }
+      lists++;
+      return { ok: true, status: 200, json: async () => ({ tickets, projects: [{ key: "RPE", name: "R" }], states: ["Todo", "Done", "Cancelled"], relations: ["blocks"], human: "Alex" }) };
     },
   });
   w.Element.prototype.getBoundingClientRect = function (this: Element) {
@@ -51,7 +57,7 @@ function board(opts: { reply?: () => Promise<Reply>; read?: () => Promise<void>;
     const g = grip(key), row = g.closest(".row") as HTMLElement;
     const taken = !ev(g, "pointerdown", [...(row.parentNode as Element).children].indexOf(row) * 40 + 20);
     ev(g, "pointermove", y);
-    return { order: order(), transform: row.style.transform, dragging: row.classList.contains("dragging"), taken, up: () => ev(g, "pointerup", y) };
+    return { order: order(), transform: row.style.transform, dragging: row.classList.contains("dragging"), taken, up: () => ev(g, "pointerup", y), cancel: () => ev(g, "pointercancel", y) };
   };
   const run = (code: string) => new vm.Script(code).runInContext(page);
   return { w, doc, run, order, press, posts, lists: () => lists, busy: () => doc.body.classList.contains("ranking"), err: () => doc.getElementById("err")?.textContent ?? "" };
@@ -113,13 +119,14 @@ test("drag: a ticket opened while the drop is sent is not redrawn, nor given its
   await settle();
   b.press("RPE-3", 5).up();
   await settle();
-  // the ticket's address without its view, so only a list drawn by the drop could change the page
   b.w.history.pushState(null, "", "/tickets?key=RPE-2");
-  const lists = b.lists(), page = b.doc.body.innerHTML;
+  await b.run("route()");
+  const lists = b.lists(), page = b.doc.getElementById("root")?.innerHTML;
+  assert.ok(b.doc.querySelector(".tkhead"), "the ticket is drawn");
   s.release({ ok: false, error: "refused" });
   await settle();
   assert.equal(b.lists(), lists, "no reload of the list");
-  assert.equal(b.doc.body.innerHTML, page, "nothing drawn or flashed");
+  assert.equal(b.doc.getElementById("root")?.innerHTML, page, "nothing drawn or flashed");
   // the lock is off again, and the refusal is not kept for a later list
   b.w.history.pushState(null, "", "/tickets?state=all");
   await b.run("route()");
@@ -246,14 +253,14 @@ test("drag: no drag starts on a list whose reload is still out, so none is wiped
   assert.equal(b.posts.length, 2);
 });
 
-test("drag: a refused drop whose reload fails keeps the list, and a later list does not show it", async () => {
+test("drag: a refused drop whose reload fails puts the row back, and a later list does not show it", async () => {
   let reading: () => Promise<void> = async () => {};
   const b = board({ reply: async () => ({ ok: false, error: "refused" }), read: () => reading() });
   await settle();
   reading = () => Promise.reject(new Error("down"));
   b.press("RPE-3", 5).up();
   await settle();
-  assert.equal(b.order().length, 6, "the list stays");
+  assert.deepEqual(b.order(), ["RPE-1", "RPE-2", "RPE-3", "RPE-4", "RPE-5", "RPE-6"], "the board's order");
   assert.equal(b.err(), "RPE-3: refused; the list was not read again: the board is not answering");
   reading = async () => {};
   b.run("go({state: 'open'})");
@@ -262,9 +269,9 @@ test("drag: a refused drop whose reload fails keeps the list, and a later list d
   assert.equal(b.err(), "");
 });
 
-test("drag: a ticket opened while the reload is out is not drawn over, and the pulse keeps its answer", async () => {
+test("drag: a ticket opened while the reload is out is not drawn over nor given its errors, and the pulse keeps its answer", async () => {
   let reading: () => Promise<void> = async () => {};
-  const b = board({ read: () => reading() });
+  const b = board({ reply: async () => ({ ok: false, error: "refused" }), read: () => reading() });
   b.run("RANK_MS = 100");
   await settle();
   reading = hang;
@@ -273,7 +280,56 @@ test("drag: a ticket opened while the reload is out is not drawn over, and the p
   reading = async () => {};
   b.w.history.pushState(null, "", "/tickets?key=RPE-2");
   await b.run("route()");
+  assert.ok(b.doc.querySelector(".tkhead"), "the ticket is drawn");
   await until(() => !b.busy(), "the stale reload times out");
-  assert.equal(b.doc.querySelector(".rows"), null, "the ticket is still shown");
+  assert.ok(b.doc.querySelector(".tkhead"), "the ticket is still shown");
+  assert.equal(b.err(), "");
   assert.ok(!b.doc.getElementById("pulse")?.classList.contains("stale"));
+});
+
+test("drag: a good drop clears the error an earlier drop left", async () => {
+  let posting: () => Promise<Reply> = async () => ({ ok: false, error: "refused" }), reading: () => Promise<void> = async () => {};
+  const b = board({ reply: () => posting(), read: () => reading() });
+  await settle();
+  b.press("RPE-3", 5).up();
+  await settle();
+  assert.equal(b.err(), "RPE-3: refused");
+  posting = async () => ({ ok: true });
+  reading = hang;
+  b.press("RPE-4", 5).up();
+  await settle();
+  assert.ok(b.busy(), "the reload is still out");
+  assert.equal(b.err(), "");
+});
+
+test("drag: a press that moves nothing sends and reads nothing, and a cancelled drag goes back", async () => {
+  const b = board();
+  await settle();
+  const lists = b.lists();
+  b.press("RPE-3", 100).up();
+  await settle();
+  assert.equal(b.lists(), lists);
+  const d = b.press("RPE-4", 5);
+  assert.equal(d.order[0], "RPE-4");
+  d.cancel();
+  await settle();
+  assert.deepEqual(b.order(), ["RPE-1", "RPE-2", "RPE-3", "RPE-4", "RPE-5", "RPE-6"]);
+  assert.equal(b.lists(), lists);
+  assert.equal(b.posts.length, 0);
+  b.press("RPE-4", 5).up();
+  await settle();
+  assert.equal(b.posts.length, 1, "the lock is off again");
+});
+
+test("drag: a second pointer on another grip does not drag while the first is down", async () => {
+  const b = board();
+  await settle();
+  const first = b.press("RPE-3", 5);
+  assert.equal(first.dragging, true);
+  const second = b.press("RPE-4", 45);
+  assert.equal(second.dragging, false);
+  first.up();
+  second.up();
+  await settle();
+  assert.equal(b.posts.length, 1);
 });
