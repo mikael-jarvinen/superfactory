@@ -122,10 +122,26 @@ export function daemonAlive(): boolean {
   }
 }
 
+// Whether a process exists. EPERM means it does, run by someone else.
+export function pidExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 // A background session that has not stopped or failed, behind a daemon that is running. "done"
-// means it finished a turn and is idle; it still wakes on SendMessage, so it counts as alive.
+// means it finished a turn and is idle; it still wakes on SendMessage, so it counts as alive. But
+// the listing keeps a row whose worker is gone, from before a reboot or retired by the daemon, at
+// its last state, done or blocked; such a row has no pid. So a row is live only while its worker's
+// pid exists. Not "started after the supervisor": a worker can outlive a supervisor restart, and
+// one started from a pre-spawned spare predates its row's startedAt, so neither time rules it out.
 export function sessionAlive(s: Session | null | undefined): s is Session {
-  return !!s && s.kind === "background" && s.state !== "stopped" && s.state !== "failed" && daemonAlive();
+  if (!s || s.kind !== "background" || s.state === "stopped" || s.state === "failed") return false;
+  if (typeof s.pid !== "number" || !Number.isInteger(s.pid) || s.pid <= 0) return false;
+  return pidExists(s.pid) && daemonAlive();
 }
 
 // A listing that hangs is cut off here, so a caller with a deadline can count on it.

@@ -55,7 +55,7 @@ case "$1" in
     [ -f $D/after.json ] && cp $D/after.json $D/live.json
     [ -f $D/hang-after-respawn ] && touch $D/listing-hang; echo "respawned $2" ;;
   --bg) n=; prev=; for a in "$@"; do [ "$prev" = --name ] && n=$a; prev=$a; done
-    printf '[{"id":"new1","name":"%s","kind":"background","state":"idle"}]' "$n" > $D/live.json
+    printf '[{"id":"new1","name":"%s","kind":"background","state":"idle","pid":${process.pid}}]' "$n" > $D/live.json
     echo "backgrounded · new1 · $n" ;;
   *) exit 1 ;;
 esac
@@ -66,7 +66,8 @@ esac
   return { ws, put, calls };
 }
 
-const sess = (id: string, name: string, extra: Record<string, unknown> = {}) => ({ id, name, kind: "background", state: "done", status: "idle", ...extra });
+// A row as the listing has it for a session with a worker: a pid that exists, this process's.
+const sess = (id: string, name: string, extra: Record<string, unknown> = {}) => ({ id, name, kind: "background", state: "done", status: "idle", pid: process.pid, ...extra });
 const hookIn = (to: string) => JSON.stringify({ tool_name: "SendMessage", tool_input: { to, message: "hi" } });
 const wakeHook = (ws: string, to: string, extra: string[] = []) =>
   factory(undefined, ["--workspace", ws, "hook", "wake", ...extra], { env: { CLAUDE_BIN: join(ws, "bin", "claude") }, input: hookIn(to) });
