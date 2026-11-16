@@ -47,11 +47,16 @@ function render(d){
 // While the page is visible, tell the board the newest lead message now on screen, so a reminder
 // knows what the human has read. Lead rows have no id; their `t` is the mark. Each `t` is posted once
 // per page. A post the board could not take (no answer, or a 5xx) is tried again on the next poll;
-// a refusal (4xx) is not, as the same post would be refused again.
+// a refusal (4xx) is not, as the same post would be refused again. Newest is the greatest `t`, not
+// the last row appended: after the clock steps back, a later row can carry an earlier `t`.
 let seenPosted = null;
 function markSeen(d){
   if(document.visibilityState !== 'visible') return;
-  const newest = d.messages.find(m => m.from === 'lead' && m.t);
+  let newest = null;
+  for(const m of d.messages){
+    if(m.from !== 'lead' || !m.t || !Number.isFinite(Date.parse(m.t))) continue;
+    if(!newest || Date.parse(m.t) > Date.parse(newest.t)) newest = m;
+  }
   if(!newest || newest.t === seenPosted || newest.t === d.seen) return;
   if(d.seen && Date.parse(newest.t) <= Date.parse(d.seen)) return;
   const t = newest.t;

@@ -542,7 +542,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
       if (!sameSite(req)) return json(res, 403, { ok: false, error: "refused: not from the message page" });
       readJson(req, res, (body) => {
         const r = markSeen(ws, body.t);
-        json(res, r.ok ? 200 : 400, r);
+        json(res, r.ok ? 200 : r.retry ? 503 : 400, r);
       });
       return;
     }
