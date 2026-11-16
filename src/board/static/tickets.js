@@ -6,27 +6,32 @@ const stateCls = s => 'st-' + s.toLowerCase().replace(/\s+/g, '-');
 const badge = s => `<span class="state ${stateCls(s)}">${esc(s)}</span>`;
 const labelsOf = p => meta.projects.find(x => x.key === p)?.labels || null;
 let listCache = null;
+// Each list read is numbered, and one that a newer view has overtaken is not drawn, so a slow read
+// cannot draw an older order over a newer list or a ticket. Ticket views are not numbered.
+let routes = 0;
+const isList = p => !p.get('key') && !p.get('new');
 
 async function route(){
-  const p = q();
+  const p = q(), n = ++routes;
   try {
+    if(isList(p)) return await listView(p, n);
     if(p.get('key')) return await ticketView(p.get('key'));
-    if(p.get('new')) return await newView(p.get('project'));
-    return await listView(p);
+    return await newView(p.get('project'));
   } catch(e){
-    document.getElementById('root').innerHTML = `<div class="err">${esc(e.message)}</div><p>${goLink({}, '&larr; all tickets')}</p>`;
+    if(n === routes) document.getElementById('root').innerHTML = `<div class="err">${esc(e.message)}</div><p>${goLink({}, '&larr; all tickets')}</p>`;
   }
 }
 
-async function listView(p){
-  const d = await api('/api/tickets' + (p.get('project') ? '?project=' + encodeURIComponent(p.get('project')) : ''));
+async function listView(p, n, ms){
+  const d = await api('/api/tickets' + (p.get('project') ? '?project=' + encodeURIComponent(p.get('project')) : ''), undefined, ms);
+  if(n !== routes) return false;
   meta = d; listCache = d.tickets;
   const state = p.get('state') || 'open', text = (p.get('q') || '').toLowerCase(), label = p.get('label') || '';
   const counts = {open: 0}; for(const t of d.tickets){ counts[t.state] = (counts[t.state] || 0) + 1; if(OPEN(t.state)) counts.open++; }
   let rows = d.tickets.filter(t => state === 'all' ? true : state === 'open' ? OPEN(t.state) : t.state === state);
   if(label) rows = rows.filter(t => t.labels.includes(label));
   if(text) rows = rows.filter(t => (t.key + ' ' + t.title).toLowerCase().includes(text));
-  rows.sort((a, b) => b.updated.localeCompare(a.updated));
+  // The server lists them in the human's order, the one the round dispatches Todo in; a filter keeps it.
   const keep = {project: p.get('project') || '', q: p.get('q') || '', label};
   const chip = (s, name) => goLink({...keep, state: s}, `${esc(name)} <b>${counts[s] ?? (s === 'all' ? d.tickets.length : 0)}</b>`, 'chip' + (s === state ? ' on' : ''));
   const projects = d.projects.length > 1
@@ -38,8 +43,8 @@ async function listView(p){
     ${label ? `<p class="filter">label <span class="lbl">${esc(label)}</span> ${goLink({...keep, state, label: ''}, '&times; clear')}</p>` : ''}
     <div class="err" id="err"></div>
     <div class="rows">${rows.map(t => `
-      <a class="row" href="?key=${esc(t.key)}" data-go="key=${esc(t.key)}">
-        <span class="k">${esc(t.key)}</span>${badge(t.state)}
+      <a class="row" href="?key=${esc(t.key)}" data-go="key=${esc(t.key)}" data-key="${esc(t.key)}">
+        <span class="grip${OPEN(t.state) ? '' : ' fixed'}"${OPEN(t.state) ? ' title="drag to reorder"' : ''} aria-hidden="true"></span><span class="k">${esc(t.key)}</span>${badge(t.state)}
         <span class="ti">${esc(t.title)}</span>
         <span class="meta">${t.labels.map(l => `<span class="lbl">${esc(l)}</span>`).join('')}${t.comments ? `<span class="cm">${t.comments} comment${t.comments === 1 ? "" : "s"}</span>` : ''}<span class="ago">${ago(t.updated)}</span></span>
       </a>`).join('') || '<p class="none">no tickets here</p>'}</div>`;
@@ -48,6 +53,100 @@ async function listView(p){
   s.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => go({...keep, state, q: s.value}, true), 250); });
   if(p.get('q')) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
   document.getElementById('proj')?.addEventListener('change', e => go({state, project: e.target.value}));
+  dragToRank(document.querySelector('.rows'));
+  return true;
+}
+
+// A row is dragged by its grip with pointer events, so a finger reorders as a mouse does; the grip
+// has touch-action:none, so a drag on it never scrolls the page. The drop is sent as the rows now
+// above and below it, its result is shown at once, and the list, if it is still shown, is read again
+// from the server, whose order is the real one. One drop is sent at a time: no drag starts until that
+// read is drawn or has failed, and as the drop and the read each give up after RANK_MS, the lock
+// always clears. One pointer drags at a time; a press with another pointer is ignored. The list
+// holds that pointer, so a list drawn over a held grip starts free.
+let ranking = false, RANK_MS = 15000;
+function dragToRank(list){
+  if(!list) return;
+  let held = null;
+  list.addEventListener('click', e => { if(e.target.closest('.grip:not(.fixed)')) { e.preventDefault(); e.stopPropagation(); } }, true);
+  list.addEventListener('pointerdown', e => {
+    const grip = e.target.closest('.grip:not(.fixed)');
+    if(!grip || e.button > 0) return;
+    // the page takes every press on the grip, locked or not, so it never drags the row's link or
+    // selects text
+    e.preventDefault();
+    if(ranking || held !== null) return;
+    const row = grip.closest('.row'), was = row.previousElementSibling;
+    const grab = e.clientY - row.getBoundingClientRect().top;
+    let y = e.clientY;
+    grip.setPointerCapture(e.pointerId);
+    held = e.pointerId;
+    row.classList.add('dragging');
+    // A fast move can cross several rows at once, so the row moves until it is under the pointer,
+    // and never past a closed row, which has no place in the order.
+    const place = () => {
+      row.style.transform = '';
+      const mid = el => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
+      const open = el => el && !el.querySelector('.grip.fixed');
+      for(;;){
+        const prev = row.previousElementSibling, next = row.nextElementSibling;
+        if(open(prev) && y < mid(prev)) list.insertBefore(row, prev);
+        else if(open(next) && y > mid(next)) list.insertBefore(next, row);
+        else break;
+      }
+      // above a closed row or the end of the list the row is drawn no lower than where it would drop
+      const dy = y - grab - row.getBoundingClientRect().top;
+      row.style.transform = `translateY(${open(row.nextElementSibling) ? dy : Math.min(dy, 0)}px)`;
+    };
+    const move = ev => {
+      y = ev.clientY;
+      if(y < 60) scrollBy(0, -12); else if(y > innerHeight - 60) scrollBy(0, 12);
+      place();
+    };
+    const end = async ev => {
+      grip.removeEventListener('pointermove', move);
+      grip.removeEventListener('pointerup', end);
+      grip.removeEventListener('pointercancel', end);
+      held = null;
+      row.classList.remove('dragging'); row.style.transform = '';
+      const back = () => was ? was.after(row) : list.prepend(row);
+      // a cancelled drag goes back, and a press that moved nothing or whose list was drawn over has
+      // nothing to send or read
+      if(ev.type === 'pointercancel') back();
+      if(ev.type === 'pointercancel' || !row.isConnected || row.previousElementSibling === was) return;
+      const key = el => el?.dataset.key || null;
+      let failed = '';
+      ranking = true;
+      document.body.classList.add('ranking');
+      try {
+        try {
+          await api('/api/tickets/' + encodeURIComponent(row.dataset.key), {op: 'rank', after: key(row.previousElementSibling), before: key(row.nextElementSibling)}, RANK_MS);
+        } catch(err){
+          failed = `${row.dataset.key}: ${err.message}${err.timeout ? '; the drop may still land' : ''}`;
+          // the board answered and did not move it
+          if(err.status) back();
+        }
+        // a ticket or the new-ticket form opened while the drop was sent has drawn itself, and the
+        // result is not about it
+        const p = q();
+        if(!isList(p)) return;
+        // shown at once, which also clears an earlier drop's error
+        flash(failed);
+        // If the read fails, the list stays, with both errors. The drawn list has a fresh #err, so
+        // the drop's result is shown again in it. A read a newer view has overtaken shows nothing.
+        const n = ++routes;
+        try {
+          if(await listView(p, n, RANK_MS)) flash(failed);
+        } catch(err){ if(n === routes) flash([failed, `the list was not read again: ${err.message}`].filter(Boolean).join('; ')); }
+      } finally {
+        ranking = false;
+        document.body.classList.remove('ranking');
+      }
+    };
+    grip.addEventListener('pointermove', move);
+    grip.addEventListener('pointerup', end);
+    grip.addEventListener('pointercancel', end);
+  });
 }
 
 function labelPicker(project, have){
