@@ -1,7 +1,7 @@
 // Where an agent's sessions live. Every session operation goes through the agent's
 // transport; the local one runs claude on this machine, and an agent with a host goes through that
 // host's daemon (remote.ts).
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -109,23 +109,57 @@ const parse = (stdout: string): Session[] => {
 // SF_CC_DAEMON_DIR stands in for the socket dir, so a test can give the probe a daemon of its own.
 export const claudeConfigDir = () => process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
 export const daemonSocketDir = () => process.env.SF_CC_DAEMON_DIR || join("/tmp", `cc-daemon-${process.getuid?.() ?? ""}`);
-export function daemonAlive(): boolean {
+// The running supervisor's pid, and when it started (epoch ms) where /proc tells, or null for a
+// daemon that is down.
+export function daemonUp(): { pid: number; startedAt?: number } | null {
   try {
     const roster = JSON.parse(readFileSync(join(claudeConfigDir(), "daemon", "roster.json"), "utf8")) as { supervisorPid?: unknown };
     const pid = Number.parseInt(String(roster.supervisorPid), 10);
-    if (!Number.isInteger(pid)) return false;
+    if (!Number.isInteger(pid)) return null;
     process.kill(pid, 0);
     const base = daemonSocketDir();
-    return readdirSync(base).some((d) => !d.startsWith(".") && existsSync(join(base, d, "control.sock")));
+    if (!readdirSync(base).some((d) => !d.startsWith(".") && existsSync(join(base, d, "control.sock")))) return null;
+    const startedAt = procStartedAt(pid);
+    return startedAt === undefined ? { pid } : { pid, startedAt };
   } catch {
-    return false;
+    return null;
   }
 }
 
-// A background session that has not stopped or failed, behind a daemon that is running. "done"
-// means it finished a turn and is idle; it still wakes on SendMessage, so it counts as alive.
+export const daemonAlive = (): boolean => daemonUp() !== null;
+
+// When a process started, epoch ms: boot time plus its start in clock ticks, from /proc. Undefined
+// off Linux or when it cannot be read. btime is whole seconds, so this can be up to a second early.
+let ticksPerS: number | undefined;
+export function procStartedAt(pid: number): number | undefined {
+  try {
+    const btime = Number(/^btime (\d+)$/m.exec(readFileSync("/proc/stat", "utf8"))?.[1]);
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const ticks = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]);
+    ticksPerS ??= Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8", timeout: 5000 }).trim());
+    const at = (btime + ticks / ticksPerS) * 1000;
+    return btime > 0 && ticksPerS > 0 && Number.isFinite(at) ? at : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Clock slack for a session started as its supervisor did.
+const STARTED_SLACK_MS = 2000;
+
+// A background session that has not stopped or failed, run by the daemon that is up now. "done"
+// means it finished a turn and is idle; it still wakes on SendMessage, so it counts as alive. But
+// the listing keeps a row whose worker is gone, from before a reboot or retired by the daemon, at
+// its last state, done or blocked, and with no pid. So a row is live only with a pid and, where the
+// supervisor's start is known, only if it started after it: the workers are the supervisor's
+// children, so none outlives it.
 export function sessionAlive(s: Session | null | undefined): s is Session {
-  return !!s && s.kind === "background" && s.state !== "stopped" && s.state !== "failed" && daemonAlive();
+  if (!s || s.kind !== "background" || s.state === "stopped" || s.state === "failed") return false;
+  if (typeof s.pid !== "number" || !Number.isInteger(s.pid) || s.pid <= 0) return false;
+  const d = daemonUp();
+  if (!d) return false;
+  const at = typeof s.startedAt === "number" ? s.startedAt : typeof s.startedAt === "string" ? Date.parse(s.startedAt) : NaN;
+  return d.startedAt === undefined || !Number.isFinite(at) || at >= d.startedAt - STARTED_SLACK_MS;
 }
 
 // A listing that hangs is cut off here, so a caller with a deadline can count on it.

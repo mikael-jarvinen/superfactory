@@ -21,6 +21,8 @@ export interface Session {
   startedAt?: string | number;
   createdAt?: string;
   sessionId?: string;
+  // the worker's pid; the listing leaves it out for a row whose worker is gone
+  pid?: number | null;
   // epoch ms the session's transcript was last written, added by the local listing (transport.ts)
   activeAt?: number;
   [k: string]: unknown;
