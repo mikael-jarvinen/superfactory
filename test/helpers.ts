@@ -21,6 +21,22 @@ chmodSync(join(fakeBin, "systemd-run"), 0o755);
 process.env.PATH = `${fakeBin}${delimiter}${process.env.PATH ?? ""}`;
 process.on("exit", () => rmSync(fakeBin, { recursive: true, force: true }));
 
+// Nor may a test read this box's claude: its config dir (transcripts, the daemon's roster) or the
+// daemon's sockets. Every test file gets a claude daemon of its own that is up: a roster naming the
+// test process, which outlives every factory it runs, and one control socket. A test that sets its
+// own CLAUDE_CONFIG_DIR gives it the roster with fakeDaemon.
+export function fakeDaemon(configDir: string, pid = process.pid): void {
+  mkdirSync(join(configDir, "daemon"), { recursive: true });
+  writeFileSync(join(configDir, "daemon", "roster.json"), JSON.stringify({ supervisorPid: pid }));
+}
+const fakeClaude = realpathSync(mkdtempSync(join(tmpdir(), "sf-claude-")));
+fakeDaemon(join(fakeClaude, "config"));
+mkdirSync(join(fakeClaude, "sockets", "d1"), { recursive: true });
+writeFileSync(join(fakeClaude, "sockets", "d1", "control.sock"), "");
+process.env.CLAUDE_CONFIG_DIR = join(fakeClaude, "config");
+process.env.SF_CC_DAEMON_DIR = join(fakeClaude, "sockets");
+process.on("exit", () => rmSync(fakeClaude, { recursive: true, force: true }));
+
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function until(what: string, fn: () => unknown, ms = 15_000) {
