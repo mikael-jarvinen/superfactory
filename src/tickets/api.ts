@@ -5,6 +5,7 @@
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
 import type { Actor } from "./guard.js";
+import { ordered } from "./rank.js";
 import * as T from "./store.js";
 import * as W from "../wiki/store.js";
 
@@ -36,6 +37,7 @@ function summary(t: T.Ticket) {
   return {
     key: t.key, project: t.project, number: t.number, title: t.title, state: t.state, labels: t.labels,
     relations: t.relations, comments: t.comments.length, created: t.created, updated: t.updated, by: t.by,
+    ...(t.rank !== undefined ? { rank: t.rank } : {}),
   };
 }
 
@@ -48,7 +50,7 @@ function ticketsGet(ws: Workspace, rest: string, q: URLSearchParams): Reply {
       projects: T.projects(ws),
       states: T.TICKET_STATES,
       relations: T.RELATION_KINDS,
-      tickets: T.list(ws, project).map(summary),
+      tickets: ordered(T.list(ws, project)).map(summary),
     });
   }
   const key = T.resolveKey(ws, decodeURIComponent(rest));
@@ -92,6 +94,11 @@ async function ticketsPost(ws: Workspace, rest: string, b: Record<string, unknow
       const to = T.resolveKey(ws, str(b.to, "to"));
       if (!T.exists(ws, to)) return bad(`no ticket ${to}`, 404);
       tk = T.relate(ws, key, str(b.kind, "kind") as T.RelationKind, to, human.name, b.remove === true ? "unrelate" : "relate");
+      break;
+    }
+    case "rank": {
+      const ref = (v: unknown) => (v === undefined || v === null ? null : T.resolveKey(ws, str(v, "the ticket to place it by")));
+      tk = T.rank(ws, key, { after: ref(b.after), before: ref(b.before) }, human.name);
       break;
     }
     case "link":

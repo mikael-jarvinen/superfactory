@@ -33,16 +33,24 @@ button.x{border:0;min-height:0;padding:0 6px;color:var(--faint);font-size:16px}
 .chip.on{color:var(--ink);border-color:var(--ink)}
 .chip:hover{text-decoration:none;border-color:var(--dim)}
 .rows{display:flex;flex-direction:column;border-top:1px solid var(--line-soft)}
-.row{display:grid;grid-template-columns:auto auto 1fr;grid-template-areas:"k s m" "t t t";gap:4px 8px;align-items:center;
+.row{display:grid;grid-template-columns:auto auto auto 1fr;grid-template-areas:"g k s m" "g t t t";gap:4px 8px;align-items:center;
   padding:11px 4px;border-bottom:1px solid var(--line-soft);color:var(--ink);text-decoration:none}
 .row:hover{background:var(--raised);text-decoration:none}
 .row .k{grid-area:k;font-family:var(--mono);font-size:12px;color:var(--dim)}
 .row .state{grid-area:s}
 .row .ti{grid-area:t;font-size:15px;line-height:1.35}
 .row .meta{grid-area:m;display:flex;gap:6px;justify-content:flex-end;align-items:center;flex-wrap:wrap}
+/* The grip: dots to drag a row by. A finger on it drags the row rather than scrolling the page. A
+   closed ticket has no place in the order, so its grip is blank. */
+.row .grip{grid-area:g;align-self:stretch;width:22px;margin:-11px 0 -11px -4px;cursor:grab;touch-action:none;
+  user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;
+  background:radial-gradient(circle,var(--faint) 1.3px,transparent 1.6px) center/7px 7px;background-clip:content-box;padding:12px 4px}
+body.ranking .row .grip:not(.fixed){cursor:progress}
+.row .grip.fixed{background:none;cursor:inherit;touch-action:auto}
+.row.dragging{position:relative;z-index:2;background:var(--raised);box-shadow:0 4px 14px rgba(0,0,0,.18);cursor:grabbing}
 .row.page{grid-template-columns:1fr auto;grid-template-areas:"t m";padding-left:calc(4px + var(--depth,0) * 18px)}
 @media (min-width:720px){
-  .row{grid-template-columns:80px 96px 1fr auto;grid-template-areas:"k s t m"}
+  .row{grid-template-columns:auto 80px 96px 1fr auto;grid-template-areas:"g k s t m"}
 }
 .ago,.cm{font-family:var(--mono);font-size:11px;color:var(--faint)}
 .lbl{font-family:var(--mono);font-size:10.5px;color:var(--dim);background:var(--raised);border:1px solid var(--line);border-radius:3px;padding:0 5px}
