@@ -66,12 +66,18 @@ function dragToRank(list){
     let y = e.clientY;
     grip.setPointerCapture(e.pointerId);
     row.classList.add('dragging');
+    // A fast move can cross several rows at once, so the row moves until it is under the pointer,
+    // and never past a closed row, which has no place in the order.
     const place = () => {
       row.style.transform = '';
-      const prev = row.previousElementSibling, next = row.nextElementSibling;
       const mid = el => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
-      if(prev && y < mid(prev)) list.insertBefore(row, prev);
-      else if(next && y > mid(next)) list.insertBefore(next, row);
+      const open = el => el && !el.querySelector('.grip.fixed');
+      for(;;){
+        const prev = row.previousElementSibling, next = row.nextElementSibling;
+        if(open(prev) && y < mid(prev)) list.insertBefore(row, prev);
+        else if(open(next) && y > mid(next)) list.insertBefore(next, row);
+        else break;
+      }
       row.style.transform = `translateY(${y - grab - row.getBoundingClientRect().top}px)`;
     };
     const move = ev => {
@@ -86,10 +92,13 @@ function dragToRank(list){
       row.classList.remove('dragging'); row.style.transform = '';
       if(ev.type === 'pointercancel' || row.previousElementSibling === was) return route();
       const key = el => el?.dataset.key || null;
+      let failed = '';
       try {
         await api('/api/tickets/' + encodeURIComponent(row.dataset.key), {op: 'rank', after: key(row.previousElementSibling), before: key(row.nextElementSibling)});
-      } catch(err){ flash(err.message); }
-      route();
+      } catch(err){ failed = err.message; }
+      // the reload draws a fresh #err, so a refusal is shown after it
+      await route();
+      if(failed) flash(failed);
     };
     grip.addEventListener('pointermove', move);
     grip.addEventListener('pointerup', end);

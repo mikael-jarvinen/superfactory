@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { serve } from "../src/board/server.js";
@@ -102,6 +102,21 @@ test("store: closing a ticket drops its rank, so a reopened one comes back at th
   appendFileSync(join(T.projectDir(ws, "RPE"), "RPE-3.jsonl"), JSON.stringify({ t: "2026-06-01T00:00:00Z", by: "Alex", op: "rank", rank: "1" }) + "\n");
   assert.equal(T.load(ws, "RPE-3").rank, undefined);
   await T.move(ws, "RPE-3", "Todo", { human: true, name: "Alex" });
+  assert.deepEqual(keys(ws), ["RPE-1", "RPE-2", "RPE-3"]);
+});
+
+test("store: an anchor that left the order since the check is refused, and nothing is written", () => {
+  const ws = seeded(["2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"], ["Todo", "Todo", "Todo"]);
+  // A ticket load() finds but list() leaves out, as an anchor closed between the two would be: a
+  // project the workspace does not configure.
+  const web = join(T.trackerDir(ws), "tickets", "WEB");
+  mkdirSync(web, { recursive: true });
+  copyFileSync(join(T.projectDir(ws, "RPE"), "RPE-1.jsonl"), join(web, "WEB-1.jsonl"));
+  const logs = () => readdirSync(T.projectDir(ws, "RPE")).map((f) => readFileSync(join(T.projectDir(ws, "RPE"), f), "utf8"));
+  const was = logs();
+  assert.throws(() => T.rank(ws, "RPE-3", { after: "WEB-1" }, "Alex"), /WEB-1 is no longer in the order/);
+  assert.throws(() => T.rank(ws, "RPE-3", { before: "WEB-1" }, "Alex"), /WEB-1 is no longer in the order/);
+  assert.deepEqual(logs(), was);
   assert.deepEqual(keys(ws), ["RPE-1", "RPE-2", "RPE-3"]);
 });
 
