@@ -54,12 +54,14 @@ async function listView(p){
 // A row is dragged by its grip with pointer events, so a finger reorders as a mouse does; the grip
 // has touch-action:none, so a drag on it never scrolls the page. The drop is sent as the rows now
 // above and below it, and the list is read again from the server, whose order is the real one.
+// One drop is sent at a time: no drag starts until the list it came from is drawn again.
+let ranking = false;
 function dragToRank(list){
   if(!list) return;
   list.addEventListener('click', e => { if(e.target.closest('.grip:not(.fixed)')) { e.preventDefault(); e.stopPropagation(); } }, true);
   list.addEventListener('pointerdown', e => {
     const grip = e.target.closest('.grip:not(.fixed)');
-    if(!grip || e.button > 0) return;
+    if(!grip || e.button > 0 || ranking) return;
     e.preventDefault();
     const row = grip.closest('.row'), was = row.previousElementSibling;
     const grab = e.clientY - row.getBoundingClientRect().top;
@@ -78,7 +80,9 @@ function dragToRank(list){
         else if(open(next) && y > mid(next)) list.insertBefore(next, row);
         else break;
       }
-      row.style.transform = `translateY(${y - grab - row.getBoundingClientRect().top}px)`;
+      // above a closed row the row is drawn no lower than where it would drop
+      const dy = y - grab - row.getBoundingClientRect().top;
+      row.style.transform = `translateY(${row.nextElementSibling && !open(row.nextElementSibling) ? Math.min(dy, 0) : dy}px)`;
     };
     const move = ev => {
       y = ev.clientY;
@@ -92,13 +96,19 @@ function dragToRank(list){
       row.classList.remove('dragging'); row.style.transform = '';
       if(ev.type === 'pointercancel' || row.previousElementSibling === was) return route();
       const key = el => el?.dataset.key || null;
+      const at = location.href;
       let failed = '';
+      ranking = true;
       try {
         await api('/api/tickets/' + encodeURIComponent(row.dataset.key), {op: 'rank', after: key(row.previousElementSibling), before: key(row.nextElementSibling)});
       } catch(err){ failed = err.message; }
-      // the reload draws a fresh #err, so a refusal is shown after it
-      await route();
-      if(failed) flash(failed);
+      try {
+        // a page opened while the drop was sent has drawn itself, and the refusal is not about it
+        if(location.href !== at) return;
+        // the reload draws a fresh #err, so a refusal is shown after it
+        await route();
+        if(failed) flash(failed);
+      } finally { ranking = false; }
     };
     grip.addEventListener('pointermove', move);
     grip.addEventListener('pointerup', end);
