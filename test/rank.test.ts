@@ -114,7 +114,7 @@ test("store: an anchor load() finds but the order leaves out is refused, and not
   copyFileSync(join(T.projectDir(ws, "RPE"), "RPE-1.jsonl"), join(web, "WEB-1.jsonl"));
   const logs = () => [T.projectDir(ws, "RPE"), web].flatMap((d) => readdirSync(d).map((f) => readFileSync(join(d, f), "utf8")));
   const was = logs();
-  assert.throws(() => T.rank(ws, "RPE-3", { after: "WEB-1" }, "Alex"), /WEB-1 is not in the order \(closed or not listed\); place RPE-3 again/);
+  assert.throws(() => T.rank(ws, "RPE-3", { after: "WEB-1" }, "Alex"), /WEB-1 is not in the order \(closed, or in a project this workspace does not list\); place RPE-3 next to another open ticket/);
   assert.throws(() => T.rank(ws, "RPE-3", { before: "WEB-1" }, "Alex"), /WEB-1 is not in the order/);
   assert.deepEqual(logs(), was);
   assert.deepEqual(keys(ws), ["RPE-1", "RPE-2", "RPE-3"]);

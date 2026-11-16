@@ -54,15 +54,17 @@ async function listView(p){
 // A row is dragged by its grip with pointer events, so a finger reorders as a mouse does; the grip
 // has touch-action:none, so a drag on it never scrolls the page. The drop is sent as the rows now
 // above and below it, and the list is read again from the server, whose order is the real one.
-// One drop is sent at a time: no drag starts until the list it came from is drawn again.
-let ranking = false;
+// One drop is sent at a time: no drag starts until its answer is in or RANK_MS has passed.
+let ranking = false, RANK_MS = 15000;
 function dragToRank(list){
   if(!list) return;
   list.addEventListener('click', e => { if(e.target.closest('.grip:not(.fixed)')) { e.preventDefault(); e.stopPropagation(); } }, true);
   list.addEventListener('pointerdown', e => {
     const grip = e.target.closest('.grip:not(.fixed)');
-    if(!grip || e.button > 0 || ranking) return;
+    if(!grip || e.button > 0) return;
+    // without this a press on the grip drags the row's link or selects text
     e.preventDefault();
+    if(ranking) return;
     const row = grip.closest('.row'), was = row.previousElementSibling;
     const grab = e.clientY - row.getBoundingClientRect().top;
     let y = e.clientY;
@@ -80,9 +82,9 @@ function dragToRank(list){
         else if(open(next) && y > mid(next)) list.insertBefore(next, row);
         else break;
       }
-      // above a closed row the row is drawn no lower than where it would drop
+      // above a closed row or the end of the list the row is drawn no lower than where it would drop
       const dy = y - grab - row.getBoundingClientRect().top;
-      row.style.transform = `translateY(${row.nextElementSibling && !open(row.nextElementSibling) ? Math.min(dy, 0) : dy}px)`;
+      row.style.transform = `translateY(${open(row.nextElementSibling) ? dy : Math.min(dy, 0)}px)`;
     };
     const move = ev => {
       y = ev.clientY;
@@ -96,15 +98,17 @@ function dragToRank(list){
       row.classList.remove('dragging'); row.style.transform = '';
       if(ev.type === 'pointercancel' || row.previousElementSibling === was) return route();
       const key = el => el?.dataset.key || null;
-      const at = location.href;
       let failed = '';
       ranking = true;
+      list.classList.add('ranking');
       try {
-        await api('/api/tickets/' + encodeURIComponent(row.dataset.key), {op: 'rank', after: key(row.previousElementSibling), before: key(row.nextElementSibling)});
+        await api('/api/tickets/' + encodeURIComponent(row.dataset.key), {op: 'rank', after: key(row.previousElementSibling), before: key(row.nextElementSibling)}, RANK_MS);
       } catch(err){ failed = err.message; }
       try {
-        // a page opened while the drop was sent has drawn itself, and the refusal is not about it
-        if(location.href !== at) return;
+        // a ticket or the new-ticket form opened while the drop was sent has drawn itself, and the
+        // refusal is not about it; a list under other filters is drawn again with it
+        const p = q();
+        if(p.get('key') || p.get('new')) return;
         // the reload draws a fresh #err, so a refusal is shown after it
         await route();
         if(failed) flash(failed);

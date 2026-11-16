@@ -416,9 +416,10 @@ export function rank(ws: Workspace, key: string, at: Place, by: string): Ticket 
     const all = ordered(list(ws)).filter((t) => t.key !== key && !isClosed(t.state));
     const i = all.findIndex((t) => t.key === anchor);
     // The anchor can close after the check above, as a move takes the ticket's lock and not this one,
-    // and an anchor list() leaves out lands here too. A ticket that closes before its rank is
-    // appended keeps none, since fold takes no rank while a ticket is closed.
-    if (i < 0) throw new FactoryError(`${anchor} is not in the order (closed or not listed); place ${key} again`);
+    // and an anchor list() leaves out lands here too. If the ticket being placed, or one ranked ahead
+    // of it, closes before the rank is appended, it keeps none, since fold takes no rank while a
+    // ticket is closed.
+    if (i < 0) throw new FactoryError(`${anchor} is not in the order (closed, or in a project this workspace does not list); place ${key} next to another open ticket`);
     let lo = at.after ? all[i] : all[i - 1];
     const hi = at.after ? all[i + 1] : all[i];
     if (lo && lo.rank === undefined) {

@@ -1,15 +1,17 @@
 // Shared by the tickets and wiki pages: JSON calls, the pulse, and moving between views without a reload.
-async function api(url, body){
+// A call given ms is dropped if the board has not answered by then.
+async function api(url, body, ms){
   const pulse = document.getElementById('pulse'), at = document.getElementById('at');
+  const ctl = new AbortController(), timer = ms ? setTimeout(() => ctl.abort(), ms) : 0;
   let r, d;
   try {
-    r = await fetch(url, body === undefined ? {cache:'no-store'}
-      : {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    r = await fetch(url, body === undefined ? {cache:'no-store', signal: ctl.signal}
+      : {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body), signal: ctl.signal});
     d = await r.json();
   } catch {
     pulse.classList.add('stale'); at.textContent = 'not answering';
-    throw new Error('the board is not answering');
-  }
+    throw new Error(ctl.signal.aborted ? `the board did not answer in ${ms / 1000} s` : 'the board is not answering');
+  } finally { clearTimeout(timer); }
   pulse.classList.remove('stale'); at.textContent = new Date().toTimeString().slice(0, 5);
   if(!r.ok) { const e = new Error(d.error || r.status); e.status = r.status; e.data = d; throw e; }
   return d;

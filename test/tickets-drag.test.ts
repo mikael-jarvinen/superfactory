@@ -1,27 +1,32 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import vm from "node:vm";
 import { JSDOM } from "jsdom";
 
 // /tickets as the page runs it, in a window of its own, with rows laid out 40px apart by their
-// place in the list, since jsdom has no layout, and the server answered by `reply`.
+// place in the list, since jsdom has no layout. Every GET is answered with the same six tickets, and
+// every POST by `reply`.
 type Reply = { ok: true } | { ok: false; error: string };
+const windows: JSDOM[] = [];
+after(() => windows.forEach((d) => d.window.close()));
 function board(reply: () => Promise<Reply> = async () => ({ ok: true })) {
   const dom = new JSDOM('<button id="theme"></button><div id="pulse"></div><span id="at"></span><div id="root"></div>', { runScripts: "outside-only", url: "http://board.test/tickets?state=all" });
+  windows.push(dom);
   const w = dom.window;
   const tickets = [["RPE-1", "Todo"], ["RPE-2", "Todo"], ["RPE-3", "Todo"], ["RPE-4", "Todo"], ["RPE-5", "Done"], ["RPE-6", "Cancelled"]]
     .map(([key, state]) => ({ key, state, title: key, labels: [], comments: 0, updated: "2026-01-01T00:00:00Z", project: "RPE" }));
   const posts: unknown[] = [];
   let lists = 0;
   Object.assign(w, {
-    fetch: async (_url: string, o?: { method?: string; body?: string }) => {
+    fetch: async (url: string, o?: { method?: string; body?: string; signal?: AbortSignal }) => {
       if (o?.method === "POST") {
         posts.push(JSON.parse(o.body ?? "null"));
-        const r = await reply();
+        // a hung reply is given up when the page aborts it, as fetch does
+        const r = await Promise.race([reply(), new Promise<never>((_, no) => o.signal?.addEventListener("abort", () => no(new Error("aborted"))))]);
         return { ok: r.ok, status: r.ok ? 200 : 400, json: async () => (r.ok ? { ok: true } : { ok: false, error: r.error }) };
       }
-      lists++;
+      if (url.split("?")[0] === "/api/tickets") lists++;
       return { ok: true, status: 200, json: async () => ({ tickets, projects: [{ key: "RPE", name: "R" }], states: ["Todo", "Done", "Cancelled"] }) };
     },
   });
@@ -45,7 +50,8 @@ function board(reply: () => Promise<Reply> = async () => ({ ok: true })) {
     ev(g, "pointermove", y);
     return { order: order(), transform: row.style.transform, dragging: row.classList.contains("dragging"), up: () => ev(g, "pointerup", y) };
   };
-  return { w, doc, order, press, posts, lists: () => lists, err: () => doc.getElementById("err")?.textContent ?? "" };
+  const run = (code: string) => new vm.Script(code).runInContext(page);
+  return { w, doc, run, order, press, posts, lists: () => lists, err: () => doc.getElementById("err")?.textContent ?? "" };
 }
 const settle = () => new Promise((r) => setTimeout(r, 20));
 const deferred = () => {
@@ -84,18 +90,56 @@ test("drag: a refused drop shows its error after the list is drawn again", async
   assert.deepEqual(b.order(), ["RPE-1", "RPE-2", "RPE-3", "RPE-4", "RPE-5", "RPE-6"]);
 });
 
-test("drag: a page opened while the drop is sent is not redrawn, nor given its refusal", async () => {
+test("drag: a ticket opened while the drop is sent is not redrawn, nor given its refusal", async () => {
   const s = deferred();
   const b = board(s.reply);
   await settle();
   b.press("RPE-3", 5).up();
   await settle();
-  const lists = b.lists();
+  // the ticket's address without its view, so only a list drawn by the drop could change the page
   b.w.history.pushState(null, "", "/tickets?key=RPE-2");
+  const lists = b.lists(), page = b.doc.body.innerHTML;
   s.release({ ok: false, error: "refused" });
   await settle();
   assert.equal(b.lists(), lists, "no reload of the list");
-  assert.ok(!b.doc.body.textContent?.includes("refused"));
+  assert.equal(b.doc.body.innerHTML, page, "nothing drawn or flashed");
+  // the lock is off again
+  b.w.history.pushState(null, "", "/tickets?state=all");
+  await b.run("route()");
+  await settle();
+  b.press("RPE-4", 5).up();
+  await settle();
+  assert.equal(b.posts.length, 2);
+});
+
+test("drag: a filter changed while the drop is sent still gets the list again, and the refusal", async () => {
+  const s = deferred();
+  const b = board(s.reply);
+  await settle();
+  b.press("RPE-3", 5).up();
+  await settle();
+  b.run("go({state: 'open'})");
+  await settle();
+  const lists = b.lists();
+  s.release({ ok: false, error: "refused" });
+  await settle();
+  assert.equal(b.lists(), lists + 1, "the list is read again");
+  assert.equal(b.err(), "refused");
+  assert.equal(new URL(b.w.location.href).search, "?state=open");
+});
+
+test("drag: a drop the board never answers is given up, and dragging works again", async () => {
+  let hang = true;
+  const b = board(() => (hang ? new Promise<Reply>(() => {}) : Promise.resolve({ ok: true })));
+  b.run("RANK_MS = 50");
+  await settle();
+  b.press("RPE-3", 5).up();
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(b.err(), "the board did not answer in 0.05 s");
+  hang = false;
+  b.press("RPE-4", 5).up();
+  await settle();
+  assert.equal(b.posts.length, 2);
 });
 
 test("drag: no second drag starts while a drop is being sent", async () => {
