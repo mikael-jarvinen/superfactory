@@ -11,7 +11,8 @@ async function api(url, body, ms){
   try {
     r = await fetch(url, body === undefined ? {cache:'no-store', signal: ctl.signal}
       : {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body), signal: ctl.signal});
-    d = await r.json();
+    // a refusal with a body that is not JSON, such as a proxy's error page, still carries its status
+    d = await r.json().catch(err => { if(r.ok) throw err; return {error: `HTTP ${r.status}`}; });
   } catch {
     beat(false);
     if(!ctl.signal.aborted) throw new Error('the board is not answering');

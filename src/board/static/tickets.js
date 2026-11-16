@@ -62,10 +62,12 @@ async function listView(p, n, ms){
 // above and below it, its result is shown at once, and the list, if it is still shown, is read again
 // from the server, whose order is the real one. One drop is sent at a time: no drag starts until that
 // read is drawn or has failed, and as the drop and the read each give up after RANK_MS, the lock
-// always clears. The lock is taken at the press, so a second finger on another grip waits too.
+// always clears. One pointer drags at a time; a press with another pointer is ignored. The list
+// holds that pointer, so a list drawn over a held grip starts free.
 let ranking = false, RANK_MS = 15000;
 function dragToRank(list){
   if(!list) return;
+  let held = null;
   list.addEventListener('click', e => { if(e.target.closest('.grip:not(.fixed)')) { e.preventDefault(); e.stopPropagation(); } }, true);
   list.addEventListener('pointerdown', e => {
     const grip = e.target.closest('.grip:not(.fixed)');
@@ -73,12 +75,12 @@ function dragToRank(list){
     // the page takes every press on the grip, locked or not, so it never drags the row's link or
     // selects text
     e.preventDefault();
-    if(ranking) return;
-    ranking = true;
+    if(ranking || held !== null) return;
     const row = grip.closest('.row'), was = row.previousElementSibling;
     const grab = e.clientY - row.getBoundingClientRect().top;
     let y = e.clientY;
     grip.setPointerCapture(e.pointerId);
+    held = e.pointerId;
     row.classList.add('dragging');
     // A fast move can cross several rows at once, so the row moves until it is under the pointer,
     // and never past a closed row, which has no place in the order.
@@ -105,13 +107,16 @@ function dragToRank(list){
       grip.removeEventListener('pointermove', move);
       grip.removeEventListener('pointerup', end);
       grip.removeEventListener('pointercancel', end);
+      held = null;
       row.classList.remove('dragging'); row.style.transform = '';
       const back = () => was ? was.after(row) : list.prepend(row);
-      // a cancelled drag goes back, and a press that moved nothing has nothing to send or read
+      // a cancelled drag goes back, and a press that moved nothing or whose list was drawn over has
+      // nothing to send or read
       if(ev.type === 'pointercancel') back();
-      if(ev.type === 'pointercancel' || row.previousElementSibling === was) { ranking = false; return; }
+      if(ev.type === 'pointercancel' || !row.isConnected || row.previousElementSibling === was) return;
       const key = el => el?.dataset.key || null;
       let failed = '';
+      ranking = true;
       document.body.classList.add('ranking');
       try {
         try {

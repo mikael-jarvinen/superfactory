@@ -7,7 +7,8 @@ import { JSDOM } from "jsdom";
 // /tickets as the page runs it, in a window of its own, with rows laid out 40px apart by their
 // place in the list, since jsdom has no layout. Every GET waits for `read` and is answered with the
 // same six tickets; every POST is answered by `reply`. A wait the page aborts rejects, as fetch does.
-type Reply = { ok: true } | { ok: false; error: string };
+// A refusal with `page` comes as a proxy's error page with that status, which is not JSON.
+type Reply = { ok: true } | { ok: false; error: string } | { ok: false; page: number };
 const windows: JSDOM[] = [];
 after(() => windows.forEach((d) => d.window.close()));
 const hang = () => new Promise<never>(() => {});
@@ -26,6 +27,7 @@ function board(opts: { reply?: () => Promise<Reply>; read?: () => Promise<void>;
       if (o?.method === "POST") {
         posts.push(JSON.parse(o.body ?? "null"));
         const r = await Promise.race([reply(), aborted(o.signal)]);
+        if ("page" in r) return { ok: false, status: r.page, json: async () => JSON.parse("<html>") };
         return { ok: r.ok, status: r.ok ? 200 : 400, json: async () => (r.ok ? { ok: true } : { ok: false, error: r.error }) };
       }
       await Promise.race([(opts.read ?? (async () => {}))(), aborted(o?.signal)]);
@@ -332,4 +334,66 @@ test("drag: a second pointer on another grip does not drag while the first is do
   second.up();
   await settle();
   assert.equal(b.posts.length, 1);
+});
+
+// a list drawn over a held grip: the new list drags while the old pointer is never released, as in a
+// browser, where the drawn-over grip gets no more events; a release that does come sends nothing
+async function redrawnFree(b: ReturnType<typeof board>, redraw: () => void) {
+  const held = b.press("RPE-3", 5), lists = b.lists();
+  assert.equal(held.dragging, true);
+  redraw();
+  await until(() => b.lists() > lists, "the list is drawn again");
+  const d = b.press("RPE-4", 5);
+  assert.equal(d.dragging, true, "the new list drags");
+  d.up();
+  await settle();
+  held.up();
+  await settle();
+  assert.deepEqual(b.posts, [{ op: "rank", after: null, before: "RPE-1" }]);
+}
+
+test("drag: a search typed while a grip is held redraws the list, and the new list drags", async () => {
+  const b = board();
+  await settle();
+  await redrawnFree(b, () => {
+    const s = b.doc.getElementById("search") as HTMLInputElement;
+    s.value = "RPE";
+    s.dispatchEvent(new b.w.Event("input"));
+  });
+});
+
+test("drag: going back while a grip is held redraws the list, and the new list drags", async () => {
+  const b = board();
+  await settle();
+  await b.run("go({state: 'open'})");
+  await redrawnFree(b, () => b.w.history.back());
+});
+
+test("drag: a press whose pointer capture throws leaves dragging free", async () => {
+  const b = board();
+  await settle();
+  const capture = b.w.Element.prototype.setPointerCapture;
+  b.w.Element.prototype.setPointerCapture = function () {
+    b.w.Element.prototype.setPointerCapture = capture;
+    throw new b.w.DOMException("no such pointer", "NotFoundError");
+  };
+  // the throw is reported on the window, as an uncaught one is in a browser
+  b.w.addEventListener("error", (e) => e.preventDefault(), { once: true });
+  b.press("RPE-3", 5).up();
+  await settle();
+  assert.equal(b.posts.length, 0);
+  b.press("RPE-4", 5).up();
+  await settle();
+  assert.deepEqual(b.posts, [{ op: "rank", after: null, before: "RPE-1" }]);
+});
+
+test("drag: a refusal that comes as a proxy's error page puts the row back", async () => {
+  let reading: () => Promise<void> = async () => {};
+  const b = board({ reply: async () => ({ ok: false, page: 502 }), read: () => reading() });
+  await settle();
+  reading = () => Promise.reject(new Error("down"));
+  b.press("RPE-3", 5).up();
+  await settle();
+  assert.deepEqual(b.order(), ["RPE-1", "RPE-2", "RPE-3", "RPE-4", "RPE-5", "RPE-6"]);
+  assert.match(b.err(), /^RPE-3: HTTP 502; the list was not read again/);
 });
