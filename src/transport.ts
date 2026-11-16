@@ -138,9 +138,14 @@ export function pidExists(pid: number): boolean {
 // its last state, done or blocked; such a row has no pid. So a row is live only while its worker's
 // pid exists. Not "started after the supervisor": a worker can outlive a supervisor restart, and
 // one started from a pre-spawned spare predates its row's startedAt, so neither time rules it out.
+// One exception: a worker just launched is listed working before its pid, for about 1.3 s after
+// `claude --bg` returns. A pid-less working row younger than STARTING_MS is that start, and live;
+// a stale row is done or blocked, and far older.
+export const STARTING_MS = 30_000;
 export function sessionAlive(s: Session | null | undefined): s is Session {
   if (!s || s.kind !== "background" || s.state === "stopped" || s.state === "failed") return false;
-  if (typeof s.pid !== "number" || !Number.isInteger(s.pid) || s.pid <= 0) return false;
+  if (typeof s.pid !== "number" || !Number.isInteger(s.pid) || s.pid <= 0)
+    return s.state === "working" && Date.now() - instant(s.startedAt) < STARTING_MS && daemonAlive();
   return pidExists(s.pid) && daemonAlive();
 }
 
