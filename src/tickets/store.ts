@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { LABEL_RE, PROJECT_KEY_RE, type TrackerProject } from "../config.js";
 import { type Actor, checkCreate, checkMove, checkMoveNow, type MoveProof, type SpentOk, spendsOk } from "./guard.js";
 import { withLock } from "./lock.js";
-import { between, isRank, ordered, spread } from "./rank.js";
+import { between, isClosed, isRank, ordered, spread } from "./rank.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError, now } from "../util.js";
 
@@ -397,15 +397,18 @@ export interface Place {
 // Puts the ticket right after `after` in the order, or right before `before` when `after` is null,
 // as the human dropped it between two visible rows. Rows a filter hides keep their place. A ticket
 // dropped among the unranked ones ranks those above it first, in the order they already show, so
-// nothing else on the page moves.
+// nothing else on the page moves. Only open tickets are placed or ranked.
 export function rank(ws: Workspace, key: string, at: Place, by: string): Ticket {
-  load(ws, key);
   const anchor = at.after ?? at.before;
   if (!anchor) throw new FactoryError("rank: give the ticket to place it after or before");
   if (anchor === key) throw new FactoryError(`${key} cannot be placed next to itself`);
   if (!exists(ws, anchor)) throw new FactoryError(`no ticket ${anchor}`);
+  for (const k of [key, anchor]) {
+    const st = load(ws, k).state;
+    if (isClosed(st)) throw new FactoryError(`${k} is ${st}; only open tickets have a place in the order`);
+  }
   return withLock(rankLockOf(ws), () => {
-    const all = ordered(list(ws)).filter((t) => t.key !== key);
+    const all = ordered(list(ws)).filter((t) => t.key !== key && !isClosed(t.state));
     const i = all.findIndex((t) => t.key === anchor);
     let lo = at.after ? all[i] : all[i - 1];
     const hi = at.after ? all[i + 1] : all[i];
@@ -424,12 +427,12 @@ export function rank(ws: Workspace, key: string, at: Place, by: string): Ticket 
   });
 }
 
-// Ranks the unranked tickets among `keys`, in that order, after every ticket ranked already. An
-// import's order is seeded with this once; a ticket with a rank keeps it.
+// Ranks the open, unranked tickets among `keys`, in that order, after every ticket ranked already.
+// An import's order is seeded with this once; a ticket with a rank keeps it.
 export function seedRanks(ws: Workspace, keys: string[], by: string): string[] {
   return withLock(rankLockOf(ws), () => {
     const tks = list(ws);
-    const have = new Set(tks.filter((t) => t.rank === undefined).map((t) => t.key));
+    const have = new Set(tks.filter((t) => t.rank === undefined && !isClosed(t.state)).map((t) => t.key));
     const todo = [...new Set(keys)].filter((k) => have.has(k));
     const top = tks.map((t) => t.rank).filter((r): r is string => r !== undefined).sort().pop() ?? "";
     const ranks = spread(top, null, todo.length);

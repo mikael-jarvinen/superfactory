@@ -39,7 +39,7 @@ async function listView(p){
     <div class="err" id="err"></div>
     <div class="rows">${rows.map(t => `
       <a class="row" href="?key=${esc(t.key)}" data-go="key=${esc(t.key)}" data-key="${esc(t.key)}">
-        <span class="grip" title="drag to reorder" aria-hidden="true"></span><span class="k">${esc(t.key)}</span>${badge(t.state)}
+        <span class="grip${OPEN(t.state) ? '' : ' fixed'}"${OPEN(t.state) ? ' title="drag to reorder"' : ''} aria-hidden="true"></span><span class="k">${esc(t.key)}</span>${badge(t.state)}
         <span class="ti">${esc(t.title)}</span>
         <span class="meta">${t.labels.map(l => `<span class="lbl">${esc(l)}</span>`).join('')}${t.comments ? `<span class="cm">${t.comments} comment${t.comments === 1 ? "" : "s"}</span>` : ''}<span class="ago">${ago(t.updated)}</span></span>
       </a>`).join('') || '<p class="none">no tickets here</p>'}</div>`;
@@ -56,9 +56,9 @@ async function listView(p){
 // above and below it, and the list is read again from the server, whose order is the real one.
 function dragToRank(list){
   if(!list) return;
-  list.addEventListener('click', e => { if(e.target.closest('.grip')) { e.preventDefault(); e.stopPropagation(); } }, true);
+  list.addEventListener('click', e => { if(e.target.closest('.grip:not(.fixed)')) { e.preventDefault(); e.stopPropagation(); } }, true);
   list.addEventListener('pointerdown', e => {
-    const grip = e.target.closest('.grip');
+    const grip = e.target.closest('.grip:not(.fixed)');
     if(!grip || e.button > 0) return;
     e.preventDefault();
     const row = grip.closest('.row'), was = row.previousElementSibling;

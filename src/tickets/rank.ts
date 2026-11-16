@@ -31,14 +31,23 @@ export function spread(lo: string, hi: string | null, n: number): string[] {
 
 interface Rankable {
   key: string;
+  state: string;
   rank?: string;
   updated: string;
 }
 
-// The one order: ranked tickets by rank, then the unranked ones, longest-waiting first. /tickets
-// and `factory ticket list` (so the round's queue) both list in it.
+// Done and Cancelled are read as a history, so they keep no rank and list after the open tickets.
+export const isClosed = (state: string) => state === "Done" || state === "Cancelled";
+
+// The one order: open tickets ranked by rank, then the unranked ones, longest-waiting first, then
+// the closed ones, newest first. /tickets and `factory ticket list` (so the round's queue) both list
+// in it.
 export function compare(a: Rankable, b: Rankable): number {
-  if (a.rank !== undefined || b.rank !== undefined) {
+  const ca = isClosed(a.state), cb = isClosed(b.state);
+  if (ca !== cb) return ca ? 1 : -1;
+  if (ca) {
+    if (a.updated !== b.updated) return a.updated > b.updated ? -1 : 1;
+  } else if (a.rank !== undefined || b.rank !== undefined) {
     if (a.rank === undefined) return 1;
     if (b.rank === undefined) return -1;
     if (a.rank !== b.rank) return a.rank < b.rank ? -1 : 1;

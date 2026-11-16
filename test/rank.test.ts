@@ -17,10 +17,10 @@ name = "RPE Training App"
 `;
 const IMPORT: Actor = { human: false, name: "plane", importer: true };
 const keys = (ws: ReturnType<typeof openWorkspace>) => ordered(T.list(ws)).map((t) => t.key);
-// Tickets RPE-1.. with these updated times, oldest given first unless the times say otherwise.
-function seeded(times: string[]) {
+// Tickets RPE-1.. with these updated times, and these states or Backlog.
+function seeded(times: string[], states: T.TicketState[] = []) {
   const ws = openWorkspace(tempWorkspace(LOCAL));
-  times.forEach((t, i) => T.create(ws, { project: "RPE", number: i + 1, t, title: `t${i + 1}`, source: { system: "plane" } }, IMPORT));
+  times.forEach((t, i) => T.create(ws, { project: "RPE", number: i + 1, t, title: `t${i + 1}`, state: states[i] ?? "Backlog", source: { system: "plane" } }, IMPORT));
   return ws;
 }
 
@@ -48,10 +48,11 @@ test("rank: between is strictly between, spread is in order, and neither ends in
   assert.ok(!isRank("a0") && !isRank("") && !isRank("A") && !isRank(3));
 });
 
-test("rank: the order is ranked by rank, then the unranked, longest-waiting first", () => {
-  const tk = (key: string, updated: string, rank?: string) => ({ key, updated, ...(rank ? { rank } : {}) });
-  const list = [tk("RPE-1", "2026-03-01"), tk("RPE-2", "2026-01-01"), tk("RPE-3", "2026-05-01", "m"), tk("RPE-4", "2026-01-01", "c"), tk("RPE-5", "2026-01-01")];
-  assert.deepEqual(ordered(list).map((t) => t.key), ["RPE-4", "RPE-3", "RPE-2", "RPE-5", "RPE-1"]);
+test("rank: open tickets by rank, then unranked longest-waiting first, then closed newest first", () => {
+  const tk = (key: string, updated: string, state = "Todo", rank?: string) => ({ key, updated, state, ...(rank ? { rank } : {}) });
+  const list = [tk("RPE-1", "2026-03-01"), tk("RPE-2", "2026-01-01"), tk("RPE-3", "2026-05-01", "Backlog", "m"), tk("RPE-4", "2026-01-01", "Todo", "c"),
+    tk("RPE-5", "2026-01-01"), tk("RPE-6", "2026-02-01", "Done", "a"), tk("RPE-7", "2026-04-01", "Cancelled"), tk("RPE-8", "2026-03-01", "Done")];
+  assert.deepEqual(ordered(list).map((t) => t.key), ["RPE-4", "RPE-3", "RPE-2", "RPE-5", "RPE-1", "RPE-7", "RPE-8", "RPE-6"]);
   assert.equal(compare(list[0]!, list[0]!), 0);
 });
 
@@ -72,6 +73,21 @@ test("store: rank places a ticket, ranks the unranked rows above it in place, an
   assert.throws(() => T.rank(ws, "RPE-1", { after: "RPE-1" }, "Alex"), /next to itself/);
   assert.throws(() => T.rank(ws, "RPE-1", { after: "RPE-9" }, "Alex"), /no ticket RPE-9/);
   assert.throws(() => T.rank(ws, "RPE-1", {}, "Alex"), /after or before/);
+});
+
+test("store: closed tickets are never ranked, by a drop or a seed, and cannot be placed", () => {
+  const ws = seeded(["2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z", "2026-01-04T00:00:00Z", "2026-01-05T00:00:00Z"],
+    ["Cancelled", "Todo", "Done", "Todo", "Todo"]);
+  const closed = () => T.list(ws).filter((t) => t.state === "Done" || t.state === "Cancelled");
+  // a drop below the last unranked open row ranks the open rows above it, and no closed one
+  T.rank(ws, "RPE-2", { after: "RPE-5" }, "Alex");
+  assert.deepEqual(keys(ws), ["RPE-4", "RPE-5", "RPE-2", "RPE-3", "RPE-1"]);
+  assert.equal(closed().length, 2);
+  assert.ok(closed().every((t) => t.rank === undefined));
+  assert.throws(() => T.rank(ws, "RPE-1", { after: "RPE-2" }, "Alex"), /RPE-1 is Cancelled/);
+  assert.throws(() => T.rank(ws, "RPE-2", { after: "RPE-1" }, "Alex"), /RPE-1 is Cancelled/);
+  assert.deepEqual(T.seedRanks(ws, ["RPE-1", "RPE-2", "RPE-3", "RPE-4"], "plane"), []);
+  assert.ok(closed().every((t) => t.rank === undefined));
 });
 
 test("store: seedRanks ranks only the unranked, after the ranked, and a second run changes nothing", () => {

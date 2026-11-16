@@ -40,10 +40,12 @@ button.x{border:0;min-height:0;padding:0 6px;color:var(--faint);font-size:16px}
 .row .state{grid-area:s}
 .row .ti{grid-area:t;font-size:15px;line-height:1.35}
 .row .meta{grid-area:m;display:flex;gap:6px;justify-content:flex-end;align-items:center;flex-wrap:wrap}
-/* The grip: dots to drag a row by. A finger on it drags the row rather than scrolling the page. */
+/* The grip: dots to drag a row by. A finger on it drags the row rather than scrolling the page. A
+   closed ticket has no place in the order, so its grip is blank. */
 .row .grip{grid-area:g;align-self:stretch;width:22px;margin:-11px 0 -11px -4px;cursor:grab;touch-action:none;
   user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;
   background:radial-gradient(circle,var(--faint) 1.3px,transparent 1.6px) center/7px 7px;background-clip:content-box;padding:12px 4px}
+.row .grip.fixed{background:none;cursor:inherit}
 .row.dragging{position:relative;z-index:2;background:var(--raised);box-shadow:0 4px 14px rgba(0,0,0,.18);cursor:grabbing}
 .row.page{grid-template-columns:1fr auto;grid-template-areas:"t m";padding-left:calc(4px + var(--depth,0) * 18px)}
 @media (min-width:720px){
