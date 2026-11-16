@@ -180,3 +180,32 @@ test("the message page refuses a cross-site post", { skip: noInboxLock }, async 
   assert.equal((await post({ "Content-Type": "application/json", "Origin": board.url })).status, 200);
   assert.deepEqual(readTail(ws.messages).map((r) => r.text), ["do something"]);
 });
+
+// Mikael, 2026-11-16: "What's the link to the third design slideset. The task card on the board does
+// not contain it." A card carries the design's slides and canvas from design-review through the build.
+test("the server: a card carries its design's slides and canvas once it has them", { skip: noInboxLock }, async () => {
+  const dir = tempWorkspace();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  process.env.CLAUDE_BIN = join(dir, "bin", "claude");
+  const ws = openWorkspace(dir);
+  const quiet = () => {};
+  const slides = "https://claude.ai/artifact/slides1";
+  const canvas = "https://claude.ai/artifact/canvas1";
+  transition(ws, "WEB-5", "designing", { agent: "bea" }, quiet);
+  transition(ws, "WEB-6", "designing", { agent: "bea" }, quiet);
+  transition(ws, "WEB-6", "design-review", { canvas, slides }, quiet);
+  transition(ws, "WEB-7", "designing", { agent: "bea" }, quiet);
+  transition(ws, "WEB-7", "design-review", { canvas, slides }, quiet);
+  transition(ws, "WEB-7", "queued", { approved: "looks right" }, quiet);
+  transition(ws, "WEB-7", "building", { agent: "cal" }, quiet);
+
+  const board = await serve(ws, { host: "127.0.0.1", port: 0 });
+  after(() => board.close());
+  const snap = await (await fetch(board.url + "/api")).json();
+  const design = (k: string) => snap.tickets.find((t: { ticket: string }) => t.ticket === k).design;
+  assert.equal(design("WEB-5"), null, "still being drawn: nothing to link");
+  assert.deepEqual(design("WEB-6"), { slides, canvas, approved: false });
+  assert.deepEqual(design("WEB-7"), { slides, canvas, approved: true }, "kept while it is built");
+  const js = await (await fetch(board.url + "/static/board.js")).text();
+  assert.ok(js.includes('href="${esc(t.design.slides)}"') && js.includes('href="${esc(t.design.canvas)}"'), "the card links both");
+});
