@@ -82,15 +82,17 @@ export function watchdog(ws: Workspace, { staleMinutes, checkSeconds, receipts }
     const oldest = oldestUnanswered(readTail(ws.messages), { isHuman: (k) => isHuman(ws, k), receipt: (id) => receipts.receipt(id) });
     const r = step(state, oldest, { nowMs: Date.now(), capMs: Math.max(2 * checkSeconds, 60) * 1000, staleMinutes });
     for (const e of r.events) {
-      if (e.type === "recovered") log(`watchdog: ${name} has seen [m:${e.id}] or a later message, episode over`);
-      else {
-        log(`watchdog: ALERT, [m:${e.id}] unseen by ${name} for ${e.age} min`);
-        post(ws, { text: `${name} has not seen your message of ${hhmm(e.t)} after ${e.age} minutes. Nudge the session to get an answer.`, kind: "watchdog" });
-      }
+      if (e.type !== "alert") continue;
+      log(`watchdog: ALERT, [m:${e.id}] unseen by ${name} for ${e.age} min`);
+      post(ws, { text: `${name} has not seen your message of ${hhmm(e.t)} after ${e.age} minutes. Nudge the session to get an answer.`, kind: "watchdog" });
     }
     state = r.state;
     const p = watchFile(ws);
     writeFileSync(`${p}.tmp`, JSON.stringify({ ...state, oldest: oldest?.id ?? null, ageMinutes: r.age }, null, 2) + "\n");
     renameSync(`${p}.tmp`, p);
+    // An episode is over once the file says so: the line comes after the write, so a reader that
+    // sees the line finds the file already cleared. An alert is posted before the write, so a crash
+    // between them repeats it rather than loses it.
+    for (const e of r.events) if (e.type === "recovered") log(`watchdog: ${name} has seen [m:${e.id}] or a later message, episode over`);
   };
 }
