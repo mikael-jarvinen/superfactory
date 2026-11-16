@@ -28,7 +28,7 @@ import { openForReview } from "./gate/open.js";
 import { ready, report } from "./gate/ready.js";
 import { send } from "./gate/send.js";
 import { ACCEPT_PROSE, waitAndSend } from "./gate/wait.js";
-import { KINDS, type Kind, messages, say } from "./messages.js";
+import { KINDS, type Kind, VIAS, type Via, messages, say } from "./messages.js";
 import { type HookName, type HookResult, HOOKS } from "./settings.js";
 import { schedule } from "./scheduler/index.js";
 import { render } from "./scheduler/launchd.js";
@@ -89,8 +89,9 @@ usage: factory [--workspace <dir>] <command> [options]
   state --list [--all]            every open item
   drop <LOCAL-key>... [--note N] [--force]
                                   delete a LOCAL record; tracker tickets are never droppable
-  say "<text>" [--ticket K] [--link URL] [--kind ${KINDS.join("|")}]
-                                  post to the message page and ring the machine
+  say "<text>" [--ticket K] [--link URL] [--kind ${KINDS.join("|")}] [--via ${VIAS.join("|")}]
+                                  post to the message page and ring the machine. --via telegram
+                                  marks a copy of a text the human already got on Telegram
                                   (SF_NOTIFY=0 mutes it, SF_NOTIFY_SOUND names the sound)
   messages [-n 20]                the last n messages. Never read the log whole: it is
                                   append-only and unbounded.
@@ -621,11 +622,14 @@ function cmdDrop(ws: Workspace, argv: string[]) {
 
 function cmdSay(ws: Workspace, argv: string[]) {
   const s = { type: "string" } as const;
-  const { v, p } = args("say", argv, { ticket: s, link: s, kind: s }, [1, Infinity]);
+  const { v, p } = args("say", argv, { ticket: s, link: s, kind: s, via: s }, [1, Infinity]);
   const kind = str(v.kind) ?? "note";
   if (!(KINDS as readonly string[]).includes(kind))
     throw new UsageError(`say: --kind: invalid choice: ${pyRepr(kind)} (choose from ${KINDS.map(pyRepr).join(", ")})`);
-  say(ws, p, { ticket: str(v.ticket), link: str(v.link), kind: kind as Kind });
+  const via = str(v.via);
+  if (via !== undefined && !(VIAS as readonly string[]).includes(via))
+    throw new UsageError(`say: --via: invalid choice: ${pyRepr(via)} (choose from ${VIAS.map(pyRepr).join(", ")})`);
+  say(ws, p, { ticket: str(v.ticket), link: str(v.link), kind: kind as Kind, via: via as Via | undefined });
 }
 
 function cmdBoard(ws: Workspace, argv: string[]) {

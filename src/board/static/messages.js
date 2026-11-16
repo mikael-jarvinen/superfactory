@@ -41,8 +41,27 @@ function render(d){
     </div></div>`;
   }).join('') : '<div class="none">nothing yet</div>';
   if(html !== lastList){ list.innerHTML = html; lastList = html; }
+  markSeen(d);
+}
+
+// While the page is visible, tell the board the newest lead message now on screen, so a reminder
+// knows what the human has read. Lead rows have no id; their `t` is the mark. Each `t` is posted once
+// per page. A post the board could not take (no answer, or a 5xx) is tried again on the next poll;
+// a refusal (4xx) is not, as the same post would be refused again.
+let seenPosted = null;
+function markSeen(d){
+  if(document.visibilityState !== 'visible') return;
+  const newest = d.messages.find(m => m.from === 'lead' && m.t);
+  if(!newest || newest.t === seenPosted || newest.t === d.seen) return;
+  if(d.seen && Date.parse(newest.t) <= Date.parse(d.seen)) return;
+  const t = newest.t;
+  seenPosted = t;
+  fetch('/api/messages/seen', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({t})})
+    .then(r => { if(r.status >= 500 && seenPosted === t) seenPosted = null; },() => { if(seenPosted === t) seenPosted = null; });
 }
 const tick = poll('/api/messages', render);
+// Coming back to a tab that was hidden marks what it shows at once, not on the next poll.
+document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'visible') tick(); });
 
 const t = document.getElementById('t'), b = document.getElementById('b'), err = document.getElementById('err');
 const preview = document.getElementById('preview');

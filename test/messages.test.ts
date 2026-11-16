@@ -28,6 +28,20 @@ test("say appends one row of any length, and prints a push line of the first lin
   assert.equal(factory(ws, ["say", "x", "--kind", "chat"]).status, 2);
 });
 
+test("say --via telegram marks a copy of a Telegram text, and only that row carries via", () => {
+  const ws = tempWorkspace();
+  after(() => rmSync(ws, { recursive: true, force: true }));
+  const log = join(ws, "state", "messages.jsonl");
+  assert.equal(factory(ws, ["say", "sent on Telegram", "--via", "telegram"]).status, 0);
+  assert.equal(factory(ws, ["say", "on the board only"]).status, 0);
+  const rows = readFileSync(log, "utf8").trimEnd().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(rows.map((r) => [r.text, r.via]), [["sent on Telegram", "telegram"], ["on the board only", undefined]]);
+  assert.ok(!("via" in rows[1]), "a row without via keeps its old shape");
+  const bad = factory(ws, ["say", "x", "--via", "sms"]);
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /--via: invalid choice: 'sms'/);
+});
+
 test("the log rotates past a megabyte, and messages reads only the tail", () => {
   const ws = tempWorkspace();
   after(() => rmSync(ws, { recursive: true, force: true }));
