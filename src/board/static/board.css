@@ -44,6 +44,13 @@ section{padding:18px 20px 20px;border-bottom:1px solid var(--line)}
    the side on a dashed line, a 2IC/XO position rather than a link in the lead-to-teams chain; the teams
    below on a bar that joins them. Each team's colour, sampled from its portraits' backdrop, is the
    accent over its heading. The trunk runs behind the lead, who covers it with the page ground. */
+/* The Team heading is the toggle: a button that looks like every other section heading. Shut, only
+   the heading and its running count show. */
+.teamsum{width:100%;background:none;border:0;padding:0;color:var(--ink);font:inherit;cursor:pointer;text-align:left}
+.teamsum .more{margin-left:auto;font-family:var(--mono);font-size:11px;letter-spacing:.08em;
+               text-transform:uppercase;color:var(--cool);white-space:nowrap}
+.team.shut .org{display:none}
+.team.shut .shead{margin-bottom:0}
 .team .top{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);
      align-items:start;padding-bottom:24px}
 .team .top::before{content:"";position:absolute;left:50%;top:0;bottom:0;border-left:1px solid var(--line)}

@@ -47,17 +47,26 @@ function roster(g){
       <div class="people">${g.members.map(p => member(p)).join('')}</div></div>`;
 }
 
+// Whether the org chart is open: this browser's choice, kept in localStorage. With nothing stored a
+// phone starts with it shut, as the chart is a screenful there before any work shows.
+const TEAM_KEY = 'sf-team-open';
+let teamOpen = (() => {
+  try { const v = localStorage.getItem(TEAM_KEY); if(v === '1' || v === '0') return v === '1'; } catch {}
+  return !matchMedia('(max-width:640px)').matches;
+})();
+
 // An org chart of rosters rather than a box per person: the lead on top, the assistants to the side on
-// a dashed line, the teams below on a bar that joins them.
+// a dashed line, the teams below on a bar that joins them. The heading opens and shuts it; shut, the
+// running count stays.
 function team(groups){
   const lead = groups.filter(g => g.key === 'lead').flatMap(g => g.members);
   const staff = groups.filter(g => g.staff);
   const rest = groups.filter(g => g.key !== 'lead' && !g.staff);
   const members = groups.flatMap(g => g.members);
-  return `<section class="team"><div class="shead"><h2>Team</h2><span class="sum">${members.filter(p => p.alive).length} of ${members.length} running</span></div>
-    <div class="top">${lead.length ? `<div class="head">${lead.map(p => member(p, 'big')).join('')}</div>` : ''}
+  return `<section class="team ${teamOpen ? '' : 'shut'}"><button class="shead teamsum" aria-expanded="${teamOpen}" aria-controls="org"><h2>Team</h2><span class="sum">${members.filter(p => p.alive).length} of ${members.length} running</span><span class="more">${teamOpen ? 'hide' : 'show'}</span></button>
+    <div class="org" id="org"><div class="top">${lead.length ? `<div class="head">${lead.map(p => member(p, 'big')).join('')}</div>` : ''}
       ${staff.length ? `<div class="staff">${staff.map(roster).join('')}</div>` : ''}</div>
-    <div class="rosters" style="--n:${rest.length || 1}">${rest.map(roster).join('')}</div></section>`;
+    <div class="rosters" style="--n:${rest.length || 1}">${rest.map(roster).join('')}</div></div></section>`;
 }
 
 const stackName = st => st.mine ? `${esc(human)}&rsquo;s ${esc(st.label)}` : `${esc(st.label)} ${st.slot}`;
@@ -184,6 +193,15 @@ function render(d){
   if(aside) aside.scrollTop = kept;
 }
 
+document.getElementById('root').addEventListener('click', e => {
+  const t = e.target.closest('.teamsum');
+  if(!t) return;
+  teamOpen = !teamOpen;
+  try { localStorage.setItem(TEAM_KEY, teamOpen ? '1' : '0'); } catch {}
+  t.closest('.team').classList.toggle('shut', !teamOpen);
+  t.setAttribute('aria-expanded', teamOpen);
+  t.querySelector('.more').textContent = teamOpen ? 'hide' : 'show';
+});
 document.getElementById('root').addEventListener('click', e => {
   const b = e.target.closest('.stacksum');
   if(!b) return;
