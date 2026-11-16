@@ -68,10 +68,29 @@ export function say(ws: Workspace, words: string[], opts: { ticket?: string; lin
 
 // The tail of the log, never the whole of it: it is append-only and unbounded.
 export function readTail(path: string): Message[] {
+  return tailOf(path).rows;
+}
+
+// The newest n rows (n = 0: all the tail holds), continuous across one rollover. `post` renames
+// the log to .1 past a megabyte, so right after a rollover the log holds a row or two and the page
+// showed only those (2026-11-16). While the log is short enough to be read whole and holds fewer
+// than n rows, the tail of .1 comes before it. Tails only, of both.
+export function readRecent(path: string, n: number): Message[] {
+  const cur = tailOf(path);
+  let rows = cur.rows;
+  if (cur.whole && (n === 0 || rows.length < n)) rows = [...tailOf(path + ".1").rows, ...rows];
+  return n === 0 ? rows : rows.slice(-n);
+}
+
+// whole: the tail is the whole file, so nothing between it and .1 was skipped. A missing file is
+// whole and empty.
+function tailOf(path: string): { rows: Message[]; whole: boolean } {
   let buf: Buffer;
+  let whole = true;
   try {
     const size = statSync(path).size;
     const start = size > TAIL_BYTES ? size - TAIL_BYTES : 0;
+    whole = start === 0;
     buf = Buffer.alloc(size - start);
     const fd = openSync(path, "r");
     try {
@@ -84,7 +103,7 @@ export function readTail(path: string): Message[] {
       buf = nl < 0 ? Buffer.alloc(0) : buf.subarray(nl + 1);
     }
   } catch {
-    return [];
+    return { rows: [], whole: true };
   }
   const rows: Message[] = [];
   for (const line of buf.toString("utf8").split(/\r?\n/)) {
@@ -95,20 +114,18 @@ export function readTail(path: string): Message[] {
       // a torn or foreign line
     }
   }
-  return rows;
+  return { rows, whole };
 }
 
 export function messages(ws: Workspace, n: number, out = console.log): void {
-  try {
-    statSync(ws.messages);
-  } catch {
+  const rows = readRecent(ws.messages, n);
+  if (!rows.length) {
     out("no messages yet");
     return;
   }
   const humanName = ws.config.human.name.toLowerCase();
   const leadName = lead(ws).name;
-  const rows = readTail(ws.messages);
-  for (const r of n === 0 ? rows : rows.slice(-n)) {
+  for (const r of rows) {
     const who = isHuman(ws, r.kind) ? humanName : leadName;
     out(`${(r.t ?? "").slice(0, 16)}  ${who.padEnd(9)} ${(r.kind ?? "").padEnd(8)} ${r.ticket ?? ""}`.trimEnd());
     for (const line of splitlines(r.text ?? "")) out(`    ${line}`);
