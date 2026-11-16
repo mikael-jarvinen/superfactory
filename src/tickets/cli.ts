@@ -5,13 +5,15 @@ import { parseArgs, type ParseArgsConfig } from "node:util";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
 import { cliActor } from "./guard.js";
+import { ordered } from "./rank.js";
 import * as T from "./store.js";
 import * as W from "../wiki/store.js";
 
 export const TICKET_USAGE = `  ticket ...                      the local tracker, when [tracker] kind = "local"; else refused.
                                   <ref> is PROJ-12, or 12 with one project.
     list [--project P] [--state S]... [--label L] [--all] [--json]
-                                  open tickets (all states with --all), one line each, or as JSON
+                                  open tickets (all states with --all), one line each, or as JSON,
+                                  in the human's order: ranked first, then longest-waiting first
     show <ref> [--json]           the whole ticket: description, labels, relations, links, comments
     comments <ref>                its comments only
     create --project P --title T [--body B | --body-file F] [--label L]... [--as A]
@@ -28,6 +30,8 @@ export const TICKET_USAGE = `  ticket ...                      the local tracker
     relate <ref> blocked_by|blocks|relates_to|duplicate_of <ref> [--remove] [--as A]
     link <ref> <url> [title] [--as A]
     title <ref> <new title> [--as A]
+    rank <ref> (--after <ref> | --before <ref>) [--as A]
+                                  place it in the order right after or before another ticket
   wiki ...                        the wiki of the local tracker. <page> is PROJ/path, or path with one project.
     list [--project P]            every page, by path
     show <page> [--json]          the page as markdown, with its sha
@@ -84,7 +88,7 @@ export function cmdTicket(ws: Workspace, argv: string[]): number | Promise<numbe
     case "list": {
       const { v } = parse("ticket list", rest, { project: { type: "string" }, state: { type: "string", multiple: true }, label: { type: "string" }, all: { type: "boolean" }, json: { type: "boolean" } }, 0, 0);
       const states = ((v.state as string[] | undefined) ?? []).map(T.checkState);
-      let tks = T.list(ws, s(v.project));
+      let tks = ordered(T.list(ws, s(v.project)));
       if (states.length) tks = tks.filter((t) => states.includes(t.state));
       else if (!v.all) tks = tks.filter((t) => t.state !== "Done" && t.state !== "Cancelled");
       if (s(v.label)) tks = tks.filter((t) => t.labels.includes(s(v.label) as string));
@@ -182,6 +186,16 @@ export function cmdTicket(ws: Workspace, argv: string[]): number | Promise<numbe
       const key = T.resolveKey(ws, p[0] as string);
       const tk = T.retitle(ws, key, p[1] as string, actor.name);
       console.log(`  ${key}: titled ${JSON.stringify(tk.title)}`);
+      return 0;
+    }
+    case "rank": {
+      const { v, p } = parse("ticket rank", rest, { after: { type: "string" }, before: { type: "string" }, ...as }, 1, 1);
+      if (!s(v.after) === !s(v.before)) throw new FactoryError("ticket rank: give one of --after or --before", 2);
+      const actor = cliActor(ws, s(v.as));
+      const key = T.resolveKey(ws, p[0] as string);
+      const by = (r: string | undefined) => (r ? T.resolveKey(ws, r) : null);
+      T.rank(ws, key, { after: by(s(v.after)), before: by(s(v.before)) }, actor.name);
+      console.log(`  ${key}: placed ${s(v.after) ? `after ${by(s(v.after))}` : `before ${by(s(v.before))}`}`);
       return 0;
     }
     default:

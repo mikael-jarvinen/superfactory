@@ -26,7 +26,7 @@ async function listView(p){
   let rows = d.tickets.filter(t => state === 'all' ? true : state === 'open' ? OPEN(t.state) : t.state === state);
   if(label) rows = rows.filter(t => t.labels.includes(label));
   if(text) rows = rows.filter(t => (t.key + ' ' + t.title).toLowerCase().includes(text));
-  rows.sort((a, b) => b.updated.localeCompare(a.updated));
+  // The server lists them in the human's order, the one the round dispatches Todo in; a filter keeps it.
   const keep = {project: p.get('project') || '', q: p.get('q') || '', label};
   const chip = (s, name) => goLink({...keep, state: s}, `${esc(name)} <b>${counts[s] ?? (s === 'all' ? d.tickets.length : 0)}</b>`, 'chip' + (s === state ? ' on' : ''));
   const projects = d.projects.length > 1
@@ -38,8 +38,8 @@ async function listView(p){
     ${label ? `<p class="filter">label <span class="lbl">${esc(label)}</span> ${goLink({...keep, state, label: ''}, '&times; clear')}</p>` : ''}
     <div class="err" id="err"></div>
     <div class="rows">${rows.map(t => `
-      <a class="row" href="?key=${esc(t.key)}" data-go="key=${esc(t.key)}">
-        <span class="k">${esc(t.key)}</span>${badge(t.state)}
+      <a class="row" href="?key=${esc(t.key)}" data-go="key=${esc(t.key)}" data-key="${esc(t.key)}">
+        <span class="grip" title="drag to reorder" aria-hidden="true"></span><span class="k">${esc(t.key)}</span>${badge(t.state)}
         <span class="ti">${esc(t.title)}</span>
         <span class="meta">${t.labels.map(l => `<span class="lbl">${esc(l)}</span>`).join('')}${t.comments ? `<span class="cm">${t.comments} comment${t.comments === 1 ? "" : "s"}</span>` : ''}<span class="ago">${ago(t.updated)}</span></span>
       </a>`).join('') || '<p class="none">no tickets here</p>'}</div>`;
@@ -48,6 +48,53 @@ async function listView(p){
   s.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => go({...keep, state, q: s.value}, true), 250); });
   if(p.get('q')) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
   document.getElementById('proj')?.addEventListener('change', e => go({state, project: e.target.value}));
+  dragToRank(document.querySelector('.rows'));
+}
+
+// A row is dragged by its grip with pointer events, so a finger reorders as a mouse does; the grip
+// has touch-action:none, so a drag on it never scrolls the page. The drop is sent as the rows now
+// above and below it, and the list is read again from the server, whose order is the real one.
+function dragToRank(list){
+  if(!list) return;
+  list.addEventListener('click', e => { if(e.target.closest('.grip')) { e.preventDefault(); e.stopPropagation(); } }, true);
+  list.addEventListener('pointerdown', e => {
+    const grip = e.target.closest('.grip');
+    if(!grip || e.button > 0) return;
+    e.preventDefault();
+    const row = grip.closest('.row'), was = row.previousElementSibling;
+    const grab = e.clientY - row.getBoundingClientRect().top;
+    let y = e.clientY;
+    grip.setPointerCapture(e.pointerId);
+    row.classList.add('dragging');
+    const place = () => {
+      row.style.transform = '';
+      const prev = row.previousElementSibling, next = row.nextElementSibling;
+      const mid = el => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
+      if(prev && y < mid(prev)) list.insertBefore(row, prev);
+      else if(next && y > mid(next)) list.insertBefore(next, row);
+      row.style.transform = `translateY(${y - grab - row.getBoundingClientRect().top}px)`;
+    };
+    const move = ev => {
+      y = ev.clientY;
+      if(y < 60) scrollBy(0, -12); else if(y > innerHeight - 60) scrollBy(0, 12);
+      place();
+    };
+    const end = async ev => {
+      grip.removeEventListener('pointermove', move);
+      grip.removeEventListener('pointerup', end);
+      grip.removeEventListener('pointercancel', end);
+      row.classList.remove('dragging'); row.style.transform = '';
+      if(ev.type === 'pointercancel' || row.previousElementSibling === was) return route();
+      const key = el => el?.dataset.key || null;
+      try {
+        await api('/api/tickets/' + encodeURIComponent(row.dataset.key), {op: 'rank', after: key(row.previousElementSibling), before: key(row.nextElementSibling)});
+      } catch(err){ flash(err.message); }
+      route();
+    };
+    grip.addEventListener('pointermove', move);
+    grip.addEventListener('pointerup', end);
+    grip.addEventListener('pointercancel', end);
+  });
 }
 
 function labelPicker(project, have){

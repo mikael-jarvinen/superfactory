@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { LABEL_RE, PROJECT_KEY_RE, type TrackerProject } from "../config.js";
 import { type Actor, checkCreate, checkMove, checkMoveNow, type MoveProof, type SpentOk, spendsOk } from "./guard.js";
 import { withLock } from "./lock.js";
+import { between, isRank, ordered, spread } from "./rank.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError, now } from "../util.js";
 
@@ -51,6 +52,8 @@ export interface Ticket {
   by: string;
   // set by an import: where the ticket came from
   source?: Record<string, unknown>;
+  // its place in the human's order (rank.ts); a ticket never dragged has none
+  rank?: string;
 }
 
 // Every event carries when and who. `by` is the human's name for a write from the board, else the
@@ -66,6 +69,7 @@ export type Event = { t: string; by: string } & (
   | { op: "relate"; kind: RelationKind; to: string }
   | { op: "unrelate"; kind: RelationKind; to: string }
   | { op: "link"; url: string; title: string | null }
+  | { op: "rank"; rank: string }
 );
 
 export const enabled = (ws: Workspace) => ws.config.tracker.kind === "local";
@@ -86,6 +90,8 @@ const FILE_RE = new RegExp(`^(${PK})-([1-9][0-9]*)\\.jsonl$`);
 const lockOf = (ws: Workspace, key: string) => join(projectDir(ws, parseKey(key).project), ".locks", `${key}.lock`);
 // One for the workspace, as the oks a Done move checks are read from every project.
 const okLockOf = (ws: Workspace) => join(trackerDir(ws), "tickets", ".locks", "done-ok.lock");
+// One for the workspace, as a rank is placed among every project's.
+const rankLockOf = (ws: Workspace) => join(trackerDir(ws), "tickets", ".locks", "rank.lock");
 
 export function parseKey(key: string): { project: string; number: number } {
   const m = KEY_RE.exec(key);
@@ -142,6 +148,11 @@ export function fold(key: string, events: Event[]): Ticket {
     ...(first.source ? { source: first.source } : {}),
   };
   for (const e of events.slice(1)) {
+    // A new place in the order is not a change to the ticket, so it leaves its waiting time alone.
+    if (e.op === "rank") {
+      if (isRank(e.rank)) tk.rank = e.rank;
+      continue;
+    }
     tk.updated = e.t;
     switch (e.op) {
       case "move": tk.state = e.to; break;
@@ -376,4 +387,53 @@ export function link(ws: Workspace, key: string, url: string, title: string | nu
   load(ws, key);
   append(ws, key, { t: t ?? now(), by, op: "link", url, title });
   return load(ws, key);
+}
+
+export interface Place {
+  after?: string | null;
+  before?: string | null;
+}
+
+// Puts the ticket right after `after` in the order, or right before `before` when `after` is null,
+// as the human dropped it between two visible rows. Rows a filter hides keep their place. A ticket
+// dropped among the unranked ones ranks those above it first, in the order they already show, so
+// nothing else on the page moves.
+export function rank(ws: Workspace, key: string, at: Place, by: string): Ticket {
+  load(ws, key);
+  const anchor = at.after ?? at.before;
+  if (!anchor) throw new FactoryError("rank: give the ticket to place it after or before");
+  if (anchor === key) throw new FactoryError(`${key} cannot be placed next to itself`);
+  if (!exists(ws, anchor)) throw new FactoryError(`no ticket ${anchor}`);
+  return withLock(rankLockOf(ws), () => {
+    const all = ordered(list(ws)).filter((t) => t.key !== key);
+    const i = all.findIndex((t) => t.key === anchor);
+    let lo = at.after ? all[i] : all[i - 1];
+    const hi = at.after ? all[i + 1] : all[i];
+    if (lo && lo.rank === undefined) {
+      const first = all.findIndex((t) => t.rank === undefined);
+      const tail = all.slice(first, all.indexOf(lo) + 1);
+      const ranks = spread(all[first - 1]?.rank ?? "", null, tail.length);
+      tail.forEach((t, j) => {
+        t.rank = ranks[j] as string;
+        append(ws, t.key, { t: now(), by, op: "rank", rank: t.rank });
+      });
+      lo = tail[tail.length - 1];
+    }
+    append(ws, key, { t: now(), by, op: "rank", rank: between(lo?.rank ?? "", hi?.rank ?? null) });
+    return load(ws, key);
+  });
+}
+
+// Ranks the unranked tickets among `keys`, in that order, after every ticket ranked already. An
+// import's order is seeded with this once; a ticket with a rank keeps it.
+export function seedRanks(ws: Workspace, keys: string[], by: string): string[] {
+  return withLock(rankLockOf(ws), () => {
+    const tks = list(ws);
+    const have = new Set(tks.filter((t) => t.rank === undefined).map((t) => t.key));
+    const todo = [...new Set(keys)].filter((k) => have.has(k));
+    const top = tks.map((t) => t.rank).filter((r): r is string => r !== undefined).sort().pop() ?? "";
+    const ranks = spread(top, null, todo.length);
+    todo.forEach((k, j) => append(ws, k, { t: now(), by, op: "rank", rank: ranks[j] as string }));
+    return todo;
+  });
 }
