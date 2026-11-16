@@ -15,6 +15,7 @@ import type { Workspace } from "../workspace.js";
 import { roster } from "../config.js";
 import { capitalize, run, sleep } from "../util.js";
 import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, saveAttachment } from "./inbox.js";
+import { markSeen, readSeen } from "./seen.js";
 import { tryFailure } from "../failures.js";
 import { type Fetch, ReviewCache } from "./reviews.js";
 import { isScheduler } from "../scheduler/state.js";
@@ -23,9 +24,10 @@ import { enabled as trackerEnabled } from "../tickets/store.js";
 
 // The board: a read-only picture of the fleet at `/`, and the thread between the human and the lead
 // at `/messages`. `/api` and `/api/messages` are the JSON behind them, and both pages re-fetch every
-// two seconds. Posting to `/api/messages` is the one write, and it only appends to the message log:
-// the text lands in the thread at once, so the page never looks like it swallowed it. Getting it to
-// the lead is the inbox's job. state/ is written by the factory alone, so a board that is wrong is
+// two seconds. Posting to `/api/messages` is the one message write, and it only appends to the message
+// log: the text lands in the thread at once, so the page never looks like it swallowed it. Getting it
+// to the lead is the inbox's job. `/api/messages/seen` only records how far the human has read, in
+// logs/ (seen.ts). state/ is written by the factory alone, so a board that is wrong is
 // a board with a bug rather than a store that has been corrupted.
 
 const STATIC = fileURLToPath(new URL("./static/", import.meta.url));
@@ -403,7 +405,7 @@ function messagesView(ws: Workspace, sessions: SessionCache, receipts: Receipts)
     const human = isHuman(ws, r.kind);
     return { ...r, from: human ? "human" : "lead", age_min: ageMinutes(r.t), receipt: human && r.id ? receipts.receipt(r.id) : null };
   });
-  return { at: clock(), human: ws.config.human.name, lead: leadName, lead_avatar: avatars(ws)[leadName] ?? null, status, messages: rows };
+  return { at: clock(), human: ws.config.human.name, lead: leadName, lead_avatar: avatars(ws)[leadName] ?? null, status, seen: readSeen(ws), messages: rows };
 }
 
 // ---------------------------------------------------------------- HTTP
@@ -532,6 +534,15 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
       if (!sameSite(req)) return json(res, 403, { ok: false, error: "refused: not from the board" });
       readJson(req, res, (body) => {
         replyTracker(res, trackerApi(ws, "POST", req.url ?? "/", body));
+      });
+      return;
+    }
+    // The page saying how far the human has read the lead's messages; see seen.ts.
+    if (req.method === "POST" && path === "/api/messages/seen") {
+      if (!sameSite(req)) return json(res, 403, { ok: false, error: "refused: not from the message page" });
+      readJson(req, res, (body) => {
+        const r = markSeen(ws, body.t);
+        json(res, r.ok ? 200 : 400, r);
       });
       return;
     }
