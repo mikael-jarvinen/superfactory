@@ -148,14 +148,19 @@ export function fold(key: string, events: Event[]): Ticket {
     ...(first.source ? { source: first.source } : {}),
   };
   for (const e of events.slice(1)) {
-    // A new place in the order is not a change to the ticket, so it leaves its waiting time alone.
+    // A new place in the order is not a change to the ticket, so it leaves its waiting time alone. A
+    // closed ticket takes none, even from a drop that raced its move.
     if (e.op === "rank") {
-      if (isRank(e.rank)) tk.rank = e.rank;
+      if (isRank(e.rank) && !isClosed(tk.state)) tk.rank = e.rank;
       continue;
     }
     tk.updated = e.t;
     switch (e.op) {
-      case "move": tk.state = e.to; break;
+      case "move":
+        tk.state = e.to;
+        // a closed ticket leaves the order, so a reopened one comes back unranked, at the bottom
+        if (isClosed(e.to)) delete tk.rank;
+        break;
       case "label":
         if (e.add && !tk.labels.includes(e.add)) tk.labels.push(e.add);
         if (e.rm) tk.labels = tk.labels.filter((l) => l !== e.rm);
@@ -403,11 +408,11 @@ export function rank(ws: Workspace, key: string, at: Place, by: string): Ticket 
   if (!anchor) throw new FactoryError("rank: give the ticket to place it after or before");
   if (anchor === key) throw new FactoryError(`${key} cannot be placed next to itself`);
   if (!exists(ws, anchor)) throw new FactoryError(`no ticket ${anchor}`);
-  for (const k of [key, anchor]) {
-    const st = load(ws, k).state;
-    if (isClosed(st)) throw new FactoryError(`${k} is ${st}; only open tickets have a place in the order`);
-  }
   return withLock(rankLockOf(ws), () => {
+    for (const k of [key, anchor]) {
+      const st = load(ws, k).state;
+      if (isClosed(st)) throw new FactoryError(`${k} is ${st}; only open tickets have a place in the order`);
+    }
     const all = ordered(list(ws)).filter((t) => t.key !== key && !isClosed(t.state));
     const i = all.findIndex((t) => t.key === anchor);
     let lo = at.after ? all[i] : all[i - 1];

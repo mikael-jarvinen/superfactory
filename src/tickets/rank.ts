@@ -52,7 +52,14 @@ export function compare(a: Rankable, b: Rankable): number {
     if (b.rank === undefined) return -1;
     if (a.rank !== b.rank) return a.rank < b.rank ? -1 : 1;
   } else if (a.updated !== b.updated) return a.updated < b.updated ? -1 : 1;
-  return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+  return byKey(a.key, b.key);
+}
+
+// PROJ-9 before PROJ-10.
+function byKey(a: string, b: string): number {
+  const [pa = "", na = ""] = a.split("-"), [pb = "", nb = ""] = b.split("-");
+  if (pa !== pb) return pa < pb ? -1 : 1;
+  return Number(na) - Number(nb);
 }
 
 export const ordered = <T extends Rankable>(tks: T[]): T[] => [...tks].sort(compare);

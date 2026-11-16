@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { appendFileSync } from "node:fs";
+import { join } from "node:path";
 import { after, test } from "node:test";
 import { serve } from "../src/board/server.js";
 import type { Actor } from "../src/tickets/guard.js";
@@ -88,6 +90,24 @@ test("store: closed tickets are never ranked, by a drop or a seed, and cannot be
   assert.throws(() => T.rank(ws, "RPE-2", { after: "RPE-1" }, "Alex"), /RPE-1 is Cancelled/);
   assert.deepEqual(T.seedRanks(ws, ["RPE-1", "RPE-2", "RPE-3", "RPE-4"], "plane"), []);
   assert.ok(closed().every((t) => t.rank === undefined));
+});
+
+test("store: closing a ticket drops its rank, so a reopened one comes back at the bottom", async () => {
+  const ws = seeded(["2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"], ["Todo", "Todo", "Todo"]);
+  T.seedRanks(ws, ["RPE-3", "RPE-1", "RPE-2"], "plane");
+  assert.deepEqual(keys(ws), ["RPE-3", "RPE-1", "RPE-2"]);
+  await T.move(ws, "RPE-3", "Cancelled", { human: true, name: "Alex" });
+  assert.equal(T.load(ws, "RPE-3").rank, undefined);
+  // a rank event that lands after the close, as from a drop that raced it, is not taken
+  appendFileSync(join(T.projectDir(ws, "RPE"), "RPE-3.jsonl"), JSON.stringify({ t: "2026-06-01T00:00:00Z", by: "Alex", op: "rank", rank: "1" }) + "\n");
+  assert.equal(T.load(ws, "RPE-3").rank, undefined);
+  await T.move(ws, "RPE-3", "Todo", { human: true, name: "Alex" });
+  assert.deepEqual(keys(ws), ["RPE-1", "RPE-2", "RPE-3"]);
+});
+
+test("rank: ties go by project, then number, so RPE-9 comes before RPE-10", () => {
+  const tk = (key: string) => ({ key, updated: "2026-01-01", state: "Todo" });
+  assert.deepEqual(ordered([tk("RPE-10"), tk("WEB-2"), tk("RPE-9")]).map((t) => t.key), ["RPE-9", "RPE-10", "WEB-2"]);
 });
 
 test("store: seedRanks ranks only the unranked, after the ranked, and a second run changes nothing", () => {
