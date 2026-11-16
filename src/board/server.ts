@@ -9,7 +9,7 @@ import { lead, owesSession, reviewOnly, type Session } from "../fleet.js";
 import { leadStatus } from "../hooks/status.js";
 import { Unreachable } from "../remote.js";
 import { agentSessions, pick, transportFor, transports } from "../transport.js";
-import { isHuman, readTail } from "../messages.js";
+import { isHuman, readRecent, readTail } from "../messages.js";
 import { allRecs, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { capitalize, run, sleep } from "../util.js";
@@ -385,7 +385,7 @@ function messagesView(ws: Workspace, sessions: SessionCache, receipts: Receipts)
   receipts.read(st.transcript);
   const leadName = lead(ws).name;
   const status = sessions.alive(leadName, sessions.background().get(leadName)) ? (st.words ?? null) : sessions.unknown(leadName) ? "unknown" : "offline";
-  const rows = readTail(ws.messages).reverse().slice(0, 60).map((r) => {
+  const rows = readRecent(ws.messages, 60).reverse().map((r) => {
     const human = isHuman(ws, r.kind);
     return { ...r, from: human ? "human" : "lead", age_min: ageMinutes(r.t), receipt: human && r.id ? receipts.receipt(r.id) : null };
   });
