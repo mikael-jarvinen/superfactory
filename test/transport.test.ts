@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { agentOrDie, findSession, type Session } from "../src/fleet.js";
 import { claudeEnv, claudeScoped, JOB_ENV, SCOPE } from "../src/scope.js";
 import { procStat } from "../src/stacks/process.js";
-import { agentSessions, daemonAlive, daemonUp, local, pick, sessionAlive, type Transport } from "../src/transport.js";
+import { agentSessions, daemonAlive, local, pick, sessionAlive, type Transport } from "../src/transport.js";
 import { runClaude } from "../src/watchers/job.js";
 import { run } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
@@ -85,7 +85,7 @@ test("a reviewer started on demand here gets its appendix as the file it starts 
   writeFileSync(join(dir, "briefs", "rae.md"), "rae's brief\n");
   writeFileSync(join(dir, "bin", "claude"), `#!/bin/sh
 if [ "$1" = agents ]; then
-  if [ -f "${dir}/started" ]; then echo '[{"id":"abc123","name":"rae","kind":"background","state":"idle","pid":4242}]'; else echo '[]'; fi
+  if [ -f "${dir}/started" ]; then echo '[{"id":"abc123","name":"rae","kind":"background","state":"idle","pid":${process.pid}}]'; else echo '[]'; fi
   exit 0
 fi
 prev=
@@ -340,7 +340,7 @@ test("the daemon is down, and no session alive, when its supervisor is gone, unn
   const was = { cfg: process.env.CLAUDE_CONFIG_DIR, socks: process.env.SF_CC_DAEMON_DIR };
   const d = tempDir();
   const cfg = join(d, "config"), socks = join(d, "sockets");
-  const row = { kind: "background", state: "done", name: "bea", pid: 4242 } as Session;
+  const row = { kind: "background", state: "done", name: "bea", pid: process.pid } as Session;
   process.env.CLAUDE_CONFIG_DIR = cfg;
   process.env.SF_CC_DAEMON_DIR = socks;
   try {
@@ -364,34 +364,37 @@ test("the daemon is down, and no session alive, when its supervisor is gone, unn
   }
 });
 
-test("a row the listing keeps after its worker is gone is not alive, next to live rows", () => {
+test("a row is alive while its worker's pid exists, through a supervisor restart; one the listing keeps after its worker is gone is not", () => {
   const was = { cfg: process.env.CLAUDE_CONFIG_DIR, socks: process.env.SF_CC_DAEMON_DIR };
   const d = tempDir();
   const cfg = join(d, "config"), socks = join(d, "sockets");
   process.env.CLAUDE_CONFIG_DIR = cfg;
   process.env.SF_CC_DAEMON_DIR = socks;
+  const worker = spawn("sleep", ["60"]);
+  const sup2 = spawn("sleep", ["60"]);
   try {
     fakeDaemon(cfg);
     mkdirSync(join(socks, "d1"), { recursive: true });
     writeFileSync(join(socks, "d1", "control.sock"), "");
-    // the fake supervisor is this process, so its start is known on Linux
-    const sup = daemonUp();
-    assert.ok(sup);
-    const after = (sup.startedAt ?? Date.now()) + 60_000;
-    const row = (id: string, extra: Partial<Session>) => ({ id, name: "bea", kind: "background", startedAt: after, ...extra }) as Session;
+    const gone = spawnSync("true").pid as number;
+    const live = worker.pid as number;
+    const row = (id: string, extra: Partial<Session>) => ({ id, name: "bea", kind: "background", startedAt: Date.now(), ...extra }) as Session;
     assert.equal(sessionAlive(row("a1", { state: "done" })), false, "no pid, done: a worker the daemon retired");
     assert.equal(sessionAlive(row("a2", { state: "blocked" })), false, "no pid, blocked: a worker gone at a reboot");
-    assert.equal(sessionAlive(row("a3", { state: "done", status: "idle", pid: 4242 })), true, "a pid, done and idle: it wakes on a message");
-    assert.equal(sessionAlive(row("a4", { state: "working", status: "busy", pid: 4243 })), true, "a pid, working");
-    assert.equal(sessionAlive(row("a5", { state: "done", pid: 0 })), false, "a pid that is not one");
-    if (sup.startedAt !== undefined) {
-      const before = sup.startedAt - 3_600_000;
-      assert.equal(sessionAlive(row("a6", { state: "done", pid: 4244, startedAt: before })), false, "a pid, but started before this supervisor");
-      assert.equal(sessionAlive(row("a7", { state: "done", pid: 4245, startedAt: new Date(before).toISOString() })), false, "the same, with startedAt as ISO");
-      assert.equal(sessionAlive(row("a8", { state: "done", pid: 4246, startedAt: sup.startedAt - 500 })), true, "within the slack of the supervisor's start");
-    }
-    assert.equal(sessionAlive(row("a9", { state: "done", pid: 4247, startedAt: undefined })), true, "a pid and no start: the pid rule alone");
+    assert.equal(sessionAlive(row("a3", { state: "done", status: "idle", pid: live })), true, "a pid, done and idle: it wakes on a message");
+    assert.equal(sessionAlive(row("a4", { state: "working", status: "busy", pid: live })), true, "a pid, working");
+    assert.equal(sessionAlive(row("a5", { state: "done", pid: gone })), false, "a pid whose process has exited");
+    assert.equal(sessionAlive(row("a6", { state: "done", pid: 0 })), false, "a pid that is not one");
+    assert.equal(sessionAlive(row("a7", { state: "done", pid: 1 })), true, "a pid run by another user (EPERM) exists");
+    // the supervisor restarts, and the worker, started before the new one, keeps running
+    const old = row("a8", { state: "done", pid: live, startedAt: Date.now() - 3_600_000 });
+    fakeDaemon(cfg, sup2.pid as number);
+    assert.equal(daemonAlive(), true);
+    assert.equal(sessionAlive(old), true, "a session started before the supervisor restarted, still running");
+    assert.equal(sessionAlive(row("a9", { state: "done", startedAt: Date.now() - 3_600_000 })), false, "and its pid-less neighbour is still dead");
   } finally {
+    worker.kill();
+    sup2.kill();
     process.env.CLAUDE_CONFIG_DIR = was.cfg;
     process.env.SF_CC_DAEMON_DIR = was.socks;
   }
