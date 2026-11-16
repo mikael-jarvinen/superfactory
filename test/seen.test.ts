@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import vm from "node:vm";
@@ -121,6 +121,36 @@ test("the message page marks the newest lead message only while visible, once ea
   s.data.messages.unshift(s.lead("2026-11-16T12:15:00+00:00"));
   await poll();
   assert.equal(s.posts.length, n);
+});
+
+test("seen: a log that cannot be read is a 5xx the page retries, not a refusal", { skip: noInboxLock }, async () => {
+  const dir = tempWorkspace();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  process.env.CLAUDE_BIN = join(dir, "bin", "claude");
+  const ws = openWorkspace(dir);
+  mkdirSync(ws.stateDir, { recursive: true });
+  appendFileSync(ws.messages, pyDumps({ t: "2026-11-16T12:00:00+00:00", kind: "note", text: "first" }) + "\n");
+  const board = await serve(ws, { host: "127.0.0.1", port: 0 });
+  after(() => board.close());
+  const mark = () => fetch(board.url + "/api/messages/seen", {
+    method: "POST", headers: { "Content-Type": "application/json", "Origin": board.url }, body: JSON.stringify({ t: "2026-11-16T12:00:00+00:00" }),
+  });
+  // A briefly unreadable log: a transient read failure, then the log reads again.
+  renameSync(ws.messages, ws.messages + ".1");
+  const r = await mark();
+  assert.equal(r.status, 503, "retryable while the log cannot be read");
+  assert.equal(readSeen(ws), null);
+  renameSync(ws.messages + ".1", ws.messages);
+  assert.equal((await mark()).status, 200, "the same t goes through once it can");
+  assert.equal(readSeen(ws), "2026-11-16T12:00:00+00:00");
+});
+
+test("the message page marks the greatest lead t, not the last row appended", async () => {
+  const { s, poll } = messagesPage();
+  // Newest appended first, as /api/messages lists them; the clock stepped back before the last row.
+  s.data.messages = [s.lead("2026-11-16T12:04:00+00:00", "after the step"), s.lead("2026-11-16T12:05:00+00:00", "before it")];
+  await poll();
+  assert.deepEqual(s.posts, ["2026-11-16T12:05:00+00:00"]);
 });
 
 test("the message page tries a mark again after a 5xx, not after a refusal", async () => {

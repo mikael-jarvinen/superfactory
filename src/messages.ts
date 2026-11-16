@@ -74,6 +74,12 @@ export function say(ws: Workspace, words: string[], opts: { ticket?: string; lin
 
 // The tail of the log, never the whole of it: it is append-only and unbounded.
 export function readTail(path: string): Message[] {
+  return tryReadTail(path) ?? [];
+}
+
+// readTail, but null when the log cannot be read (missing, or a transient read failure), so a caller
+// can tell that from a log with no matching row.
+export function tryReadTail(path: string): Message[] | null {
   let buf: Buffer;
   try {
     const size = statSync(path).size;
@@ -90,7 +96,7 @@ export function readTail(path: string): Message[] {
       buf = nl < 0 ? Buffer.alloc(0) : buf.subarray(nl + 1);
     }
   } catch {
-    return [];
+    return null;
   }
   const rows: Message[] = [];
   for (const line of buf.toString("utf8").split(/\r?\n/)) {

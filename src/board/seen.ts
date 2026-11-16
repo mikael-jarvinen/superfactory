@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { isHuman, readTail } from "../messages.js";
+import { isHuman, tryReadTail } from "../messages.js";
 import type { Workspace } from "../workspace.js";
 
 // How far the human has read the lead's side of the thread. The message page, while it is visible,
@@ -24,11 +24,15 @@ export function readSeen(ws: Workspace): string | null {
 
 // Mark `t` seen. It must be the `t` of a lead message in the log's tail, so a post can only name a
 // message that exists. The mark only moves forward: a tab left open on an older page, or two tabs,
-// never move it back.
-export function markSeen(ws: Workspace, t: unknown): { ok: true; seen: string } | { ok: false; error: string } {
+// never move it back. A transient read failure of the log (EMFILE, EIO) is `retry`, which the board
+// answers with a 5xx so the page posts the same `t` again; a refusal it would not. This does not
+// cover a roll: post() writes the new log at once, so an older `t` is gone from it either way.
+export function markSeen(ws: Workspace, t: unknown): { ok: true; seen: string } | { ok: false; error: string; retry?: true } {
   const at = time(t);
   if (!Number.isFinite(at)) return { ok: false, error: "t is not a time" };
-  if (!readTail(ws.messages).some((r) => r.t === t && !isHuman(ws, r.kind))) return { ok: false, error: "no lead message has that t" };
+  const rows = tryReadTail(ws.messages);
+  if (rows === null) return { ok: false, error: "the message log could not be read", retry: true };
+  if (!rows.some((r) => r.t === t && !isHuman(ws, r.kind))) return { ok: false, error: "no lead message has that t" };
   const prev = readSeen(ws);
   if (prev !== null && time(prev) >= at) return { ok: true, seen: prev };
   mkdirSync(ws.logsDir, { recursive: true });
