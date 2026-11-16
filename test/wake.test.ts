@@ -12,7 +12,7 @@ import { ListingTimedOut, Unreachable } from "../src/remote.js";
 import { type Transport, transportFor } from "../src/transport.js";
 import { wake } from "../src/wake.js";
 import { openWorkspace } from "../src/workspace.js";
-import { factory, TOML, tempWorkspace } from "./helpers.js";
+import { factory, fakeDaemon, TOML, tempWorkspace } from "./helpers.js";
 
 const ASSISTANT_TOML = TOML.replace("[tracker]", `[roles.assistant]
 cwd = "assistants"
@@ -220,6 +220,7 @@ test("a named assistant that is off is woken on its conversation; --force starts
 test("the session a wake respawns is the one last active by its transcript, not the one started last", () => {
   const { ws, put, calls } = fakeFleet();
   const cfg = join(ws, "claude-config");
+  fakeDaemon(cfg);
   const proj = join(cfg, "projects", "-w-bea-dir");
   mkdirSync(proj, { recursive: true });
   const row = (id: string, startedAt: number) => sess(id, "bea", { startedAt, cwd: "/w/bea.dir", sessionId: `${id}-uuid` });

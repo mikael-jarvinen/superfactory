@@ -80,7 +80,7 @@ const isDir = (p: string) => existsSync(p) && statSync(p).isDirectory();
 // started earlier may have talked since. Undefined when the transcript is not found.
 export function transcriptAt(s: Session): number | undefined {
   if (typeof s.sessionId !== "string" || !/^[\w-]+$/.test(s.sessionId) || typeof s.cwd !== "string") return undefined;
-  const dir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+  const dir = claudeConfigDir();
   try {
     return statSync(join(dir, "projects", s.cwd.replace(/[^A-Za-z0-9]/g, "-"), `${s.sessionId}.jsonl`)).mtimeMs;
   } catch {
@@ -105,14 +105,17 @@ const parse = (stdout: string): Session[] => {
 // exits, the listing keeps the session at its last state. The roster names the supervisor pid; a
 // dead pid or a missing control socket means no background session is alive, whatever the listing
 // says. These are undocumented Claude Code internals, so they stay behind this one function.
-// Probed on every call, never cached.
+// Probed on every call, never cached. The roster is under claude's config dir, as transcripts are;
+// SF_CC_DAEMON_DIR stands in for the socket dir, so a test can give the probe a daemon of its own.
+export const claudeConfigDir = () => process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+export const daemonSocketDir = () => process.env.SF_CC_DAEMON_DIR || join("/tmp", `cc-daemon-${process.getuid?.() ?? ""}`);
 export function daemonAlive(): boolean {
   try {
-    const roster = JSON.parse(readFileSync(join(homedir(), ".claude", "daemon", "roster.json"), "utf8")) as { supervisorPid?: unknown };
+    const roster = JSON.parse(readFileSync(join(claudeConfigDir(), "daemon", "roster.json"), "utf8")) as { supervisorPid?: unknown };
     const pid = Number.parseInt(String(roster.supervisorPid), 10);
     if (!Number.isInteger(pid)) return false;
     process.kill(pid, 0);
-    const base = join("/tmp", `cc-daemon-${process.getuid?.() ?? ""}`);
+    const base = daemonSocketDir();
     return readdirSync(base).some((d) => !d.startsWith(".") && existsSync(join(base, d, "control.sock")));
   } catch {
     return false;

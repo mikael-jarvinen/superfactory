@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { agentOrDie, findSession, type Session } from "../src/fleet.js";
 import { claudeEnv, claudeScoped, JOB_ENV, SCOPE } from "../src/scope.js";
 import { procStat } from "../src/stacks/process.js";
-import { agentSessions, local, pick, type Transport } from "../src/transport.js";
+import { agentSessions, daemonAlive, local, pick, sessionAlive, type Transport } from "../src/transport.js";
 import { runClaude } from "../src/watchers/job.js";
 import { run } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
-import { factory, tempDir, tempWorkspace, TOML } from "./helpers.js";
+import { factory, fakeDaemon, tempDir, tempWorkspace, TOML } from "./helpers.js";
 
 // What a real systemd-run --user --scope said with no user bus: systemd 259 (niilo), 249 (turing).
 const NO_BUS_259 = "Failed to connect to user scope bus via local transport: No such file or directory";
@@ -333,4 +334,32 @@ test("an agent's session is its newest live one, else its newest, and only its b
   // findSession goes by the same rule and never returns an interactive session
   const ft = { ...t, sessions: () => [row("i", "running", { kind: "interactive", updatedAt: "2026-11-13T12:00:00Z" }), old, recent] } as Transport;
   assert.equal(findSession(ft, "bea")?.id, "new");
+});
+
+test("the daemon is down, and no session alive, when its supervisor is gone, unnamed, or has no control socket", () => {
+  const was = { cfg: process.env.CLAUDE_CONFIG_DIR, socks: process.env.SF_CC_DAEMON_DIR };
+  const d = tempDir();
+  const cfg = join(d, "config"), socks = join(d, "sockets");
+  const row = { kind: "background", state: "done", name: "bea" } as Session;
+  process.env.CLAUDE_CONFIG_DIR = cfg;
+  process.env.SF_CC_DAEMON_DIR = socks;
+  try {
+    assert.equal(daemonAlive(), false, "no roster");
+    fakeDaemon(cfg);
+    assert.equal(daemonAlive(), false, "no socket dir");
+    mkdirSync(join(socks, "d1"), { recursive: true });
+    assert.equal(daemonAlive(), false, "a socket dir with no control.sock");
+    writeFileSync(join(socks, "d1", "control.sock"), "");
+    assert.equal(daemonAlive(), true);
+    assert.equal(sessionAlive(row), true);
+    const gone = spawnSync("true").pid as number;
+    fakeDaemon(cfg, gone);
+    assert.equal(daemonAlive(), false, "a supervisor that has exited");
+    assert.equal(sessionAlive(row), false, "a done row behind a dead daemon is not alive");
+    writeFileSync(join(cfg, "daemon", "roster.json"), JSON.stringify({}));
+    assert.equal(daemonAlive(), false, "a roster that names no pid");
+  } finally {
+    process.env.CLAUDE_CONFIG_DIR = was.cfg;
+    process.env.SF_CC_DAEMON_DIR = was.socks;
+  }
 });
