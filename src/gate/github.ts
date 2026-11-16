@@ -79,11 +79,12 @@ export interface CheckRun {
 }
 
 // Check-runs at one commit, every page. This is the source the gate trusts: `gh pr checks` and
-// GraphQL's statusCheckRollup both leave out some checks, the Copilot reviewer among them.
-export function checkRuns(repo: Repo, sha: string): CheckRun[] | undefined {
+// GraphQL's statusCheckRollup both leave out some checks, the Copilot reviewer among them. A
+// watcher passes its own reader, whose gh calls have a bound.
+export function checkRuns(repo: Repo, sha: string, read: typeof api = api): CheckRun[] | undefined {
   const all: CheckRun[] = [];
   for (let page = 1; ; page++) {
-    const d = api<{ total_count?: number; check_runs?: CheckRun[] }>(`repos/${repo.remote}/commits/${sha}/check-runs?per_page=100&page=${page}`);
+    const d = read<{ total_count?: number; check_runs?: CheckRun[] }>(`repos/${repo.remote}/commits/${sha}/check-runs?per_page=100&page=${page}`);
     if (!d || !Array.isArray(d.check_runs)) return undefined;
     all.push(...d.check_runs);
     if (d.check_runs.length === 0 || all.length >= (d.total_count ?? 0)) return all;

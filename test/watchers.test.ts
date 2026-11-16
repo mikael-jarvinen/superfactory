@@ -503,3 +503,61 @@ test("a watcher runs in the lead's permission mode, so the lead never holds its 
     }
   }
 });
+
+// Mikael, 2026-11-16: "If CI checks fail we should probably do something." A failed check on a PR in
+// review is told once per head, with how the same check stands on the base and how far behind it is.
+test("the round: a failed CI check on a PR in review is told once per head, with the base's view of it", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  const state = (...a: string[]) => assert.equal(factory(ws, ["state", ...a]).status, 0, a.join(" "));
+  const H1 = "1".repeat(40);
+  const H2 = "2".repeat(40);
+  const TIP = "9".repeat(40);
+  state("WEB-3", "building");
+  state("WEB-3", "pr-open", "--pr", "acme/web#3", "--head", H1.slice(0, 7));
+  state("WEB-3", "your-review", "--reviewed", H1.slice(0, 7), "--force");
+  const check = (name: string, conclusion: string | null, status = "completed") =>
+    ({ name, status, conclusion, started_at: "2026-11-16T08:00:00Z", details_url: null });
+  const runs = (...c: unknown[]) => ({ stdout: { total_count: c.length, check_runs: c } });
+  const routes = (head: string, atHead: unknown[], baseRefName = "main") => ({
+    "pr list -R acme/web --state all": { stdout: [{ number: 3, title: "WEB-3: x", headRefName: "WEB-3", state: "OPEN", isDraft: true, mergedAt: null, headRefOid: head, baseRefName }] },
+    "pr list -R acme/api --state all": { stdout: [] },
+    [`api repos/acme/web/commits/${head}/check-runs?per_page=100&page=1`]: runs(...atHead),
+    [`api repos/acme/web/compare/${baseRefName}...${head}`]: { stdout: { behind_by: 4, base_commit: { sha: TIP } } },
+    [`api repos/acme/web/commits/${TIP}/check-runs?per_page=100&page=1`]: runs(check("e2e", "success"), check("lint", "failure"), check("test", "success")),
+  });
+  const failing = [check("e2e", "failure"), check("lint", "timed_out"), check("test", null, "in_progress"), check("build", "success"), check("Aikido Deep Review", "failure")];
+  const ciNotes = () => notes().filter((n) => /CI on PRs in review/.test(n));
+
+  // One line: the failed checks, each as the base sees it, and how far behind; a running check is no failure.
+  let r = run(["watch", "round"], [], routes(H1, failing));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(ciNotes().length, 1);
+  assert.match(ciNotes()[0]!, /CI on PRs in review: WEB-3: acme\/web#3 at 1111111 CI FAILED: e2e \(green on main\), lint \(failing on main too\); 4 behind main/);
+  assert.doesNotMatch(ciNotes()[0]!, /test|build|Deep Review/);
+
+  // The same head next round: nothing new to tell.
+  r = run(["watch", "round", "--facts"], [], routes(H1, failing));
+  assert.match(r.stdout, /WEB-3: acme\/web#3 at 1111111 ci failed \(already reported, not an escalation\)/);
+  run(["watch", "round"], [], routes(H1, failing));
+  assert.equal(ciNotes().length, 1);
+
+  // A new head that fails is told again.
+  run(["watch", "round"], [], routes(H2, failing));
+  assert.equal(ciNotes().length, 2);
+  assert.match(ciNotes()[1]!, /acme\/web#3 at 2222222 CI FAILED: e2e/);
+
+  // Running again: not a failure, and the told set forgets it, so failing again is news.
+  r = run(["watch", "round", "--facts"], [], routes(H2, [check("e2e", null, "queued"), check("lint", null, "in_progress")]));
+  assert.match(r.stdout, /-- CI on PRs in review --\n {2}none failing/);
+  run(["watch", "round"], [], routes(H2, [check("e2e", "success"), check("lint", "success")]));
+  assert.equal(ciNotes().length, 2);
+  run(["watch", "round"], [], routes(H2, failing));
+  assert.equal(ciNotes().length, 3);
+
+  // A PR stacked on another branch is checked against that branch. Nothing is asked of the PR itself.
+  rmSync(join(ws, "logs", "ci-told.json"));
+  r = run(["watch", "round", "--facts"], [], routes(H2, failing, "WEB-2"));
+  assert.match(r.stdout, /acme\/web#3 at 2222222 CI FAILED: e2e \(green on WEB-2\), lint \(failing on WEB-2 too\); 4 behind WEB-2/);
+  const asked = readFileSync(join(ws, "gh.log"), "utf8");
+  assert.doesNotMatch(asked, /rerun|update-branch|"pr","(edit|merge|close|ready)"/);
+});
