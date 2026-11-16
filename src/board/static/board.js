@@ -63,7 +63,7 @@ function team(groups){
   const staff = groups.filter(g => g.staff);
   const rest = groups.filter(g => g.key !== 'lead' && !g.staff);
   const members = groups.flatMap(g => g.members);
-  return `<section class="team ${teamOpen ? '' : 'shut'}"><button class="shead teamsum" aria-expanded="${teamOpen}" aria-controls="org"><h2>Team</h2><span class="sum">${members.filter(p => p.alive).length} of ${members.length} running</span><span class="more">${teamOpen ? 'hide' : 'show'}</span></button>
+  return `<section class="team ${teamOpen ? '' : 'shut'}"><h2 class="togh"><button class="shead teamsum" aria-expanded="${teamOpen}" aria-controls="org"><span class="ttl">Team</span><span class="sum">${members.filter(p => p.alive).length} of ${members.length} running</span><span class="more">${teamOpen ? 'hide' : 'show'}</span></button></h2>
     <div class="org" id="org"><div class="top">${lead.length ? `<div class="head">${lead.map(p => member(p, 'big')).join('')}</div>` : ''}
       ${staff.length ? `<div class="staff">${staff.map(roster).join('')}</div>` : ''}</div>
     <div class="rosters" style="--n:${rest.length || 1}">${rest.map(roster).join('')}</div></div></section>`;
@@ -110,8 +110,8 @@ let stacksOpen = false;
 function stacksPanel(s){
   if(!s.present) return '';
   const head = (sum, bad, more) => `<div class="shead"><h2>Stacks</h2><span class="sum ${bad ? 'bad' : ''}">${sum}</span></div>
-    <button class="stacksum" aria-expanded="${stacksOpen}"><h2>Stacks</h2>
-      <span class="sum ${bad ? 'bad' : ''}">${sum}</span><span class="more">${more}</span></button>`;
+    <h2 class="togh"><button class="stacksum" aria-expanded="${stacksOpen}"><span class="ttl">Stacks</span>
+      <span class="sum ${bad ? 'bad' : ''}">${sum}</span><span class="more">${more}</span></button></h2>`;
   if(s.checked_s == null)
     return `<aside class="side">${head('checking', false, '')}</aside>`;
   // The up/of summary counts web stacks only; non-web slots (events) have no HTTP health to sum.
