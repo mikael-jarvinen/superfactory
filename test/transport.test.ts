@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 import { agentOrDie, findSession, type Session } from "../src/fleet.js";
 import { claudeEnv, claudeScoped, JOB_ENV, SCOPE } from "../src/scope.js";
 import { procStat } from "../src/stacks/process.js";
-import { agentSessions, daemonAlive, local, pick, sessionAlive, type Transport } from "../src/transport.js";
+import { agentSessions, daemonAlive, local, pick, sessionAlive, STARTING_MS, type Transport } from "../src/transport.js";
 import { runClaude } from "../src/watchers/job.js";
 import { run } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
@@ -358,6 +358,27 @@ test("the daemon is down, and no session alive, when its supervisor is gone, unn
     assert.equal(sessionAlive(row), false, "a done row behind a dead daemon is not alive");
     writeFileSync(join(cfg, "daemon", "roster.json"), JSON.stringify({}));
     assert.equal(daemonAlive(), false, "a roster that names no pid");
+  } finally {
+    process.env.CLAUDE_CONFIG_DIR = was.cfg;
+    process.env.SF_CC_DAEMON_DIR = was.socks;
+  }
+});
+
+test("a row listed working before its pid is starting, and alive for STARTING_MS", () => {
+  const was = { cfg: process.env.CLAUDE_CONFIG_DIR, socks: process.env.SF_CC_DAEMON_DIR };
+  const d = tempDir();
+  const cfg = join(d, "config"), socks = join(d, "sockets");
+  process.env.CLAUDE_CONFIG_DIR = cfg;
+  process.env.SF_CC_DAEMON_DIR = socks;
+  try {
+    fakeDaemon(cfg);
+    mkdirSync(join(socks, "d1"), { recursive: true });
+    writeFileSync(join(socks, "d1", "control.sock"), "");
+    const row = (id: string, extra: Partial<Session>) => ({ id, name: "bea", kind: "background", ...extra }) as Session;
+    assert.equal(sessionAlive(row("s1", { state: "working", startedAt: Date.now() - 1_000 })), true, "no pid, working, 1 s old: starting");
+    assert.equal(sessionAlive(row("s2", { state: "working", startedAt: Date.now() - STARTING_MS - 1_000 })), false, "no pid, working, 31 s old: not a start");
+    assert.equal(sessionAlive(row("s3", { state: "done", startedAt: Date.now() - 1_000 })), false, "no pid, done, 1 s old: not a start");
+    assert.equal(sessionAlive(row("s4", { state: "working" })), false, "no pid, working, no startedAt: its age is unknown");
   } finally {
     process.env.CLAUDE_CONFIG_DIR = was.cfg;
     process.env.SF_CC_DAEMON_DIR = was.socks;
