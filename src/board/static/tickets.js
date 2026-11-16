@@ -6,20 +6,27 @@ const stateCls = s => 'st-' + s.toLowerCase().replace(/\s+/g, '-');
 const badge = s => `<span class="state ${stateCls(s)}">${esc(s)}</span>`;
 const labelsOf = p => meta.projects.find(x => x.key === p)?.labels || null;
 let listCache = null;
+// A drop's refusal, shown by the next list drawn. Each route() is numbered, and a list read for an
+// older one is not drawn, so it cannot cover a newer list or its refusal.
+let note = '', routes = 0;
+const isList = p => !p.get('key') && !p.get('new');
 
-async function route(){
-  const p = q();
+// ms, if given, bounds the list read.
+async function route(ms){
+  const p = q(), n = ++routes;
   try {
+    if(isList(p)) return await listView(p, n, ms);
+    note = '';
     if(p.get('key')) return await ticketView(p.get('key'));
-    if(p.get('new')) return await newView(p.get('project'));
-    return await listView(p);
+    return await newView(p.get('project'));
   } catch(e){
-    document.getElementById('root').innerHTML = `<div class="err">${esc(e.message)}</div><p>${goLink({}, '&larr; all tickets')}</p>`;
+    if(n === routes) document.getElementById('root').innerHTML = `<div class="err">${esc(e.message)}</div><p>${goLink({}, '&larr; all tickets')}</p>`;
   }
 }
 
-async function listView(p){
-  const d = await api('/api/tickets' + (p.get('project') ? '?project=' + encodeURIComponent(p.get('project')) : ''));
+async function listView(p, n, ms){
+  const d = await api('/api/tickets' + (p.get('project') ? '?project=' + encodeURIComponent(p.get('project')) : ''), undefined, ms);
+  if(n !== routes) return;
   meta = d; listCache = d.tickets;
   const state = p.get('state') || 'open', text = (p.get('q') || '').toLowerCase(), label = p.get('label') || '';
   const counts = {open: 0}; for(const t of d.tickets){ counts[t.state] = (counts[t.state] || 0) + 1; if(OPEN(t.state)) counts.open++; }
@@ -49,12 +56,14 @@ async function listView(p){
   if(p.get('q')) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
   document.getElementById('proj')?.addEventListener('change', e => go({state, project: e.target.value}));
   dragToRank(document.querySelector('.rows'));
+  if(note) { flash(note); note = ''; }
 }
 
 // A row is dragged by its grip with pointer events, so a finger reorders as a mouse does; the grip
 // has touch-action:none, so a drag on it never scrolls the page. The drop is sent as the rows now
-// above and below it, and the list is read again from the server, whose order is the real one.
-// One drop is sent at a time: no drag starts until its answer is in or RANK_MS has passed.
+// above and below it, and the list, if it is still shown, is read again from the server, whose order
+// is the real one. One drop is sent at a time: no drag starts until the board answers it or RANK_MS
+// has passed.
 let ranking = false, RANK_MS = 15000;
 function dragToRank(list){
   if(!list) return;
@@ -62,7 +71,7 @@ function dragToRank(list){
   list.addEventListener('pointerdown', e => {
     const grip = e.target.closest('.grip:not(.fixed)');
     if(!grip || e.button > 0) return;
-    // without this a press on the grip drags the row's link or selects text
+    // every press on the grip is the page's, locked or not, and never the row link's
     e.preventDefault();
     if(ranking) return;
     const row = grip.closest('.row'), was = row.previousElementSibling;
@@ -100,19 +109,17 @@ function dragToRank(list){
       const key = el => el?.dataset.key || null;
       let failed = '';
       ranking = true;
-      list.classList.add('ranking');
+      document.body.classList.add('ranking');
       try {
         await api('/api/tickets/' + encodeURIComponent(row.dataset.key), {op: 'rank', after: key(row.previousElementSibling), before: key(row.nextElementSibling)}, RANK_MS);
-      } catch(err){ failed = err.message; }
-      try {
-        // a ticket or the new-ticket form opened while the drop was sent has drawn itself, and the
-        // refusal is not about it; a list under other filters is drawn again with it
-        const p = q();
-        if(p.get('key') || p.get('new')) return;
-        // the reload draws a fresh #err, so a refusal is shown after it
-        await route();
-        if(failed) flash(failed);
-      } finally { ranking = false; }
+      } catch(err){ failed = err.timeout ? `${err.message}; the drop may still land, so check the order` : err.message; }
+      ranking = false;
+      document.body.classList.remove('ranking');
+      // a ticket or the new-ticket form opened while the drop was sent has drawn itself, and the
+      // refusal is not about it; a list under other filters is drawn again with it
+      if(!isList(q())) return;
+      if(failed) note = failed;
+      await route(RANK_MS);
     };
     grip.addEventListener('pointermove', move);
     grip.addEventListener('pointerup', end);

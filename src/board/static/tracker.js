@@ -1,5 +1,5 @@
 // Shared by the tickets and wiki pages: JSON calls, the pulse, and moving between views without a reload.
-// A call given ms is dropped if the board has not answered by then.
+// A call given ms stops waiting after that long and throws, though the board may still carry it out.
 async function api(url, body, ms){
   const pulse = document.getElementById('pulse'), at = document.getElementById('at');
   const ctl = new AbortController(), timer = ms ? setTimeout(() => ctl.abort(), ms) : 0;
@@ -10,7 +10,8 @@ async function api(url, body, ms){
     d = await r.json();
   } catch {
     pulse.classList.add('stale'); at.textContent = 'not answering';
-    throw new Error(ctl.signal.aborted ? `the board did not answer in ${ms / 1000} s` : 'the board is not answering');
+    if(!ctl.signal.aborted) throw new Error('the board is not answering');
+    const e = new Error(`the board did not answer in ${ms / 1000} s`); e.timeout = true; throw e;
   } finally { clearTimeout(timer); }
   pulse.classList.remove('stale'); at.textContent = new Date().toTimeString().slice(0, 5);
   if(!r.ok) { const e = new Error(d.error || r.status); e.status = r.status; e.data = d; throw e; }
