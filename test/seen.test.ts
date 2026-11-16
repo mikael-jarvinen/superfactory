@@ -18,12 +18,15 @@ test("seen: the page marks the newest lead message it showed, forward only, and 
   process.env.CLAUDE_BIN = join(dir, "bin", "claude");
   const ws = openWorkspace(dir);
   mkdirSync(ws.stateDir, { recursive: true });
-  const row = (t: string, kind: string, text: string) => appendFileSync(ws.messages, pyDumps({ t, kind, text }) + "\n");
+  const row = (t: string, kind: string, text: string, via?: string) =>
+    appendFileSync(ws.messages, pyDumps({ t, kind, text, ...(via ? { via } : {}) }) + "\n");
   row("2026-11-16T12:00:00+00:00", "note", "first");
   row("2026-11-16T12:05:00+00:00", "human", "a question");
   row("2026-11-16T12:10:00+00:00", "answer", "second");
   // Two lead messages in the same second: one mark covers both.
   row("2026-11-16T12:10:00+00:00", "note", "second, same second");
+  // A copy of a Telegram text: still a lead row, and /api/messages says where it came from.
+  row("2026-11-16T12:10:00+00:00", "note", "also on Telegram", "telegram");
 
   const board = await serve(ws, { host: "127.0.0.1", port: 0 });
   after(() => board.close());
@@ -33,6 +36,8 @@ test("seen: the page marks the newest lead message it showed, forward only, and 
   const seen = async () => (await (await fetch(board.url + "/api/messages")).json()).seen;
 
   assert.equal(await seen(), null, "nothing marked yet");
+  const listed = (await (await fetch(board.url + "/api/messages")).json()).messages as { text: string; via?: string; from: string }[];
+  assert.deepEqual(listed.filter((m) => m.via).map((m) => [m.text, m.via, m.from]), [["also on Telegram", "telegram", "lead"]]);
   assert.equal((await mark("2026-11-16T12:00:00+00:00")).status, 200);
   assert.equal(await seen(), "2026-11-16T12:00:00+00:00");
   assert.equal(JSON.parse(readFileSync(seenFile(ws), "utf8")).t, "2026-11-16T12:00:00+00:00", "kept in logs/");
