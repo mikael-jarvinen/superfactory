@@ -77,8 +77,8 @@ export function readTail(path: string): Message[] {
   return tryReadTail(path) ?? [];
 }
 
-// readTail, but null when the log cannot be read (missing, as for a moment while it is rolled, or
-// unreadable), so a caller can tell that from a log with no matching row.
+// readTail, but null when the log cannot be read (missing, or a transient read failure), so a caller
+// can tell that from a log with no matching row.
 export function tryReadTail(path: string): Message[] | null {
   let buf: Buffer;
   try {

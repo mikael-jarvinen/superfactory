@@ -24,9 +24,9 @@ export function readSeen(ws: Workspace): string | null {
 
 // Mark `t` seen. It must be the `t` of a lead message in the log's tail, so a post can only name a
 // message that exists. The mark only moves forward: a tab left open on an older page, or two tabs,
-// never move it back. A log that cannot be read right now (gone for a moment while it is rolled) is
-// `retry`, which the board answers with a 5xx so the page posts the same `t` again; a refusal it
-// would not.
+// never move it back. A transient read failure of the log (EMFILE, EIO) is `retry`, which the board
+// answers with a 5xx so the page posts the same `t` again; a refusal it would not. This does not
+// cover a roll: post() writes the new log at once, so an older `t` is gone from it either way.
 export function markSeen(ws: Workspace, t: unknown): { ok: true; seen: string } | { ok: false; error: string; retry?: true } {
   const at = time(t);
   if (!Number.isFinite(at)) return { ok: false, error: "t is not a time" };

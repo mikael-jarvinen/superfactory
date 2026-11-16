@@ -135,7 +135,7 @@ test("seen: a log that cannot be read is a 5xx the page retries, not a refusal",
   const mark = () => fetch(board.url + "/api/messages/seen", {
     method: "POST", headers: { "Content-Type": "application/json", "Origin": board.url }, body: JSON.stringify({ t: "2026-11-16T12:00:00+00:00" }),
   });
-  // The moment the log is rolled away and not yet written again.
+  // A briefly unreadable log: a transient read failure, then the log reads again.
   renameSync(ws.messages, ws.messages + ".1");
   const r = await mark();
   assert.equal(r.status, 503, "retryable while the log cannot be read");
