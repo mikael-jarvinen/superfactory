@@ -6,7 +6,7 @@ import { JSDOM } from "jsdom";
 
 // /tickets as the page runs it, in a window of its own, with rows laid out 40px apart by their
 // place in the list, since jsdom has no layout. Every GET waits for `read` and is answered with the
-// same six tickets; every POST is answered by `reply`. A wait the page aborts ends, as fetch does.
+// same six tickets; every POST is answered by `reply`. A wait the page aborts rejects, as fetch does.
 type Reply = { ok: true } | { ok: false; error: string };
 const windows: JSDOM[] = [];
 after(() => windows.forEach((d) => d.window.close()));
@@ -103,7 +103,7 @@ test("drag: a refused drop shows its error after the list is drawn again", async
   await settle();
   b.press("RPE-3", 5).up();
   await settle();
-  assert.equal(b.err(), "refused");
+  assert.equal(b.err(), "RPE-3: refused");
   assert.deepEqual(b.order(), ["RPE-1", "RPE-2", "RPE-3", "RPE-4", "RPE-5", "RPE-6"]);
 });
 
@@ -142,7 +142,7 @@ test("drag: a filter changed while the drop is sent still gets the list again, a
   s.release({ ok: false, error: "refused" });
   await settle();
   assert.equal(b.lists(), lists + 1, "the list is read again");
-  assert.equal(b.err(), "refused");
+  assert.equal(b.err(), "RPE-3: refused");
   assert.equal(new URL(b.w.location.href).search, "?state=open");
 });
 
@@ -158,9 +158,10 @@ test("drag: a filter's list that answers after the drop's reload does not cover 
   b.run("go({state: 'open'})");
   s.release({ ok: false, error: "refused" });
   await settle();
-  assert.equal(b.err(), "refused");
+  assert.equal(b.err(), "RPE-3: refused");
+  // a fixed wait, as nothing shows the stale read arriving: it must not draw
   await new Promise((r) => setTimeout(r, 120));
-  assert.equal(b.err(), "refused", "still shown once the filter's read is in");
+  assert.equal(b.err(), "RPE-3: refused", "still shown once the filter's read is in");
   assert.equal(b.order().length, 4, "the open list");
 });
 
@@ -196,33 +197,83 @@ test("drag: a drop the board never answers is given up, and dragging works again
   await settle();
   assert.equal(b.press("RPE-4", 5).dragging, false, "locked until the timeout");
   await until(() => b.err() !== "", "the timeout is shown");
-  assert.equal(b.err(), "the board did not answer in 0.2 s; the drop may still land, so check the order");
+  assert.equal(b.err(), "RPE-3: the board did not answer in 0.2 s; the drop may still land");
   posting = async () => ({ ok: true });
   b.press("RPE-4", 5).up();
   await settle();
   assert.equal(b.posts.length, 2);
 });
 
-test("drag: when the reload after a timed-out drop hangs too, the next drag still posts", async () => {
+test("drag: when the reload after a timed-out drop hangs too, the list stays with both errors, then drags again", async () => {
   let posting: () => Promise<Reply> = hang, reading: () => Promise<void> = async () => {};
   const b = board({ reply: () => posting(), read: () => reading() });
   b.run("RANK_MS = 100");
   await settle();
   reading = hang;
   b.press("RPE-3", 5).up();
-  await settle();
-  assert.ok(b.busy());
-  await until(() => !b.busy(), "the lock clears when the drop times out");
-  // the reload is still waiting, and the moved list is still shown
+  await until(() => b.err() !== "", "the drop's timeout is shown");
+  assert.equal(b.err(), "RPE-3: the board did not answer in 0.1 s; the drop may still land", "shown before the reload");
+  assert.ok(b.busy(), "locked until the reload settles");
+  await until(() => !b.busy(), "the lock clears when the reload times out");
+  assert.deepEqual(b.order(), ["RPE-3", "RPE-1", "RPE-2", "RPE-4", "RPE-5", "RPE-6"], "the list stays");
+  assert.equal(b.err(), "RPE-3: the board did not answer in 0.1 s; the drop may still land; the list was not read again: the board did not answer in 0.1 s");
   posting = async () => ({ ok: true });
   reading = async () => {};
-  const next = b.press("RPE-1", 125);
+  b.press("RPE-1", 125).up();
+  await settle();
+  assert.equal(b.posts.length, 2);
+  assert.equal(b.err(), "");
+});
+
+test("drag: no drag starts on a list whose reload is still out, so none is wiped", async () => {
+  let release!: () => void, reading: () => Promise<void> = async () => {};
+  const b = board({ read: () => reading() });
+  await settle();
+  reading = () => new Promise<void>((r) => (release = r));
+  b.press("RPE-3", 5).up();
+  await settle();
+  assert.equal(b.posts.length, 1);
+  const during = b.press("RPE-4", 5);
+  assert.equal(during.dragging, false, "locked while the reload is out");
+  during.up();
+  reading = async () => {};
+  release();
+  await settle();
+  const next = b.press("RPE-4", 5);
   assert.equal(next.dragging, true);
   next.up();
   await settle();
   assert.equal(b.posts.length, 2);
-  // the stale reload gives up later and draws nothing over the newer list, which shows the timeout
-  await new Promise((r) => setTimeout(r, 200));
-  assert.equal(b.order().length, 6);
-  assert.match(b.err(), /did not answer in 0\.1 s/);
+});
+
+test("drag: a refused drop whose reload fails keeps the list, and a later list does not show it", async () => {
+  let reading: () => Promise<void> = async () => {};
+  const b = board({ reply: async () => ({ ok: false, error: "refused" }), read: () => reading() });
+  await settle();
+  reading = () => Promise.reject(new Error("down"));
+  b.press("RPE-3", 5).up();
+  await settle();
+  assert.equal(b.order().length, 6, "the list stays");
+  assert.equal(b.err(), "RPE-3: refused; the list was not read again: the board is not answering");
+  reading = async () => {};
+  b.run("go({state: 'open'})");
+  await settle();
+  assert.equal(b.order().length, 4);
+  assert.equal(b.err(), "");
+});
+
+test("drag: a ticket opened while the reload is out is not drawn over, and the pulse keeps its answer", async () => {
+  let reading: () => Promise<void> = async () => {};
+  const b = board({ read: () => reading() });
+  b.run("RANK_MS = 100");
+  await settle();
+  reading = hang;
+  b.press("RPE-3", 5).up();
+  await settle();
+  reading = async () => {};
+  b.w.history.pushState(null, "", "/tickets?key=RPE-2");
+  await b.run("route()");
+  await until(() => !b.busy(), "the stale reload times out");
+  assert.equal(b.doc.querySelector(".rows"), null, "the ticket is still shown");
+  assert.ok(!b.doc.getElementById("pulse")?.classList.contains("stale"));
 });
