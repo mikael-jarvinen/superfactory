@@ -122,6 +122,8 @@ usage: factory [--workspace <dir>] <command> [options]
   demo <KEY> <spec.ts> [base-url] run a Playwright demo from the worktree; media in /tmp/demo/<KEY>
   demo --before <KEY> <spec.ts> [base-url]
                                   the same with main's code checked out; media in /tmp/demo/<KEY>-before
+  demo --before --base-ref <branch> <KEY> <spec.ts> [base-url]
+                                  a PR stacked on <branch>: the same with origin/<branch> checked out
   watch queue                     read the tracker's queue once, and tell the lead about new queued
                                   tickets and fresh merges. What the scheduler runs; prompts/queue.md.
   watch round [--facts]           the round once: facts gathered here, and a note to the lead with
@@ -643,14 +645,16 @@ function cmdPrMedia(ws: Workspace, argv: string[]) {
 }
 
 function cmdDemo(ws: Workspace, argv: string[]): number | void {
-  const { v, p } = args("demo", argv, { init: { type: "boolean" }, before: { type: "boolean" } }, [1, 3]);
+  const { v, p } = args("demo", argv, { init: { type: "boolean" }, before: { type: "boolean" }, "base-ref": { type: "string" } }, [1, 3]);
   const [key, spec, base] = p as [string, string | undefined, string | undefined];
+  const baseRef = v["base-ref"] as string | undefined;
   if (v.init) {
-    if (spec || v.before) throw new UsageError("demo: --init takes only the key");
+    if (spec || v.before || baseRef !== undefined) throw new UsageError("demo: --init takes only the key");
     return demoInit(ws, key);
   }
-  if (!spec) throw new UsageError("demo: which spec? factory demo [--before] <KEY> <spec.ts> [base-url], or --init for the template");
-  return demo(ws, key, spec, base, undefined, !!v.before);
+  if (baseRef !== undefined && !v.before) throw new UsageError("demo: --base-ref goes with --before");
+  if (!spec) throw new UsageError("demo: which spec? factory demo [--before [--base-ref <branch>]] <KEY> <spec.ts> [base-url], or --init for the template");
+  return demo(ws, key, spec, base, undefined, !!v.before, baseRef);
 }
 
 // A scheduled run that dies before it starts leaves a line where the round looks, not only in the

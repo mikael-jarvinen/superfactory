@@ -708,3 +708,80 @@ test("demo --before finds the base commit the checked-out files match", () => {
   g("switch", "-q", "--detach", "origin/main");
   assert.equal(beforeSha(dir).sha, base);
 });
+
+// A PR stacked on another branch: its before is that branch's head on origin, named with --base-ref.
+// Lyyti-classic#8752, based on #8751's branch, could get no before set while only main counted.
+test("demo --before --base-ref accepts a stacked PR's base and still refuses an unrelated commit", () => {
+  const dir = join(tempWorkspace(TOML), "repo");
+  after(() => rmSync(dirname(dir), { recursive: true, force: true }));
+  mkdirSync(dir);
+  const g = (...a: string[]) => {
+    const r = git(dir, ...a);
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  const commit = (file: string, text: string) => {
+    writeFileSync(join(dir, file), text);
+    g("add", ".");
+    g("commit", "-qm", text);
+    return g("rev-parse", "HEAD");
+  };
+  g("init", "-q", "-b", "main");
+  g("config", "user.email", "t@example.com");
+  g("config", "user.name", "t");
+  g("update-ref", "refs/remotes/origin/main", commit("a.txt", "main\n"));
+  g("switch", "-qc", "lower");
+  const lower = commit("a.txt", "lower\n");
+  g("update-ref", "refs/remotes/origin/lower", lower);
+  g("switch", "-qc", "upper");
+  commit("a.txt", "upper\n");
+  g("switch", "-qc", "unrelated", "main");
+  const unrelated = commit("b.txt", "unrelated\n");
+  g("switch", "-q", "upper");
+
+  // Detached at the base branch's head: refused without --base-ref, as before; accepted with it.
+  g("switch", "-q", "--detach", "origin/lower");
+  assert.equal(beforeSha(dir).sha, undefined, "without --base-ref only main counts");
+  assert.deepEqual(beforeSha(dir, "lower"), { sha: lower, base: "origin/lower" });
+  assert.equal(beforeSha(dir, "origin/lower").sha, lower, "origin/ is optional");
+
+  // Anything else is still refused: the stacked branch's own files, or a commit off another branch.
+  g("switch", "-q", "upper");
+  assert.equal(beforeSha(dir, "lower").sha, undefined, "the PR's own files are not its base");
+  g("switch", "-q", "--detach", unrelated);
+  assert.equal(beforeSha(dir, "lower").sha, undefined, "an unrelated commit is no base");
+
+  // --base-ref names a branch on origin; a sha or a branch never fetched is refused outright.
+  assert.throws(() => beforeSha(dir, lower), /is not a branch on origin/);
+  assert.throws(() => beforeSha(dir, "unrelated"), /is not a branch on origin; `git fetch origin unrelated` first/);
+});
+
+// pr-media for a stacked PR: GitHub compares against the PR's base branch, so media stamped at that
+// branch's head is the before set, and main's head is refused.
+test("pr-media puts a stacked PR's base-stamped demo under Before and refuses main's head", () => {
+  const { ws, run } = gateWorkspace();
+  const LOWER = "e".repeat(40);
+  const MAIN = "c".repeat(40);
+  const dir = join(ws, "media");
+  mkdirSync(dir);
+  writeFileSync(join(dir, "01-shot.png"), "png");
+  const stampAt = (sha: string) => writeFileSync(join(dir, STAMP), JSON.stringify({ sha }));
+  const view = `pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`;
+  const pr = (green()[view] as { stdout: object }).stdout;
+  const routes = green({
+    [view]: { stdout: { ...pr, baseRefName: "lower" } },
+    [`api repos/${REMOTE}/compare/lower...${HEAD}`]: { stdout: { merge_base_commit: { sha: LOWER }, base_commit: { sha: LOWER } } },
+  });
+  const media = () => run(routes, ["pr-media", "web", String(N), "--dir", dir, "--dry-run"]);
+
+  stampAt(LOWER);
+  let r = media();
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, new RegExp(`${BEFORE_BEGIN}\n### Before\n\\*\\*shot\\*\\*`));
+  assert.ok(r.calls.some((c) => c.startsWith(`api repos/${REMOTE}/compare/lower...${HEAD}`)));
+
+  stampAt(MAIN);
+  r = media();
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /the demo captured ccccccc but the PR head is aaaaaaa and its base \(lower\) is eeeeeee/);
+});

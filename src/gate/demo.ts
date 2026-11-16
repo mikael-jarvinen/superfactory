@@ -7,7 +7,8 @@
 //
 // --before records the code as it was before the change, into /tmp/demo/<KEY>-before/: the files
 // checked out must be exactly the merge-base of HEAD with origin's default branch, or that branch's
-// head, and the stamp names that commit, not HEAD.
+// head, and the stamp names that commit, not HEAD. A PR stacked on another branch names that branch
+// with --base-ref, and the files may then also be exactly origin's head of it.
 //
 // Playwright is an optional peer, never imported here: the runner is found in this package, the
 // workspace or the worktree, and run as a child. The spec and the config are copied next to each
@@ -69,19 +70,29 @@ export function demoInit(ws: Workspace, key: string, out: (line: string) => void
 }
 
 // The commit a --before run's files are: the merge-base of HEAD with origin's default branch, or
-// that branch's head, whichever the tracked files match exactly. Undefined when they match neither.
-export function beforeSha(cwd = process.cwd()): { sha?: string; base: string } {
+// that branch's head, or with baseRef (a stacked PR's base branch) origin's head of that branch,
+// whichever the tracked files match exactly. Undefined when they match none. baseRef must name a
+// branch on origin: a sha or a tag is no PR's base.
+export function beforeSha(cwd = process.cwd(), baseRef?: string): { sha?: string; base: string } {
   const git = (...args: string[]) => run("git", args, { cwd });
+  const verify = (ref: string) => git("rev-parse", "--verify", "--quiet", `${ref}^{commit}`).stdout.trim();
   const head = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.trim();
-  const base = head || "origin/main";
-  const tip = git("rev-parse", "--verify", "--quiet", `${base}^{commit}`).stdout.trim();
-  if (!tip) return { base };
-  const mb = git("merge-base", "HEAD", tip).stdout.trim();
-  for (const sha of [mb, tip]) if (sha && git("diff", "--quiet", sha, "--").status === 0) return { sha, base };
+  const main = head || "origin/main";
+  let base = main;
+  let stackTip = "";
+  if (baseRef !== undefined) {
+    const name = baseRef.replace(/^(refs\/remotes\/)?origin\//, "");
+    base = `origin/${name}`;
+    stackTip = name ? verify(`refs/remotes/${base}`) : "";
+    if (!stackTip) throw new FactoryError(`demo: --base-ref ${pyRepr(baseRef)} is not a branch on origin; \`git fetch origin ${name || "<branch>"}\` first`, 2);
+  }
+  const tip = verify(main);
+  const mb = tip ? git("merge-base", "HEAD", tip).stdout.trim() : "";
+  for (const sha of [mb, tip, stackTip]) if (sha && git("diff", "--quiet", sha, "--").status === 0) return { sha, base };
   return { base };
 }
 
-export function demo(ws: Workspace, key: string, spec: string, baseUrl: string | undefined, out: (line: string) => void = console.log, before = false): number {
+export function demo(ws: Workspace, key: string, spec: string, baseUrl: string | undefined, out: (line: string) => void = console.log, before = false, baseRef?: string): number {
   const no = (msg: string) => new FactoryError(`demo: ${msg}`, 2);
   checkKey(ws, key);
   if (!existsSync(spec)) throw no(`no spec at ${spec}`);
@@ -89,10 +100,14 @@ export function demo(ws: Workspace, key: string, spec: string, baseUrl: string |
   if (git("rev-parse", "--is-inside-work-tree").status !== 0) throw no("run this from the item's worktree");
   let ranAt: string | undefined;
   if (before) {
-    const b = beforeSha();
+    const b = beforeSha(process.cwd(), baseRef);
     if (!b.sha)
-      throw no(`--before: the files checked out are neither ${b.base} nor its merge-base with HEAD. ` +
-        `\`git switch --detach ${b.base}\` (or the merge-base), run the demo, then switch back.`);
+      throw no(baseRef === undefined
+        ? `--before: the files checked out are neither ${b.base} nor its merge-base with HEAD. ` +
+          `\`git switch --detach ${b.base}\` (or the merge-base), run the demo, then switch back. ` +
+          "A PR stacked on another branch: --base-ref <that branch>."
+        : `--before: the files checked out are not ${b.base}, nor main or its merge-base with HEAD. ` +
+          `\`git switch --detach ${b.base}\`, run the demo, then switch back.`);
     ranAt = b.sha;
   }
   if (run("ffmpeg", ["-version"]).status !== 0) throw no("ffmpeg is not installed (brew install ffmpeg)");

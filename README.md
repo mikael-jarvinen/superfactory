@@ -142,6 +142,7 @@ Builders, from their worktree:
 | `factory demo <KEY> --init` | Copy the demo template. |
 | `factory demo <KEY> <spec.ts> [base-url]` | Record the demo. |
 | `factory demo --before <KEY> <spec.ts> [base-url]` | Record the same demo on main's code, the "before". |
+| `factory demo --before --base-ref <branch> <KEY> <spec.ts> [base-url]` | For a PR stacked on `<branch>`: record the "before" on `origin/<branch>`'s head. |
 | `factory pr-media <repo> <n> --dir <media-dir>` | Put the demo into the PR body; a before recording goes under Before. |
 
 Scripts and hooks. Nobody types these; they are listed so you can recognise them:
