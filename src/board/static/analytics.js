@@ -112,26 +112,34 @@ function hideTip(){
 
 function trendsView(d, bs){
   return Object.entries(METRICS).map(([k, m]) => {
-    const series = shown(bs).map(b => b.total ? b.total[m.key].mean : 0);
-    const cur = series[series.length - 1], prev = bs.length > 1 ? (bs[bs.length - 2].total ? bs[bs.length - 2].total[m.key].mean : 0) : undefined;
+    // an empty period has no figure, so it carries no point and shows no change
+    const fig = b => b && b.total ? b.total[m.key].mean : null;
+    const series = shown(bs).map(fig);
+    const cur = series[series.length - 1], prev = bs.length > 1 ? fig(bs[bs.length - 2]) : null;
     // a period still running has no change: a partial week against a full one is noise
-    const dl = bs[bs.length - 1].running ? '' : change(cur, prev, m);
+    const dl = bs[bs.length - 1].running || cur === null || prev === null ? '' : change(cur, prev, m);
     return `<button class="trend ${k === metric ? 'on' : ''}" data-metric="${k}" aria-pressed="${k === metric}">` +
-      `<span class="tl">${esc(m.label)}</span><span class="tv">${esc(m.fmt(cur))} ${dl}</span>` +
+      `<span class="tl">${esc(m.label)}</span><span class="tv">${cur === null ? '&middot;' : esc(m.fmt(cur))} ${dl}</span>` +
       `<span class="tu">avg per ticket${bs[bs.length - 1].running ? ', so far' : ''}</span>${spark(series, bs[bs.length - 1].running)}</button>`;
   }).join('');
 }
 
 // One small line per measure, oldest period on the left; the period still running is dashed, as
-// its figure is only so far.
+// its figure is only so far. An empty period (null) has no figure, so it breaks the line rather
+// than dipping it to the floor; a figure alone between gaps shows as a dot.
 function spark(vals, running){
   if(vals.length < 2) return '';
-  const max = Math.max(...vals), n = vals.length;
-  const pts = vals.map((v, i) => `${(i / (n - 1) * 100).toFixed(2)},${(29 - (max ? v / max * 26 : 0)).toFixed(2)}`);
+  const max = Math.max(0, ...vals.filter(v => v !== null)), n = vals.length;
+  const pts = vals.map((v, i) => v === null ? null : `${(i / (n - 1) * 100).toFixed(2)},${(29 - (max ? v / max * 26 : 0)).toFixed(2)}`);
   const done = running ? pts.slice(0, -1) : pts;
+  const runs = [[]];
+  for(const p of done) p === null ? runs.push([]) : runs[runs.length - 1].push(p);
+  // a lone point is drawn as a line of no length, which its round cap makes a dot
+  const line = (r, cls = '') => r.length ? `<polyline${cls} points="${(r.length > 1 ? r : [r[0], r[0]]).join(' ')}"/>` : '';
+  const last = pts.slice(-2);
   return `<svg class="spark" viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true">` +
-    (done.length > 1 ? `<polyline points="${done.join(' ')}"/>` : '') +
-    (running ? `<polyline class="so" points="${pts.slice(-2).join(' ')}"/>` : '') + `</svg>`;
+    runs.map(r => line(r)).join('') +
+    (running && last[1] !== null ? (last[0] !== null ? line(last, ' class="so"') : line([last[1]], ' class="so"')) : '') + `</svg>`;
 }
 
 function tableView(d, bs){
@@ -140,14 +148,16 @@ function tableView(d, bs){
   const rows = bs.map((b, i) => ({...b, prev: bs[i - 1]}));
   const head = `<th class="k">${period}</th><th>tickets</th>${cols.map(s => `<th><span class="sw" style="background:${color(d.states, s)}"></span>${esc(s)}</th>`).join('')}`;
   // a period still running shows its figures so far, but no change from the one before
+  // nor does a state with no stay ending in the period: it has no figure, so nothing to compare
   const vs = (b, cur, prev, m) => b.prev && !b.running ? change(cur, prev, m) : '';
+  const vsState = (b, s) => b.stats[s] ? vs(b, avg(b, s), b.prev && avg(b.prev, s)) : '';
   return `<div class="tbl"><table class="per"><thead><tr>${head}</tr></thead><tbody>${shown(rows).reverse().map(b => {
     const empty = !b.tickets && !Object.keys(b.open || {}).length;
     const tickets = `<td class="${b.tickets ? '' : 'z'}">${b.tickets || '&middot;'}${vs(b, b.tickets, b.prev && b.prev.tickets, COUNT)}</td>`;
     return `<tr class="${empty ? 'none' : ''}"><td class="k"><b>${esc(b.label)}</b><small>${b.running ? 'so far' : empty ? 'nothing recorded' : ''}</small></td>${tickets}` +
       cols.map(s => {
         const v = avg(b, s), o = stillIn(b, s);
-        return `<td class="${v ? '' : 'z'}">${v ? esc(m.fmt(v)) : '&middot;'}${vs(b, v, b.prev && avg(b.prev, s))}${o ? `<small class="still">${esc(o)}</small>` : ''}</td>`;
+        return `<td class="${v ? '' : 'z'}">${v ? esc(m.fmt(v)) : '&middot;'}${vsState(b, s)}${o ? `<small class="still">${esc(o)}</small>` : ''}</td>`;
       }).join('') + `</tr>`;
   }).join('')}</tbody></table></div>`;
 }

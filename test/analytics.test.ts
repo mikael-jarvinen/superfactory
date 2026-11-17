@@ -375,6 +375,8 @@ test("week and month: labelled bars of averages, a tooltip of the spread, and th
   assert.equal(r[2]![col("tickets")], "2", "the oldest has no week before");
   assert.equal(r[1]![col("tickets")], "1↓1");
   assert.equal(r[1]![col("gate")], "45.0h↑45.0h", "none the week before: the change is by how much");
+  assert.equal(r[2]![col("building")], "4.0h");
+  assert.equal(r[1]![col("building")], "\u00b7", "no stay ended in building: no figure, so no made-up drop");
   assert.equal(r[0]![col("your-review")], "·1 still in");
   assert.equal(doc.querySelectorAll("#ptable tbody tr:first-child .dl").length, 0, "the running week shows no change");
   assert.equal(r[0]![col("tickets")], "\u00b7", "its own figures still show, with no arrow");
@@ -382,7 +384,10 @@ test("week and month: labelled bars of averages, a tooltip of the spread, and th
   assert.equal(doc.querySelectorAll(".trend").length, 4);
   assert.match(doc.querySelector(".trend")!.textContent!, /avg per ticket, so far/);
   assert.equal(doc.querySelectorAll(".trend .dl").length, 0, "nor do the trend cards while it runs");
-  assert.equal(doc.querySelectorAll(".trend polyline.so").length, 4, "the running week is dashed");
+  // the running week is empty: it has no figure, so it carries no point rather than dipping to 0
+  assert.match(doc.querySelector(".trend .tv")!.textContent!, /^\u00b7/);
+  assert.equal(doc.querySelectorAll(".trend polyline.so").length, 0, "no dashed line to an empty week");
+  assert.equal(doc.querySelectorAll(".trend polyline").length, 4, "the finished weeks make one line each");
   click(doc, '.trend[data-metric="entries"]');
   assert.equal(doc.querySelector('#metrics [data-metric="entries"]')!.getAttribute("aria-pressed"), "true");
   assert.match(doc.getElementById("barsh")!.textContent!, /Average entries per ticket, by week/);
@@ -406,6 +411,6 @@ test("a fresh workspace's page shows the current period empty", async () => {
     const r = rows(doc);
     assert.equal(r.length, 1);
     assert.deepEqual(r[0]!.slice(1), ["·"], "no tickets and no state columns");
-    assert.match(doc.getElementById("trends")!.textContent!, /time0 avg per ticket, so far/);
+    assert.match(doc.getElementById("trends")!.textContent!, /time\u00b7 avg per ticket, so far/);
   }
 });

@@ -460,7 +460,6 @@ export function report(ws: Workspace, usage: TranscriptUsage, now = Date.now()):
       const end = stepEnd(tl, i, now);
       cellOf(m, s.state).entries++;
       cellOf(m, s.state).seconds += (end - s.at) / 1000;
-      // the time is split at period boundaries, so a long wait shows in every week and month it spans
       // the stay counts whole where it ended; one still open counts as open only, and the last
       // state of an item taken off the board has no known end, so it is in no period
       if (isOpen(tl, i)) {
