@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isHuman, type Message, tryReadTail } from "../messages.js";
 import { allRecs, type Rec } from "../state.js";
@@ -177,11 +177,16 @@ function unblocked(ws: Workspace): Map<string, number[]> {
 // block records: the lead posts the question and records the block in either order, a few minutes apart.
 const ASKED_WITH = 10 * 60_000;
 
-// Every question still open, handled or not; null when the log cannot be read.
-function open(ws: Workspace, recs = records(ws)): QueueItem[] | null {
-  const rows = wholeLog(ws.messages);
-  if (rows === null) return null;
+// Every question still open, handled or not. `read` is false when the message log exists and could
+// not be read: the records' questions are still there, the rows' are not. A workspace with no log
+// yet has no rows. `covers` names the record a posted row is the question of, so a mark on the
+// record holds once the row is posted.
+function open(ws: Workspace, recs = records(ws)): { items: QueueItem[]; read: boolean; covers: Map<string, string> } {
+  let rows = wholeLog(ws.messages);
+  const read = rows !== null || !existsSync(ws.messages);
+  rows ??= [];
   const left = unblocked(ws);
+  const covers = new Map<string, string>();
   // A blocked row is answered once its ticket has left blocked since it was posted.
   const movedOn = (ticket: string, t: number) => (left.get(ticket) ?? []).some((u) => u >= t);
   const items: QueueItem[] = [];
@@ -196,10 +201,13 @@ function open(ws: Workspace, recs = records(ws)): QueueItem[] | null {
   for (const r of recs.values()) {
     if (r.state !== "blocked" || !r.asked_you) continue;
     const from = Math.max(time(r.asked_you.at) - ASKED_WITH, ...(left.get(r.ticket) ?? []).map((u) => u + 1));
-    if (items.some((i) => i.ticket === r.ticket && time(i.t) >= from)) continue;
+    const posted = items.filter((i) => i.ticket === r.ticket && time(i.t) >= from);
+    for (const i of posted) covers.set(i.id, recordId(r));
+    if (posted.length) continue;
     items.push({ id: recordId(r), t: null, at: r.asked_you.at, kind: "blocked", ticket: r.ticket, text: r.asked_you.question ?? "blocked, with no question recorded", link: null, from: "board" });
   }
-  return items.sort((a, b) => (time(a.at) || 0) - (time(b.at) || 0));
+  items.sort((a, b) => (time(a.at) || 0) - (time(b.at) || 0));
+  return { items, read, covers };
 }
 
 // What waits on the human: open, not marked handled, and not history from before the queue's start,
@@ -216,13 +224,14 @@ export function queue(ws: Workspace): QueueItem[] {
     }
   }
   const recs = records(ws);
-  const items = open(ws, recs) ?? [];
+  const { items, covers } = open(ws, recs);
   if (h === "unreadable") return items; // everything, rather than hide a question behind a broken file
   const { start, handled } = h;
   const blockedNow = (i: QueueItem) => !!i.ticket && recs.get(i.ticket)?.state === "blocked";
   // Rows carry whole seconds, so a row posted in the second the start was set is after it.
   const from = start === null ? -Infinity : Math.floor(time(start) / 1000) * 1000;
-  return items.filter((i) => !(i.id in handled) && (time(i.at) >= from || blockedNow(i)));
+  const done = (i: QueueItem) => i.id in handled || (covers.get(i.id) ?? "") in handled;
+  return items.filter((i) => !done(i) && (time(i.at) >= from || blockedNow(i)));
 }
 
 // Mark an item handled. It must be one the queue holds now, so a post can only name a real question.
@@ -233,9 +242,12 @@ export function markHandled(ws: Workspace, id: unknown): { ok: true } | { ok: fa
   if (h === "unreadable") return { ok: false, error: brokenNote(ws) };
   const cur: Handled = h === "missing" ? fresh() : h;
   if (id in cur.handled) return { ok: true };
-  const items = open(ws);
-  if (items === null) return { ok: false, error: "the message log could not be read", retry: true };
-  if (!items.some((i) => i.id === id)) return { ok: false, error: "nothing in the queue has that id" };
+  const { items, read } = open(ws);
+  if (!items.some((i) => i.id === id)) {
+    // A row's question cannot be checked while the log cannot be read; a record's can.
+    if (!read && id.startsWith("m")) return { ok: false, error: "the message log could not be read", retry: true };
+    return { ok: false, error: "nothing in the queue has that id" };
+  }
   cur.handled[id] = new Date().toISOString();
   writeHandled(ws, cur);
   return { ok: true };

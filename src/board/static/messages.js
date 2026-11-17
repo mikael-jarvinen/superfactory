@@ -196,17 +196,18 @@ t.addEventListener('paste', e => {
 });
 
 async function send(){
-  const text = t.value.trim(), images = pending.filter(p => p.url).map(p => p.url);
+  // The question this answers is the one quoted when it was sent, whatever reply is clicked meanwhile.
+  const text = t.value.trim(), images = pending.filter(p => p.url).map(p => p.url), answered = replyTo;
   if(!text && !images.length) return;
   b.disabled = true; b.textContent = 'sending'; err.textContent = '';
   try {
     const r = await (await fetch('/api/messages', {method:'POST', headers:{'Content-Type':'application/json'},
                                                    body: JSON.stringify({text, images})})).json();
     if(r.ok){
-      t.value = ''; clearPreview();
-      // A reply started from the panel answers that question: it leaves the queue once sent.
-      const answered = replyTo;
-      stopReply();
+      // A reply started from the panel answers that question: it leaves the queue once sent. A reply
+      // to another, started while this one was sending, keeps its quote.
+      t.value = replyTo && replyTo !== answered ? replyQuote : ''; clearPreview();
+      if(replyTo === answered) stopReply();
       if(answered) await handled(answered, true); else await tick();
     } else { err.textContent = r.error || 'not sent'; }
   } catch { err.textContent = 'not sent: the board is not answering'; }

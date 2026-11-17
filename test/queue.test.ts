@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import vm from "node:vm";
@@ -121,13 +121,14 @@ async function messagesPage(data: object) {
   const dom = new JSDOM(html, { runScripts: "outside-only", url: "http://board.test/messages" });
   windows.push(dom);
   const w = dom.window;
-  const s = { data, posts: [] as [string, Record<string, unknown>][], handledStatus: 200 };
+  const s = { data, posts: [] as [string, Record<string, unknown>][], handledStatus: 200, hold: null as Promise<void> | null };
   Object.defineProperty(w.document, "visibilityState", { get: () => "hidden" });
   Object.assign(w, {
     scrollTo: () => {},
     fetch: async (url: string, o?: { method?: string; body?: string }) => {
       if (o?.method === "POST") {
         s.posts.push([url, JSON.parse(o.body ?? "{}")]);
+        if (url === "/api/messages" && s.hold) await s.hold;
         const status = url === "/api/messages/handled" ? s.handledStatus : 200;
         return { ok: status < 300, status, json: async () => (status < 300 ? { ok: true } : { ok: false, error: "nothing in the queue has that id" }) };
       }
@@ -337,4 +338,48 @@ test("queue: a broken handled file is named on the page with how to mend it", as
   const { doc, settle } = await messagesPage({ at: "12:00", human: "Alex", lead: "niilo", lead_avatar: null, status: "idle", seen: null, messages: [], queue: [], queue_note: note });
   await settle();
   assert.equal(doc.querySelector("#qlist .qnote")!.textContent, note);
+});
+
+test("queue: a blocked record waits, and can be marked handled, before the workspace has any message log", () => {
+  const ws = workspace();
+  assert.equal(existsSync(ws.messages), false);
+  rec(ws, "LOCAL-first", "blocked", { question: "which account?", at: T(1) });
+  const q = queue(ws);
+  assert.deepEqual(q.map((i) => [i.from, i.text]), [["board", "which account?"]]);
+  assert.deepEqual(markHandled(ws, q[0]!.id), { ok: true });
+  assert.deepEqual(queue(ws), []);
+});
+
+test("queue: a record marked handled stays handled when the lead posts its question afterwards", () => {
+  const ws = workspace();
+  rec(ws, "LOCAL-late", "blocked", { question: "which account?", at: T(10) });
+  assert.deepEqual(markHandled(ws, queue(ws)[0]!.id), { ok: true });
+  row(ws, T(12), "blocked", "which account?", "LOCAL-late");
+  assert.deepEqual(queue(ws), []);
+  // A later question on the ticket, once it was unblocked and blocked again, is new.
+  unblock(ws, T(20), "LOCAL-late");
+  rec(ws, "LOCAL-late", "blocked", { question: "and the region?", at: T(30) });
+  row(ws, T(31), "blocked", "and the region?", "LOCAL-late");
+  assert.deepEqual(queue(ws).map((i) => i.text), ["and the region?"]);
+});
+
+test("the message page: a reply marks the question it quoted, even if another reply is started while it sends", async () => {
+  const item = (id: string, text: string) => ({ id, t: T(1), at: T(1), kind: "decision", ticket: null, text, link: null, from: "message", age_min: 5, in_thread: false });
+  const { s, doc, w, settle } = await messagesPage({
+    at: "12:00", human: "Alex", lead: "niilo", lead_avatar: null, status: "idle", seen: null, messages: [],
+    queue: [item("maaaaaaaaaaaa", "first?"), item("mbbbbbbbbbbbb", "second?")],
+  });
+  const t = doc.getElementById("t") as HTMLTextAreaElement;
+  let release!: () => void;
+  s.hold = new Promise((r) => (release = r));
+  (doc.querySelector('[data-reply="maaaaaaaaaaaa"]') as HTMLElement).click();
+  t.value += "yes";
+  doc.getElementById("f")!.dispatchEvent(new w.Event("submit", { cancelable: true }));
+  await settle();
+  (doc.querySelector('[data-reply="mbbbbbbbbbbbb"]') as HTMLElement).click();
+  release();
+  await settle();
+  assert.deepEqual(s.posts.map(([u, b]) => [u, b.id ?? b.text]), [["/api/messages", "> first?\n\nyes"], ["/api/messages/handled", "maaaaaaaaaaaa"]]);
+  assert.equal(doc.getElementById("replying")!.hidden, false, "the second reply is still being written");
+  assert.equal(t.value, "> second?\n\n");
 });
