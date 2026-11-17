@@ -23,6 +23,8 @@ import { dirname, join } from 'node:path';
 const OUT = process.env.DEMO_OUT as string;
 if (!OUT) throw new Error('DEMO_OUT is not set: run this through `factory demo`');
 const BASE = process.env.DEMO_BASE_URL ?? 'http://localhost:3000/';
+// `factory demo --before` films into <KEY>-before: one spec makes both videos, with the same captions.
+const STATE = OUT.endsWith('-before') ? 'Before' : 'After';
 
 // ---------------------------------------------------------------- the camera: no need to edit
 const PACE = Number(process.env.DEMO_PACE ?? 1);
@@ -336,7 +338,7 @@ test('demo', async ({ page, camera }) => {
 
   // Roll on the screen the PR changes, right before the first step that shows the change. The title
   // card rolls the camera: "Before: ..." in the before video, "After: ..." in the after one.
-  await camera.title('After: rich text survives a save');
+  await camera.title(`${STATE}: rich text survives a save`);
 
   // Only the steps that show the change, then stop. Each step that changes the screen gets a
   // caption first, in plain words, the same in the before video. For a PR that fixes saving rich text:
