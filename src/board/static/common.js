@@ -49,6 +49,15 @@ function trackerNav(t){
     a.classList.toggle('on', here === href);
   }
 }
+// The analytics link, after messages on every page, so a page's own header need not carry it.
+addEventListener('DOMContentLoaded', () => {
+  const nav = document.querySelector('header nav');
+  if(!nav || nav.querySelector('a[href="/analytics"]')) return;
+  const a = document.createElement('a');
+  a.href = '/analytics'; a.textContent = 'analytics';
+  const msgs = nav.querySelector('a[href="/messages"]');
+  msgs ? msgs.after(a) : nav.appendChild(a);
+});
 addEventListener('DOMContentLoaded', () => {
   if(location.pathname === '/') return;
   fetch('/api/tickets?summary=1', {cache:'no-store'}).then(r => r.ok ? r.json() : null).then(trackerNav).catch(() => {});
