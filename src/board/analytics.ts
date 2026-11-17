@@ -1,5 +1,7 @@
 // Board analytics: for every work item, how long it spent in each state, how many times it entered
-// each, and the tokens its sessions spent there, per item and per week.
+// each, and the tokens its sessions spent there, per item; and per UTC week (Monday start), calendar
+// month and all time, the average per ticket and its median, p80 and p95, so the page can show how
+// long a piece of work spends in each state and how that changes from one period to the next.
 //
 // Time and entries are folded from state/events.jsonl, which every transition already appends to
 // with its time, so nothing new is stored. Tokens are read from the Claude Code transcripts of the
@@ -263,10 +265,95 @@ export interface Cell {
 const noCell = (): Cell => ({ seconds: 0, entries: 0, tokens: noTokens() });
 const cellOf = (m: Record<string, Cell>, s: string) => (m[s] ??= noCell());
 
+// The measures a ticket's cell is read by.
+export const MEASURES = {
+  seconds: (c: Cell) => c.seconds,
+  entries: (c: Cell) => c.entries,
+  tokens: (c: Cell) => c.tokens.input + c.tokens.output + c.tokens.cache_read + c.tokens.cache_write,
+  output: (c: Cell) => c.tokens.output,
+};
+export type Measure = keyof typeof MEASURES;
+
+// How a measure is spread over n tickets: the mean, and the median, p80 and p95.
+export interface Stat {
+  n: number;
+  mean: number;
+  p50: number;
+  p80: number;
+  p95: number;
+}
+
+// The p quantile, 0 to 1, of values sorted ascending, by linear interpolation between the two
+// nearest ranks (numpy's default, and Excel's PERCENTILE.INC): one value is every quantile of
+// itself, and the median of an even count is the mean of the middle two. NaN for no values.
+export function quantile(sorted: number[], p: number): number {
+  if (!sorted.length) return NaN;
+  const h = (sorted.length - 1) * p;
+  const lo = Math.floor(h);
+  const a = sorted[lo] as number;
+  const b = sorted[Math.min(lo + 1, sorted.length - 1)] as number;
+  return a + (h - lo) * (b - a);
+}
+
+// The spread of some tickets' values, or null for none, so no figure is made up for an empty period.
+export function stat(values: number[]): Stat | null {
+  if (!values.length) return null;
+  const v = [...values].sort((x, y) => x - y);
+  return { n: v.length, mean: v.reduce((a, x) => a + x, 0) / v.length, p50: quantile(v, 0.5), p80: quantile(v, 0.8), p95: quantile(v, 0.95) };
+}
+
+// A stay still open when the report was made: how many tickets are in a state, and the longest so far.
+export interface Open {
+  n: number;
+  longest: number;
+}
+
+// One period, or all time, over the stays that ended in it: the totals per state, how many tickets
+// ended one, and per state the spread over those tickets of what each spent there, a ticket's stays
+// in one state summed so rework counts. `total` is the spread of each ticket's sum over every state.
+// Stays still open are in none of it, but counted in `open`, in the period holding now.
+export interface Bucket {
+  states: Record<string, Cell>;
+  tickets: number;
+  stats: Record<string, Record<Measure, Stat>>;
+  total: Record<Measure, Stat> | null;
+  open: Record<string, Open>;
+}
+
+function bucket(byTicket: Iterable<Record<string, Cell>>, open: Record<string, Open> = {}): Bucket {
+  const tickets = [...byTicket].filter((m) => Object.keys(m).length);
+  const states: Record<string, Cell> = {};
+  const per = new Map<string, Cell[]>();
+  for (const m of tickets) {
+    for (const [st, c] of Object.entries(m)) {
+      const t = cellOf(states, st);
+      t.seconds += c.seconds;
+      t.entries += c.entries;
+      addTokens(t.tokens, c.tokens);
+      per.set(st, [...(per.get(st) ?? []), c]);
+    }
+  }
+  const spread = (cells: Cell[]) => Object.fromEntries((Object.keys(MEASURES) as Measure[]).map((k) => [k, stat(cells.map(MEASURES[k]))])) as Record<Measure, Stat>;
+  const stats: Record<string, Record<Measure, Stat>> = {};
+  for (const [st, cells] of per) stats[st] = spread(cells);
+  const sums = tickets.map((m) => {
+    const c = noCell();
+    for (const x of Object.values(m)) {
+      c.seconds += x.seconds;
+      c.entries += x.entries;
+      addTokens(c.tokens, x.tokens);
+    }
+    return c;
+  });
+  return { states, tickets: tickets.length, stats, total: sums.length ? spread(sums) : null, open };
+}
+
 export interface Report {
   states: string[];
   now: number;
-  weeks: { week: string; states: Record<string, Cell> }[];
+  all: Bucket;
+  weeks: ({ week: string } & Bucket)[];
+  months: ({ month: string } & Bucket)[];
   items: { ticket: string; title: string | null; state: string | null; live: boolean; states: Record<string, Cell> }[];
   unattributed: Record<string, Tokens>;
   left_out: string[];
@@ -284,11 +371,57 @@ export const weekOf = (t: number): number => {
   const d = Math.floor(t / DAY) * DAY;
   return d - ((new Date(d).getUTCDay() + 6) % 7) * DAY;
 };
-const weekKey = (t: number) => new Date(t).toISOString().slice(0, 10);
+// The first of the calendar month, UTC, holding t.
+export const monthOf = (t: number): number => {
+  const d = new Date(t);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+};
+
+// A period kind: where the period holding t starts, where one starting at `start` ends, and its key.
+interface Kind {
+  of: (t: number) => number;
+  end: (start: number) => number;
+  key: (start: number) => string;
+}
+const WEEK: Kind = { of: weekOf, end: (w) => w + 7 * DAY, key: (w) => new Date(w).toISOString().slice(0, 10) };
+const MONTH: Kind = {
+  of: monthOf,
+  end: (m) => { const d = new Date(m); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1); },
+  key: (m) => new Date(m).toISOString().slice(0, 7),
+};
+
+// Each ticket's cells per state for each period of one kind, from the stays that ended in it. A stay
+// counts whole in the period it ended, however far back it began, so a past period is final.
+class Periods {
+  private m = new Map<number, Map<string, Record<string, Cell>>>();
+  constructor(private kind: Kind) {}
+
+  // The cell of a ticket's stays in a state that ended at t.
+  at(t: number, ticket: string, state: string): Cell {
+    const p = this.kind.of(t);
+    let m = this.m.get(p);
+    if (!m) this.m.set(p, (m = new Map()));
+    let c = m.get(ticket);
+    if (!c) m.set(ticket, (c = {}));
+    return cellOf(c, state);
+  }
+
+  // Every period from the one holding the first recorded change to the one holding now, oldest
+  // first. A period with nothing in it is listed empty rather than left out, and with no history at
+  // all the list is the current period alone. The stays open now are counted in the period holding now.
+  list(now: number, first: number, open: Record<string, Open>): ({ key: string } & Bucket)[] {
+    const have = [...this.m.keys()];
+    const cur = this.kind.of(now);
+    const last = Math.max(cur, ...have);
+    const out: ({ key: string } & Bucket)[] = [];
+    for (let p = Math.min(cur, Number.isFinite(first) ? this.kind.of(first) : cur, ...have); p <= last; p = this.kind.end(p)) out.push({ key: this.kind.key(p), ...bucket(this.m.get(p)?.values() ?? [], p === cur ? open : {}) });
+    return out;
+  }
+}
 
 // The item and state an agent was on at t: its record named the agent and was in a state the agent
 // works in. A working state first, then the latest entered.
-function onAt(byAgent: Map<string, { tl: Timeline; i: number; end: number }[]>, agent: string, t: number): { tl: Timeline; state: string } | null {
+function onAt(byAgent: Map<string, { tl: Timeline; i: number; end: number }[]>, agent: string, t: number): { tl: Timeline; i: number } | null {
   let best: { tl: Timeline; i: number } | null = null;
   let bestKey = -Infinity;
   for (const r of byAgent.get(agent) ?? []) {
@@ -297,29 +430,28 @@ function onAt(byAgent: Map<string, { tl: Timeline; i: number; end: number }[]>, 
     const key = (BUSY.has(s.state) ? 1e15 : 0) + s.at;
     if (key > bestKey) [best, bestKey] = [r, key];
   }
-  return best ? { tl: best.tl, state: (best.tl.steps[best.i] as Step).state } : null;
+  return best;
 }
 
-// The state an item was in at t, or null before its first.
-function stateAt(tl: Timeline, t: number): string | null {
-  let s: string | null = null;
+// The step an item was in at t, or -1 before its first.
+function stepAt(tl: Timeline, t: number): number {
+  let i = -1;
   for (const st of tl.steps) {
     if (st.at > t) break;
-    s = st.state;
+    i++;
   }
-  return s;
+  return i;
 }
 
 export function report(ws: Workspace, usage: TranscriptUsage, now = Date.now()): Report {
   const tls = timelines(ws);
-  const weeks = new Map<number, Record<string, Cell>>();
-  const week = (t: number) => {
-    const w = weekOf(t);
-    let m = weeks.get(w);
-    if (!m) weeks.set(w, (m = {}));
-    return m;
-  };
+  const periods = [new Periods(WEEK), new Periods(MONTH)];
+  const [weeks, months] = periods as [Periods, Periods];
   const items = new Map<string, Record<string, Cell>>();
+  // what each ticket spent in its closed stays, for the all-time averages
+  const closed = new Map<string, Record<string, Cell>>();
+  const open: Record<string, Open> = {};
+  const isOpen = (tl: Timeline, i: number) => tl.live && i === tl.steps.length - 1 && (tl.steps[i] as Step).state !== "done";
   const byAgent = new Map<string, { tl: Timeline; i: number; end: number }[]>();
   for (const tl of tls) {
     const m: Record<string, Cell> = {};
@@ -327,13 +459,21 @@ export function report(ws: Workspace, usage: TranscriptUsage, now = Date.now()):
     tl.steps.forEach((s, i) => {
       const end = stepEnd(tl, i, now);
       cellOf(m, s.state).entries++;
-      cellOf(week(s.at), s.state).entries++;
       cellOf(m, s.state).seconds += (end - s.at) / 1000;
-      // the time is split at week boundaries, so a long wait shows in every week it spans
-      for (let a = s.at; a < end;) {
-        const b = Math.min(end, weekOf(a) + 7 * DAY);
-        cellOf(week(a), s.state).seconds += (b - a) / 1000;
-        a = b;
+      // the time is split at period boundaries, so a long wait shows in every week and month it spans
+      // the stay counts whole where it ended; one still open counts as open only, and the last
+      // state of an item taken off the board has no known end, so it is in no period
+      if (isOpen(tl, i)) {
+        const o = (open[s.state] ??= { n: 0, longest: 0 });
+        o.n++;
+        o.longest = Math.max(o.longest, (end - s.at) / 1000);
+      } else if (tl.live || i < tl.steps.length - 1) {
+        const all = closed.get(tl.ticket) ?? {};
+        closed.set(tl.ticket, all);
+        for (const c of [...periods.map((p) => p.at(end, tl.ticket, s.state)), cellOf(all, s.state)]) {
+          c.entries++;
+          c.seconds += (end - s.at) / 1000;
+        }
       }
       if (s.agent && s.state !== "done") {
         const l = byAgent.get(s.agent) ?? [];
@@ -354,18 +494,24 @@ export function report(ws: Workspace, usage: TranscriptUsage, now = Date.now()):
       if (!item && !(f.agent && fleet.has(f.agent))) continue;
       for (const c of f.calls) {
         if (c.at < since) continue;
-        let hit: { tl: Timeline; state: string } | null = null;
+        let hit: { tl: Timeline; i: number } | null = null;
         if (item) {
           const tl = byTicket.get(item) as Timeline;
-          const s = stateAt(tl, c.at);
-          hit = s ? { tl, state: s } : null;
+          const i = stepAt(tl, c.at);
+          hit = i >= 0 ? { tl, i } : null;
         } else hit = onAt(byAgent, f.agent as string, c.at);
         if (!hit) {
           addTokens((unattributed[f.agent ?? item ?? "?"] ??= noTokens()), c.tokens);
           continue;
         }
-        addTokens(cellOf(items.get(hit.tl.ticket) as Record<string, Cell>, hit.state).tokens, c.tokens);
-        addTokens(cellOf(week(c.at), hit.state).tokens, c.tokens);
+        const st = hit.tl.steps[hit.i] as Step;
+        addTokens(cellOf(items.get(hit.tl.ticket) as Record<string, Cell>, st.state).tokens, c.tokens);
+        // a call is its stay's, so it counts where the stay ended, and not while the stay is open
+        if (!isOpen(hit.tl, hit.i) && (hit.tl.live || hit.i < hit.tl.steps.length - 1)) {
+          const end = stepEnd(hit.tl, hit.i, now);
+          for (const p of periods) addTokens(p.at(end, hit.tl.ticket, st.state).tokens, c.tokens);
+          addTokens(cellOf(closed.get(hit.tl.ticket) as Record<string, Cell>, st.state).tokens, c.tokens);
+        }
       }
     }
   }
@@ -374,7 +520,9 @@ export function report(ws: Workspace, usage: TranscriptUsage, now = Date.now()):
   return {
     states: [...STATES],
     now,
-    weeks: [...weeks.entries()].sort(([a], [b]) => a - b).map(([w, states]) => ({ week: weekKey(w), states })),
+    all: bucket(closed.values(), open),
+    weeks: weeks.list(now, since, open).map(({ key, ...b }) => ({ week: key, ...b })),
+    months: months.list(now, since, open).map(({ key, ...b }) => ({ month: key, ...b })),
     items: tls.map((tl) => ({
       ticket: tl.ticket, title: tl.title, live: tl.live,
       state: recs.get(tl.ticket)?.state ?? (tl.steps[tl.steps.length - 1]?.state ?? null),
