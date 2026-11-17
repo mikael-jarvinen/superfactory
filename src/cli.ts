@@ -40,6 +40,7 @@ import { FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.j
 import { failure } from "./failures.js";
 import { runQueue } from "./watchers/queue.js";
 import { runRound } from "./watchers/round.js";
+import { runReviews } from "./watchers/reviews.js";
 import { openWorkspace, resolveWorkspace, type Workspace } from "./workspace.js";
 
 const USAGE = `factory: start, stop, dispatch and track a fleet of Claude Code sessions.
@@ -128,6 +129,8 @@ usage: factory [--workspace <dir>] <command> [options]
                                   a PR stacked on <branch>: the same with origin/<branch> checked out
   watch queue                     read the tracker's queue once, and tell the lead about new queued
                                   tickets and fresh merges. What the scheduler runs; prompts/queue.md.
+  watch reviews                   read the review comments on the PRs in review once, and tell the
+                                  lead about new ones. No model; every 5 minutes by default.
   watch round [--facts]           the round once: facts gathered here, and a note to the lead with
                                   the lines that need it, each told once a day at most.
                                   --facts prints the facts and tells nobody.
@@ -671,10 +674,10 @@ function cmdDemo(ws: Workspace, argv: string[]): number | void {
 function cmdWatch(ws: Workspace, argv: string[]): number {
   const { v, p } = args("watch", argv, { facts: { type: "boolean" } }, [1, 1]);
   const job = p[0] as string;
-  if (job !== "queue" && job !== "round") throw new UsageError(`watch: ${pyRepr(job)} is not a watcher; watchers are queue, round`);
+  if (job !== "queue" && job !== "round" && job !== "reviews") throw new UsageError(`watch: ${pyRepr(job)} is not a watcher; watchers are queue, reviews, round`);
   if (v.facts && job !== "round") throw new UsageError("watch: --facts is for the round");
   try {
-    return job === "queue" ? runQueue(ws) : runRound(ws, { factsOnly: !!v.facts });
+    return job === "queue" ? runQueue(ws) : job === "reviews" ? runReviews(ws) : runRound(ws, { factsOnly: !!v.facts });
   } catch (e) {
     if (e instanceof FactoryError && !v.facts) failure(ws, `${job} FAILED: ${e.message.split("\n")[0]}`);
     throw e;

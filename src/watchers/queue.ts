@@ -1,6 +1,6 @@
 // `factory watch queue`: on the scheduler's cadence, tell the lead about new work in the tracker's
-// queue, about fresh merges it owes a done judgement for, and about new review comments on the PRs
-// in review (reviews.ts).
+// queue and about fresh merges it owes a done judgement for. New review comments are the review
+// watcher's (reviews.ts), which runs no model and so can run more often.
 //
 // The model does the one thing only a session can: read the tracker through the connector. It is
 // handed no state, runs no commands and messages nobody. Everything after the read is here: the
@@ -17,7 +17,6 @@ import { dockerWatchdog } from "./docker.js";
 import { failure } from "../failures.js";
 import { beat, heartbeatAge, heartbeatPath, loadPrompt, logTo, openLog, runFailure, runReader, TIMED_OUT, watcherGh } from "./job.js";
 import { deliver } from "./relay.js";
-import { reviewComments, saveCursors } from "./reviews.js";
 
 // What the last runs left: the queue keys already seen, the merge urls already reported, the PRs
 // already reported as conflicting (owner/repo#n), and the last few outcomes, which the round reads
@@ -222,8 +221,6 @@ export function runQueue(ws: Workspace, out: (line: string) => void = console.lo
   lines.push(...m.lines);
   const c = conflicts(recs, prev.conflicting, log);
   lines.push(...c.lines);
-  const rv = reviewComments(ws, recs, log);
-  lines.push(...rv.lines);
   const stale = roundStale(ws);
   if (stale) lines.push(stale.line);
   const docker = dockerWatchdog(ws);
@@ -232,7 +229,6 @@ export function runQueue(ws: Workspace, out: (line: string) => void = console.lo
   // What was not delivered is not recorded as told, so the next run says it again.
   const delivered = lines.length ? deliver(ws, ["[queue watcher]", ...lines].join("\n")) : true;
   if (delivered) stale?.told();
-  if (delivered) saveCursors(ws, rv.cursors);
   const outcome = r.slept ? "slept" : r.status !== 0 ? "failed" : read?.outcome === "read" ? (lines.length ? "reported" : "quiet") : (read?.outcome ?? "failed");
   const state: QueueState = {
     known: read?.outcome === "read" ? read.keys.filter((k) => delivered || !fresh.includes(k)) : prev.known,

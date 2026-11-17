@@ -1,5 +1,6 @@
-// The queue watcher's review step: new review comments on the PRs of items in review, told to the
-// lead so it can dispatch the builder. Mikael, 2026-11-17, after a colleague's factory answered his
+// `factory watch reviews`: new review comments on the PRs of items in review, told to the lead so
+// it can dispatch the builder. Its own job, every five minutes by default: the queue watcher reads
+// the tracker through a model and stays at its own cadence, and this reads GitHub only. Mikael, 2026-11-17, after a colleague's factory answered his
 // review comment on their PR by itself: "I need this feature in my factory ... So basically I need a
 // script that alerts our factory when we get reviews". Until now nothing said a comment had come
 // in until Mikael mentioned it or the gate tripped on an unresolved thread.
@@ -10,11 +11,12 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { MARKER } from "../gate/comment.js";
-import { type Rec, recPrs } from "../state.js";
+import { allRecs, type Rec, recPrs } from "../state.js";
 import { squash } from "../util.js";
 import type { Workspace } from "../workspace.js";
-import { logTo, watcherGh } from "./job.js";
+import { beat, logTo, openLog, watcherGh } from "./job.js";
 import { CONFLICT_WATCHED } from "./queue.js";
+import { deliver } from "./relay.js";
 
 // The newest comment time seen on each PR (owner/repo#n -> ISO time). In state/, beside the
 // records, because it is what the factory has been told, not a log. Not a .json name: every .json
@@ -83,7 +85,7 @@ export function reviewQuery(keys: string[]): string {
     const [, owner, name] = repo.match(OWNER_REPO) as [string, string, string];
     return `r${i}: repository(owner: "${owner}", name: "${name}") { ${ns.map((n) => `p${n}: pullRequest(number: ${n}) { ${PR_FIELDS} }`).join(" ")} }`;
   });
-  return `query { viewer { login } ${parts.join(" ")} }`;
+  return `query { viewer { login } rateLimit { cost remaining resetAt } ${parts.join(" ")} }`;
 }
 
 // The review bots whose comments are findings. Every other bot (sync-label, sonarcloud, codecov,
@@ -185,15 +187,26 @@ export function prLines(rec: Rec, key: string, url: string, items: Item[], human
   ];
 }
 
+export interface ReviewRead {
+  // false when GitHub could not be read: no cursor moves, and the next run reads the same comments
+  ok: boolean;
+  lines: string[];
+  cursors: Record<string, string>;
+  prs: number;
+  calls: number;
+  // GitHub's GraphQL budget after the call, as it reported it
+  rate?: { cost: number; remaining: number; resetAt: string };
+}
+
 // The new review comments on every watched PR, and the cursors to keep once the note is left. A
 // read that fails says so in the log and moves no cursor, so the next run reads the same comments.
-export function reviewComments(ws: Workspace, recs: Rec[], log: string): { lines: string[]; cursors: Record<string, string> } {
+export function reviewComments(ws: Workspace, recs: Rec[], log: string): ReviewRead {
   const prev = loadCursors(ws);
   const watched = new Map<string, Rec>();
   for (const rec of recs.filter((r) => CONFLICT_WATCHED.has(r.state ?? "")))
     for (const p of recPrs(rec))
       if (p.repo && OWNER_REPO.test(p.repo) && typeof p.number === "number") watched.set(`${p.repo}#${p.number}`, rec);
-  if (!watched.size) return { lines: [], cursors: {} };
+  if (!watched.size) return { ok: true, lines: [], cursors: {}, prs: 0, calls: 0 };
   const keys = [...watched.keys()];
   // A PR seen for the first time with nothing on it yet starts its cursor here, so the first
   // comment after is news wherever it is written.
@@ -208,7 +221,7 @@ export function reviewComments(ws: Workspace, recs: Rec[], log: string): { lines
   const viewer = (data?.viewer as { login?: string } | undefined)?.login;
   if (!data || !viewer) {
     logTo(log, `reviews: cannot read the review comments${r.stderr.trim() ? `: ${r.stderr.trim()}` : ""}`);
-    return { lines: [], cursors: prev };
+    return { ok: false, lines: [], cursors: prev, prs: watched.size, calls: 1 };
   }
   const repos = [...new Set(keys.map((k) => k.split("#")[0] as string))];
   const lines: string[] = [];
@@ -224,5 +237,22 @@ export function reviewComments(ws: Workspace, recs: Rec[], log: string): { lines
     cursors[key] = newest ?? asked;
     if (items.length) lines.push(...prLines(watched.get(key) as Rec, key, node.url, items, ws.config.human.name));
   }
-  return { lines, cursors };
+  return { ok: true, lines, cursors, prs: watched.size, calls: 1, rate: data.rateLimit as ReviewRead["rate"] };
+}
+
+// One run: read, leave the lead a note when something is new, and move the cursors only once the
+// note is left. The heartbeat says GitHub was read; the round reads it.
+export function runReviews(ws: Workspace, out: (line: string) => void = console.log): number {
+  const log = openLog(ws, "reviews");
+  const t0 = Date.now();
+  const r = reviewComments(ws, allRecs(ws), log);
+  const delivered = r.lines.length ? deliver(ws, ["[review watcher]", ...r.lines].join("\n")) : true;
+  if (r.ok && delivered) saveCursors(ws, r.cursors);
+  if (r.ok) beat(ws, "reviews");
+  const outcome = !r.ok ? "unreadable" : r.lines.length ? "reported" : "quiet";
+  const rate = r.rate ? ` graphql_cost=${r.rate.cost} graphql_remaining=${r.rate.remaining}` : "";
+  logTo(log, `outcome=${outcome} prs=${r.prs} gh_calls=${r.calls}${rate} ms=${Date.now() - t0}${r.lines.length ? ` delivered=${delivered}` : ""}`);
+  for (const l of r.lines) out(l);
+  out(`reviews: ${outcome}`);
+  return r.ok && delivered ? 0 : 1;
 }

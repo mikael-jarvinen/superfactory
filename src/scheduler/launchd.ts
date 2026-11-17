@@ -1,7 +1,8 @@
 // The scheduler on macOS: launchd agents rendered from [watchers] and installed for this user.
 //
-// Three jobs. The queue watcher, only when there is a tracker to read. The round, once an hour.
-// And `factory up`, at login and twice an hour: the daemon retires a session that sat idle for a
+// Four jobs. The queue watcher, only when there is a tracker to read. The review watcher, every five
+// minutes unless [watchers] reviews_every_minutes says otherwise (0 turns it off): it runs no model,
+// so its cadence costs GitHub calls and nothing else. The round, once an hour. And `factory up`, at login and twice an hour: the daemon retires a session that sat idle for a
 // day and then exits, and `up` respawns the lead from its last thread when nothing is running and
 // prints one line when something is.
 //
@@ -22,7 +23,7 @@ import { die, run } from "../util.js";
 
 const CLI = fileURLToPath(new URL("../cli.js", import.meta.url));
 
-export const JOB_NAMES = ["queue", "round", "up"] as const;
+export const JOB_NAMES = ["queue", "reviews", "round", "up"] as const;
 export type JobName = (typeof JOB_NAMES)[number];
 
 export interface Calendar {
@@ -45,11 +46,11 @@ export const label = (ws: Workspace, name: JobName) => `superfactory.${lead(ws).
 // Calendar intervals, not StartInterval: a plain interval timer is not serviced while the laptop
 // sleeps, so a closed lid stops it for the night, while a missed calendar fire runs at the next wake.
 // A calendar repeats within the hour or the day, so the cadence has to divide one of them evenly.
-export function every(minutes: number): Calendar[] {
+export function every(minutes: number, setting = "queue_every_minutes"): Calendar[] {
   const steps = (end: number, step: number) => Array.from({ length: end / step }, (_, i) => i * step);
   if (minutes > 0 && 60 % minutes === 0) return steps(60, minutes).map((m) => ({ Minute: m }));
   if (minutes % 60 === 0 && 1440 % minutes === 0) return steps(24, minutes / 60).map((h) => ({ Hour: h, Minute: 0 }));
-  return die(`watchers.queue_every_minutes = ${minutes}: a calendar job needs a number of minutes that divides 60, or a number of hours that divides 24`);
+  return die(`watchers.${setting} = ${minutes}: a calendar job needs a number of minutes that divides 60, or a number of hours that divides 24`);
 }
 
 const UP_AT: Calendar[] = [{ Minute: 3 }, { Minute: 33 }];
@@ -60,6 +61,9 @@ export function jobs(ws: Workspace): Job[] {
   const out: Job[] = [];
   if (trackerOf(ws).reads)
     out.push({ name: "queue", label: label(ws, "queue"), args: [...base, "watch", "queue"], calendar: every(w.queueEveryMinutes ?? 15), runAtLoad: false });
+  const reviews = w.reviewsEveryMinutes ?? 5;
+  if (reviews > 0)
+    out.push({ name: "reviews", label: label(ws, "reviews"), args: [...base, "watch", "reviews"], calendar: every(reviews, "reviews_every_minutes"), runAtLoad: false });
   out.push({ name: "round", label: label(ws, "round"), args: [...base, "watch", "round"], calendar: [{ Minute: w.roundMinute ?? 7 }], runAtLoad: false });
   out.push({ name: "up", label: label(ws, "up"), args: [...base, "up"], calendar: UP_AT, runAtLoad: true });
   return out;
