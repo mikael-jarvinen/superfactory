@@ -83,3 +83,23 @@ test("transition output and refusal messages", () => {
   const last = readFileSync(join(ws, "state", "events.jsonl"), "utf8").trim().split("\n").pop() as string;
   assert.match(last, /^\{"at": "[^"]+", "event": "dropped", "from_state": "queued", "note": "not asked for", "ticket": "LOCAL-gone"\}$/);
 });
+
+// Mikael split lyyti-classic#8754 off LOCAL-reports-petes-design, and the PR stayed on both cards.
+test("state --remove-pr takes a PR off an item and logs it", () => {
+  const ws = tempWorkspace();
+  after(() => rmSync(ws, { recursive: true, force: true }));
+  const T = "TEST-3";
+  factory(ws, ["state", T, "building", "--agent", "bea"]);
+  factory(ws, ["state", T, "pr-open", "--pr", "acme/web#1", "--head", "abc1234"]);
+  factory(ws, ["state", T, "pr-open", "--pr", "acme/web#2", "--head", "def5678"]);
+  let r = factory(ws, ["state", T, "--remove-pr", "acme/web#2", "--note", "split off to TEST-4"]);
+  assert.equal(r.stdout, "TEST-3: removed PR acme/web#2; PRs now: acme/web#1\n");
+  const rec = JSON.parse(readFileSync(join(ws, "state", `${T}.json`), "utf8"));
+  assert.equal(rec.state, "pr-open", "no transition");
+  assert.deepEqual(rec.prs, [{ head: "abc1234", number: 1, repo: "acme/web" }]);
+  assert.deepEqual(rec.pr, rec.prs[0], "the focus moves to the PR left");
+  const last = JSON.parse(readFileSync(join(ws, "state", "events.jsonl"), "utf8").trim().split("\n").pop() as string);
+  assert.deepEqual([last.from, last.to, last.evidence, last.note], ["pr-open", "pr-open", "removed PR acme/web#2", "split off to TEST-4"]);
+  r = factory(ws, ["state", T, "--remove-pr", "acme/web#2"]);
+  assert.equal(r.stderr, "factory: TEST-3 has no PR acme/web#2; it has: acme/web#1\n");
+});

@@ -34,7 +34,7 @@ import { runScheduler } from "./scheduler/run.js";
 import { cmdStack, STACK_USAGE } from "./stacks/command.js";
 import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/engine.js";
 import {
-  allRecs, appendEvent, BUSY, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removeRec, saveRec, showRec, transition, validKey,
+  allRecs, appendEvent, BUSY, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removePr, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
 import { FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.js";
 import { failure } from "./failures.js";
@@ -73,6 +73,8 @@ usage: factory [--workspace <dir>] <command> [options]
                                   take the lead's non-code work, then brief it by message
   state <KEY>                     show one record
   state <KEY> --title "<words>"   what it is about, for the board. No transition.
+  state <KEY> --remove-pr owner/repo#N [--note N]
+                                  take a PR off the item, e.g. after a split. No transition.
   state <KEY> <new-state> [--agent A] [--stack S] [--evidence E] [--note N] [--title T]
         [--pr owner/repo#N] [--head SHA] [--reviewed SHA] [--jira STATUS] [--force]
         [--canvas URL] [--slides URL] [--approved "<the human's words>"]
@@ -207,6 +209,7 @@ function cmdState(ws: Workspace, argv: string[]) {
   const { v, p } = args("state", argv, {
     list: { type: "boolean" }, all: { type: "boolean" }, force: { type: "boolean" },
     agent: s, stack: s, evidence: s, note: s, title: s, pr: s, head: s, reviewed: s, jira: s, canvas: s, slides: s, approved: s,
+    "remove-pr": s,
   }, [0, 2]);
   const [ticket, next] = p;
   if (v.list) {
@@ -216,6 +219,12 @@ function cmdState(ws: Workspace, argv: string[]) {
     return;
   }
   if (!ticket) throw new FactoryError("state needs a ticket, or --list");
+  const removing = str(v["remove-pr"]);
+  if (removing) {
+    if (next) throw new FactoryError("--remove-pr is not a transition; run it without a new state");
+    removePr(ws, ticket, removing, str(v.note));
+    return;
+  }
   if (!next) {
     const rec = loadRec(ws, ticket);
     if (!rec) throw new FactoryError(`no record for ${ticket}`);
