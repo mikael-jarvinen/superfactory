@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import vm from "node:vm";
 import { JSDOM } from "jsdom";
-import { handledFile, queue } from "../src/board/queue.js";
+import { handledFile, markHandled, queue } from "../src/board/queue.js";
 import { serve } from "../src/board/server.js";
 import { say } from "../src/messages.js";
 import { transition } from "../src/state.js";
@@ -14,14 +14,20 @@ import { tempDir, tempWorkspace } from "./helpers.js";
 
 const noInboxLock = process.platform !== "darwin" && process.platform !== "linux" && "the inbox lock is built for macOS and Linux only";
 
-function workspace(): Workspace {
+function workspace(opts: { since?: false } = {}): Workspace {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
   process.env.CLAUDE_BIN = join(dir, "bin", "claude");
   const ws = openWorkspace(dir);
   mkdirSync(ws.stateDir, { recursive: true });
+  // A queue that has been on since before any of these rows; the first-read start has a test of its own.
+  if (opts.since !== false) writeHandledFile(ws, { start: "2000-01-01T00:00:00Z", handled: {} });
   return ws;
 }
+const writeHandledFile = (ws: Workspace, v: unknown) => {
+  mkdirSync(ws.logsDir, { recursive: true });
+  writeFileSync(handledFile(ws), typeof v === "string" ? v : JSON.stringify(v));
+};
 const row = (ws: Workspace, t: string, kind: string, text: string, ticket: string | null = null, file = ws.messages) =>
   appendFileSync(file, pyDumps({ t, text, ticket, kind, link: null }) + "\n");
 const rec = (ws: Workspace, ticket: string, state: string, asked: { question: string; at: string } | null = null) =>
@@ -115,14 +121,15 @@ async function messagesPage(data: object) {
   const dom = new JSDOM(html, { runScripts: "outside-only", url: "http://board.test/messages" });
   windows.push(dom);
   const w = dom.window;
-  const s = { data, posts: [] as [string, Record<string, unknown>][] };
+  const s = { data, posts: [] as [string, Record<string, unknown>][], handledStatus: 200 };
   Object.defineProperty(w.document, "visibilityState", { get: () => "hidden" });
   Object.assign(w, {
     scrollTo: () => {},
     fetch: async (url: string, o?: { method?: string; body?: string }) => {
       if (o?.method === "POST") {
         s.posts.push([url, JSON.parse(o.body ?? "{}")]);
-        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        const status = url === "/api/messages/handled" ? s.handledStatus : 200;
+        return { ok: status < 300, status, json: async () => (status < 300 ? { ok: true } : { ok: false, error: "nothing in the queue has that id" }) };
       }
       return { ok: true, status: 200, json: async () => structuredClone(s.data) };
     },
@@ -195,15 +202,15 @@ test("queue: a fresh workspace with only the config it must have, its own names 
   const ws = openWorkspace(dir);
   assert.equal(ws.stateDir, join(dir, "data", "st"));
   const quiet = () => {};
+  const board = await serve(ws, { host: "127.0.0.1", port: 0 });
+  after(() => board.close());
+  const get = async () => ((await (await fetch(board.url + "/api/messages")).json()) as { human: string; lead: string; queue: { id: string; text: string; from: string }[] });
+  assert.deepEqual((await get()).queue, [], "nothing yet, and the first read sets the queue's start");
   // The lead's real writers: `factory say` and `factory state`.
   say(ws, ["pick a colour?"], { kind: "decision", ticket: "LOCAL-colour" }, quiet);
   say(ws, ["just news"], { kind: "note" }, quiet);
   transition(ws, "LOCAL-key", "queued", {}, quiet);
   transition(ws, "LOCAL-key", "blocked", { note: "need the key" }, quiet);
-
-  const board = await serve(ws, { host: "127.0.0.1", port: 0 });
-  after(() => board.close());
-  const get = async () => ((await (await fetch(board.url + "/api/messages")).json()) as { human: string; lead: string; queue: { id: string; text: string; from: string }[] });
   const d = await get();
   assert.deepEqual([d.human, d.lead], ["Robin", "kai"]);
   assert.deepEqual(d.queue.map((i) => [i.from, i.text]), [["message", "pick a colour?"], ["board", "need the key"]]);
@@ -213,4 +220,93 @@ test("queue: a fresh workspace with only the config it must have, its own names 
   assert.equal(handledFile(ws), join(dir, "data", "lg", "messages-handled.json"));
   transition(ws, "LOCAL-key", "building", {}, quiet);
   assert.deepEqual((await get()).queue, [], "handled, and unblocked");
+});
+
+test("queue: a blocked record is the row posted with it, not an older question on the same ticket", () => {
+  const ws = workspace();
+  // Asked and handled long before the ticket was blocked with a new question that was never posted.
+  row(ws, T(1), "decision", "old, handled", "LOCAL-x");
+  const old = queue(ws)[0]!.id;
+  assert.deepEqual(markHandled(ws, old), { ok: true });
+  rec(ws, "LOCAL-x", "blocked", { question: "new question", at: T(30) });
+  assert.deepEqual(queue(ws).map((i) => [i.from, i.text]), [["board", "new question"]]);
+  // Posted a few minutes before the block was recorded: that row is the question, once.
+  row(ws, T(25), "blocked", "posted first", "LOCAL-y");
+  rec(ws, "LOCAL-y", "blocked", { question: "posted first", at: T(30) });
+  assert.deepEqual(queue(ws).map((i) => [i.from, i.text]), [["message", "posted first"], ["board", "new question"]]);
+});
+
+test("queue: an unblock far back in a large events log still answers its question, and appends are read as they come", () => {
+  const ws = workspace();
+  row(ws, T(1), "blocked", "answered long ago", "LOCAL-old");
+  row(ws, T(2), "blocked", "answered now", "LOCAL-new");
+  unblock(ws, T(3), "LOCAL-old");
+  const pad = pyDumps({ t: T(4), ticket: "LOCAL-pad", from: "building", to: "agent-review", note: "x".repeat(900) }) + "\n";
+  appendFileSync(ws.events, pad.repeat(Math.ceil((4.1 * 1024 * 1024) / pad.length)));
+  assert.deepEqual(queue(ws).map((i) => i.text), ["answered now"]);
+  unblock(ws, T(5), "LOCAL-new");
+  assert.deepEqual(queue(ws), []);
+  // A torn last line is read once it is whole.
+  row(ws, T(6), "blocked", "torn", "LOCAL-torn");
+  const line = pyDumps({ t: T(7), ticket: "LOCAL-torn", from: "blocked", to: "building" }) + "\n";
+  appendFileSync(ws.events, line.slice(0, 20));
+  assert.deepEqual(queue(ws).map((i) => i.text), ["torn"]);
+  appendFileSync(ws.events, line.slice(20));
+  assert.deepEqual(queue(ws), []);
+});
+
+test("queue: turned on in a workspace with history, only what is still blocked is waiting", () => {
+  const ws = workspace({ since: false });
+  row(ws, "2026-01-01T09:00:00+00:00", "decision", "answered in the thread months ago", "LOCAL-done");
+  row(ws, "2026-01-02T09:00:00+00:00", "blocked", "still blocked", "LOCAL-stuck");
+  rec(ws, "LOCAL-stuck", "blocked", { question: "still blocked", at: "2026-01-02T09:00:00+00:00" });
+  rec(ws, "LOCAL-quiet", "blocked", { question: "never posted", at: "2026-01-03T09:00:00+00:00" });
+  assert.deepEqual(queue(ws).map((i) => i.text), ["still blocked", "never posted"]);
+  const start = JSON.parse(readFileSync(handledFile(ws), "utf8")).start as string;
+  assert.ok(Date.now() - Date.parse(start) < 60_000, "the first read set the start");
+  assert.deepEqual(queue(ws).map((i) => i.text), ["still blocked", "never posted"], "and keeps it");
+  // A question asked after the start is waiting.
+  const now = new Date(Date.parse(start) + 1000).toISOString();
+  row(ws, now, "decision", "asked after", "LOCAL-new");
+  assert.deepEqual(queue(ws).map((i) => i.text), ["still blocked", "never posted", "asked after"]);
+});
+
+test("queue: a handled file that does not parse shows everything and is never written over", () => {
+  const ws = workspace();
+  row(ws, T(1), "decision", "a?");
+  const id = queue(ws)[0]!.id;
+  writeHandledFile(ws, "{ torn");
+  assert.deepEqual(queue(ws).map((i) => i.text), ["a?"]);
+  const r = markHandled(ws, id);
+  assert.equal(r.ok, false);
+  assert.equal(readFileSync(handledFile(ws), "utf8"), "{ torn");
+});
+
+test("the message page: reply keeps a draft, cancel takes back only the quote, a question gone meanwhile is no error", async () => {
+  const item = { id: "maaaaaaaaaaaa", t: T(1), at: T(1), kind: "decision", ticket: "LOCAL-ship", text: "ship on friday?", link: null, from: "message", age_min: 5, in_thread: false };
+  const { s, doc, w, settle } = await messagesPage({
+    at: "12:00", human: "Alex", lead: "niilo", lead_avatar: null, status: "idle", seen: null, messages: [], queue: [item],
+  });
+  const t = doc.getElementById("t") as HTMLTextAreaElement;
+  const reply = () => (doc.querySelector('[data-reply="maaaaaaaaaaaa"]') as HTMLElement).click();
+  t.value = "half typed";
+  reply();
+  assert.equal(t.value, "> LOCAL-ship: ship on friday?\n\nhalf typed");
+  reply();
+  assert.equal(t.value, "> LOCAL-ship: ship on friday?\n\nhalf typed", "a second reply does not quote twice");
+  t.value += ", and more";
+  (doc.getElementById("unreply") as HTMLElement).click();
+  assert.equal(t.value, "half typed, and more");
+  assert.equal(doc.getElementById("replying")!.hidden, true);
+
+  reply();
+  s.handledStatus = 400; // its ticket moved on while the reply was written
+  doc.getElementById("f")!.dispatchEvent(new w.Event("submit", { cancelable: true }));
+  await settle();
+  assert.deepEqual(s.posts.map(([u]) => u), ["/api/messages", "/api/messages/handled"]);
+  assert.equal(doc.getElementById("err")!.textContent, "");
+  // The handled button still says when it was refused.
+  (doc.querySelector('[data-done="maaaaaaaaaaaa"]') as HTMLElement).click();
+  await settle();
+  assert.equal(doc.getElementById("err")!.textContent, "nothing in the queue has that id");
 });

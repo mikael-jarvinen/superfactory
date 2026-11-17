@@ -49,7 +49,7 @@ function render(d){
 // opened. A row goes when the board says it is resolved (see queue.ts): marked handled here, replied
 // to from here, or its ticket moved out of blocked. Reading it does not. A row whose message is in the
 // thread below links to it; an older one opens its words in the panel.
-let lastQueue = '', replyTo = null;
+let lastQueue = '', replyTo = null, replyQuote = '';
 const opened = new Set();
 const firstLine = s => (String(s || '').split('\n').find(l => l.trim()) || '').replace(/^[#>*\s-]+/, '').trim();
 function renderQueue(d){
@@ -76,11 +76,13 @@ function renderQueue(d){
 }
 let qItems = new Map();
 
-async function handled(id){
+// quiet: after a reply, whose question may have left the queue on its own meanwhile (its ticket moved
+// on). A refusal then says nothing worth showing under a message that was sent.
+async function handled(id, quiet){
   err.textContent = '';
   try {
     const r = await fetch('/api/messages/handled', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
-    if(!r.ok) err.textContent = ((await r.json().catch(() => ({}))).error) || 'not marked handled';
+    if(!r.ok && !(quiet && r.status === 400)) err.textContent = ((await r.json().catch(() => ({}))).error) || 'not marked handled';
   } catch { err.textContent = 'not marked handled: the board is not answering'; }
   lastQueue = ''; // redraw, so a button disabled by a failed mark is live again
   await tick();
@@ -89,17 +91,23 @@ async function handled(id){
 function startReply(id){
   const i = qItems.get(id);
   if(!i) return;
+  // The quote goes in front of whatever is already typed, and cancel takes back only the quote.
+  const draft = unquote();
   replyTo = id;
-  const quote = firstLine(i.text).slice(0, 200);
-  t.value = `> ${i.ticket ? i.ticket + ': ' : ''}${quote}\n\n`;
+  replyQuote = `> ${i.ticket ? i.ticket + ': ' : ''}${firstLine(i.text).slice(0, 200)}\n\n`;
+  t.value = replyQuote + draft;
   document.getElementById('replyto').textContent = `replying to ${i.ticket || i.kind}: sending marks it handled`;
   document.getElementById('replying').hidden = false;
   t.focus();
   t.setSelectionRange(t.value.length, t.value.length);
   scrollTo({top: 0, behavior: 'smooth'});
 }
+function unquote(){
+  const v = t.value;
+  return replyQuote && v.startsWith(replyQuote) ? v.slice(replyQuote.length) : v;
+}
 function stopReply(){
-  replyTo = null;
+  replyTo = null; replyQuote = '';
   const r = document.getElementById('replying');
   if(r) r.hidden = true;
 }
@@ -124,7 +132,7 @@ addEventListener('DOMContentLoaded', () => {
       m.classList.remove('flash'); void m.offsetWidth; m.classList.add('flash');
     }
   });
-  document.getElementById('unreply').addEventListener('click', () => { stopReply(); t.value = ''; });
+  document.getElementById('unreply').addEventListener('click', () => { t.value = unquote(); stopReply(); t.focus(); });
 });
 
 // While the page is visible, tell the board the newest lead message now on screen, so a reminder
@@ -198,7 +206,7 @@ async function send(){
       // A reply started from the panel answers that question: it leaves the queue once sent.
       const answered = replyTo;
       stopReply();
-      if(answered) await handled(answered); else await tick();
+      if(answered) await handled(answered, true); else await tick();
     } else { err.textContent = r.error || 'not sent'; }
   } catch { err.textContent = 'not sent: the board is not answering'; }
   b.disabled = false; b.textContent = 'send'; t.focus();
