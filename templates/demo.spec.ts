@@ -7,11 +7,19 @@
 // them. After the roll the camera paces each step, draws the cursor and the click rings, and records
 // the frames `factory demo` encodes to demo.mp4. DEMO_PACE=0 films at full speed.
 //
-// Words on screen, for a colleague who never saw the ticket. `camera.title('After: ...')` opens the
-// video with a title card, and `camera.caption('...')` puts a line at the bottom before each step
-// that changes the screen, saying what the viewer is about to see. A caption stays until the next
-// one or `camera.caption(null)`. The before and after videos use the same captions, so they can be
-// compared. Neither shows in the screenshots.
+// The words on screen are a presenter's narration, for a colleague who never saw the ticket; the
+// lead writes it in the brief from the ticket, and you change only the wording to fit the screen.
+// Mikael, 2026-11-17: "I would need a narration written for a new feature demo. These current texts
+// I don't understand, is it telling what it's doing now?"
+// - `camera.title('...')` opens the video with a card: what the feature is and what problem it solves.
+// - `camera.caption('...')` puts a line at the bottom: what the viewer is looking at and why it
+//   matters, never which click is happening.
+//     good: 'The report is built on one page, so the preview shows the result while you choose the columns'
+//     bad:  'Save it and see the numbers'
+//   A caption stays until the next one or `camera.caption(null)`. Neither shows in the screenshots.
+// A new feature gets one narrated walkthrough and no before video. Only a change to something that
+// exists is also filmed with `factory demo --before`: the same spec, narrated as what each video is
+// (STATE says which), the before what is wrong today, the after what is different.
 // Environment: DEMO_BASE_URL (the app), DEMO_OUT (where files go), and DEMO_USER and DEMO_PASS
 // from the workspace's demo.env. A login page that comes prefilled needs neither: signIn only
 // clicks the button. Nothing here is committed to a product repo.
@@ -23,7 +31,7 @@ import { dirname, join } from 'node:path';
 const OUT = process.env.DEMO_OUT as string;
 if (!OUT) throw new Error('DEMO_OUT is not set: run this through `factory demo`');
 const BASE = process.env.DEMO_BASE_URL ?? 'http://localhost:3000/';
-// `factory demo --before` films into <KEY>-before: one spec makes both videos, with the same captions.
+// `factory demo --before` films into <KEY>-before. For a change only: one spec makes both videos.
 const STATE = OUT.endsWith('-before') ? 'Before' : 'After';
 
 // ---------------------------------------------------------------- the camera: no need to edit
@@ -337,16 +345,21 @@ test('demo', async ({ page, camera }) => {
   // await expect(page.getByRole('heading', { name: 'The changed screen' })).toBeVisible();
 
   // Roll on the screen the PR changes, right before the first step that shows the change. The title
-  // card rolls the camera: "Before: ..." in the before video, "After: ..." in the after one.
-  await camera.title(`${STATE}: rich text survives a save`);
+  // card rolls the camera. This example is a fix, a change, so it has a before video too; a new
+  // feature's title just names the feature and the problem it solves.
+  const before = STATE === 'Before';
+  await camera.title(before
+    ? 'Before: formatting in an event description is lost when the event is saved'
+    : 'After: an event description keeps its bold text and lists through a save');
 
-  // Only the steps that show the change, then stop. Each step that changes the screen gets a
-  // caption first, in plain words, the same in the before video. For a PR that fixes saving rich text:
-  // await camera.caption('Type bold text and a list into the description');
+  // Only the steps that show the change, then stop, each narrated from the brief: what the viewer is
+  // looking at and why it matters, never the click.
+  // await camera.caption('Organisers format the description that attendees read on the registration page');
   // await page.getByRole('textbox', { name: 'Description' }).fill('Bold text and a list');
-  // await camera.caption('Save, then reload the page');
   // await page.getByRole('button', { name: 'Save' }).click();
   // await page.reload();
-  // await camera.caption('The bold text and the list are still there');
+  // await camera.caption(before
+  //   ? 'Reopened after saving, the description has lost its formatting, so attendees see plain text'
+  //   : 'Reopened after saving, the bold text and the list are still there, as attendees will see them');
   await shot(page, '01-rich-text-kept-after-save');
 });
