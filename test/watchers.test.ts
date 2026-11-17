@@ -562,11 +562,12 @@ test("the round: a failed CI check on a PR in review is told once per head, with
   assert.doesNotMatch(asked, /rerun|update-branch|"pr","(edit|merge|close|ready)"/);
 });
 
-// Mikael, 2026-11-17: "I need a script that alerts our factory when we get reviews". New review
-// comments on a PR in review reach the lead as one note per run, grouped by PR; the factory's own
-// replies and the bots that only report are not news, and a comment is told once.
-test("the queue tells the lead about new review comments, once, and not the factory's own", () => {
-  const { ws, run, notes, read } = watcherWorkspace();
+// Mikael, 2026-11-17: "I need a script that alerts our factory when we get reviews", and then "Only
+// every 15 minutes, maybe every 5 minutes?". The review watcher is its own job with no model. New
+// review comments on a PR in review reach the lead as one note per run, grouped by PR; the factory's
+// own replies and the bots that only report are not news, and a comment is told once.
+test("the review watcher tells the lead about new review comments, once, and not the factory's own", () => {
+  const { ws, run, notes, read, logs, age } = watcherWorkspace();
   assert.equal(factory(ws, ["state", "WEB-2", "queued", "--title", "Fix login"]).status, 0);
   const file = join(ws, "state", "WEB-2.json");
   const pr7 = { repo: "acme/web", number: 7 };
@@ -589,17 +590,20 @@ test("the queue tells the lead about new review comments, once, and not the fact
   const cursor = () => (JSON.parse(readFileSync(join(ws, "state", "reviews.state"), "utf8")) as Record<string, string>)["acme/web#7"];
 
   // First sight: only a resolved thread, so nothing is outstanding; the cursor starts at it.
-  let r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes(answer([old])));
+  let r = run(["watch", "reviews"], [], routes(answer([old])));
   assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(r.calls.length, 0, "no model");
+  assert.ok(existsSync(logs("reviews.heartbeat")), "a read writes the heartbeat");
+  assert.match(read("reviews.log"), /outcome=quiet prs=1 gh_calls=1 ms=\d+/);
   assert.deepEqual(notes(), []);
   assert.equal(cursor(), at(0));
 
   // A colleague's comment is news. A bot thread the factory has answered is handled, and neither
   // the factory's reply nor a label bot is news.
-  r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes(answer([old, ask, replied], [], [label])));
+  r = run(["watch", "reviews"], [], routes(answer([old, ask, replied], [], [label])));
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const first = [
-    "[queue watcher]",
+    "[review watcher]",
     "review: WEB-2 web#7 (colleague-review) https://github.com/acme/web/pull/7",
     '  - colleague sam, change request, app/Report.php:42: "Using Collection class instead of standard arrays would read better here." [thread PRRT_ask, comment 101]',
   ].join("\n");
@@ -607,21 +611,29 @@ test("the queue tells the lead about new review comments, once, and not the fact
   assert.equal(cursor(), at(12));
 
   // The same comments again: the cursor keeps them from being told twice.
-  r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes(answer([old, ask, replied], [], [label])));
+  r = run(["watch", "reviews"], [], routes(answer([old, ask, replied], [], [label])));
   assert.equal(notes().length, 1, "nothing new, so no note");
 
   // A bot's finding and a colleague's question, each classified as such, in one note for the PR.
-  r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes(answer([old, ask, replied, finding], [question], [label])));
+  r = run(["watch", "reviews"], [], routes(answer([old, ask, replied, finding], [question], [label])));
   assert.equal(notes()[1], [
-    "[queue watcher]",
+    "[review watcher]",
     "review: WEB-2 web#7 (colleague-review) https://github.com/acme/web/pull/7",
     '  - bot coderabbitai, finding, src/c.ts:9: "_⚠️ Potential issue_ The loop never ends when `n` is 0." [thread PRRT_bot2, comment 105]',
     '  - colleague sam, question, review: "Why not reuse the existing exporter?" [review 106]',
   ].join("\n"));
 
-  // A read that fails moves no cursor and leaves no note.
-  r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes({ status: 1, stderr: "HTTP 502" }));
+  // A read that fails moves no cursor, leaves no note and no heartbeat, and fails the run.
+  const before = age("reviews.heartbeat");
+  r = run(["watch", "reviews"], [], routes({ status: 1, stderr: "HTTP 502" }));
+  assert.equal(r.status, 1);
   assert.equal(notes().length, 2);
   assert.equal(cursor(), at(21));
-  assert.match(read("queue.log"), /reviews: cannot read the review comments: HTTP 502/);
+  assert.equal(statSync(logs("reviews.heartbeat")).mtimeMs, before);
+  assert.match(read("reviews.log"), /reviews: cannot read the review comments: HTTP 502/);
+
+  // The queue watcher no longer reads review comments, so nothing is told twice.
+  r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes(answer([old, ask, replied, finding], [question], [label])));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.doesNotMatch(readFileSync(join(ws, "gh.log"), "utf8"), /graphql/);
 });

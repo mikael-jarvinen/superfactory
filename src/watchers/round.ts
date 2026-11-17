@@ -42,6 +42,7 @@ const UNREPORTED_COMMIT_S = 3 * 3600;
 // for a machine that is working correctly.
 const queueStaleS = (ws: Workspace) => Math.max(2 * 3600, 3 * 60 * (ws.config.watchers.queueEveryMinutes ?? 15));
 const ROUND_STALE_S = 130 * 60;
+const reviewsStaleS = (ws: Workspace) => Math.max(2 * 3600, 3 * 60 * (ws.config.watchers.reviewsEveryMinutes ?? 5));
 
 export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
   const out: string[] = [];
@@ -278,6 +279,11 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
         const down = o.filter((x) => x === "unavailable").length;
         out.push(`  queue last=${o[o.length - 1]} tracker-unavailable in last ${o.length}=${down}${down >= 4 ? "  -- the connector is failing, not the schedule" : ""}`);
       }
+    }
+    if ((ws.config.watchers.reviewsEveryMinutes ?? 5) > 0) {
+      const r = heartbeatAge(ws, "reviews");
+      out.push(r === null ? "  reviews heartbeat MISSING -- has it ever read GitHub? factory schedule install"
+        : `  reviews heartbeat ${r}s ago${r > reviewsStaleS(ws) ? `  STALE (over ${Math.floor(reviewsStaleS(ws) / 60)} min: new review comments are not being told)` : ""}`);
     }
     const a = heartbeatAge(ws, "round");
     out.push(a === null ? "  round heartbeat MISSING -- first run, or the round has never completed"
