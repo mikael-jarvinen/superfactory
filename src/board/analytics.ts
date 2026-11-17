@@ -9,9 +9,13 @@
 //
 // - A transcript in a builder's worktree, <checkout>/.claude/worktrees/<item>, is that item's.
 // - A transcript in an agent's own cwd is the agent's, by the name the session was launched with.
-//   Its calls go to the item that agent was on at the time: an item whose record named the agent
-//   and was not done. Of several, one in a working state (designing, building, fixing) first, then
-//   the one that entered its state last.
+//   Its calls go to the item that agent was on at the time: an item whose record named the agent and
+//   was not done. Of several, one in a working state (designing, building, fixing) first, then the
+//   one that entered its state last. pr-open, agent-review and gate count as the agent's, as the
+//   fixes a review asks for are often made while the item sits there. queued (not started), and
+//   blocked, design-review, your-review and colleague-review (waiting on a human, the agent free
+//   for other work) do not: an agent with only such items is doing something else, and its calls are
+//   counted as no item's. A worktree's transcripts are its item's in any state.
 //
 // Left out: the lead and the reviewers, who are never an item's agent; agents on another host and
 // repos checked out on one, whose transcripts are not on this machine; and calls with no item at the
@@ -111,7 +115,7 @@ interface Call {
 interface FileRead {
   offset: number;
   agent: string | null;
-  ids: Set<string>;
+  ids: Map<string, Tokens>;
   calls: Call[];
 }
 
@@ -131,7 +135,9 @@ export const projectDirFor = (cwd: string) => join(claudeConfigDir(), "projects"
 
 // Every transcript is read incrementally, as one runs to tens of megabytes, and only its assistant
 // calls and its session name are kept. An API call's usage is repeated on every content block it
-// returned, so a call is counted once by its message id.
+// returned, so a call is counted once by its message id, with the largest of each count seen for it:
+// the blocks before the last can carry a partial output count. A resumed session copies a few calls
+// of the old one into its new transcript, and those few are counted in both.
 export class TranscriptUsage {
   private files = new Map<string, FileRead>();
 
@@ -164,11 +170,11 @@ export class TranscriptUsage {
 
   private readOne(path: string): FileRead {
     let st = this.files.get(path);
-    if (!st) this.files.set(path, (st = { offset: 0, agent: null, ids: new Set(), calls: [] }));
+    if (!st) this.files.set(path, (st = { offset: 0, agent: null, ids: new Map(), calls: [] }));
     let fd: number | undefined;
     try {
       const size = statSync(path).size;
-      if (size < st.offset) Object.assign(st, { offset: 0, agent: null, ids: new Set(), calls: [] });
+      if (size < st.offset) Object.assign(st, { offset: 0, agent: null, ids: new Map(), calls: [] });
       fd = openSync(path, "r");
       let pos = st.offset;
       let carry = Buffer.alloc(0);
@@ -211,14 +217,14 @@ export class TranscriptUsage {
     const at = time(d.timestamp);
     if (d.type !== "assistant" || !u || Number.isNaN(at)) return;
     const id = String(d.message?.id ?? d.requestId ?? d.uuid ?? "");
-    if (id) {
-      if (st.ids.has(id)) return;
-      st.ids.add(id);
+    const tokens = { input: num(u.input_tokens), output: num(u.output_tokens), cache_read: num(u.cache_read_input_tokens), cache_write: num(u.cache_creation_input_tokens) };
+    const seen = id ? st.ids.get(id) : undefined;
+    if (seen) {
+      for (const k of Object.keys(tokens) as (keyof Tokens)[]) seen[k] = Math.max(seen[k], tokens[k]);
+      return;
     }
-    st.calls.push({
-      at,
-      tokens: { input: num(u.input_tokens), output: num(u.output_tokens), cache_read: num(u.cache_read_input_tokens), cache_write: num(u.cache_creation_input_tokens) },
-    });
+    if (id) st.ids.set(id, tokens);
+    st.calls.push({ at, tokens });
   }
 }
 
@@ -265,6 +271,9 @@ export interface Report {
   left_out: string[];
 }
 
+// States an item waits in while its agent is free: not started, or waiting on a human.
+const NOT_ON = new Set(["queued", "blocked", "design-review", "your-review", "colleague-review"]);
+
 const DAY = 86_400_000;
 // The Monday, UTC, of the week holding t.
 export const weekOf = (t: number): number => {
@@ -273,14 +282,14 @@ export const weekOf = (t: number): number => {
 };
 const weekKey = (t: number) => new Date(t).toISOString().slice(0, 10);
 
-// The item and state an agent was on at t: its record named the agent and was not done. A working
-// state first, then the latest entered.
+// The item and state an agent was on at t: its record named the agent and was in a state the agent
+// works in. A working state first, then the latest entered.
 function onAt(byAgent: Map<string, { tl: Timeline; i: number; end: number }[]>, agent: string, t: number): { tl: Timeline; state: string } | null {
   let best: { tl: Timeline; i: number } | null = null;
   let bestKey = -Infinity;
   for (const r of byAgent.get(agent) ?? []) {
     const s = r.tl.steps[r.i] as Step;
-    if (t < s.at || t >= r.end) continue;
+    if (t < s.at || t >= r.end || NOT_ON.has(s.state)) continue;
     const key = (BUSY.has(s.state) ? 1e15 : 0) + s.at;
     if (key > bestKey) [best, bestKey] = [r, key];
   }

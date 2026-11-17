@@ -65,11 +65,12 @@ function workspace(): Workspace {
   const big = { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 1000, cache_creation_input_tokens: 50 };
   transcript(otto, "s1.jsonl", "otto", [
     call("2026-11-01T12:00:00Z", "m0", { output_tokens: 7000 }), // before the first change: not counted
-    call("2026-11-02T09:30:00Z", "m00", { output_tokens: 7 }), // LOCAL-b is otto's only item yet
+    call("2026-11-02T09:30:00Z", "m00", { output_tokens: 7 }), // LOCAL-b, otto's only item yet, is queued
     call("2026-11-02T11:00:00Z", "m1", big),
-    call("2026-11-02T11:00:01Z", "m1", big), // the same call's second content block
+    call("2026-11-02T11:00:01Z", "m1", { ...big, output_tokens: 12 }), // the same call's last content block, its full output
     call("2026-11-02T13:30:00Z", "m2", { output_tokens: 3 }),
     call("2026-11-02T14:30:00Z", "m3", { output_tokens: 20 }),
+    call("2026-11-10T12:00:00Z", "m6", { output_tokens: 11 }), // LOCAL-a with the human
   ]);
   mkdirSync(join(projectDirFor(otto), "s1", "subagents"), { recursive: true });
   writeFileSync(join(projectDirFor(otto), "s1", "subagents", "agent-x.jsonl"), call("2026-11-02T14:45:00Z", "m4", { output_tokens: 5 }) + "\n");
@@ -104,13 +105,15 @@ test("time, entries and tokens per item and state, and per week", () => {
   assert.equal(item("LOCAL-gone").states["queued"]!.seconds, 0, "an item off the board stops at its last change");
   assert.equal(item("LOCAL-b").states["queued"]!.seconds, (9 * 24) * H);
 
-  // tokens: one call counted once, the working item preferred, then the latest entered
-  assert.deepEqual(a["building"]!.tokens, { input: 100, output: 10, cache_read: 1000, cache_write: 50 });
-  assert.equal(a["agent-review"]!.tokens.output, 3, "between two items in waiting states, the latest entered");
+  // tokens: one call counted once with its largest counts, and not to an item its agent is free of
+  assert.deepEqual(a["building"]!.tokens, { input: 100, output: 12, cache_read: 1000, cache_write: 50 });
+  assert.equal(a["agent-review"]!.tokens.output, 3, "an agent's review fixes are its item's");
+  assert.equal(a["your-review"]!.tokens.output, 0, "waiting on the human, the agent is free");
   assert.equal(a["fixing"]!.tokens.output, 25, "a subagent's calls are its session's");
-  assert.equal(item("LOCAL-b").states["queued"]!.tokens.output, 7, "an item in a waiting state is still its agent's");
+  assert.equal(item("LOCAL-b").states["queued"]!.tokens.output, 0, "nor is a queued one");
   assert.equal(item("WEB-1").states["building"]!.tokens.output, 40, "a builder's worktree is its item's");
-  assert.deepEqual(Object.keys(r.unattributed), ["nap"], "before the first change, and sessions of no fleet agent, are not counted");
+  assert.deepEqual(Object.keys(r.unattributed).sort(), ["nap", "otto"], "before the first change, and sessions of no fleet agent, are not counted");
+  assert.equal(r.unattributed["otto"]!.output, 7 + 11, "otto's calls while its items were queued or with the human");
   assert.equal(r.unattributed["nap"]!.output, 9);
   assert.deepEqual(r.left_out.sort(), ["ada", "rae"]);
 
@@ -122,7 +125,7 @@ test("time, entries and tokens per item and state, and per week", () => {
   assert.equal(w2!.states["gate"]!.seconds, 33 * H);
   assert.equal(w1!.states["gate"]!.entries, 1);
   assert.equal(w2!.states["gate"]!.entries ?? 0, 0);
-  assert.equal(w1!.states["building"]!.tokens.output, 10 + 40);
+  assert.equal(w1!.states["building"]!.tokens.output, 12 + 40);
   assert.equal(w1!.states["queued"]!.seconds, (6 * 24 + 15) * H, "LOCAL-b's queue in its first week");
 });
 
@@ -166,11 +169,24 @@ test("the page and its JSON are served, and the page renders them at phone width
   assert.equal(doc.querySelector("tbody tr td.k b")!.textContent, "LOCAL-b", "the most time first: queued an hour before LOCAL-a started");
   (doc.querySelector('[data-metric="tokens"]') as HTMLElement).click();
   assert.equal(doc.querySelector("tbody tr td.k b")!.textContent, "LOCAL-a");
-  assert.match(doc.querySelector("tbody tr")!.textContent!, /1\.2k/, "LOCAL-a's tokens: 1160 + 3 + 25");
+  assert.match(doc.querySelector("tbody tr")!.textContent!, /1\.2k/, "LOCAL-a's tokens: 1162 + 25");
   const f = doc.getElementById("find") as HTMLInputElement;
   f.value = "web-1";
   f.dispatchEvent(new w.Event("input"));
   assert.deepEqual([...doc.querySelectorAll("tbody td.k b")].map((x) => x.textContent), ["WEB-1"]);
+  // a refresh leaves the filter as it is, caret and all, and the table where it was scrolled to
+  f.value = "local";
+  f.setSelectionRange(2, 2);
+  f.dispatchEvent(new w.Event("input"));
+  (doc.querySelector(".tbl") as HTMLElement).scrollLeft = 120;
+  const later = structuredClone(d);
+  later.items.find((i: { ticket: string }) => i.ticket === "LOCAL-a").states["your-review"].seconds += 86400;
+  const old = doc.querySelector(".tbl");
+  (w as unknown as { render: (x: unknown) => void }).render(later);
+  assert.notEqual(doc.querySelector(".tbl"), old, "the table was rebuilt");
+  assert.equal(doc.getElementById("find"), f, "the same input");
+  assert.equal(f.selectionStart, 2);
+  assert.equal((doc.querySelector(".tbl") as HTMLElement).scrollLeft, 120);
   // the page's own stylesheet keeps the item table, the one wide thing, in a box of its own
   const css = readFileSync(new URL("../src/board/static/analytics.css", import.meta.url), "utf8");
   assert.match(css, /\.tbl\{overflow-x:auto/);

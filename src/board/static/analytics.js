@@ -56,25 +56,49 @@ function footView(d){
     `${un ? `Spent with no item: ${un}.` : ''}</p>`;
 }
 
+// The page is built once and each part is refilled in place, so the filter keeps its caret and any
+// composition in progress, and the item table keeps where it was scrolled to, across every refresh.
+function shell(root){
+  root.innerHTML =
+    `<div class="chips" role="group" aria-label="measure" id="metrics"></div>` +
+    `<section><h2>By week</h2><div class="legend" id="legend"></div><div id="weeks"></div><div id="more"></div></section>` +
+    `<section><h2>By item</h2><input class="find" id="find" type="search" placeholder="filter items" aria-label="filter items">` +
+    `<div id="items"></div><div id="foot"></div></section>`;
+  root.addEventListener('click', e => {
+    const b = e.target.closest('[data-metric]');
+    if(b){ metric = b.dataset.metric; keep('sf-analytics-metric', metric); render(last); }
+    else if(e.target.closest('#allweeks')){ allWeeks = !allWeeks; render(last); }
+  });
+  const f = root.querySelector('#find');
+  f.value = find;
+  f.addEventListener('input', () => { find = f.value; items(last); });
+}
+
+function fill(id, html){
+  const el = document.getElementById(id);
+  if(el.innerHTML !== html) el.innerHTML = html;
+}
+
+function items(d){
+  const box = document.querySelector('#items .tbl');
+  const x = box ? box.scrollLeft : 0;
+  fill('items', itemsView(d));
+  const nbox = document.querySelector('#items .tbl');
+  if(nbox && nbox !== box) nbox.scrollLeft = x;
+}
+
 function render(d){
   last = d;
   const root = document.getElementById('root');
-  const focused = document.activeElement && document.activeElement.id === 'find';
+  if(!document.getElementById('find')) shell(root);
   const used = d.states.filter(s => d.weeks.some(w => w.states[s]));
-  root.innerHTML =
-    `<div class="chips" role="group" aria-label="measure">${Object.entries(METRICS).map(([k, x]) =>
-      `<button class="chip ${k === metric ? 'on' : ''}" data-metric="${k}" aria-pressed="${k === metric}">${esc(x.label)}</button>`).join('')}</div>` +
-    `<section><h2>By week</h2><div class="legend">${used.map(s => `<span><i class="sw" style="background:${color(d.states, s)}"></i>${esc(s)}</span>`).join('')}</div>` +
-    weeksView(d) +
-    (d.weeks.length > 12 ? `<div class="chips"><button class="chip" id="allweeks">${allWeeks ? 'last 12 weeks' : `all ${d.weeks.length} weeks`}</button></div>` : '') +
-    `</section><section><h2>By item</h2><input class="find" id="find" type="search" placeholder="filter items" aria-label="filter items" value="${esc(find)}">` +
-    itemsView(d) + footView(d) + `</section>`;
-  root.querySelectorAll('[data-metric]').forEach(b => b.addEventListener('click', () => { metric = b.dataset.metric; keep('sf-analytics-metric', metric); render(last); }));
-  const aw = document.getElementById('allweeks');
-  if(aw) aw.addEventListener('click', () => { allWeeks = !allWeeks; render(last); });
-  const f = document.getElementById('find');
-  f.addEventListener('input', () => { find = f.value; render(last); });
-  if(focused){ f.focus(); f.setSelectionRange(f.value.length, f.value.length); }
+  fill('metrics', Object.entries(METRICS).map(([k, x]) =>
+    `<button class="chip ${k === metric ? 'on' : ''}" data-metric="${k}" aria-pressed="${k === metric}">${esc(x.label)}</button>`).join(''));
+  fill('legend', used.map(s => `<span><i class="sw" style="background:${color(d.states, s)}"></i>${esc(s)}</span>`).join(''));
+  fill('weeks', weeksView(d));
+  fill('more', d.weeks.length > 12 ? `<div class="chips"><button class="chip" id="allweeks">${allWeeks ? 'last 12 weeks' : `all ${d.weeks.length} weeks`}</button></div>` : '');
+  items(d);
+  fill('foot', footView(d));
 }
 
 (function(){

@@ -25,7 +25,8 @@ import { enabled as trackerEnabled } from "../tickets/store.js";
 
 // The board: a read-only picture of the fleet at `/`, the thread between the human and the lead
 // at `/messages`, and how long items spend in each state at `/analytics` (analytics.ts). `/api` and
-// `/api/messages` are the JSON behind the first two, and both pages re-fetch every two seconds. Posting to `/api/messages` is the one message write, and it only appends to the message
+// `/api/messages` are the JSON behind the first two, and both pages re-fetch every two seconds.
+// Posting to `/api/messages` is the one message write, and it only appends to the message
 // log: the text lands in the thread at once, so the page never looks like it swallowed it. Getting it
 // to the lead is the inbox's job. `/api/messages/seen` only records how far the human has read, in
 // logs/ (seen.ts). state/ is written by the factory alone, so a board that is wrong is
