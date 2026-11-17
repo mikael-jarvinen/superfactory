@@ -362,8 +362,9 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
       review: r.state !== null && IN_REVIEW.has(r.state) ? reviews.get(prKey(p)) : null,
     })),
     // Mikael, 2026-11-16: the card must carry the design's slideset, from design-review through
-    // the build. An item has one once a designer has sent it for review.
-    design: r.design?.slides ? { slides: r.design.slides, canvas: r.design.canvas, approved: !!r.design.approved } : null,
+    // the build. An item has one once a designer has sent it for review. No "approved" mark: on a card
+    // in building or fixing it read as if the PR were approved.
+    design: r.design?.slides ? { slides: r.design.slides, canvas: r.design.canvas } : null,
   }));
   const idx = (s: string | null) => (s !== null && COLUMNS.includes(s) ? COLUMNS.indexOf(s) : 99);
   tickets.sort((a, b) => idx(a.column) - idx(b.column) || (b.age_min ?? 0) - (a.age_min ?? 0));

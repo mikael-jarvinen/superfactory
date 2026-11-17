@@ -204,8 +204,9 @@ test("the server: a card carries its design's slides and canvas once it has them
   const snap = await (await fetch(board.url + "/api")).json();
   const design = (k: string) => snap.tickets.find((t: { ticket: string }) => t.ticket === k).design;
   assert.equal(design("WEB-5"), null, "still being drawn: nothing to link");
-  assert.deepEqual(design("WEB-6"), { slides, canvas, approved: false });
-  assert.deepEqual(design("WEB-7"), { slides, canvas, approved: true }, "kept while it is built");
+  assert.deepEqual(design("WEB-6"), { slides, canvas });
+  assert.deepEqual(design("WEB-7"), { slides, canvas }, "kept while it is built");
   const js = await (await fetch(board.url + "/static/board.js")).text();
   assert.ok(js.includes('href="${esc(t.design.slides)}"') && js.includes('href="${esc(t.design.canvas)}"'), "the card links both");
+  assert.ok(!js.includes("t.design.approved"), "no approved mark: on a card in the build it read as the PR's");
 });
