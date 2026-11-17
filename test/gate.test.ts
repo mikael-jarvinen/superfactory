@@ -40,6 +40,8 @@ function green(over: Routes = {}, head = HEAD, draft = true): Routes {
     [`api repos/${REMOTE}/commits/${head}/check-runs?per_page=100&page=1`]: checkRuns(check("test"), check("scanner")),
     [`api repos/${REMOTE}/commits/${head}/status`]: { stdout: { statuses: [{ context: "review-bot", state: "success", description: "Review completed" }] } },
     "api graphql": { stdout: { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [{ isResolved: true, path: "src/a.ts", line: 3 }] } } } } } },
+    [`api repos/${REMOTE}/pulls/${N}/comments?per_page=100&page=1`]: { stdout: [] },
+    [`api repos/${REMOTE}/pulls/${N}/commits?per_page=100&page=1`]: { stdout: [{ sha: head }] },
     [`pr diff ${N} --repo ${REMOTE}`]: { stdout: diffOf(2, 20) },
     [`pr ready ${N} --repo ${REMOTE}`]: { stdout: "" },
     ...over,
@@ -259,7 +261,7 @@ test("a required review bot must have reviewed the head: pr-ready refuses, pr-wa
   assert.ok(!r.calls.includes(rv), "a completed review at this head needs nothing more");
 
   for (const desc of ["Review skipped: draft pull request"]) {
-    r = ready({ [st]: rabbit("success", desc), [rv]: { stdout: [review("b".repeat(40))] } });
+    r = ready({ [st]: rabbit("success", desc), [rv]: { stdout: [] } });
     assert.equal(r.status, 1, r.stdout);
     assert.match(r.stdout, new RegExp(`CodeRabbit has not reviewed aaaaaaa: its status here says "${desc}"`));
     assert.match(r.stdout, ASK);
@@ -290,6 +292,59 @@ test("a required review bot must have reviewed the head: pr-ready refuses, pr-wa
   assert.equal(r.status, 3, r.stderr);
   assert.equal(r.calls.filter((c) => c === POST).length, 1);
   assert.match(r.stderr, /still waiting after \d+s on:\n {2}- CodeRabbit has not reviewed aaaaaaa/);
+});
+
+// On 2026-11-17 CodeRabbit cut the account to one review an hour, and Mikael chose to keep it for the
+// first version of each PR and let later versions go without it.
+test("a review bot that reviewed an earlier head of the PR lets later heads pass, said as a remark", () => {
+  const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
+  const OLD = "b".repeat(40);
+  const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
+  const rv = `api repos/${REMOTE}/pulls/${N}/reviews?per_page=100&page=1`;
+  const cm = `api repos/${REMOTE}/pulls/${N}/comments?per_page=100&page=1`;
+  const commits = `api repos/${REMOTE}/pulls/${N}/commits?per_page=100&page=1`;
+  const skippedHere = { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review skipped: draft pull request" }] } };
+  const ready = (over: Routes) => run(green({ [st]: skippedHere, [rv]: { stdout: [] }, ...over }), ["pr-ready", "web", String(N)]);
+  const EARLIER = /CodeRabbit reviewed an earlier head, bbbbbbb, not aaaaaaa; later versions go without its review/;
+
+  // never reviewed: refused, with the same ask as before
+  let r = ready({ [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, [`api repos/${REMOTE}/commits/${OLD}/status`]: { stdout: { statuses: [] } } });
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /CodeRabbit has not reviewed aaaaaaa: its status here says "Review skipped: draft pull request" -- comment "@coderabbitai review" on the PR, then run this again/);
+
+  // reviewed an earlier head, by a review, by an inline comment of its own, or by its status there
+  const evidence: Routes[] = [
+    { [rv]: { stdout: [{ user: { login: "coderabbitai[bot]" }, commit_id: OLD, state: "COMMENTED", body: REVIEW_BODY }] } },
+    { [cm]: { stdout: [{ user: { login: "coderabbitai[bot]" }, original_commit_id: OLD, in_reply_to_id: null }] } },
+    { [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] },
+      [`api repos/${REMOTE}/commits/${OLD}/status`]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review completed" }] } } },
+  ];
+  for (const over of evidence) {
+    r = ready(over);
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.stdout, EARLIER);
+    assert.match(r.stdout, /^SENDABLE/m);
+  }
+
+  // its reply in a thread on an older head is not a review of it
+  r = ready({ [cm]: { stdout: [{ user: { login: "coderabbitai[bot]" }, original_commit_id: OLD, in_reply_to_id: 11 }] } });
+  assert.equal(r.status, 1, r.stdout);
+
+  // its unresolved threads still block
+  r = ready({ ...evidence[0], "api graphql": { stdout: { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [{ isResolved: false, path: "src/a.ts", line: 3 }] } } } } } } });
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /unresolved review threads: src\/a.ts:3/);
+
+  // a review of this head passes with no remark about an earlier one
+  r = ready({ [rv]: { stdout: [{ user: { login: "coderabbitai[bot]" }, commit_id: HEAD, state: "COMMENTED", body: REVIEW_BODY }] } });
+  assert.equal(r.status, 0, r.stdout);
+  assert.doesNotMatch(r.stdout, /earlier head/);
+
+  // a review in progress at this head is still waited out
+  r = run(green({ [st]: [{ stdout: { statuses: [{ context: "CodeRabbit", state: "pending", description: "Review in progress" }] } },
+    { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review completed" }] } }], ...evidence[0] }), ["pr-wait", "web", String(N), HEAD]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /waiting \(\d+s\) on: CodeRabbit is reviewing aaaaaaa \(Review in progress\)/);
 });
 
 // On 2026-10-28 CodeRabbit skipped seven drafts, and each time the lead asked for the review by hand
