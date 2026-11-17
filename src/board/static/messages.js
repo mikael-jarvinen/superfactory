@@ -27,7 +27,7 @@ function render(d){
     const mine = m.from === 'human';
     const slot = d.lead_avatar ? `<div class="slot">${mine ? '' : face(d.lead_avatar, 'm')}</div>` : '';
     return `
-    <div class="msg ${mine ? 'human' : esc(m.kind || 'note')} ${slot ? 'chat' : ''}">${slot}<div class="main">
+    <div class="msg ${mine ? 'human' : esc(m.kind || 'note')} ${slot ? 'chat' : ''}"${m.qid ? ` id="q-${esc(m.qid)}"` : ''}>${slot}<div class="main">
       <div class="who">
         <span class="name">${esc(mine ? d.human : lead)}</span>
         ${mine ? '' : `<span class="kind">${esc(m.kind || 'note')}</span>`}
@@ -41,8 +41,91 @@ function render(d){
     </div></div>`;
   }).join('') : '<div class="none">nothing yet</div>';
   if(html !== lastList){ list.innerHTML = html; lastList = html; }
+  renderQueue(d);
   markSeen(d);
 }
+
+// The questions and decisions waiting on the human, oldest first, in a panel that stays shut until
+// opened. A row goes when the board says it is resolved (see queue.ts): marked handled here, replied
+// to from here, or its ticket moved out of blocked. Reading it does not. A row whose message is in the
+// thread below links to it; an older one opens its words in the panel.
+let lastQueue = '', replyTo = null;
+const opened = new Set();
+const firstLine = s => (String(s || '').split('\n').find(l => l.trim()) || '').replace(/^[#>*\s-]+/, '').trim();
+function renderQueue(d){
+  const panel = document.getElementById('queue'), qlist = document.getElementById('qlist');
+  if(!panel || !qlist) return;
+  const q = d.queue || [];
+  document.getElementById('qcount').textContent = q.length;
+  panel.classList.toggle('empty', !q.length);
+  const sel = getSelection();
+  if(!sel.isCollapsed && qlist.contains(sel.anchorNode)) return;
+  const html = q.length ? q.map(i => {
+    const head = `<span class="kind">${esc(i.kind)}</span>${i.ticket ? `<span class="tk">${esc(i.ticket)}</span>` : ''}<span class="when">${esc(when(i.age_min))}</span>`;
+    const line = esc(firstLine(i.text) || i.kind);
+    const open = opened.has(i.id);
+    const go = i.in_thread ? `<a class="line" href="#q-${esc(i.id)}" data-go="${esc(i.id)}">${line}</a>`
+      : open ? `<div class="body">${md(i.text)}</div>${i.link ? `<div class="link"><a href="${esc(i.link)}" target="_blank" rel="noopener">${esc(i.link)}</a></div>` : ''}`
+      : `<button type="button" class="line" data-open="${esc(i.id)}" aria-expanded="false">${line}</button>`;
+    const less = !i.in_thread && open ? `<button type="button" data-open="${esc(i.id)}" aria-expanded="true">less</button>` : '';
+    return `<div class="qi ${esc(i.kind)}"><div class="qhead">${head}</div>${go}
+      <div class="qact"><button type="button" data-reply="${esc(i.id)}">reply</button><button type="button" data-done="${esc(i.id)}">handled</button>${less}</div></div>`;
+  }).join('') : '<div class="none">nothing waiting on you</div>';
+  if(html !== lastQueue){ qlist.innerHTML = html; lastQueue = html; }
+  qItems = new Map(q.map(i => [i.id, i]));
+}
+let qItems = new Map();
+
+async function handled(id){
+  err.textContent = '';
+  try {
+    const r = await fetch('/api/messages/handled', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
+    if(!r.ok) err.textContent = ((await r.json().catch(() => ({}))).error) || 'not marked handled';
+  } catch { err.textContent = 'not marked handled: the board is not answering'; }
+  lastQueue = ''; // redraw, so a button disabled by a failed mark is live again
+  await tick();
+}
+
+function startReply(id){
+  const i = qItems.get(id);
+  if(!i) return;
+  replyTo = id;
+  const quote = firstLine(i.text).slice(0, 200);
+  t.value = `> ${i.ticket ? i.ticket + ': ' : ''}${quote}\n\n`;
+  document.getElementById('replyto').textContent = `replying to ${i.ticket || i.kind}: sending marks it handled`;
+  document.getElementById('replying').hidden = false;
+  t.focus();
+  t.setSelectionRange(t.value.length, t.value.length);
+  scrollTo({top: 0, behavior: 'smooth'});
+}
+function stopReply(){
+  replyTo = null;
+  const r = document.getElementById('replying');
+  if(r) r.hidden = true;
+}
+
+addEventListener('DOMContentLoaded', () => {
+  const qlist = document.getElementById('qlist');
+  if(!qlist) return;
+  qlist.addEventListener('click', e => {
+    const b = e.target.closest('[data-done],[data-reply],[data-open],[data-go]');
+    if(!b) return;
+    if(b.dataset.done){ b.disabled = true; handled(b.dataset.done); }
+    else if(b.dataset.reply) startReply(b.dataset.reply);
+    else if(b.dataset.open){
+      const id = b.dataset.open;
+      opened.has(id) ? opened.delete(id) : opened.add(id);
+      lastQueue = ''; tick();
+    } else if(b.dataset.go){
+      const m = document.getElementById('q-' + b.dataset.go);
+      if(!m) return;
+      e.preventDefault();
+      m.scrollIntoView({behavior: 'smooth', block: 'start'});
+      m.classList.remove('flash'); void m.offsetWidth; m.classList.add('flash');
+    }
+  });
+  document.getElementById('unreply').addEventListener('click', () => { stopReply(); t.value = ''; });
+});
 
 // While the page is visible, tell the board the newest lead message now on screen, so a reminder
 // knows what the human has read. Lead rows have no id; their `t` is the mark. Each `t` is posted once
@@ -110,7 +193,13 @@ async function send(){
   try {
     const r = await (await fetch('/api/messages', {method:'POST', headers:{'Content-Type':'application/json'},
                                                    body: JSON.stringify({text, images})})).json();
-    if(r.ok){ t.value = ''; clearPreview(); await tick(); } else { err.textContent = r.error || 'not sent'; }
+    if(r.ok){
+      t.value = ''; clearPreview();
+      // A reply started from the panel answers that question: it leaves the queue once sent.
+      const answered = replyTo;
+      stopReply();
+      if(answered) await handled(answered); else await tick();
+    } else { err.textContent = r.error || 'not sent'; }
   } catch { err.textContent = 'not sent: the board is not answering'; }
   b.disabled = false; b.textContent = 'send'; t.focus();
 }
