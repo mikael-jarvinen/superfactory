@@ -78,12 +78,12 @@ export function readTail(path: string): Message[] {
 }
 
 // readTail, but null when the log cannot be read (missing, or a transient read failure), so a caller
-// can tell that from a log with no matching row.
-export function tryReadTail(path: string): Message[] | null {
+// can tell that from a log with no matching row. `bytes` is how much of the end to read.
+export function tryReadTail(path: string, bytes = TAIL_BYTES): Message[] | null {
   let buf: Buffer;
   try {
     const size = statSync(path).size;
-    const start = size > TAIL_BYTES ? size - TAIL_BYTES : 0;
+    const start = size > bytes ? size - bytes : 0;
     buf = Buffer.alloc(size - start);
     const fd = openSync(path, "r");
     try {
