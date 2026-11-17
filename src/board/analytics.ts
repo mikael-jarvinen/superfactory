@@ -99,10 +99,11 @@ export function timelines(ws: Workspace): Timeline[] {
 // When a step ends: the next change, now for the current state of a live item, and at once for
 // done, which is where an item stops rather than a place it waits.
 const stepEnd = (tl: Timeline, i: number, now: number): number => {
+  const s = tl.steps[i] as Step;
+  if (s.state === "done") return s.at; // even when it was forced back out later
   const next = tl.steps[i + 1];
   if (next) return next.at;
-  const s = tl.steps[i] as Step;
-  return s.state === "done" || !tl.live ? s.at : Math.max(s.at, now);
+  return tl.live ? Math.max(s.at, now) : s.at;
 };
 
 // ---------------------------------------------------------------- transcripts
@@ -271,6 +272,9 @@ export interface Report {
   left_out: string[];
 }
 
+// Agents whose sessions are never counted, though one may share a cwd with an agent who is.
+const leftOut = (a: { role: string; host?: string | null }) => a.role === "lead" || a.role === "reviewer" || !!a.host;
+
 // States an item waits in while its agent is free: not started, or waiting on a human.
 const NOT_ON = new Set(["queued", "blocked", "design-review", "your-review", "colleague-review"]);
 
@@ -342,7 +346,7 @@ export function report(ws: Workspace, usage: TranscriptUsage, now = Date.now()):
   // Calls before the first recorded change could be no item's, so they are not counted, even as
   // unattributed; nor are sessions named for no agent in the fleet, a probe or a human's own.
   const since = Math.min(...tls.map((t) => (t.steps[0] as Step).at));
-  const fleet = new Set(ws.config.agents.map((a) => a.name));
+  const fleet = new Set(ws.config.agents.filter((a) => !leftOut(a)).map((a) => a.name));
   const unattributed: Record<string, Tokens> = {};
   const byTicket = new Map(tls.map((t) => [t.ticket, t]));
   for (const { dir, item } of tls.length ? sources(ws, tls.map((t) => t.ticket)) : []) {
@@ -365,7 +369,7 @@ export function report(ws: Workspace, usage: TranscriptUsage, now = Date.now()):
       }
     }
   }
-  const left_out = ws.config.agents.filter((a) => a.role === "lead" || a.role === "reviewer" || a.host).map((a) => a.name);
+  const left_out = ws.config.agents.filter(leftOut).map((a) => a.name);
   const recs = new Map(allRecs(ws).map((r) => [r.ticket, r]));
   return {
     states: [...STATES],

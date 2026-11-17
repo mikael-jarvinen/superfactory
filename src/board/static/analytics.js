@@ -105,7 +105,11 @@ function render(d){
   async function tick(){
     const pulse = document.getElementById('pulse'), at = document.getElementById('at');
     let d;
-    try { d = await (await fetch('/api/analytics', {cache: 'no-store'})).json(); }
+    try {
+      const res = await fetch('/api/analytics', {cache: 'no-store'});
+      if(!res.ok) throw new Error(String(res.status));
+      d = await res.json();
+    }
     catch { pulse.classList.add('stale'); at.textContent = 'not answering'; return; }
     pulse.classList.remove('stale'); at.textContent = d.at;
     render(d);

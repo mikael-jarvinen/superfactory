@@ -153,7 +153,13 @@ test("the page and its JSON are served, and the page renders them at phone width
   const dom = new JSDOM(page.replace(/<script src[^>]*><\/script>/g, ""), { runScripts: "outside-only", url: `${b.url}/analytics`, pretendToBeVisual: true });
   after(() => dom.window.close());
   const w = dom.window;
-  Object.assign(w, { fetch: async (u: string) => (u.startsWith("/api/analytics") ? { ok: true, json: async () => d } : { ok: false }), matchMedia: () => ({ matches: true }), innerWidth: 375 });
+  let down = false;
+  const ticks: (() => Promise<void>)[] = [];
+  Object.assign(w, {
+    fetch: async (u: string) => (u.startsWith("/api/analytics") && !down ? { ok: true, json: async () => d } : { ok: false, status: 500, json: async () => ({ error: "boom" }) }),
+    matchMedia: () => ({ matches: true }), innerWidth: 375,
+    setInterval: (fn: () => Promise<void>, ms: number) => (ms === 30000 && ticks.push(fn), 0),
+  });
   const ctx = dom.getInternalVMContext();
   for (const f of ["common.js", "analytics.js"])
     new vm.Script(readFileSync(new URL(`../src/board/static/${f}`, import.meta.url), "utf8"), { filename: f }).runInContext(ctx);
@@ -187,9 +193,41 @@ test("the page and its JSON are served, and the page renders them at phone width
   assert.equal(doc.getElementById("find"), f, "the same input");
   assert.equal(f.selectionStart, 2);
   assert.equal((doc.querySelector(".tbl") as HTMLElement).scrollLeft, 120);
+  // a report that fails leaves the last good one, and says so
+  const at = doc.getElementById("at")!.textContent;
+  const table = doc.querySelector(".tbl")!.innerHTML;
+  down = true;
+  assert.equal(ticks.length, 1);
+  await ticks[0]!();
+  assert.equal(doc.getElementById("at")!.textContent, "not answering");
+  assert.notEqual(at, "not answering");
+  assert.equal(doc.querySelector(".tbl")!.innerHTML, table);
   // the page's own stylesheet keeps the item table, the one wide thing, in a box of its own
   const css = readFileSync(new URL("../src/board/static/analytics.css", import.meta.url), "utf8");
   assert.match(css, /\.tbl\{overflow-x:auto/);
+});
+
+test("done counts no time, even for an item forced back out of it", () => {
+  const ws = openWorkspace(tempWorkspace(GROUPED));
+  ev(ws, "2026-11-05T00:00:00Z", "LOCAL-re", null, "building", null);
+  ev(ws, "2026-11-05T01:00:00Z", "LOCAL-re", "building", "done", null);
+  ev(ws, "2026-11-06T01:00:00Z", "LOCAL-re", "done", "building", null);
+  ev(ws, "2026-11-06T02:00:00Z", "LOCAL-re", "building", "done", null);
+  rec(ws, "LOCAL-re", "done", null, "2026-11-06T02:00:00+00:00");
+  const s = report(ws, new TranscriptUsage(), NOW).items[0]!.states;
+  assert.equal(s["done"]!.seconds, 0);
+  assert.equal(s["done"]!.entries, 2);
+  assert.equal(s["building"]!.seconds, 2 * H);
+});
+
+test("the lead's and reviewers' sessions are not counted, even in an agent's cwd", () => {
+  const ws = workspace();
+  const shared = join(ws.dir, "assistants");
+  transcript(shared, "lead.jsonl", "ada", [call("2026-11-01T12:00:00Z", "x1", { output_tokens: 1 }), call("2026-11-02T11:00:00Z", "x2", { output_tokens: 500 })]);
+  transcript(shared, "rev.jsonl", "rae", [call("2026-11-02T11:00:00Z", "x3", { output_tokens: 500 })]);
+  const r = report(ws, new TranscriptUsage(), NOW);
+  assert.deepEqual(Object.keys(r.unattributed).sort(), ["nap", "otto"]);
+  assert.equal(r.items.find((i) => i.ticket === "LOCAL-a")!.states["building"]!.tokens.output, 12);
 });
 
 test("the nav link reaches every other page through common.js", () => {
