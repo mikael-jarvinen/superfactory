@@ -110,6 +110,29 @@ export interface Review {
   body: string | null;
 }
 
+// Every page of a list endpoint, or undefined when any page cannot be read.
+function allPages<T>(path: string): T[] | undefined {
+  const all: T[] = [];
+  for (let page = 1; ; page++) {
+    const d = api<T[]>(`${path}?per_page=100&page=${page}`);
+    if (!Array.isArray(d)) return undefined;
+    all.push(...d);
+    if (d.length < 100) return all;
+  }
+}
+
+export interface ReviewComment {
+  user: { login: string } | null;
+  original_commit_id: string | null;
+  in_reply_to_id?: number | null;
+}
+
+// Every inline review comment on a PR.
+export const reviewComments = (repo: Repo, n: number) => allPages<ReviewComment>(`repos/${repo.remote}/pulls/${n}/comments`);
+
+// The PR's commits, oldest first. A force-push drops the commits it replaced.
+export const prCommits = (repo: Repo, n: number) => allPages<{ sha: string }>(`repos/${repo.remote}/pulls/${n}/commits`);
+
 // Every review on a PR, every page.
 export function reviews(repo: Repo, n: number): Review[] | undefined {
   const all: Review[] = [];
