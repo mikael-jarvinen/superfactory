@@ -6,6 +6,12 @@
 // show the change. Screenshots are named `NN-what-it-shows.png` in the order a reviewer should see
 // them. After the roll the camera paces each step, draws the cursor and the click rings, and records
 // the frames `factory demo` encodes to demo.mp4. DEMO_PACE=0 films at full speed.
+//
+// Words on screen, for a colleague who never saw the ticket. `camera.title('After: ...')` opens the
+// video with a title card, and `camera.caption('...')` puts a line at the bottom before each step
+// that changes the screen, saying what the viewer is about to see. A caption stays until the next
+// one or `camera.caption(null)`. The before and after videos use the same captions, so they can be
+// compared. Neither shows in the screenshots.
 // Environment: DEMO_BASE_URL (the app), DEMO_OUT (where files go), and DEMO_USER and DEMO_PASS
 // from the workspace's demo.env. A login page that comes prefilled needs neither: signIn only
 // clicks the button. Nothing here is committed to a product repo.
@@ -17,6 +23,8 @@ import { dirname, join } from 'node:path';
 const OUT = process.env.DEMO_OUT as string;
 if (!OUT) throw new Error('DEMO_OUT is not set: run this through `factory demo`');
 const BASE = process.env.DEMO_BASE_URL ?? 'http://localhost:3000/';
+// `factory demo --before` films into <KEY>-before: one spec makes both videos, with the same captions.
+const STATE = OUT.endsWith('-before') ? 'Before' : 'After';
 
 // ---------------------------------------------------------------- the camera: no need to edit
 const PACE = Number(process.env.DEMO_PACE ?? 1);
@@ -27,12 +35,15 @@ const MS = {
   afterInput: 900,
   afterGoto: 1000,
   endHold: 2500,
+  title: 1800, // the title card
+  read: 1200, // a caption, read before its step starts; longer for a longer line
 };
 const POINTER = new Set(['click', 'dblclick', 'tap', 'check', 'uncheck', 'setChecked']);
 const OTHER = new Set(['fill', 'type', 'press', 'selectOption', 'setInputFiles', 'hover']);
 
 const cam = {
   page: undefined as Page | undefined, rolling: false, x: 0, y: 0, shooting: false, blackoutUntil: 0, cut: 0,
+  caption: null as string | null,
 };
 const pause = (page: Page, ms: number) => (PACE > 0 ? page.waitForTimeout(ms * PACE) : undefined);
 
@@ -57,10 +68,16 @@ function overlay() {
       .ring{position:fixed;width:56px;height:56px;margin:-28px 0 0 -28px;border-radius:50%;
         border:4px solid #ff2d55;background:rgba(255,45,85,.22);box-shadow:0 0 0 2px #fff;
         animation:ring 1100ms ease-out forwards}
+      .caption{position:fixed;left:0;right:0;bottom:0;padding:18px 32px 20px;background:rgba(17,17,17,.86);
+        color:#fff;font:600 26px/1.35 system-ui,-apple-system,'Segoe UI',sans-serif;text-align:center}
+      .title{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:0 10%;
+        background:#111;color:#fff;font:700 44px/1.3 system-ui,-apple-system,'Segoe UI',sans-serif;text-align:center}
+      .caption:empty,.title:empty{display:none}
       @keyframes ring{0%{transform:scale(.25);opacity:1}60%{opacity:.95}100%{transform:scale(1.35);opacity:0}}
     </style><div class="cursor"><svg viewBox="0 0 28 32" width="28" height="32">
       <path d="M2 2 L2 26 L8.5 19.5 L13 29.5 L17.5 27.5 L13 17.8 L22 17.8 Z"
-        fill="#111" stroke="#fff" stroke-width="2" stroke-linejoin="round"/></svg></div>`;
+        fill="#111" stroke="#fff" stroke-width="2" stroke-linejoin="round"/></svg></div>
+      <div class="caption"></div><div class="title"></div>`;
     cursor = root.querySelector('.cursor') as HTMLElement;
     document.documentElement.appendChild(host);
     return true;
@@ -69,6 +86,10 @@ function overlay() {
     x = nx;
     y = ny;
     if (ensure()) cursor.style.transform = `translate(${x - 2}px, ${y - 2}px)`;
+  };
+  // Text, not markup: a caption is set as textContent.
+  w.__demoText = (which: 'caption' | 'title', text: string | null) => {
+    if (ensure()) (root.querySelector(`.${which}`) as HTMLElement).textContent = text ?? '';
   };
   w.__demoHide = (hidden: boolean) => {
     if (host) host.style.visibility = hidden ? 'hidden' : '';
@@ -166,16 +187,24 @@ function patch(page: Page) {
   };
 }
 
-const test = base.extend<{ camera: { roll: () => Promise<void> } }>({
+interface Camera {
+  roll: () => Promise<void>;
+  caption: (text: string | null) => Promise<void>;
+  title: (text: string) => Promise<void>;
+}
+
+const test = base.extend<{ camera: Camera }>({
   camera: async ({ page }, use) => {
     const dir = `${OUT}/.frames`;
     rmSync(dir, { recursive: true, force: true });
     const size = page.viewportSize() ?? { width: 1280, height: 800 };
-    Object.assign(cam, { page, rolling: false, x: size.width / 2, y: size.height / 2, cut: 0 });
+    Object.assign(cam, { page, rolling: false, x: size.width / 2, y: size.height / 2, cut: 0, caption: null });
     await page.addInitScript(overlay);
+    // A new document has a new overlay: put the cursor and the caption back on it.
     page.on('load', () => {
       if (!cam.rolling) return;
       page.evaluate(([x, y]) => (window as any).__demoCursor?.(x, y), [cam.x, cam.y]).catch(() => {});
+      if (cam.caption) page.evaluate((t) => (window as any).__demoText?.('caption', t), cam.caption).catch(() => {});
     });
     patch(page);
     const frames: { file: string; at: number }[] = [];
@@ -199,7 +228,21 @@ const test = base.extend<{ camera: { roll: () => Promise<void> } }>({
       });
       await pause(page, MS.afterGoto);
     };
-    await use({ roll });
+    const text = (which: 'caption' | 'title', t: string | null) => page.evaluate(([w, v]) => (window as any).__demoText?.(w, v), [which, t] as const);
+    // The line at the bottom, held long enough to read before the step it announces.
+    const caption = async (t: string | null) => {
+      cam.caption = t?.trim() || null;
+      await text('caption', cam.caption);
+      if (cam.caption && cam.rolling) await pause(page, MS.read + cam.caption.split(/\s+/).length * 120);
+    };
+    // The card the video opens with. Called before roll(), it is the first frame filmed.
+    const title = async (t: string) => {
+      await text('title', t);
+      if (!cam.rolling) await roll();
+      await pause(page, MS.title);
+      await text('title', null);
+    };
+    await use({ roll, caption, title });
     if (!cam.rolling) return;
     await pause(page, MS.endHold);
     const end = performance.now() - cam.cut;
@@ -293,12 +336,17 @@ test('demo', async ({ page, camera }) => {
   await page.goto(BASE); // the changed screen's URL
   // await expect(page.getByRole('heading', { name: 'The changed screen' })).toBeVisible();
 
-  // Roll on the screen the PR changes, right before the first step that shows the change.
-  await camera.roll();
+  // Roll on the screen the PR changes, right before the first step that shows the change. The title
+  // card rolls the camera: "Before: ..." in the before video, "After: ..." in the after one.
+  await camera.title(`${STATE}: rich text survives a save`);
 
-  // Only the steps that show the change, then stop. For a PR that fixes saving rich text:
+  // Only the steps that show the change, then stop. Each step that changes the screen gets a
+  // caption first, in plain words, the same in the before video. For a PR that fixes saving rich text:
+  // await camera.caption('Type bold text and a list into the description');
   // await page.getByRole('textbox', { name: 'Description' }).fill('Bold text and a list');
+  // await camera.caption('Save, then reload the page');
   // await page.getByRole('button', { name: 'Save' }).click();
   // await page.reload();
+  // await camera.caption('The bold text and the list are still there');
   await shot(page, '01-rich-text-kept-after-save');
 });
