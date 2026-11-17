@@ -14,6 +14,7 @@ import { allRecs, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU }
 import type { Workspace } from "../workspace.js";
 import { roster } from "../config.js";
 import { capitalize, run, sleep } from "../util.js";
+import { report, type Report, TranscriptUsage } from "./analytics.js";
 import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, saveAttachment } from "./inbox.js";
 import { markSeen, readSeen } from "./seen.js";
 import { tryFailure } from "../failures.js";
@@ -22,9 +23,9 @@ import { isScheduler } from "../scheduler/state.js";
 import { isTrackerApi, trackerApi, trackerSummary } from "../tickets/api.js";
 import { enabled as trackerEnabled } from "../tickets/store.js";
 
-// The board: a read-only picture of the fleet at `/`, and the thread between the human and the lead
-// at `/messages`. `/api` and `/api/messages` are the JSON behind them, and both pages re-fetch every
-// two seconds. Posting to `/api/messages` is the one message write, and it only appends to the message
+// The board: a read-only picture of the fleet at `/`, the thread between the human and the lead
+// at `/messages`, and how long items spend in each state at `/analytics` (analytics.ts). `/api` and
+// `/api/messages` are the JSON behind the first two, and both pages re-fetch every two seconds. Posting to `/api/messages` is the one message write, and it only appends to the message
 // log: the text lands in the thread at once, so the page never looks like it swallowed it. Getting it
 // to the lead is the inbox's job. `/api/messages/seen` only records how far the human has read, in
 // logs/ (seen.ts). state/ is written by the factory alone, so a board that is wrong is
@@ -422,7 +423,9 @@ const TYPES: Record<string, string> = {
   ".webp": "image/webp",
   ".ico": "image/x-icon",
 };
-const PAGES: Record<string, string> = { "/": "board.html", "/messages": "messages.html" };
+const PAGES: Record<string, string> = { "/": "board.html", "/messages": "messages.html", "/analytics": "analytics.html" };
+// The analytics read every transcript the fleet wrote, so one report serves every request for this long.
+const ANALYTICS_EVERY = 30_000;
 // The local tracker's pages, served only when the workspace has one.
 const TRACKER_PAGES: Record<string, string> = { "/tickets": "tickets.html", "/wiki": "wiki.html" };
 // Large enough for several pasted screenshots; the POST is same-site only, so this is not a public surface.
@@ -500,6 +503,12 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
   const stacks = new StackChecks();
   const receipts = opts.receipts ?? new Receipts();
   const reviews = new ReviewCache(opts.reviews);
+  const usage = new TranscriptUsage();
+  let analytics: { at: number; body: Report & { at: string } } | null = null;
+  const readAnalytics = () => {
+    if (!analytics || Date.now() - analytics.at >= ANALYTICS_EVERY) analytics = { at: Date.now(), body: { at: clock(), ...report(ws, usage) } };
+    return analytics.body;
+  };
   const readReviews = () => {
     try {
       reviews.refresh(reviewKeys(ws)).catch(() => {});
@@ -586,6 +595,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
       return json(res, 200, snapshot(ws, sessions, stacks, reviews));
     }
     if (path === "/api/messages") return json(res, 200, messagesView(ws, sessions, receipts));
+    if (path === "/api/analytics") return json(res, 200, readAnalytics());
     if (isTrackerApi(path)) {
       replyTracker(res, trackerApi(ws, "GET", req.url ?? "/"));
       return;
