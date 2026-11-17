@@ -95,11 +95,15 @@ const REVIEW_BOTS = /^(coderabbitai|copilot|aikido)/i;
 export type Kind = "bot" | "colleague" | "human";
 export type Shape = "finding" | "suggestion" | "question" | "change request" | "approval";
 
-// What a body says once the machinery is gone: HTML comments, folded <details> and quoted lines.
-function prose(body: string): string {
+// What a body says once the machinery is gone: HTML comments, folded <details>, every other tag,
+// bold markers and quoted lines. CodeRabbit opens a finding with an <img> icon inside bold, and
+// the note's 200 characters went on markup before a word of the finding.
+export function prose(body: string): string {
   return body
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/<details>[\s\S]*?<\/details>/g, "")
+    .replace(/<\/?[a-zA-Z][^>]*>/g, "")
+    .replace(/\*\*|__/g, "")
     .split("\n").filter((l) => !l.startsWith(">")).join("\n")
     .trim();
 }
@@ -170,7 +174,10 @@ export function newItems(pr: PrNode, viewer: string, cursor: string | undefined)
       add(c, where, `thread ${t.id}, comment ${c.databaseId}`);
     }
   }
-  for (const r of pr.reviews?.nodes ?? []) if (seen(r.createdAt) && cursor) add(r, "review", `review ${r.databaseId}`, r.state);
+  // A bot's review body is its summary ("Actionable comments posted: 3"); its findings are the
+  // inline comments, listed above.
+  for (const r of pr.reviews?.nodes ?? [])
+    if (seen(r.createdAt) && cursor && kindOf(r.author, r.body ?? "", viewer) !== "bot") add(r, "review", `review ${r.databaseId}`, r.state);
   for (const c of pr.comments?.nodes ?? []) if (seen(c.createdAt) && cursor) add(c, "top-level", `comment ${c.databaseId}`);
   items.sort((a, b) => a.at.localeCompare(b.at));
   return { items, newest };
