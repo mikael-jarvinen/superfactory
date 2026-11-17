@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import vm from "node:vm";
 import { JSDOM } from "jsdom";
-import { projectDirFor, report, TranscriptUsage, weekOf } from "../src/board/analytics.js";
+import { projectDirFor, quantile, report, stat, TranscriptUsage, weekOf } from "../src/board/analytics.js";
 import { serve } from "../src/board/server.js";
 import { appendEvent, saveRec } from "../src/state.js";
 import { openWorkspace, type Workspace } from "../src/workspace.js";
@@ -117,16 +117,26 @@ test("time, entries and tokens per item and state, and per week", () => {
   assert.equal(r.unattributed["nap"]!.output, 9);
   assert.deepEqual(r.left_out.sort(), ["ada", "rae"]);
 
-  // weeks start on Monday, UTC, and a wait is split across the weeks it spans
+  // weeks start on Monday, UTC, and a stay counts whole in the week it ended
   assert.equal(new Date(weekOf(Date.parse("2026-11-08T23:59:00Z"))).toISOString().slice(0, 10), "2026-11-02");
   assert.deepEqual(r.weeks.map((w) => w.week), ["2026-11-02", "2026-11-09"]);
   const [w1, w2] = r.weeks;
-  assert.equal(w1!.states["gate"]!.seconds, 12 * H);
-  assert.equal(w2!.states["gate"]!.seconds, 33 * H);
-  assert.equal(w1!.states["gate"]!.entries, 1);
-  assert.equal(w2!.states["gate"]!.entries ?? 0, 0);
+  assert.equal(w1!.tickets, 2, "LOCAL-a and WEB-1; LOCAL-b's queue is still open");
+  assert.equal(w1!.states["gate"], undefined, "the gate stay ended the next week");
+  assert.equal(w2!.states["gate"]!.seconds, 45 * H, "whole, though it began the week before");
+  assert.deepEqual(w1!.stats["building"]!.seconds, { n: 2, mean: 4 * H, p50: 4 * H, p80: 5.2 * H, p95: 5.8 * H });
+  assert.equal(w1!.stats["agent-review"]!.seconds.mean, 142 * H, "a ticket's two stays in a state are added up");
+  assert.equal(w1!.stats["agent-review"]!.entries.mean, 2);
   assert.equal(w1!.states["building"]!.tokens.output, 12 + 40);
-  assert.equal(w1!.states["queued"]!.seconds, (6 * 24 + 15) * H, "LOCAL-b's queue in its first week");
+  // open stays are in no average, and counted in the week holding now
+  assert.equal(w1!.states["queued"], undefined);
+  assert.deepEqual(w1!.open, {});
+  assert.deepEqual(w2!.open, { "queued": { n: 1, longest: 216 * H }, "your-review": { n: 1, longest: 24 * H } });
+  assert.equal(w2!.stats["your-review"], undefined);
+  assert.deepEqual(r.all.open, w2!.open);
+  assert.equal(r.all.tickets, 2, "LOCAL-gone's last state has no end, so it is in no average");
+  assert.equal(r.all.stats["gate"]!.seconds.mean, 45 * H);
+  assert.equal(r.all.total!.seconds.mean, (2 + 1 + 142 + 1 + 45 + 6) * H / 2);
 });
 
 test("a transcript is read on from where it stopped, and a call is still counted once", () => {
@@ -170,8 +180,10 @@ test("the page and its JSON are served, and the page renders them at phone width
     await new Promise((r) => setTimeout(r, 20));
   }
   assert.equal(doc.querySelectorAll('header nav a[href="/analytics"]').length, 1, "one analytics link");
-  // served, the report runs to the real now, so the weeks run on to this one
-  assert.equal(doc.querySelectorAll(".wk").length, d.weeks.length);
+  // all time first: one bar, labelled, of averages per ticket
+  assert.equal(doc.querySelectorAll(".wk").length, 1);
+  assert.match(doc.querySelector(".wk")!.textContent!, /^All time.*2 tickets/);
+  assert.match(doc.getElementById("barsh")!.textContent!, /Average time per ticket, all time/);
   assert.equal(doc.querySelector("tbody tr td.k b")!.textContent, "LOCAL-b", "the most time first: queued an hour before LOCAL-a started");
   (doc.querySelector('[data-metric="tokens"]') as HTMLElement).click();
   assert.equal(doc.querySelector("tbody tr td.k b")!.textContent, "LOCAL-a");
@@ -234,5 +246,197 @@ test("the nav link reaches every other page through common.js", () => {
   for (const f of ["board.html", "messages.html", "tickets.html", "wiki.html"]) {
     const html = readFileSync(new URL(`../src/board/static/${f}`, import.meta.url), "utf8");
     assert.match(html, /\/static\/common\.js/, `${f} loads common.js`);
+  }
+});
+
+test("percentiles: none, one, two and a few values", () => {
+  assert.ok(Number.isNaN(quantile([], 0.5)));
+  assert.equal(stat([]), null, "no tickets make no figures");
+  assert.deepEqual(stat([7]), { n: 1, mean: 7, p50: 7, p80: 7, p95: 7 }, "one ticket is every percentile of itself");
+  const two = stat([10, 0])!;
+  assert.deepEqual([two.n, two.mean, two.p50], [2, 5, 5], "sorted first; the median of two is their mean");
+  assert.ok(Math.abs(two.p80 - 8) < 1e-9 && Math.abs(two.p95 - 9.5) < 1e-9, "between the two, by rank");
+  // 1..5: ranks 0..4, so p80 sits at rank 3.2 and p95 at 3.8
+  const five = stat([5, 3, 1, 4, 2])!;
+  assert.equal(five.mean, 3);
+  assert.equal(five.p50, 3);
+  assert.ok(Math.abs(five.p80 - 4.2) < 1e-9);
+  assert.ok(Math.abs(five.p95 - 4.8) < 1e-9);
+  // a long tail moves p95 and the mean, not the median
+  const tail = stat([1, 1, 1, 1, 100])!;
+  assert.equal(tail.p50, 1);
+  assert.ok(tail.mean > 20 && tail.p95 > 80);
+});
+
+test("a stay counts whole in the week and month it ended, across a year end too", () => {
+  const ws = openWorkspace(tempWorkspace(GROUPED));
+  // Friday noon to the next Tuesday noon: over the month's end (Sunday) and the week's (Monday)
+  ev(ws, "2026-10-30T12:00:00Z", "LOCAL-x", null, "building", null);
+  ev(ws, "2026-11-03T12:00:00Z", "LOCAL-x", "building", "done", null);
+  // over a year's end, forced out of done and back, so building twice in the same week and month
+  ev(ws, "2026-12-31T20:00:00Z", "LOCAL-y", null, "building", null);
+  ev(ws, "2027-01-01T04:00:00Z", "LOCAL-y", "building", "done", null);
+  ev(ws, "2027-01-02T00:00:00Z", "LOCAL-y", "done", "building", null);
+  ev(ws, "2027-01-02T01:00:00Z", "LOCAL-y", "building", "done", null);
+  rec(ws, "LOCAL-x", "done", null, "2026-11-03T12:00:00+00:00");
+  rec(ws, "LOCAL-y", "done", null, "2027-01-02T01:00:00+00:00");
+  const r = report(ws, new TranscriptUsage(), Date.parse("2027-01-15T00:00:00Z"));
+  const wk = (k: string) => r.weeks.find((w) => w.week === k)!;
+  const mo = (k: string) => r.months.find((m) => m.month === k)!;
+  assert.equal(wk("2026-10-26").stats["building"], undefined, "nothing ended the week it began");
+  assert.deepEqual(wk("2026-11-02").stats["building"]!.seconds, { n: 1, mean: 96 * H, p50: 96 * H, p80: 96 * H, p95: 96 * H });
+  assert.equal(mo("2026-10").stats["building"], undefined);
+  assert.equal(mo("2026-11").states["building"]!.seconds, 96 * H);
+  assert.equal(mo("2026-12").tickets, 0, "the year-end stay ended in January");
+  assert.equal(mo("2027-01").stats["building"]!.seconds.mean, 9 * H, "8h and 1h, one ticket");
+  assert.equal(mo("2027-01").stats["building"]!.entries.mean, 2);
+  assert.equal(wk("2026-12-28").stats["building"]!.seconds.n, 1);
+  assert.equal(mo("2027-01").stats["done"]!.seconds.mean, 0, "done counts no time");
+  assert.equal(mo("2027-01").stats["done"]!.entries.mean, 2);
+  // done has a known end, its own time, so it stays counted after the item is taken off the board
+  ev(ws, "2027-01-05T00:00:00Z", "LOCAL-gone", null, "building", null);
+  ev(ws, "2027-01-05T02:00:00Z", "LOCAL-gone", "building", "done", null);
+  const off = report(ws, new TranscriptUsage(), Date.parse("2027-01-15T00:00:00Z"));
+  assert.equal(off.items.find((x) => x.ticket === "LOCAL-gone")!.live, false);
+  assert.equal(off.months.find((m) => m.month === "2027-01")!.stats["done"]!.entries.n, 2, "LOCAL-y's and LOCAL-gone's");
+  assert.equal(off.all.stats["done"]!.entries.n, 3);
+  // a past period does not change as time goes on
+  const later = report(ws, new TranscriptUsage(), Date.parse("2027-03-01T00:00:00Z"));
+  assert.deepEqual(later.months.find((m) => m.month === "2026-11"), mo("2026-11"));
+});
+
+test("a period with nothing in it is listed empty, up to the one holding now", () => {
+  const ws = openWorkspace(tempWorkspace(GROUPED));
+  ev(ws, "2026-11-03T00:00:00Z", "WEB-1", null, "building", null);
+  ev(ws, "2026-11-03T06:00:00Z", "WEB-1", "building", "done", null);
+  rec(ws, "WEB-1", "done", null, "2026-11-03T06:00:00+00:00");
+  const r = report(ws, new TranscriptUsage(), Date.parse("2027-01-06T00:00:00Z"));
+  assert.deepEqual(r.weeks.map((w) => w.week), ["2026-11-02", "2026-11-09", "2026-11-16", "2026-11-23", "2026-11-30", "2026-12-07", "2026-12-14", "2026-12-21", "2026-12-28", "2027-01-04"]);
+  const none = { states: {}, tickets: 0, stats: {}, total: null, open: {} };
+  for (const w of r.weeks.slice(1)) assert.deepEqual({ ...w, week: undefined }, { ...none, week: undefined });
+  assert.deepEqual(r.months.map((m) => m.month), ["2026-11", "2026-12", "2027-01"]);
+  assert.deepEqual({ ...r.months[1]!, month: undefined }, { ...none, month: undefined });
+
+  // a fresh workspace, with no history at all, has the current week and month, empty
+  const fresh = report(openWorkspace(tempWorkspace(GROUPED)), new TranscriptUsage(), Date.parse("2026-11-17T10:00:00Z"));
+  assert.deepEqual(fresh.weeks, [{ week: "2026-11-16", ...none }]);
+  assert.deepEqual(fresh.months, [{ month: "2026-11", ...none }]);
+  assert.deepEqual(fresh.all, none);
+  assert.deepEqual(fresh.items, []);
+});
+
+// The page against a report given to it, at phone width.
+async function page(d: unknown) {
+  const html = readFileSync(new URL("../src/board/static/analytics.html", import.meta.url), "utf8");
+  const dom = new JSDOM(html.replace(/<script src[^>]*><\/script>/g, ""), { runScripts: "outside-only", url: "http://board.test/analytics", pretendToBeVisual: true });
+  after(() => dom.window.close());
+  const w = dom.window;
+  const state = { down: false, ticks: [] as (() => Promise<void>)[] };
+  Object.assign(w, {
+    fetch: async (u: string) => (u.startsWith("/api/analytics") && !state.down ? { ok: true, json: async () => d } : { ok: false, status: 500, json: async () => ({}) }),
+    matchMedia: () => ({ matches: true }), innerWidth: 375,
+    setInterval: (fn: () => Promise<void>, ms: number) => (ms === 30000 && state.ticks.push(fn), 0),
+  });
+  const ctx = dom.getInternalVMContext();
+  for (const f of ["common.js", "analytics.js"])
+    new vm.Script(readFileSync(new URL(`../src/board/static/${f}`, import.meta.url), "utf8"), { filename: f }).runInContext(ctx);
+  w.document.dispatchEvent(new w.Event("DOMContentLoaded"));
+  for (const end = Date.now() + 5000; !w.document.getElementById("periods")?.children.length;) {
+    if (Date.now() > end) assert.fail("the page never rendered");
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return { w, doc: w.document, state };
+}
+
+const rows = (doc: Document) => [...doc.querySelectorAll("#ptable tbody tr")].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent!.trim()));
+const click = (doc: Document, sel: string) => (doc.querySelector(sel) as HTMLElement).click();
+
+test("week and month: labelled bars of averages, a tooltip of the spread, and the change from the period before", async () => {
+  const d = JSON.parse(JSON.stringify(report(workspace(), new TranscriptUsage(), Date.parse("2026-11-18T09:00:00Z"))));
+  const { doc, state } = await page(d);
+  assert.equal(doc.getElementById("per")!.hidden, true, "all time first, as before");
+  click(doc, '[data-period="week"]');
+  assert.equal(doc.getElementById("all")!.hidden, true);
+  assert.deepEqual([...doc.querySelectorAll(".wk .d")].map((x) => x.textContent), ["Week of 16 Nov so far", "Week of 9 Nov", "Week of 2 Nov"]);
+  assert.deepEqual([...doc.querySelectorAll(".wk .v")].map((x) => x.textContent), ["0 tickets", "1 ticket", "2 tickets"]);
+  // a state with only open stays has no segment to tap, so the longest wait is in the text too
+  assert.equal(doc.querySelector(".wk .open")!.textContent, "still in: queued 1 (longest 16.0d), your-review 1 (longest 8.0d)");
+  // a tap on a segment shows the state's spread in real units, and a second tap hides it; a tap
+  // focuses the segment just before its click, and that must not count as the first of two taps
+  (doc.querySelector('.wk:nth-child(3) .stk i[data-s="building"]') as HTMLElement).focus();
+  click(doc, '.wk:nth-child(3) .stk i[data-s="building"]');
+  const tip = doc.getElementById("tip")!;
+  assert.equal(tip.hidden, false);
+  assert.match(tip.textContent!, /building/);
+  assert.match(tip.textContent!, /Week of 2 Nov/);
+  assert.match(tip.textContent!, /average4\.0h/);
+  assert.match(tip.textContent!, /median4\.0h/);
+  assert.match(tip.textContent!, /p805\.2h/);
+  assert.match(tip.textContent!, /p955\.8h/);
+  assert.match(tip.textContent!, /n2 tickets/);
+  click(doc, '.wk:nth-child(3) .stk i[data-s="building"]');
+  assert.equal(tip.hidden, true);
+  // an open tip follows a refresh, from the new figures, even when the bars look the same
+  click(doc, '.wk:nth-child(3) .stk i[data-s="building"]');
+  const nov2 = d.weeks.find((w: { week: string }) => w.week === "2026-11-02");
+  nov2.stats.building.seconds.p95 = 7 * H;
+  await state.ticks[0]!();
+  assert.equal(tip.hidden, false);
+  assert.match(tip.textContent!, /p957\.0h/);
+  click(doc, '.wk:nth-child(3) .stk i[data-s="building"]');
+  assert.equal(tip.hidden, true);
+  // the table: averages per ticket, newest first, with the change from the week before
+  const r = rows(doc);
+  assert.deepEqual(r.map((x) => x[0]), ["Week of 16 Novso far", "Week of 9 Nov", "Week of 2 Nov"]);
+  const col = (name: string) => [...doc.querySelectorAll("#ptable thead th")].findIndex((th) => th.textContent === name);
+  assert.equal(r[2]![col("tickets")], "2", "the oldest has no week before");
+  assert.equal(r[1]![col("tickets")], "1↓1");
+  assert.equal(r[1]![col("gate")], "45.0h", "no average the week before: nothing to compare with");
+  assert.equal(r[1]![col("tickets")], "1↓1", "a count still changes by how much");
+  assert.equal(r[2]![col("building")], "4.0h");
+  assert.equal(r[1]![col("building")], "\u00b7", "no stay ended in building: no figure, so no made-up drop");
+  assert.equal(r[0]![col("your-review")], "·1 still in");
+  assert.equal(doc.querySelectorAll("#ptable tbody tr:first-child .dl").length, 0, "the running week shows no change");
+  assert.equal(r[0]![col("tickets")], "\u00b7", "its own figures still show, with no arrow");
+  // the trend cards are averages per ticket too, and pick the measure
+  assert.equal(doc.querySelectorAll(".trend").length, 4);
+  assert.match(doc.querySelector(".trend")!.textContent!, /avg per ticket, so far/);
+  // the cards compare the last two finished weeks, labelled, not the running one
+  const tcs = [...doc.querySelectorAll(".trend .tc")].map((x) => x.textContent!);
+  assert.equal(tcs.length, 4);
+  assert.match(tcs[0]!, /^Week of 9 Nov vs 2 Nov: \S+ [↑↓=]/);
+  const t0 = doc.querySelector(".trend")!;
+  const fin = d.weeks.filter((w: { week: string }) => w.week < "2026-11-16");
+  const [w1, w2] = fin.slice(-2).map((w: { total: { seconds: { mean: number } } }) => w.total.seconds.mean);
+  assert.equal(t0.querySelector(".tc .dl")!.textContent![0], w2 > w1 ? "↑" : w2 < w1 ? "↓" : "=");
+  // the running week is empty: it has no figure, so it carries no point rather than dipping to 0
+  assert.match(doc.querySelector(".trend .tv")!.textContent!, /^\u00b7/);
+  assert.equal(doc.querySelectorAll(".trend polyline.so").length, 0, "no dashed line to an empty week");
+  assert.equal(doc.querySelectorAll(".trend polyline").length, 4, "the finished weeks make one line each");
+  click(doc, '.trend[data-metric="entries"]');
+  assert.equal(doc.querySelector('#metrics [data-metric="entries"]')!.getAttribute("aria-pressed"), "true");
+  assert.match(doc.getElementById("barsh")!.textContent!, /Average entries per ticket, by week/);
+  click(doc, '[data-period="month"]');
+  assert.deepEqual([...doc.querySelectorAll(".wk .d")].map((x) => x.textContent), ["November 2026 so far"]);
+  assert.equal(doc.querySelectorAll(".trend .tc").length, 0, "fewer than two finished months: no change");
+  assert.equal(doc.querySelectorAll(".trend svg").length, 0, "one month makes no line");
+  // a failed fetch keeps the last good view
+  const table = doc.getElementById("ptable")!.innerHTML;
+  state.down = true;
+  await state.ticks[0]!();
+  assert.equal(doc.getElementById("at")!.textContent, "not answering");
+  assert.equal(doc.getElementById("ptable")!.innerHTML, table);
+});
+
+test("a fresh workspace's page shows the current period empty", async () => {
+  const d = JSON.parse(JSON.stringify(report(openWorkspace(tempWorkspace(GROUPED)), new TranscriptUsage(), Date.parse("2026-11-17T10:00:00Z"))));
+  const { doc } = await page(d);
+  assert.match(doc.getElementById("weeks")!.textContent!, /No transitions recorded yet/);
+  for (const p of ["week", "month"]) {
+    click(doc, `[data-period="${p}"]`);
+    const r = rows(doc);
+    assert.equal(r.length, 1);
+    assert.deepEqual(r[0]!.slice(1), ["·"], "no tickets and no state columns");
+    assert.match(doc.getElementById("trends")!.textContent!, /time\u00b7avg per ticket, so far/);
   }
 });
