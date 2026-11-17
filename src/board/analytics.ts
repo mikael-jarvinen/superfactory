@@ -452,6 +452,11 @@ export function report(ws: Workspace, usage: TranscriptUsage, now = Date.now()):
   const closed = new Map<string, Record<string, Cell>>();
   const open: Record<string, Open> = {};
   const isOpen = (tl: Timeline, i: number) => tl.live && i === tl.steps.length - 1 && (tl.steps[i] as Step).state !== "done";
+  // a stay is counted in a period when it has a known end: any but an item's last, the last of a
+  // live item once done, and done itself even after the item is taken off the board, as done ends
+  // at its own time
+  const ended = (tl: Timeline, i: number) =>
+    !isOpen(tl, i) && (tl.live || i < tl.steps.length - 1 || (tl.steps[i] as Step).state === "done");
   const byAgent = new Map<string, { tl: Timeline; i: number; end: number }[]>();
   for (const tl of tls) {
     const m: Record<string, Cell> = {};
@@ -461,12 +466,12 @@ export function report(ws: Workspace, usage: TranscriptUsage, now = Date.now()):
       cellOf(m, s.state).entries++;
       cellOf(m, s.state).seconds += (end - s.at) / 1000;
       // the stay counts whole where it ended; one still open counts as open only, and the last
-      // state of an item taken off the board has no known end, so it is in no period
+      // state of an item taken off the board has no known end, unless it is done, so it is in no period
       if (isOpen(tl, i)) {
         const o = (open[s.state] ??= { n: 0, longest: 0 });
         o.n++;
         o.longest = Math.max(o.longest, (end - s.at) / 1000);
-      } else if (tl.live || i < tl.steps.length - 1) {
+      } else if (ended(tl, i)) {
         const all = closed.get(tl.ticket) ?? {};
         closed.set(tl.ticket, all);
         for (const c of [...periods.map((p) => p.at(end, tl.ticket, s.state)), cellOf(all, s.state)]) {
@@ -506,7 +511,7 @@ export function report(ws: Workspace, usage: TranscriptUsage, now = Date.now()):
         const st = hit.tl.steps[hit.i] as Step;
         addTokens(cellOf(items.get(hit.tl.ticket) as Record<string, Cell>, st.state).tokens, c.tokens);
         // a call is its stay's, so it counts where the stay ended, and not while the stay is open
-        if (!isOpen(hit.tl, hit.i) && (hit.tl.live || hit.i < hit.tl.steps.length - 1)) {
+        if (ended(hit.tl, hit.i)) {
           const end = stepEnd(hit.tl, hit.i, now);
           for (const p of periods) addTokens(p.at(end, hit.tl.ticket, st.state).tokens, c.tokens);
           addTokens(cellOf(closed.get(hit.tl.ticket) as Record<string, Cell>, st.state).tokens, c.tokens);

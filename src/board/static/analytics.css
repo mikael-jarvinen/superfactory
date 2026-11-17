@@ -72,6 +72,8 @@ input.find:focus{outline:none;border-color:var(--ok)}
 .trend .tl em{font-style:normal;text-transform:none;letter-spacing:0;color:var(--mute)}
 .trend .tv{font-family:var(--mono);font-size:15px;white-space:nowrap}
 .trend .tu{display:block}
+.trend .tc{display:block;font-family:var(--mono);font-size:10.5px;color:var(--mute)}
+.trend .tc .dl{color:var(--ink)}
 .spark{display:block;width:100%;height:32px;overflow:visible}
 .spark polyline{fill:none;stroke:var(--dim);stroke-width:2;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke}
 .spark polyline.so{stroke-dasharray:3 3}

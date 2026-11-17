@@ -36,20 +36,21 @@ function bucketsOf(d){
     const [y, mo] = m.month.split('-').map(Number);
     const start = Date.UTC(y, mo - 1, 1), end = Date.UTC(y, mo, 1);
     return {...m, key: m.month, end, running: d.now < end,
-      label: new Date(start).toLocaleDateString('en-GB', {month: 'long', year: 'numeric', timeZone: 'UTC'})};
+      label: new Date(start).toLocaleDateString('en-GB', {month: 'long', year: 'numeric', timeZone: 'UTC'}),
+      short: new Date(start).toLocaleDateString('en-GB', {month: 'long', timeZone: 'UTC'})};
   });
   return d.weeks.map(w => {
     const start = Date.parse(w.week + 'T00:00:00Z'), end = start + 7 * 86400000;
-    return {...w, key: w.week, end, running: d.now < end,
-      label: 'Week of ' + new Date(start).toLocaleDateString('en-GB', {day: 'numeric', month: 'short', timeZone: 'UTC'})};
+    const day = new Date(start).toLocaleDateString('en-GB', {day: 'numeric', month: 'short', timeZone: 'UTC'});
+    return {...w, key: w.week, end, running: d.now < end, label: 'Week of ' + day, short: day};
   });
 }
 const avg = (b, s) => b.stats[s] ? b.stats[s][METRICS[metric].key].mean : 0;
 const shown = bs => bs.slice(-(showAll ? bs.length : SHOWN));
 
-// The change from the period before, by percent, or by how much for a count or when the period
-// before had none.
-// Nothing when both are empty or there is no period before.
+// The change from the period before: by how much for a count, by percent for an average.
+// Nothing when both are empty or there is no period before. Callers pass no average whose period
+// before had no figure, as there is nothing to compare it with.
 function change(cur, prev, m = METRICS[metric]){
   if(prev === undefined || (!cur && !prev)) return '';
   if(cur === prev) return `<small class="dl">=</small>`;
@@ -71,7 +72,8 @@ function barsView(d, bs){
   return `<div class="weeks">${bars.map((b, bi) => {
     const segs = d.states.filter(s => avg(b, s) > 0).map(s =>
       `<i tabindex="0" data-b="${bi}" data-s="${esc(s)}" style="width:${(avg(b, s) / max * 100).toFixed(3)}%;background:${color(d.states, s)}" aria-label="${esc(s)}: average ${esc(m.fmt(avg(b, s)))} per ticket"></i>`).join('');
-    const open = d.states.filter(s => b.open && b.open[s]).map(s => `${esc(s)} ${b.open[s].n}`).join(', ');
+    // a state with only open stays has no segment, and so no tip: the longest wait shows here too
+    const open = d.states.filter(s => b.open && b.open[s]).map(s => `${esc(s)} ${b.open[s].n} (longest ${esc(dur(b.open[s].longest))})`).join(', ');
     return `<div class="wk"><span class="d">${esc(b.label)}${b.running && period !== 'all' ? ' <em>so far</em>' : ''}</span>` +
       `<div class="stk" role="group" aria-label="${esc(b.label)}, average per ticket">${segs}</div>` +
       `<span class="v">${esc(plural(b.tickets, 'ticket', 'tickets'))}</span>` +
@@ -115,12 +117,15 @@ function trendsView(d, bs){
     // an empty period has no figure, so it carries no point and shows no change
     const fig = b => b && b.total ? b.total[m.key].mean : null;
     const series = shown(bs).map(fig);
-    const cur = series[series.length - 1], prev = bs.length > 1 ? fig(bs[bs.length - 2]) : null;
-    // a period still running has no change: a partial week against a full one is noise
-    const dl = bs[bs.length - 1].running || cur === null || prev === null ? '' : change(cur, prev, m);
+    const cur = series[series.length - 1];
+    // the change compares the last two finished periods, so the card says whether the latest whole
+    // week or month was better or worse than the one before; the running one is only on the line
+    const done = bs.filter(b => !b.running), a = done[done.length - 1], p = done[done.length - 2];
+    const vs = a && p && fig(a) !== null && fig(p) !== null ? change(fig(a), fig(p), m) : '';
+    const tc = vs ? `<span class="tc">${esc(a.label)} vs ${esc(p.short)}: ${esc(m.fmt(fig(a)))} ${vs}</span>` : '';
     return `<button class="trend ${k === metric ? 'on' : ''}" data-metric="${k}" aria-pressed="${k === metric}">` +
-      `<span class="tl">${esc(m.label)}</span><span class="tv">${cur === null ? '&middot;' : esc(m.fmt(cur))} ${dl}</span>` +
-      `<span class="tu">avg per ticket${bs[bs.length - 1].running ? ', so far' : ''}</span>${spark(series, bs[bs.length - 1].running)}</button>`;
+      `<span class="tl">${esc(m.label)}</span><span class="tv">${cur === null ? '&middot;' : esc(m.fmt(cur))}</span>` +
+      `<span class="tu">avg per ticket${bs[bs.length - 1].running ? ', so far' : ''}</span>${tc}${spark(series, bs[bs.length - 1].running)}</button>`;
   }).join('');
 }
 
@@ -150,7 +155,8 @@ function tableView(d, bs){
   // a period still running shows its figures so far, but no change from the one before
   // nor does a state with no stay ending in the period: it has no figure, so nothing to compare
   const vs = (b, cur, prev, m) => b.prev && !b.running ? change(cur, prev, m) : '';
-  const vsState = (b, s) => b.stats[s] ? vs(b, avg(b, s), b.prev && avg(b.prev, s)) : '';
+  // and an average whose period before had none is not a change by how much: nothing to compare
+  const vsState = (b, s) => b.stats[s] && b.prev && b.prev.stats[s] ? vs(b, avg(b, s), avg(b.prev, s)) : '';
   return `<div class="tbl"><table class="per"><thead><tr>${head}</tr></thead><tbody>${shown(rows).reverse().map(b => {
     const empty = !b.tickets && !Object.keys(b.open || {}).length;
     const tickets = `<td class="${b.tickets ? '' : 'z'}">${b.tickets || '&middot;'}${vs(b, b.tickets, b.prev && b.prev.tickets, COUNT)}</td>`;
@@ -250,9 +256,13 @@ function render(d){
   fill('barsh', `Average ${esc(METRICS[metric].label)} per ticket, ${period === 'all' ? 'all time' : 'by ' + period}`);
   const used = d.states.filter(s => bs.some(b => avg(b, s) > 0));
   fill('legend', used.map(s => `<span><i class="sw" style="background:${color(d.states, s)}"></i>${esc(s)}</span>`).join(''));
-  const before = document.getElementById('weeks').innerHTML;
+  // an open tip is redrawn from the new figures, on the same period and state, as an open stay's
+  // longest wait grows between refreshes; it hides when that segment is gone
+  const was = tipFor && !document.getElementById('tip').hidden ? {key: bars[+tipFor.dataset.b]?.key, s: tipFor.dataset.s, by: tipBy} : null;
   fill('weeks', barsView(d, bs));
-  if(document.getElementById('weeks').innerHTML !== before) hideTip();
+  const bi = was ? bars.findIndex(b => b.key === was.key) : -1;
+  const seg = bi < 0 ? null : [...document.querySelectorAll('#weeks .stk i')].find(x => +x.dataset.b === bi && x.dataset.s === was.s);
+  seg ? showTip(seg, was.by) : hideTip();
   fill('more', bs.length > SHOWN ? `<div class="chips"><button class="chip" id="showall">${showAll ? `last ${SHOWN} ${unit}` : `all ${bs.length} ${unit}`}</button></div>` : '');
   if(period === 'all') items(d);
   else {
