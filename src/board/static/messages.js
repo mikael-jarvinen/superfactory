@@ -60,7 +60,8 @@ function renderQueue(d){
   panel.classList.toggle('empty', !q.length);
   const sel = getSelection();
   if(!sel.isCollapsed && qlist.contains(sel.anchorNode)) return;
-  const html = q.length ? q.map(i => {
+  const note = d.queue_note ? `<div class="qnote">${esc(d.queue_note)}</div>` : '';
+  const html = note + (q.length ? q.map(i => {
     const head = `<span class="kind">${esc(i.kind)}</span>${i.ticket ? `<span class="tk">${esc(i.ticket)}</span>` : ''}<span class="when">${esc(when(i.age_min))}</span>`;
     const line = esc(firstLine(i.text) || i.kind);
     const open = opened.has(i.id);
@@ -70,7 +71,7 @@ function renderQueue(d){
     const less = !i.in_thread && open ? `<button type="button" data-open="${esc(i.id)}" aria-expanded="true">less</button>` : '';
     return `<div class="qi ${esc(i.kind)}"><div class="qhead">${head}</div>${go}
       <div class="qact"><button type="button" data-reply="${esc(i.id)}">reply</button><button type="button" data-done="${esc(i.id)}">handled</button>${less}</div></div>`;
-  }).join('') : '<div class="none">nothing waiting on you</div>';
+  }).join('') : '<div class="none">nothing waiting on you</div>');
   if(html !== lastQueue){ qlist.innerHTML = html; lastQueue = html; }
   qItems = new Map(q.map(i => [i.id, i]));
 }

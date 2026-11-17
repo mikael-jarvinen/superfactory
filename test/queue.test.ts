@@ -263,7 +263,7 @@ test("queue: turned on in a workspace with history, only what is still blocked i
   rec(ws, "LOCAL-quiet", "blocked", { question: "never posted", at: "2026-01-03T09:00:00+00:00" });
   assert.deepEqual(queue(ws).map((i) => i.text), ["still blocked", "never posted"]);
   const start = JSON.parse(readFileSync(handledFile(ws), "utf8")).start as string;
-  assert.ok(Date.now() - Date.parse(start) < 60_000, "the first read set the start");
+  assert.ok(Math.abs(Date.now() - 24 * 3600_000 - Date.parse(start)) < 60_000, "the first read set the start, a day back");
   assert.deepEqual(queue(ws).map((i) => i.text), ["still blocked", "never posted"], "and keeps it");
   // A question asked after the start is waiting.
   const now = new Date(Date.parse(start) + 1000).toISOString();
@@ -309,4 +309,32 @@ test("the message page: reply keeps a draft, cancel takes back only the quote, a
   (doc.querySelector('[data-done="maaaaaaaaaaaa"]') as HTMLElement).click();
   await settle();
   assert.equal(doc.getElementById("err")!.textContent, "nothing in the queue has that id");
+});
+
+test("queue: turned on, a decision asked in the day before still waits, and an older one does not", () => {
+  const ws = workspace({ since: false });
+  const ago = (h: number) => new Date(Date.now() - h * 3600_000).toISOString().replace(/\.\d+Z$/, "+00:00");
+  row(ws, ago(25), "decision", "asked yesterday morning");
+  row(ws, ago(2), "decision", "asked just before the upgrade");
+  assert.deepEqual(queue(ws).map((i) => i.text), ["asked just before the upgrade"]);
+  // logs/ cleared: the start is set again a day back, and what is still open within it comes back.
+  const id = queue(ws)[0]!.id;
+  rmSync(handledFile(ws));
+  assert.deepEqual(queue(ws).map((i) => i.id), [id]);
+});
+
+test("queue: a broken handled file is named on the page with how to mend it", async () => {
+  const ws = workspace();
+  row(ws, T(1), "decision", "a?");
+  const board = await serve(ws, { host: "127.0.0.1", port: 0 });
+  after(() => board.close());
+  const get = async () => (await (await fetch(board.url + "/api/messages")).json()) as { queue_note: string | null };
+  assert.equal((await get()).queue_note, null);
+  writeHandledFile(ws, "{ torn");
+  const note = (await get()).queue_note!;
+  assert.match(note, /messages-handled\.json does not parse/);
+  assert.match(note, /delete it/);
+  const { doc, settle } = await messagesPage({ at: "12:00", human: "Alex", lead: "niilo", lead_avatar: null, status: "idle", seen: null, messages: [], queue: [], queue_note: note });
+  await settle();
+  assert.equal(doc.querySelector("#qlist .qnote")!.textContent, note);
 });

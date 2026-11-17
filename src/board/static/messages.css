@@ -103,6 +103,7 @@ form button:disabled{color:var(--faint);cursor:default}
 .qi a.line:hover,.qi button.line:hover{color:var(--ok)}
 .qi .body{font-size:14px;margin-top:6px;overflow-wrap:anywhere}
 .qi .qact{display:flex;gap:8px;margin-top:8px}
+.queue .qnote{margin:6px 0;padding:6px 8px;border-left:3px solid var(--hot);color:var(--hot);font-size:12.5px;overflow-wrap:anywhere}
 .qi .qact button,.replying button{background:transparent;color:var(--dim);border:1px solid var(--line);border-radius:5px;
   padding:4px 12px;min-height:30px;font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;
   text-transform:uppercase;cursor:pointer}

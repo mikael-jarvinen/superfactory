@@ -16,7 +16,7 @@ import { roster } from "../config.js";
 import { capitalize, run, sleep } from "../util.js";
 import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, saveAttachment } from "./inbox.js";
 import { markSeen, readSeen } from "./seen.js";
-import { markHandled, messageId, queue, WAITING_KINDS } from "./queue.js";
+import { markHandled, messageId, queue, queueTrouble, WAITING_KINDS } from "./queue.js";
 import { tryFailure } from "../failures.js";
 import { type Fetch, ReviewCache } from "./reviews.js";
 import { isScheduler } from "../scheduler/state.js";
@@ -411,7 +411,7 @@ function messagesView(ws: Workspace, sessions: SessionCache, receipts: Receipts)
   });
   const shown = new Set(rows.map((r) => r.qid).filter(Boolean));
   const waiting = queue(ws).map((i) => ({ ...i, age_min: ageMinutes(i.at), in_thread: shown.has(i.id) }));
-  return { at: clock(), human: ws.config.human.name, lead: leadName, lead_avatar: avatars(ws)[leadName] ?? null, status, seen: readSeen(ws), messages: rows, queue: waiting };
+  return { at: clock(), human: ws.config.human.name, lead: leadName, lead_avatar: avatars(ws)[leadName] ?? null, status, seen: readSeen(ws), messages: rows, queue: waiting, queue_note: queueTrouble(ws) };
 }
 
 // ---------------------------------------------------------------- HTTP

@@ -46,9 +46,10 @@ const recordId = (r: Rec) => "r" + hash(r.ticket, r.asked_you?.at ?? "");
 
 const time = (t: string | null | undefined) => (t ? Date.parse(t) : NaN);
 
-// The handled file: `start`, when the queue was first read in this workspace, and `handled`, id ->
-// when. Questions asked before `start` are history, not a backlog: they are left out unless their
-// ticket is blocked now. "missing" is a workspace that has never shown the queue; "unreadable" is a
+// The handled file: `start`, a day before the queue was first read in this workspace, and `handled`,
+// id -> when. Questions asked before `start` are history, not a backlog: they are left out unless
+// their ticket is blocked now. The day keeps what was asked just before the board was upgraded, or
+// before logs/ was cleared and the start set again. "missing" is a workspace that has never shown the queue; "unreadable" is a
 // file that exists and does not parse, which is never written over, so no mark is lost to it.
 type Handled = { start: string | null; handled: Record<string, string> };
 function readHandledFile(ws: Workspace): Handled | "missing" | "unreadable" {
@@ -66,6 +67,16 @@ function readHandledFile(ws: Workspace): Handled | "missing" | "unreadable" {
   } catch {
     return "unreadable";
   }
+}
+
+const GRACE = 24 * 3600_000;
+const fresh = (): Handled => ({ start: new Date(Date.now() - GRACE).toISOString(), handled: {} });
+
+// What the page says when the handled file is broken, and how to mend it; null when it is fine.
+const brokenNote = (ws: Workspace) =>
+  `${handledFile(ws)} does not parse, so every question shows and none can be marked handled. Fix it, or delete it to start the queue again from a day ago.`;
+export function queueTrouble(ws: Workspace): string | null {
+  return readHandledFile(ws) === "unreadable" ? brokenNote(ws) : null;
 }
 
 function writeHandled(ws: Workspace, h: Handled): void {
@@ -115,7 +126,10 @@ function records(ws: Workspace): Map<string, Rec> {
 // When each ticket left blocked, from the state events log. That log is never rolled and grows for
 // the life of the workspace, so it is read once from the top and then only what was appended since,
 // and only the blocked exits are kept. A file replaced or cut short is read again from the top.
+// Nothing rotates events.jsonl. A copytruncate that cut it and let it grow back past the offset
+// before the next read would go unseen, since the inode stays the same.
 const exits = new Map<string, { ino: number; offset: number; left: Map<string, number[]> }>();
+const CHUNK = 1024 * 1024;
 function unblocked(ws: Workspace): Map<string, number[]> {
   const path = ws.events;
   let st: { ino: number; size: number };
@@ -158,7 +172,6 @@ function unblocked(ws: Workspace): Map<string, number[]> {
   }
   return c.left;
 }
-const CHUNK = 1024 * 1024;
 
 // How long before a ticket was blocked a row on it may be posted and still be the question the
 // block records: the lead posts the question and records the block in either order, a few minutes apart.
@@ -190,12 +203,12 @@ function open(ws: Workspace, recs = records(ws)): QueueItem[] | null {
 }
 
 // What waits on the human: open, not marked handled, and not history from before the queue's start,
-// oldest first. The first read in a workspace sets the start, so turning the queue on does not put
-// every decision ever posted on it.
+// oldest first. The first read in a workspace sets the start a day back, so turning the queue on
+// does not put every decision ever posted on it.
 export function queue(ws: Workspace): QueueItem[] {
   let h = readHandledFile(ws);
   if (h === "missing") {
-    h = { start: new Date().toISOString(), handled: {} };
+    h = fresh();
     try {
       writeHandled(ws, h);
     } catch {
@@ -217,8 +230,8 @@ export function queue(ws: Workspace): QueueItem[] {
 export function markHandled(ws: Workspace, id: unknown): { ok: true } | { ok: false; error: string; retry?: true } {
   if (typeof id !== "string" || !/^[mr][0-9a-f]{12}$/.test(id)) return { ok: false, error: "id is not a queue id" };
   const h = readHandledFile(ws);
-  if (h === "unreadable") return { ok: false, error: `${handledFile(ws)} does not parse; nothing is written over it` };
-  const cur: Handled = h === "missing" ? { start: new Date().toISOString(), handled: {} } : h;
+  if (h === "unreadable") return { ok: false, error: brokenNote(ws) };
+  const cur: Handled = h === "missing" ? fresh() : h;
   if (id in cur.handled) return { ok: true };
   const items = open(ws);
   if (items === null) return { ok: false, error: "the message log could not be read", retry: true };
