@@ -561,3 +561,67 @@ test("the round: a failed CI check on a PR in review is told once per head, with
   const asked = readFileSync(join(ws, "gh.log"), "utf8");
   assert.doesNotMatch(asked, /rerun|update-branch|"pr","(edit|merge|close|ready)"/);
 });
+
+// Mikael, 2026-11-17: "I need a script that alerts our factory when we get reviews". New review
+// comments on a PR in review reach the lead as one note per run, grouped by PR; the factory's own
+// replies and the bots that only report are not news, and a comment is told once.
+test("the queue tells the lead about new review comments, once, and not the factory's own", () => {
+  const { ws, run, notes, read } = watcherWorkspace();
+  assert.equal(factory(ws, ["state", "WEB-2", "queued", "--title", "Fix login"]).status, 0);
+  const file = join(ws, "state", "WEB-2.json");
+  const pr7 = { repo: "acme/web", number: 7 };
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
+  const at = (min: number) => new Date(Date.parse("2026-11-17T10:00:00Z") + min * 60_000).toISOString();
+  let id = 100;
+  const c = (login: string, min: number, body: string, typename = "User") => ({ databaseId: id++, createdAt: at(min), body, author: { login, __typename: typename } });
+  const thread = (tid: string, path: string, line: number, isResolved: boolean, ...comments: object[]) =>
+    ({ id: tid, isResolved, path, line, originalLine: line, comments: { nodes: comments } });
+  const answer = (threads: object[], reviews: object[] = [], comments: object[] = []) => ({
+    stdout: { data: { viewer: { login: "alex-gh" }, r0: { p7: { url: "https://github.com/acme/web/pull/7", reviewThreads: { nodes: threads }, reviews: { nodes: reviews }, comments: { nodes: comments } } } } },
+  });
+  const old = thread("PRRT_old", "src/a.ts", 3, true, c("sam", 0, "Rename this."));
+  const ask = thread("PRRT_ask", "app/Report.php", 42, false, c("sam", 10, "Using Collection class instead of standard arrays would read better here."));
+  const replied = thread("PRRT_bot1", "src/b.ts", 7, false, c("coderabbitai", 1, "_⚠️ Potential issue_\n\nMissing null check.", "Bot"), c("alex-gh", 11, "> Written by agent.\n\nFixed in abc1234."));
+  const label = c("sync-label", 12, "Labels synced.", "Bot");
+  const finding = thread("PRRT_bot2", "src/c.ts", 9, false, c("coderabbitai", 20, "<!-- metadata -->\n_⚠️ Potential issue_\n\nThe loop never ends when `n` is 0.", "Bot"));
+  const question = { ...c("sam", 21, "Why not reuse the existing exporter?"), state: "COMMENTED" };
+  const routes = (a: object) => ({ "pr list": { stdout: [] }, "api graphql": a });
+  const cursor = () => (JSON.parse(readFileSync(join(ws, "state", "reviews.state"), "utf8")) as Record<string, string>)["acme/web#7"];
+
+  // First sight: only a resolved thread, so nothing is outstanding; the cursor starts at it.
+  let r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes(answer([old])));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(notes(), []);
+  assert.equal(cursor(), at(0));
+
+  // A colleague's comment is news. A bot thread the factory has answered is handled, and neither
+  // the factory's reply nor a label bot is news.
+  r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes(answer([old, ask, replied], [], [label])));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const first = [
+    "[queue watcher]",
+    "review: WEB-2 web#7 (colleague-review) https://github.com/acme/web/pull/7",
+    '  - colleague sam, change request, app/Report.php:42: "Using Collection class instead of standard arrays would read better here." [thread PRRT_ask, comment 101]',
+  ].join("\n");
+  assert.deepEqual(notes(), [first]);
+  assert.equal(cursor(), at(12));
+
+  // The same comments again: the cursor keeps them from being told twice.
+  r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes(answer([old, ask, replied], [], [label])));
+  assert.equal(notes().length, 1, "nothing new, so no note");
+
+  // A bot's finding and a colleague's question, each classified as such, in one note for the PR.
+  r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes(answer([old, ask, replied, finding], [question], [label])));
+  assert.equal(notes()[1], [
+    "[queue watcher]",
+    "review: WEB-2 web#7 (colleague-review) https://github.com/acme/web/pull/7",
+    '  - bot coderabbitai, finding, src/c.ts:9: "_⚠️ Potential issue_ The loop never ends when `n` is 0." [thread PRRT_bot2, comment 105]',
+    '  - colleague sam, question, review: "Why not reuse the existing exporter?" [review 106]',
+  ].join("\n"));
+
+  // A read that fails moves no cursor and leaves no note.
+  r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes({ status: 1, stderr: "HTTP 502" }));
+  assert.equal(notes().length, 2);
+  assert.equal(cursor(), at(21));
+  assert.match(read("queue.log"), /reviews: cannot read the review comments: HTTP 502/);
+});
