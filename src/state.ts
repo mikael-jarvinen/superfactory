@@ -266,6 +266,29 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   return rec;
 }
 
+// Mikael split lyyti-classic#8754 off LOCAL-reports-petes-design into its own item, and the PR stayed
+// on both cards: --pr adds a PR to an item, and this takes one off. If it was the PR in focus, the
+// focus moves to the last one left.
+export function removePr(ws: Workspace, ticket: string, ref: string, note?: string, out: (line: string) => void = console.log): Rec {
+  const m = /^([\w.-]+\/[\w.-]+)#(\d+)$/.exec(ref);
+  if (!m) die("--remove-pr must look like owner/repo#N");
+  const [repo, number] = [m[1] as string, Number(m[2])];
+  const rec = loadRec(ws, ticket);
+  if (!rec) die(`no record for ${ticket}`);
+  const prs = recPrs(rec);
+  const same = (p: Pr) => p.repo === repo && p.number === number;
+  if (!prs.some(same)) die(`${ticket} has no PR ${ref}; it has: ${prs.map((p) => `${p.repo}#${p.number}`).join(", ") || "none"}`);
+  rec.prs = prs.filter((p) => !same(p));
+  if (!rec.pr || same(rec.pr)) rec.pr = rec.prs.at(-1) ?? null;
+  saveRec(ws, rec);
+  appendEvent(ws, {
+    t: now(), ticket, from: rec.state, to: rec.state, agent: rec.agent ?? null,
+    evidence: `removed PR ${ref}`, note: note ?? null, pr: rec.pr ?? null,
+  });
+  out(`${ticket}: removed PR ${ref}; PRs now: ${rec.prs.map((p) => `${p.repo}#${p.number}`).join(", ") || "none"}`);
+  return rec;
+}
+
 export function recPrs(rec: Rec): Pr[] {
   return rec.prs?.length ? rec.prs : rec.pr ? [rec.pr] : [];
 }
