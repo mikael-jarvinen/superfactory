@@ -114,7 +114,8 @@ function trendsView(d, bs){
   return Object.entries(METRICS).map(([k, m]) => {
     const series = shown(bs).map(b => b.total ? b.total[m.key].mean : 0);
     const cur = series[series.length - 1], prev = bs.length > 1 ? (bs[bs.length - 2].total ? bs[bs.length - 2].total[m.key].mean : 0) : undefined;
-    const dl = change(cur, prev, m);
+    // a period still running has no change: a partial week against a full one is noise
+    const dl = bs[bs.length - 1].running ? '' : change(cur, prev, m);
     return `<button class="trend ${k === metric ? 'on' : ''}" data-metric="${k}" aria-pressed="${k === metric}">` +
       `<span class="tl">${esc(m.label)}</span><span class="tv">${esc(m.fmt(cur))} ${dl}</span>` +
       `<span class="tu">avg per ticket${bs[bs.length - 1].running ? ', so far' : ''}</span>${spark(series, bs[bs.length - 1].running)}</button>`;
@@ -138,13 +139,15 @@ function tableView(d, bs){
   const cols = d.states.filter(s => bs.some(b => b.stats[s] || (b.open && b.open[s])));
   const rows = bs.map((b, i) => ({...b, prev: bs[i - 1]}));
   const head = `<th class="k">${period}</th><th>tickets</th>${cols.map(s => `<th><span class="sw" style="background:${color(d.states, s)}"></span>${esc(s)}</th>`).join('')}`;
+  // a period still running shows its figures so far, but no change from the one before
+  const vs = (b, cur, prev, m) => b.prev && !b.running ? change(cur, prev, m) : '';
   return `<div class="tbl"><table class="per"><thead><tr>${head}</tr></thead><tbody>${shown(rows).reverse().map(b => {
     const empty = !b.tickets && !Object.keys(b.open || {}).length;
-    const tickets = `<td class="${b.tickets ? '' : 'z'}">${b.tickets || '&middot;'}${b.prev ? change(b.tickets, b.prev.tickets, COUNT) : ''}</td>`;
+    const tickets = `<td class="${b.tickets ? '' : 'z'}">${b.tickets || '&middot;'}${vs(b, b.tickets, b.prev && b.prev.tickets, COUNT)}</td>`;
     return `<tr class="${empty ? 'none' : ''}"><td class="k"><b>${esc(b.label)}</b><small>${b.running ? 'so far' : empty ? 'nothing recorded' : ''}</small></td>${tickets}` +
       cols.map(s => {
         const v = avg(b, s), o = stillIn(b, s);
-        return `<td class="${v ? '' : 'z'}">${v ? esc(m.fmt(v)) : '&middot;'}${b.prev ? change(v, avg(b.prev, s)) : ''}${o ? `<small class="still">${esc(o)}</small>` : ''}</td>`;
+        return `<td class="${v ? '' : 'z'}">${v ? esc(m.fmt(v)) : '&middot;'}${vs(b, v, b.prev && avg(b.prev, s))}${o ? `<small class="still">${esc(o)}</small>` : ''}</td>`;
       }).join('') + `</tr>`;
   }).join('')}</tbody></table></div>`;
 }
@@ -171,7 +174,7 @@ function footView(d){
     `averaged over the tickets that ended a stay in it ${unit}. A stay counts whole in the ${period === 'all' ? 'period' : period} it ended. ` +
     `Stays still open are left out of the averages and shown as "still in". Hover or tap a segment for the median, p80, p95 and n. ` +
     `${period === 'week' ? 'Weeks start on Monday, UTC. ' : period === 'month' ? 'Months are calendar months, UTC. ' : ''}` +
-    `${period === 'all' ? '' : `Arrows are the change from the ${period} before; the ${period} still running counts only so far. `}` +
+    `${period === 'all' ? '' : `Arrows are the change from the ${period} before. The ${period} still running counts only so far, and shows no change until it ends. `}` +
     `Done counts entries only. Tokens are input, output and cache reads and writes of the item's agent while it was on that item. ` +
     `${d.left_out.length ? `Not counted: ${esc(d.left_out.join(', '))} (the lead, reviewers, and agents on another host). ` : ''}` +
     `${un ? `Spent with no item: ${un}.` : ''}</p>`;

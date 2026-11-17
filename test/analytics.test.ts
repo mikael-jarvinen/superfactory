@@ -376,9 +376,12 @@ test("week and month: labelled bars of averages, a tooltip of the spread, and th
   assert.equal(r[1]![col("tickets")], "1↓1");
   assert.equal(r[1]![col("gate")], "45.0h↑45.0h", "none the week before: the change is by how much");
   assert.equal(r[0]![col("your-review")], "·1 still in");
+  assert.equal(doc.querySelectorAll("#ptable tbody tr:first-child .dl").length, 0, "the running week shows no change");
+  assert.equal(r[0]![col("tickets")], "\u00b7", "its own figures still show, with no arrow");
   // the trend cards are averages per ticket too, and pick the measure
   assert.equal(doc.querySelectorAll(".trend").length, 4);
   assert.match(doc.querySelector(".trend")!.textContent!, /avg per ticket, so far/);
+  assert.equal(doc.querySelectorAll(".trend .dl").length, 0, "nor do the trend cards while it runs");
   assert.equal(doc.querySelectorAll(".trend polyline.so").length, 4, "the running week is dashed");
   click(doc, '.trend[data-metric="entries"]');
   assert.equal(doc.querySelector('#metrics [data-metric="entries"]')!.getAttribute("aria-pressed"), "true");
