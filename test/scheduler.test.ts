@@ -21,13 +21,15 @@ test("the scheduler renders one plist per job from config, labelled by the lead"
   const ws = workspace(TOML.replace('kind = "jira"', 'kind = "jira"\nsite = "example.atlassian.net"\nqueue_jql = "x"') +
     '\n[watchers]\nqueue_every_minutes = 20\nround_minute = 9\n');
   const out = render(ws, { PATH: "/one:/two", CLAUDE_BIN: "/opt/claude" });
-  assert.deepEqual(out.map((r) => r.job.label), ["superfactory.ada.queue", "superfactory.ada.round", "superfactory.ada.up"]);
+  assert.deepEqual(out.map((r) => r.job.label), ["superfactory.ada.queue", "superfactory.ada.reviews", "superfactory.ada.round", "superfactory.ada.up"]);
   for (const { path } of out) {
     assert.equal(path, join(ws.runDir, "launchd", `${out.find((r) => r.path === path)!.job.label}.plist`));
     if (process.platform === "darwin") assert.equal(spawnSync("plutil", ["-lint", path]).status, 0, `${path} is a valid plist`);
   }
-  const [queue, round, up] = out.map((r) => readFileSync(r.path, "utf8")) as [string, string, string];
+  const [queue, reviews, round, up] = out.map((r) => readFileSync(r.path, "utf8")) as [string, string, string, string];
   assert.deepEqual(minutes(queue), [0, 20, 40]);
+  assert.deepEqual(minutes(reviews), [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55], "the review watcher runs no model, so every 5 minutes by default");
+  assert.ok(reviews.includes("<string>watch</string>\n    <string>reviews</string>"));
   assert.deepEqual(minutes(round), [9]);
   assert.deepEqual(minutes(up), [3, 33]);
   assert.ok(queue.includes(`<string>${process.execPath}</string>\n    <string>${CLI}</string>\n    <string>--workspace</string>\n    <string>${ws.dir}</string>\n    <string>watch</string>\n    <string>queue</string>`));
@@ -42,6 +44,8 @@ test("the scheduler renders one plist per job from config, labelled by the lead"
   assert.throws(() => every(7), FactoryError, "a cadence that does not divide the hour cannot be a calendar job");
 
   const none = workspace(TOML.replace('kind = "jira"', 'kind = "none"'));
-  assert.deepEqual(render(none, {}).map((r) => r.job.name), ["round", "up"], "no tracker, no queue watcher");
+  assert.deepEqual(render(none, {}).map((r) => r.job.name), ["reviews", "round", "up"], "no tracker, no queue watcher");
+  const off = workspace(`${TOML}\n[watchers]\nreviews_every_minutes = 0\n`);
+  assert.ok(!render(off, {}).some((r) => r.job.name === "reviews"), "reviews_every_minutes = 0 turns the review watcher off");
   assert.ok(!existsSync(join(ws.runDir, "launchd", "superfactory.ada.relay.plist")));
 });

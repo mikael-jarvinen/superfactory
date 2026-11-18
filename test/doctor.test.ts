@@ -81,7 +81,7 @@ test("doctor checks exactly what config needs", async () => {
   const rendered = join(bare.dir, "logs", "run", "launchd");
   for (const f of readdirSync(rendered)) copyFileSync(join(rendered, f), join(bare.env.HOME as string, "Library", "LaunchAgents", f));
   // Off macOS `factory schedule run` is the scheduler: a fresh state file, from a live pid, with config's jobs.
-  const jobs = { "superfactory.ada.round": { due: "2026-01-01T00:07:00Z" }, "superfactory.ada.up": { due: "2026-01-01T00:03:00Z" } };
+  const jobs = { "superfactory.ada.reviews": { due: "2026-01-01T00:05:00Z" }, "superfactory.ada.round": { due: "2026-01-01T00:07:00Z" }, "superfactory.ada.up": { due: "2026-01-01T00:03:00Z" } };
   writeFileSync(join(bare.dir, "logs", "run", "scheduler.json"), JSON.stringify({ pid: process.pid, at: new Date().toISOString(), checkSeconds: 30, jobs }));
 
   const a = factory(bare.dir, ["doctor"], { env: bare.env });

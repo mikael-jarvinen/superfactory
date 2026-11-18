@@ -153,6 +153,9 @@ prose_remark = 30                         # added comment lines at which the gat
 queue_every_minutes = 15                  # how often the queue watcher reads the tracker: a number
                                           # that divides 60, or whole hours that divide 24. No queue
                                           # watcher runs when tracker.kind is "none".
+reviews_every_minutes = 5                 # how often the review watcher reads the review comments
+                                          # on the PRs in review and tells the lead about new ones.
+                                          # It runs no model, only one GitHub GraphQL call. 0 is off.
 round_minute = 7                          # the minute past each hour the round runs
 model = "sonnet"                          # the queue watcher
 

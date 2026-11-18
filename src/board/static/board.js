@@ -164,6 +164,7 @@ function work(d){
         <div class="m">${t.agent ? `${face(avatars[t.agent], 'c', t.agent)}<span class="who">${esc(t.agent)}</span>` : '<span class="who none">unassigned</span>'}
           ${t.age_min != null ? `<span class="age">${mins(t.age_min)} here</span>` : ''}</div>
         ${t.prs.length ? `<div class="pr">${t.prs.map(p => `<div class="prl"><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.repo)}#${esc(p.number)}</a>${review(p.review)}</div>`).join('')}</div>` : ''}
+        ${t.design ? `<div class="pr"><div class="prl"><a href="${esc(t.design.slides)}" target="_blank" rel="noopener">design slides</a>${t.design.canvas ? `<a href="${esc(t.design.canvas)}" target="_blank" rel="noopener">canvas</a>` : ''}</div></div>` : ''}
         ${t.question ? `<div class="q">${esc(t.question)}</div>` : ''}
         ${t.line && t.line !== t.question ? `<div class="line">${esc(t.line)}</div>` : ''}
       </div>`).join('');

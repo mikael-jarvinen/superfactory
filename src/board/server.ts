@@ -9,7 +9,7 @@ import { lead, owesSession, reviewOnly, type Session } from "../fleet.js";
 import { leadStatus } from "../hooks/status.js";
 import { Unreachable } from "../remote.js";
 import { agentSessions, pick, transportFor, transports } from "../transport.js";
-import { isHuman, readTail } from "../messages.js";
+import { isHuman, readRecent, readTail } from "../messages.js";
 import { allRecs, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { roster } from "../config.js";
@@ -380,6 +380,10 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
       url: `https://github.com/${p.repo}/pull/${p.number}`,
       review: r.state !== null && IN_REVIEW.has(r.state) ? reviews.get(prKey(p)) : null,
     })),
+    // Mikael, 2026-11-16: the card must carry the design's slideset, from design-review through
+    // the build. An item has one once a designer has sent it for review. No "approved" mark: on a card
+    // in building or fixing it read as if the PR were approved.
+    design: r.design?.slides ? { slides: r.design.slides, canvas: r.design.canvas } : null,
   }));
   const idx = (s: string | null) => (s !== null && COLUMNS.includes(s) ? COLUMNS.indexOf(s) : 99);
   tickets.sort((a, b) => idx(a.column) - idx(b.column) || (b.age_min ?? 0) - (a.age_min ?? 0));
@@ -405,7 +409,7 @@ function messagesView(ws: Workspace, sessions: SessionCache, receipts: Receipts)
   receipts.read(st.transcript);
   const leadName = lead(ws).name;
   const status = sessions.alive(leadName, sessions.background().get(leadName)) ? (st.words ?? null) : sessions.unknown(leadName) ? "unknown" : "offline";
-  const rows = readTail(ws.messages).reverse().slice(0, 60).map((r) => {
+  const rows = readRecent(ws.messages, 60).reverse().map((r) => {
     const human = isHuman(ws, r.kind);
     // qid names a decision or blocked row the way the queue does, so the panel can find it in the thread.
     const qid = !human && WAITING_KINDS.has(r.kind ?? "") ? { qid: messageId(r) } : {};

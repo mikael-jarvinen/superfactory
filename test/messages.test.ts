@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { readRecent } from "../src/messages.js";
 import { pyDumps } from "../src/util.js";
 import { factory, tempWorkspace } from "./helpers.js";
 
@@ -61,4 +62,24 @@ test("the log rotates past a megabyte, and messages reads only the tail", () => 
     "2026-01-02T03:04  alex      human\n    from the human\n" +
     "2026-01-02T03:04  alex      alex\n    before the rename\n" +
     "2026-01-02T03:04  ada       answer\n    two\n    lines\n");
+});
+
+// 2026-11-16: the log rolled to .1 and the page showed one message; the rest were in .1.
+test("a rollover leaves the newest messages visible, on the page and in messages -n", () => {
+  const ws = tempWorkspace();
+  after(() => rmSync(ws, { recursive: true, force: true }));
+  const log = join(ws, "state", "messages.jsonl");
+  const row = (text: string) => JSON.stringify({ t: "2026-11-16T13:40:00+00:00", text, ticket: null, kind: "note", link: null });
+  factory(ws, ["say", "the oldest"]);
+  appendFileSync(log, ("x".repeat(99) + "\n").repeat(10_100));
+  appendFileSync(log, ["m1", "m2", "m3"].map(row).join("\n") + "\n");
+  assert.equal(factory(ws, ["say", "m4"]).status, 0);
+  assert.ok(existsSync(log + ".1"), "the say rolled the log");
+  assert.equal(readRecent(log, 0).at(-1)?.text, "m4");
+
+  const out = factory(ws, ["messages", "-n", "3"]).stdout;
+  assert.match(out, /^2026-11-16T13:40 {2}ada {7}note\n {4}m2\n.*\n {4}m3\n.*\n {4}m4\n$/s);
+  // The page asks for 60: everything the tail of .1 holds, then the new log, oldest first.
+  assert.deepEqual(readRecent(log, 60).map((r) => r.text), ["m1", "m2", "m3", "m4"]);
+  assert.deepEqual(readRecent(log, 2).map((r) => r.text), ["m3", "m4"]);
 });

@@ -10,7 +10,7 @@ import { join } from "node:path";
 import type { Receipts } from "../board/inbox.js";
 import { lead } from "../fleet.js";
 import { leadStatus } from "../hooks/status.js";
-import { type Message, isHuman, post, readTail } from "../messages.js";
+import { type Message, isHuman, post, readRecent } from "../messages.js";
 import type { Workspace } from "../workspace.js";
 
 type Receipt = ReturnType<Receipts["receipt"]>;
@@ -79,7 +79,7 @@ export function watchdog(ws: Workspace, { staleMinutes, checkSeconds, receipts }
   return () => {
     const name = lead(ws).name;
     receipts.read(leadStatus(ws).transcript);
-    const oldest = oldestUnanswered(readTail(ws.messages), { isHuman: (k) => isHuman(ws, k), receipt: (id) => receipts.receipt(id) });
+    const oldest = oldestUnanswered(readRecent(ws.messages, 0), { isHuman: (k) => isHuman(ws, k), receipt: (id) => receipts.receipt(id) });
     const r = step(state, oldest, { nowMs: Date.now(), capMs: Math.max(2 * checkSeconds, 60) * 1000, staleMinutes });
     for (const e of r.events) {
       if (e.type !== "alert") continue;

@@ -4,12 +4,13 @@
 // The facts compare three views, the state store, GitHub and the live sessions, and flag what is
 // out of line, plus any files [[watchers.facts]] names. A store flag that was already escalated
 // says so and does not escalate again. Any other escalating line is told once, and again a day
-// later while it is still there. Markers, the failures cursor and what was told move only once the
-// note is written, so a round that could not tell the lead tells the next one.
+// later while it is still there. A failed CI check on a PR in review is told once per head. Markers,
+// the failures cursor and what was told move only once the note is written, so a round that could
+// not tell the lead tells the next one.
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fleetLines, owedNote, type Session } from "../fleet.js";
-import { json } from "../gate/github.js";
+import { type CheckRun, checkRuns, json } from "../gate/github.js";
 import { readTail } from "../messages.js";
 import { loaded } from "../scheduler/index.js";
 import { allRecs, BUSY, isLocal, recPrs, WAITING_ON_LEAD, WAITING_ON_YOU } from "../state.js";
@@ -41,6 +42,7 @@ const UNREPORTED_COMMIT_S = 3 * 3600;
 // for a machine that is working correctly.
 const queueStaleS = (ws: Workspace) => Math.max(2 * 3600, 3 * 60 * (ws.config.watchers.queueEveryMinutes ?? 15));
 const ROUND_STALE_S = 130 * 60;
+const reviewsStaleS = (ws: Workspace) => Math.max(2 * 3600, 3 * 60 * (ws.config.watchers.reviewsEveryMinutes ?? 5));
 
 export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
   const out: string[] = [];
@@ -140,6 +142,8 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
     return l.split(/ {2,}/).filter((p) => STORE_FLAG.test(p)).map((p) => `${ticket}: ${p}`);
   });
 
+  // Every PR the gates section read, by owner/repo#n, for the CI section after it.
+  const listed = new Map<string, GhPr>();
   section("gates: PRs on GitHub against the store", () => {
     if (!recs.length) return void out.push("  nothing open");
     // Mikael, 2026-10-16: a PR is a draft in every column but colleague review, and open there. Once
@@ -155,7 +159,8 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
         out.push(`  ${repo.remote}: CANNOT read PRs (${r.stderr.trim().slice(0, 80)})`);
         continue;
       }
-      for (const pr of withRecorded(repo.remote, recs, prs, fields))
+      for (const pr of withRecorded(repo.remote, recs, prs, fields)) {
+        listed.set(`${repo.remote}#${pr.number}`, pr);
         for (const rec of recs) {
           const { known, match } = belongs(rec, repo.remote, pr);
           if (!match) continue;
@@ -176,8 +181,59 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
           else if (pr.state === "OPEN" && pr.isDraft === true && st === "colleague-review")
             out.push(`  ${where} is a draft while colleague-review -- should be open: factory pr-open-for-review ${rec.ticket}`);
         }
+      }
     }
   }, (l) => l !== "  nothing open");
+
+  // Mikael, 2026-11-16: "If CI checks fail we should probably do something." He had found
+  // lyyti-classic#8587 (its e2e spec fixed on main after the PR's run) and #8705 (out of sync with
+  // main) failing himself. A PR waiting on review whose head has a failed check gets one line: the
+  // failed checks, each with how the same check stands on the base's latest commit, and how far the
+  // PR is behind its base. Green on the base reads as "fixed there, update the branch"; failing there
+  // too as "not this PR's doing". Told once per head and failing set: a check that runs again, goes
+  // green or comes back on a new head is news again. Nothing is done to the PR.
+  const ciFile = join(ws.logsDir, "ci-told.json");
+  let ciTold: Record<string, { head: string; checks: string[] }> = {};
+  try { ciTold = JSON.parse(readFileSync(ciFile, "utf8")) as typeof ciTold; } catch { /* none told yet */ }
+  const ciNext: typeof ciTold = {};
+  const read = <T>(path: string) => json<T>(watcherGh(["api", path]));
+  section("CI on PRs in review", () => {
+    let any = false;
+    for (const r of recs) {
+      if (!CI_STATES.has(r.state ?? "")) continue;
+      for (const p of recPrs(r)) {
+        const repo = Object.values(ws.config.repos).find((x) => x.remote === p.repo);
+        if (!repo || typeof p.number !== "number") continue;
+        const key = `${repo.remote}#${p.number}`;
+        const where = `${r.ticket}: ${key}`;
+        const keep = () => { if (ciTold[key]) ciNext[key] = ciTold[key]; any = true; };
+        const pr = listed.get(key);
+        if (!pr?.headRefOid) { keep(); out.push(`  ${where} CANNOT read its head`); continue; }
+        if (pr.state !== "OPEN") continue;
+        const head = pr.headRefOid;
+        const runs = checkRuns(repo, head, read);
+        if (!runs) { keep(); out.push(`  ${where} CANNOT read check-runs at ${head.slice(0, 7)}`); continue; }
+        // Mikael, 2026-10-09: "Ignore failing deep reviews.", as pr-ready does.
+        const failed = [...latestByName(runs)].filter(([n, c]) => c.status === "completed" && CI_FAILED.has(c.conclusion ?? "") && !/deep review/i.test(n))
+          .map(([n]) => n).sort();
+        if (!failed.length) continue;
+        any = true;
+        const base = pr.baseRefName || repo.base;
+        const cmp = read<{ behind_by?: number; base_commit?: { sha?: string } }>(`repos/${repo.remote}/compare/${base}...${head}`);
+        const tip = cmp?.base_commit?.sha;
+        const onBase = tip ? checkRuns(repo, tip, read) : undefined;
+        const latestOnBase = onBase && latestByName(onBase);
+        const checks = failed.map((n) => `${n} (${latestOnBase ? standing(latestOnBase.get(n), base) : `unread on ${base}`})`);
+        const behind = typeof cmp?.behind_by === "number" ? `${cmp.behind_by} behind ${base}` : `behind ${base}: unread`;
+        const prev = ciTold[key];
+        const seen = prev?.head === head ? prev.checks : [];
+        const fresh = failed.some((n) => !seen.includes(n));
+        ciNext[key] = { head, checks: failed };
+        out.push(`  ${where} at ${head.slice(0, 7)} ${fresh ? "CI FAILED" : "ci failed (already reported, not an escalation)"}: ${checks.join(", ")}; ${behind}`);
+      }
+    }
+    if (!any) out.push("  none failing");
+  }, (l) => / CI FAILED: /.test(l));
 
   section("branches: commits nobody reported (last 3h)", () => {
     for (const r of recs) {
@@ -224,6 +280,11 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
         out.push(`  queue last=${o[o.length - 1]} tracker-unavailable in last ${o.length}=${down}${down >= 4 ? "  -- the connector is failing, not the schedule" : ""}`);
       }
     }
+    if ((ws.config.watchers.reviewsEveryMinutes ?? 5) > 0) {
+      const r = heartbeatAge(ws, "reviews");
+      out.push(r === null ? "  reviews heartbeat MISSING -- has it ever read GitHub? factory schedule install"
+        : `  reviews heartbeat ${r}s ago${r > reviewsStaleS(ws) ? `  STALE (over ${Math.floor(reviewsStaleS(ws) / 60)} min: new review comments are not being told)` : ""}`);
+    }
     const a = heartbeatAge(ws, "round");
     out.push(a === null ? "  round heartbeat MISSING -- first run, or the round has never completed"
       : `  previous round heartbeat ${a}s ago${a > ROUND_STALE_S ? "  STALE (over 130 min: a round was missed or could not tell the lead)" : ""}`);
@@ -262,8 +323,32 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
       if (markers.length) mkdirSync(reportedDir, { recursive: true });
       for (const p of markers) writeFileSync(p, "");
       if (failuresTotal !== null) writeFileSync(seenFile, String(failuresTotal));
+      mkdirSync(ws.logsDir, { recursive: true });
+      writeFileSync(ciFile, JSON.stringify(ciNext));
     },
   };
+}
+
+const CI_STATES = new Set(["gate", "your-review", "colleague-review"]);
+const CI_FAILED = new Set(["failure", "cancelled", "timed_out"]);
+
+// Each check's latest run, by name: a check run again counts by its newest attempt.
+function latestByName(runs: CheckRun[]): Map<string, CheckRun> {
+  const m = new Map<string, CheckRun>();
+  for (const c of runs) {
+    const had = m.get(c.name);
+    if (!had || (c.started_at ?? "") > (had.started_at ?? "")) m.set(c.name, c);
+  }
+  return m;
+}
+
+// How a check stands on the base's latest commit.
+function standing(c: CheckRun | undefined, base: string): string {
+  if (!c) return `not run on ${base}`;
+  if (c.status !== "completed") return `${c.status} on ${base}`;
+  if (c.conclusion === "success") return `green on ${base}`;
+  if (CI_FAILED.has(c.conclusion ?? "")) return `failing on ${base} too`;
+  return `${c.conclusion ?? "no conclusion"} on ${base}`;
 }
 
 // Plumbing and the sessions: what says something is down.

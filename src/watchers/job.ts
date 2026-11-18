@@ -13,6 +13,8 @@ import type { Workspace } from "../workspace.js";
 import { die, run, type RunResult } from "../util.js";
 
 export type Job = "queue" | "round";
+// The scheduled watchers, the two with a model and the review watcher without one.
+export type Watcher = Job | "reviews";
 
 // prompts/<job>.md in the workspace. {lead} and {human} are filled in, in one pass.
 export const promptPath = (ws: Workspace, job: Job) => join(ws.dir, "prompts", `${job}.md`);
@@ -29,10 +31,10 @@ export function loadPrompt(ws: Workspace, job: Job, vars: Record<string, string>
   return text.replace(/\{(\w+)\}/g, (m, k: string) => all[k] ?? m).trimEnd();
 }
 
-const LOG_MAX = { queue: 5_000_000, round: 5_000_000 };
+const LOG_MAX = { queue: 5_000_000, round: 5_000_000, reviews: 2_000_000 };
 
 // logs/<job>.log, rolled to .1 past its size, with a header for this run.
-export function openLog(ws: Workspace, job: Job): string {
+export function openLog(ws: Workspace, job: Watcher): string {
   mkdirSync(ws.logsDir, { recursive: true });
   const p = join(ws.logsDir, `${job}.log`);
   try {
@@ -48,14 +50,14 @@ export const logTo = (path: string, text: string) => appendFileSync(path, text.e
 
 // A heartbeat means "ran and read the tracker", and only the caller that has that evidence writes
 // one. The board shows every *.heartbeat in logs/.
-export const heartbeatPath = (ws: Workspace, name: "queue" | "round") => join(ws.logsDir, `${name}.heartbeat`);
+export const heartbeatPath = (ws: Workspace, name: Watcher) => join(ws.logsDir, `${name}.heartbeat`);
 
-export function beat(ws: Workspace, name: "queue" | "round"): void {
+export function beat(ws: Workspace, name: Watcher): void {
   mkdirSync(ws.logsDir, { recursive: true });
   writeFileSync(heartbeatPath(ws, name), iso() + "\n");
 }
 
-export function heartbeatAge(ws: Workspace, name: "queue" | "round"): number | null {
+export function heartbeatAge(ws: Workspace, name: Watcher): number | null {
   const p = heartbeatPath(ws, name);
   return existsSync(p) ? Math.floor((Date.now() - statSync(p).mtimeMs) / 1000) : null;
 }

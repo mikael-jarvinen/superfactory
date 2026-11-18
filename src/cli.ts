@@ -37,12 +37,13 @@ import { cmdStack, STACK_USAGE } from "./stacks/command.js";
 import { cmdTicket, cmdWiki, TICKET_USAGE } from "./tickets/cli.js";
 import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/engine.js";
 import {
-  allRecs, appendEvent, BUSY, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removeRec, saveRec, showRec, transition, validKey,
+  allRecs, appendEvent, BUSY, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removePr, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
 import { FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.js";
 import { failure } from "./failures.js";
 import { runQueue } from "./watchers/queue.js";
 import { runRound } from "./watchers/round.js";
+import { runReviews } from "./watchers/reviews.js";
 import { openWorkspace, resolveWorkspace, type Workspace } from "./workspace.js";
 
 const USAGE = `factory: start, stop, dispatch and track a fleet of Claude Code sessions.
@@ -81,6 +82,8 @@ usage: factory [--workspace <dir>] <command> [options]
                                   one that is off is woken on its conversation; --force starts fresh
   state <KEY>                     show one record
   state <KEY> --title "<words>"   what it is about, for the board. No transition.
+  state <KEY> --remove-pr owner/repo#N [--note N]
+                                  take a PR off the item, e.g. after a split. No transition.
   state <KEY> <new-state> [--agent A] [--stack S] [--evidence E] [--note N] [--title T]
         [--pr owner/repo#N] [--head SHA] [--reviewed SHA] [--jira STATUS] [--force]
         [--canvas URL] [--slides URL] [--approved "<the human's words>"]
@@ -131,8 +134,12 @@ usage: factory [--workspace <dir>] <command> [options]
   demo <KEY> <spec.ts> [base-url] run a Playwright demo from the worktree; media in /tmp/demo/<KEY>
   demo --before <KEY> <spec.ts> [base-url]
                                   the same with main's code checked out; media in /tmp/demo/<KEY>-before
+  demo --before --base-ref <branch> <KEY> <spec.ts> [base-url]
+                                  a PR stacked on <branch>: the same with origin/<branch> checked out
   watch queue                     read the tracker's queue once, and tell the lead about new queued
                                   tickets and fresh merges. What the scheduler runs; prompts/queue.md.
+  watch reviews                   read the review comments on the PRs in review once, and tell the
+                                  lead about new ones. No model; every 5 minutes by default.
   watch round [--facts]           the round once: facts gathered here, and a note to the lead with
                                   the lines that need it, each told once a day at most.
                                   --facts prints the facts and tells nobody.
@@ -215,6 +222,7 @@ function cmdState(ws: Workspace, argv: string[]) {
   const { v, p } = args("state", argv, {
     list: { type: "boolean" }, all: { type: "boolean" }, force: { type: "boolean" },
     agent: s, stack: s, evidence: s, note: s, title: s, pr: s, head: s, reviewed: s, jira: s, canvas: s, slides: s, approved: s,
+    "remove-pr": s,
   }, [0, 2]);
   const [ticket, next] = p;
   if (v.list) {
@@ -224,6 +232,12 @@ function cmdState(ws: Workspace, argv: string[]) {
     return;
   }
   if (!ticket) throw new FactoryError("state needs a ticket, or --list");
+  const removing = str(v["remove-pr"]);
+  if (removing) {
+    if (next) throw new FactoryError("--remove-pr is not a transition; run it without a new state");
+    removePr(ws, ticket, removing, str(v.note));
+    return;
+  }
   if (!next) {
     const rec = loadRec(ws, ticket);
     if (!rec) throw new FactoryError(`no record for ${ticket}`);
@@ -705,14 +719,16 @@ function cmdPrMedia(ws: Workspace, argv: string[]) {
 }
 
 function cmdDemo(ws: Workspace, argv: string[]): number | void {
-  const { v, p } = args("demo", argv, { init: { type: "boolean" }, before: { type: "boolean" } }, [1, 3]);
+  const { v, p } = args("demo", argv, { init: { type: "boolean" }, before: { type: "boolean" }, "base-ref": { type: "string" } }, [1, 3]);
   const [key, spec, base] = p as [string, string | undefined, string | undefined];
+  const baseRef = v["base-ref"] as string | undefined;
   if (v.init) {
-    if (spec || v.before) throw new UsageError("demo: --init takes only the key");
+    if (spec || v.before || baseRef !== undefined) throw new UsageError("demo: --init takes only the key");
     return demoInit(ws, key);
   }
-  if (!spec) throw new UsageError("demo: which spec? factory demo [--before] <KEY> <spec.ts> [base-url], or --init for the template");
-  return demo(ws, key, spec, base, undefined, !!v.before);
+  if (baseRef !== undefined && !v.before) throw new UsageError("demo: --base-ref goes with --before");
+  if (!spec) throw new UsageError("demo: which spec? factory demo [--before [--base-ref <branch>]] <KEY> <spec.ts> [base-url], or --init for the template");
+  return demo(ws, key, spec, base, undefined, !!v.before, baseRef);
 }
 
 // A scheduled run that dies before it starts leaves a line where the round looks, not only in the
@@ -720,10 +736,10 @@ function cmdDemo(ws: Workspace, argv: string[]): number | void {
 function cmdWatch(ws: Workspace, argv: string[]): number {
   const { v, p } = args("watch", argv, { facts: { type: "boolean" } }, [1, 1]);
   const job = p[0] as string;
-  if (job !== "queue" && job !== "round") throw new UsageError(`watch: ${pyRepr(job)} is not a watcher; watchers are queue, round`);
+  if (job !== "queue" && job !== "round" && job !== "reviews") throw new UsageError(`watch: ${pyRepr(job)} is not a watcher; watchers are queue, reviews, round`);
   if (v.facts && job !== "round") throw new UsageError("watch: --facts is for the round");
   try {
-    return job === "queue" ? runQueue(ws) : runRound(ws, { factsOnly: !!v.facts });
+    return job === "queue" ? runQueue(ws) : job === "reviews" ? runReviews(ws) : runRound(ws, { factsOnly: !!v.facts });
   } catch (e) {
     if (e instanceof FactoryError && !v.facts) failure(ws, `${job} FAILED: ${e.message.split("\n")[0]}`);
     throw e;

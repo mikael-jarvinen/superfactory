@@ -1,5 +1,6 @@
 // `factory watch queue`: on the scheduler's cadence, tell the lead about new work in the tracker's
-// queue and about fresh merges it owes a done judgement for.
+// queue and about fresh merges it owes a done judgement for. New review comments are the review
+// watcher's (reviews.ts), which runs no model and so can run more often.
 //
 // The model does the one thing only a session can: read the tracker through the connector. It is
 // handed no state, runs no commands and messages nobody. Everything after the read is here: the

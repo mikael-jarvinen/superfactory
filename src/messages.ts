@@ -74,16 +74,36 @@ export function say(ws: Workspace, words: string[], opts: { ticket?: string; lin
 
 // The tail of the log, never the whole of it: it is append-only and unbounded.
 export function readTail(path: string): Message[] {
-  return tryReadTail(path) ?? [];
+  return tailOf(path)?.rows ?? [];
 }
 
 // readTail, but null when the log cannot be read (missing, or a transient read failure), so a caller
 // can tell that from a log with no matching row. `bytes` is how much of the end to read.
 export function tryReadTail(path: string, bytes = TAIL_BYTES): Message[] | null {
+  return tailOf(path, bytes)?.rows ?? null;
+}
+
+// The newest n rows (n = 0: all the tail holds), continuous across one rollover. `post` renames
+// the log to .1 past a megabyte, so right after a rollover the log holds a row or two and the page
+// showed only those (2026-11-16). While the log is short enough to be read whole and holds fewer
+// than n rows, the tail of .1 comes before it. Tails only, of both. A log that cannot be read is
+// read as whole and empty.
+export function readRecent(path: string, n: number): Message[] {
+  const cur = tailOf(path) ?? { rows: [], whole: true };
+  let rows = cur.rows;
+  if (cur.whole && (n === 0 || rows.length < n)) rows = [...(tailOf(path + ".1")?.rows ?? []), ...rows];
+  return n === 0 ? rows : rows.slice(-n);
+}
+
+// The last `bytes` of the log. whole: the tail is the whole file, so nothing between it and .1 was
+// skipped. Null when the log cannot be read (missing, or a transient read failure).
+function tailOf(path: string, bytes = TAIL_BYTES): { rows: Message[]; whole: boolean } | null {
   let buf: Buffer;
+  let whole = true;
   try {
     const size = statSync(path).size;
     const start = size > bytes ? size - bytes : 0;
+    whole = start === 0;
     buf = Buffer.alloc(size - start);
     const fd = openSync(path, "r");
     try {
@@ -107,20 +127,18 @@ export function tryReadTail(path: string, bytes = TAIL_BYTES): Message[] | null 
       // a torn or foreign line
     }
   }
-  return rows;
+  return { rows, whole };
 }
 
 export function messages(ws: Workspace, n: number, out = console.log): void {
-  try {
-    statSync(ws.messages);
-  } catch {
+  const rows = readRecent(ws.messages, n);
+  if (!rows.length) {
     out("no messages yet");
     return;
   }
   const humanName = ws.config.human.name.toLowerCase();
   const leadName = lead(ws).name;
-  const rows = readTail(ws.messages);
-  for (const r of n === 0 ? rows : rows.slice(-n)) {
+  for (const r of rows) {
     const who = isHuman(ws, r.kind) ? humanName : leadName;
     out(`${(r.t ?? "").slice(0, 16)}  ${who.padEnd(9)} ${(r.kind ?? "").padEnd(8)} ${r.ticket ?? ""}`.trimEnd());
     for (const line of splitlines(r.text ?? "")) out(`    ${line}`);
