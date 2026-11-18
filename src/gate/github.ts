@@ -133,6 +133,10 @@ export const reviewComments = (repo: Repo, n: number) => allPages<ReviewComment>
 // The PR's commits, oldest first. A force-push drops the commits it replaced.
 export const prCommits = (repo: Repo, n: number) => allPages<{ sha: string }>(`repos/${repo.remote}/pulls/${n}/commits`);
 
+// The PRs GitHub ties a commit to: the open PRs that contain it, or the merged PR that brought it
+// to the default branch.
+export const commitPulls = (repo: Repo, sha: string) => allPages<{ number: number }>(`repos/${repo.remote}/commits/${sha}/pulls`);
+
 // Every review on a PR, every page.
 export function reviews(repo: Repo, n: number): Review[] | undefined {
   const all: Review[] = [];
