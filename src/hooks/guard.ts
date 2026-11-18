@@ -891,6 +891,47 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
   }
 }
 
+// Only the comment rule, for a session that runs no guard (an assistant) or whose guard leaves gh
+// alone: the marked-comments hook. The same check checkProtect runs on a gh command.
+function checkComments(cmd: string): void {
+  let text = cmd;
+  for (let m = HEREDOC.exec(text); m; m = HEREDOC.exec(text))
+    text = text.slice(0, m.index) + (m[0].split("\n", 1)[0] as string) + " HEREDOC\n" + text.slice(m.index + m[0].length);
+  for (const s of simpleCommands(tokenize(text))) {
+    let words = stripPrefixes(s.words.filter((w) => w !== "HEREDOC"));
+    if (!words.length) continue;
+    let name;
+    try {
+      [name, words] = cmdName(words);
+    } catch (e) {
+      if (e instanceof Refused) continue;
+      throw e;
+    }
+    if (name === "gh") checkCommentWrite(words.slice(1));
+    if (SHELLS.has(name)) {
+      const i = words.findIndex((w, k) => k > 0 && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(w));
+      if (i > 0 && words[i + 1] !== undefined) checkComments(words[i + 1] as string);
+    }
+  }
+}
+
+export function commentVerdict(cmd: string): string | null {
+  try {
+    checkComments(cmd);
+    return null;
+  } catch (e) {
+    return e instanceof Refused ? e.message : `the comment check failed (${(e as Error).message})`;
+  }
+}
+
+// A GitHub MCP tool that posts a comment, review body or reply: its body is held to the same rule.
+export const MCP_COMMENT_TOOLS = /^mcp__.*github.*__(add_issue_comment|add_reply_to_pull_request_comment|add_comment_to_pending_review|pull_request_review_write|update_issue_comment|create_pending_pull_request_review|submit_pending_pull_request_review|create_and_submit_pull_request_review)$/i;
+
+export function mcpCommentVerdict(tool: string, body: unknown): string | null {
+  if (!MCP_COMMENT_TOOLS.test(tool) || typeof body !== "string" || !body.trim()) return null;
+  return markedBody(body) ? null : `this comment would read as the human's own: ${COMMENT_HINT}`;
+}
+
 // The reason a command is refused, or null when it may run. Anything unexpected refuses.
 export function verdict(cmd: string, ctx: GuardContext): string | null {
   try {
