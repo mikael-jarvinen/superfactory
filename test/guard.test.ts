@@ -501,7 +501,7 @@ test("comments, placeholders, branch updates and a scheduler's stdin are read as
     "gh pr update-branch 8701 -R acme/api", "gh pr update-branch 3 -R acme/workspace",
     "gh api -X PUT repos/acme/api/pulls/8701/update-branch", "gh api -X PUT repos/acme/api/pulls/8701/update-branch -f update_method=rebase",
     "gh api repos/acme/api/pulls/8702/update-branch", "gh api -X PUT repos/acme/workspace/pulls/3/update-branch",
-    "gh pr close 3 -R acme/workspace -c https://github.com/acme/api/pull/8701", `ls \\\n# it's\nls`,
+    "gh pr merge 3 -R acme/workspace -t https://github.com/acme/api/pull/8701", `ls \\\n# it's\nls`,
     `cat <<'EOF'\nEO\\\nF\nit's\nEOF`, `echo "$(true # it's (x\n)"`,
     "# Run the checks\nnpm test", `ls # ; ${M}`, `echo '#'; ls`, `echo "a #b"`, `echo a\\#b`,
     `printf 'cat <<EOF\\n$(date\\nEOF\\n'`, `x="$(cat <<'E'\nit's\nE\n)"; echo "$x"`,
