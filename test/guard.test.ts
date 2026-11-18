@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { after, test } from "node:test";
 import { allowClosePath } from "../src/allow-close.js";
-import { type GuardContext, verdict } from "../src/hooks/guard.js";
+import { type GuardContext, hook, mcpVerdict, verdict } from "../src/hooks/guard.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, tempWorkspace } from "./helpers.js";
 
@@ -240,16 +240,111 @@ test("the lead closes a product PR only once the human has named it", () => {
     "no repo": verdict("gh pr close 8701", lead),
     "an assistant": verdict("gh pr close 8701 -R acme/api", { ...lead, role: "assistant" }),
     "a lead with no list": verdict("gh pr close 8701 -R acme/api", { ...pr, role: "lead" }),
+    // gh takes -R/--repo before pr, or before its subcommand (Marie, after round 4)
+    "a merge, -R before pr": verdict("gh -R acme/api pr merge 8701", lead),
+    "a merge, --repo= before merge": verdict("gh pr --repo=acme/api merge 8701 --squash", lead),
+    "a lock, --repo before pr": verdict("gh --repo acme/api pr lock 8701", lead),
+    "an unrecorded PR, -R before pr": verdict("gh -R acme/api pr close 8702", lead),
   };
   for (const [what, reason] of Object.entries(refused)) assert.notEqual(reason, null, `${what} should be refused`);
   assert.match(refused["an unrecorded PR"] as string, /acme\/api#8702 is not on the allow-close list; .*factory allow-close <repo-key> <n> --words/);
   assert.match(refused["a merge of the recorded PR"] as string, /^merge of a PR on a product repo/);
   assert.match(refused["no number"] as string, /needs its number or URL/);
+  assert.match(refused["a merge, -R before pr"] as string, /^merge of a PR on a product repo/);
+  assert.match(refused["a lock, --repo before pr"] as string, /^lock of a PR on a product repo/);
+  assert.match(refused["an unrecorded PR, -R before pr"] as string, /acme\/api#8702 is not on the allow-close list/);
+  assert.equal(verdict("gh -R acme/api pr close 8701", lead), null);
+  assert.equal(verdict("gh pr -R acme/api close 8701 -c '> Written by agent. superseded'", lead), null);
   // the factory's own repos are unchanged
   assert.equal(verdict("gh pr close 3 -R acme/workspace", { ...pr, role: "assistant" }), null);
   // the words are the permission
   assert.notEqual(factory(dir, ["allow-close", "api", "8703"]).status, 0);
   assert.notEqual(factory(dir, ["allow-close", "nope", "8703", "--words", "x"]).status, 0);
+});
+
+// gh runs a user alias, a shell alias or an extension as readily as its own commands, and the guard
+// cannot know what one does: `gh alias set m 'pr merge'` then `gh m 8701 -R acme/api` was a product
+// merge in two calls. Only gh's built-in commands pass, and aliases and extensions cannot be made.
+test("a gh alias or extension is refused, and so is making one", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const refused = ["gh alias set m 'pr merge'", "gh m 8701 -R acme/api", "gh -R acme/api m 8701", "gh alias set pc 'pr comment'",
+    "gh pc 1 -b hi", "gh alias set --shell x 'gh pr merge 8701 -R acme/api'", "gh x", "gh alias import a.yml", "gh alias delete co",
+    "gh co 12", "gh extension install o/gh-x", "gh ext install o/gh-x", "gh extensions upgrade --all", "gh extension exec x",
+    "command gh m 8701 -R acme/api", "gh -- m 8701", "bash -c 'gh m 8701 -R acme/api'"];
+  const allowed = ["gh pr checkout 12", "gh pr co 12", "gh alias list", "gh alias ls", "gh ext list", "gh pr view 1", "gh --version", "gh --help", "gh help", "gh -R acme/api pr checks 1"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (!/aliases and extensions can't be checked/.test(verdict(c, ctx) ?? "")) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// The guard's matcher was Bash|Read|Grep, so the GitHub MCP tools merged, closed and commented past
+// it. Now a merge, close or undraft is checked as its gh command, a comment needs the marker, a
+// commit to a protected branch is refused, an unknown write is refused, and reads pass.
+test("the GitHub MCP tools are held to the gh rules", () => {
+  const dir = tempWorkspace();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.equal(factory(dir, ["allow-close", "api", "8701", "--words", "I allow you to close the PR"]).status, 0);
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  const lead: GuardContext = { ...pr, role: "lead", leadMerges: ["acme/web"], allowClose: allowClosePath(openWorkspace(dir).stateDir) };
+  const api = { owner: "acme", repo: "api" };
+  const M = "> Written by agent. done";
+  type Row = [string, Record<string, unknown>, GuardContext];
+  const refused: Row[] = [
+    ["merge_pull_request", { ...api, pullNumber: 8701 }, lead],
+    ["merge_pull_request", { ...api, pullNumber: 8701, merge_method: "squash" }, pr],
+    ["merge_pull_request", { owner: "acme", repo: "web", pullNumber: 506 }, lead], // no head
+    ["merge_pull_request", { owner: "acme", repo: "web", pullNumber: 506, expectedHeadSha: sha }, pr],
+    ["update_pull_request", { ...api, pullNumber: 8702, state: "closed" }, lead],
+    ["update_pull_request", { ...api, pullNumber: 8701, state: "closed" }, pr],
+    ["update_pull_request", { ...api, pullNumber: 8701, draft: false }, pr],
+    ["add_issue_comment", { ...api, issue_number: 1, body: "hi" }, pr],
+    ["add_reply_to_pull_request_comment", { ...api, pullNumber: 1, commentId: 2, body: "fixed" }, lead],
+    ["pull_request_review_write", { ...api, pullNumber: 1, method: "create", event: "COMMENT", body: "lgtm" }, pr],
+    ["update_issue_comment", { ...api, comment_id: 3, body: "edited" }, pr],
+    ["push_files", { ...api, branch: "main", files: [], message: "x" }, pr],
+    ["create_or_update_file", { ...api, branch: "master", path: "a", content: "", message: "x" }, lead],
+    ["delete_file", { ...api, branch: "main", path: "a", message: "x" }, pr],
+    ["create_repository", { name: "x" }, lead],
+    ["delete_repository", { ...api }, lead],
+    ["fork_repository", { ...api }, pr],
+    ["some_future_write", {}, lead],
+    ["add_issue_comment", { ...api, issue_number: 1, body: M }, ro],
+    ["create_pull_request", { ...api, title: "t", head: "x", base: "main" }, ro],
+  ];
+  const allowed: Row[] = [
+    ["get_me", {}, ro], ["pull_request_read", { ...api, pullNumber: 1, method: "get" }, ro], ["list_pull_requests", api, pr],
+    ["search_code", { query: "x" }, ro], ["issue_read", { ...api, issue_number: 1, method: "get" }, pr],
+    ["merge_pull_request", { owner: "acme", repo: "web", pullNumber: 506, expectedHeadSha: sha, merge_method: "squash" }, lead],
+    ["merge_pull_request", { owner: "acme", repo: "workspace", pullNumber: 3 }, pr],
+    ["update_pull_request", { ...api, pullNumber: 8701, state: "closed" }, lead],
+    ["update_pull_request", { ...api, pullNumber: 8701, title: "t", body: "unmarked description" }, pr],
+    ["update_pull_request", { ...api, pullNumber: 8701, draft: true }, pr],
+    ["add_issue_comment", { ...api, issue_number: 1, body: M }, pr],
+    ["add_issue_comment", { ...api, issue_number: 1, body: "@coderabbitai review" }, pr],
+    ["pull_request_review_write", { ...api, pullNumber: 1, method: "resolve_thread", threadId: "PRRT_x" }, pr],
+    ["create_pull_request", { ...api, title: "t", head: "x", base: "main", draft: true }, pr],
+    ["push_files", { ...api, branch: "fix-x", files: [], message: "x" }, pr],
+    ["create_or_update_file", { owner: "acme", repo: "workspace", branch: "main", path: "a", content: "", message: "x" }, pr],
+    ["issue_write", { ...api, method: "create", title: "t" }, pr],
+  ];
+  const wrong: string[] = [];
+  for (const [t, tin, ctx] of refused) if (mcpVerdict(`mcp__github__${t}`, tin, ctx) === null) wrong.push(`${ctx.role} allowed: ${t} ${JSON.stringify(tin)}`);
+  for (const [t, tin, ctx] of allowed) {
+    const why = mcpVerdict(`mcp__github__${t}`, tin, ctx);
+    if (why !== null) wrong.push(`${ctx.role} refused: ${t} ${JSON.stringify(tin)} (${why})`);
+  }
+  assert.deepEqual(wrong, []);
+  // the hook routes the MCP tools to this check
+  const argv = ["--role", "builder", "--policy", "protect", "--org", "acme", "--own-repo", "acme/workspace"];
+  const call = (tool_name: string, tool_input: Record<string, unknown>) => hook(argv, JSON.stringify({ tool_name, tool_input }));
+  const merge = call("mcp__github__merge_pull_request", { ...api, pullNumber: 8701 });
+  assert.equal(merge.code, 2);
+  assert.match(merge.stderr ?? "", /merge of a PR on a product repo/);
+  assert.equal(call("mcp__github__add_issue_comment", { ...api, issue_number: 1, body: "hi" }).code, 2);
+  assert.equal(call("mcp__github__get_me", {}).code, 0);
 });
 
 // Mikko, 2026-11-14: the lead may merge test PRs and bug fixes again. Only on a lead_merges repo, only

@@ -25,6 +25,7 @@
 import { posix } from "node:path";
 import { parseArgs } from "node:util";
 import { allowClosePath, closable } from "../allow-close.js";
+import { MARKER } from "../gate/comment.js";
 import type { HookResult } from "../settings.js";
 import { chars, run } from "../util.js";
 import { openWorkspace, resolveWorkspace } from "../workspace.js";
@@ -549,8 +550,55 @@ function checkLeadMerge(args: string[]): void {
 const HOW_TO_CLOSE = "a product PR closes only once the human has named that exact PR and the lead has recorded it with " +
   "`factory allow-close <repo-key> <n> --words \"<the human's words>\"`";
 
+// The comment rule (superfactory#119). A comment the factory's sessions post goes out under the
+// human's token login, so the review watcher tells it from the human's own by the marker it starts
+// with. A comment write passes only when its body is in the command and starts with the marker, or
+// is a bot trigger; a body from a file, a $(...) or a variable cannot be checked here.
+const COMMENT_HINT = `start the body with "${MARKER}" (or post it with \`factory pr-comment\`), in the command itself, not from a file or $(...)`;
+const markedBody = (b: string) => b.trimStart().startsWith(MARKER) || /^@coderabbitai\b/.test(b.trimStart());
+
+// gh's command path as cobra finds it. Flags may come before each command word, and pr's and issue's
+// persistent -R/--repo takes the next word (gh -R o/r pr comment 1, gh pr --repo o/r close 2). The
+// words come back with the path first and every other word after it in its order, so a parser of
+// the command's flags still sees the repo (Marie on #119, after round 4). api's path is one word.
+const GH_PATH_VALUES = new Set(["-R", "--repo"]);
+export function ghPath(args: string[]): string[] {
+  const path: string[] = [];
+  const rest: string[] = [];
+  let i = 0;
+  for (; i < args.length && path.length < (path[0] === "api" ? 1 : 2); i++) {
+    const a = args[i] as string;
+    if (a === "--") break;
+    if (a.startsWith("-") && a !== "-") {
+      rest.push(a);
+      if (GH_PATH_VALUES.has(a) && i + 1 < args.length) rest.push(args[++i] as string);
+    } else path.push(a);
+  }
+  return [...path, ...rest, ...args.slice(i)];
+}
+
+// gh's own top-level commands, from gh 2.97's `gh help`, with their cobra aliases (cs, ext, rs...).
+// Any other first word is a user alias, a shell alias or an extension, and could run anything, so
+// it is refused. gh lets no alias shadow a built-in, so this needs no read of gh's config. Making
+// an alias or getting an extension is refused outright (Marie and Niilo, the -R/alias hotfix).
+const GH_BUILTINS = new Set(["agent-task", "agent-tasks", "agent", "agents", "alias", "api", "attestation", "at", "auth", "browse",
+  "cache", "codespace", "cs", "completion", "config", "copilot", "discussion", "extension", "extensions", "ext", "gist", "gpg-key",
+  "help", "issue", "label", "licenses", "org", "pr", "preview", "project", "release", "repo", "ruleset", "rs", "run", "search",
+  "secret", "skill", "skills", "ssh-key", "status", "variable", "workflow"]);
+const GH_ALIAS_HINT = "gh aliases and extensions can't be checked: run the full gh command";
+export function checkGhCommand(args: string[]): void {
+  const [c, sub] = args;
+  // no command word: only flags (gh --version, gh --help) pass; anything after a `--` could be an alias
+  if (c === undefined || (c.startsWith("-") && args.every((a) => a.startsWith("-") && a !== "--"))) return;
+  if (!GH_BUILTINS.has(c)) refuse(`gh ${c}: ${GH_ALIAS_HINT}`);
+  if (c === "alias" && ["set", "import", "delete"].includes(sub ?? "")) refuse(`gh alias ${sub}: ${GH_ALIAS_HINT}`);
+  if (["extension", "extensions", "ext"].includes(c) && ["install", "upgrade", "exec"].includes(sub ?? ""))
+    refuse(`gh ${c} ${sub}: ${GH_ALIAS_HINT}`);
+}
+
 function checkGhProtect(words: string[], ctx: GuardContext): void {
-  const args = words.slice(1);
+  const args = ghPath(words.slice(1));
+  checkGhCommand(args);
   if (args[0] === "pr" && ["merge", "close", "lock", "unlock"].includes(args[1] ?? "")) {
     const repo = ghPrRepo(args);
     if (repo === null) refuse("merging or closing a PR needs an explicit --repo owner/name (or a PR URL) so the guard can confirm whose repo it is");
@@ -596,6 +644,55 @@ function checkGhProtect(words: string[], ctx: GuardContext): void {
     const rename = API_RENAME_TO_MAIN.exec(rest);
     if (rename && ctx.ownRepos.includes(rename[2] as string)) return;
     refuse("writing merges or refs through the API is not allowed");
+  }
+}
+
+// A GitHub MCP tool that posts a comment, review body or reply: its body is held to the same rule.
+export const MCP_COMMENT_TOOLS = /^mcp__.*github.*__(add_issue_comment|add_reply_to_pull_request_comment|add_comment_to_pending_review|pull_request_review_write|update_issue_comment|create_pending_pull_request_review|submit_pending_pull_request_review|create_and_submit_pull_request_review)$/i;
+
+export function mcpCommentVerdict(tool: string, body: unknown): string | null {
+  if (!MCP_COMMENT_TOOLS.test(tool) || typeof body !== "string" || !body.trim()) return null;
+  return markedBody(body) ? null : `this comment would read as the human's own: ${COMMENT_HINT}`;
+}
+
+// The GitHub MCP server's tools reach the same PRs as gh, so the guard sees them too (Marie and
+// Niilo, the -R/alias hotfix). A read passes. A merge, close or undraft is checked as the gh command
+// it equals, a comment must carry the marker, and a commit to a branch follows git push's rule for
+// protected branches. Any other write, including a tool the server adds later, is refused, and a
+// readonly session writes nothing.
+const MCP_GITHUB_READ = /^mcp__github__(get_\w+|list_\w+|search_\w+|issue_read|pull_request_read)$/;
+const MCP_GITHUB_BRANCH_WRITES = new Set(["push_files", "create_or_update_file", "delete_file", "create_branch"]);
+const MCP_GITHUB_WRITES = new Set(["create_pull_request", "update_pull_request", "update_pull_request_branch", "issue_write", "sub_issue_write"]);
+function checkMcpGithub(tool: string, tin: Record<string, unknown>, ctx: GuardContext): void {
+  if (MCP_GITHUB_READ.test(tool)) return;
+  const name = tool.replace(/^mcp__github__/, "");
+  if (ctx.policy === "readonly") refuse(`${name} writes to GitHub, and this session may only read`);
+  const str = (k: string) => (typeof tin[k] === "string" ? (tin[k] as string) : "");
+  const repo = `${str("owner")}/${str("repo")}`;
+  const n = String(tin.pullNumber ?? "");
+  if (MCP_COMMENT_TOOLS.test(tool)) {
+    const why = mcpCommentVerdict(tool, tin.body);
+    if (why !== null) refuse(why);
+  } else if (name === "merge_pull_request") {
+    const head = str("expectedHeadSha");
+    const method = str("merge_method");
+    checkGhProtect(["gh", "pr", "merge", n, "-R", repo, ...(head ? ["--match-head-commit", head] : []), ...(method ? [`--${method}`] : [])], ctx);
+  } else if (MCP_GITHUB_BRANCH_WRITES.has(name)) {
+    const own = ctx.ownRepos.some((r) => r.toLowerCase() === repo.toLowerCase());
+    if (protectedRef(str("branch")) && !own) refuse(`pushing to a protected branch (${str("branch")}) is not allowed`);
+  } else if (!MCP_GITHUB_WRITES.has(name)) refuse(`${name} is a GitHub MCP write the guard does not know, so it is refused; use gh`);
+  if (name === "update_pull_request") {
+    if (tin.state === "closed") checkGhProtect(["gh", "pr", "close", n, "-R", repo], ctx);
+    if (tin.draft === false) checkGhProtect(["gh", "pr", "ready", n, "-R", repo], ctx);
+  }
+}
+
+export function mcpVerdict(tool: string, tin: Record<string, unknown>, ctx: GuardContext): string | null {
+  try {
+    checkMcpGithub(tool, tin, ctx);
+    return null;
+  } catch (e) {
+    return e instanceof Refused ? e.message : `the guard failed (${(e as Error).message})`;
   }
 }
 
@@ -896,6 +993,10 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
     const target = [str("path"), str("glob")].find((x) => x && namesSecret(x));
     return target && str("output_mode") === "content"
       ? refused(`${target} holds secrets; Grep may list or count matches there, not print them`, target) : { code: 0 };
+  }
+  if (typeof call.tool_name === "string" && call.tool_name.startsWith("mcp__github__")) {
+    const reason = mcpVerdict(call.tool_name, tin, ctx);
+    return reason === null ? { code: 0 } : refused(reason, call.tool_name);
   }
   const cmd = tin.command ?? "";
   if (typeof cmd !== "string" || !cmd.trim()) return { code: 0 };
