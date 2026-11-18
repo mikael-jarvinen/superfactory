@@ -33,15 +33,17 @@ export const PREPENDED = "SF_PATH_PREPEND";
 
 export function sessionEnv(ws: Workspace, agent: Agent, path = process.env.PATH ?? "", sent = process.env[PREPENDED] ?? ""): Record<string, string> | undefined {
   const stack = agent.stack ? ws.config.stacks[agent.stack] : undefined;
-  if (!stack) return undefined;
-  const env = { ...stack.env };
+  const prepend = stack?.pathPrepend ?? [];
+  const env: Record<string, string> = { ...stack?.env };
   // path is this process's, and a wake renders a recipient's settings in its sender's hook, whose
   // PATH starts with what the sender's stack prepended (CodeRabbit on #127). Exactly that run comes
   // out, and nothing else: a render never dedupes, so a directory a stack shares with the system
   // PATH, /usr/local/bin say, keeps its system copy and survives the next render (Marie's gate).
-  if (stack.pathPrepend.length) {
-    env.PATH = [...stack.pathPrepend, ...withoutRun(path.split(":").filter(Boolean), sent.split(":").filter(Boolean))].join(":");
-    env[PREPENDED] = stack.pathPrepend.join(":");
+  // A recipient that prepends nothing, on a stack or none, still loses the sender's run (Marie and
+  // Niilo on #127).
+  if (prepend.length || sent) {
+    env.PATH = [...prepend, ...withoutRun(path.split(":").filter(Boolean), sent.split(":").filter(Boolean))].join(":");
+    env[PREPENDED] = prepend.join(":");
   }
   return Object.keys(env).length ? env : undefined;
 }

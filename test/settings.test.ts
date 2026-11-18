@@ -133,8 +133,8 @@ test("a builder on a stack gets the stack's env, with its directories first on P
 // its place there, for every other stack (Marie's gate of #127). The sender's PATH is its own render's.
 test("a stack's PATH takes the sender's prepended directories out, and only those", () => {
   const toml = TOML.replace("pin = { bea = 1 }\n", 'pin = { bea = 1 }\npath_prepend = ["/opt/java/bin"]\n')
-    .replace("[roles.lead]", '[repos.tools]\nremote = "acme/tools"\n\n[stacks.tools]\nrepos = ["tools"]\nslots = 1\npath_prepend = ["/usr/local/bin", "/opt/tools/bin"]\n\n[roles.lead]')
-    .replace("[[agents]]\nname = \"cal\"", '[[agents]]\nname = "tia"\nrole = "builder"\nstack = "tools"\n\n[[agents]]\nname = "cal"');
+    .replace("[roles.lead]", '[repos.tools]\nremote = "acme/tools"\n\n[stacks.tools]\nrepos = ["tools"]\nslots = 1\npath_prepend = ["/usr/local/bin", "/opt/tools/bin"]\n\n[stacks.docs]\nrepos = ["tools"]\nslots = 1\nenv = { DOCS = "1" }\n\n[roles.lead]')
+    .replace("[[agents]]\nname = \"cal\"", '[[agents]]\nname = "tia"\nrole = "builder"\nstack = "tools"\n\n[[agents]]\nname = "dot"\nrole = "builder"\nstack = "docs"\n\n[[agents]]\nname = "cal"');
   const dir = tempWorkspace(toml);
   after(() => rmSync(dir, { recursive: true, force: true }));
   const ws = openWorkspace(dir, {});
@@ -148,6 +148,14 @@ test("a stack's PATH takes the sender's prepended directories out, and only thos
   assert.deepEqual(woken, { PATH: "/opt/java/bin:/usr/local/bin:/usr/bin:/bin", SF_PATH_PREPEND: "/opt/java/bin" });
   // and tia woken back from bea's session gets its own PATH again
   assert.deepEqual(sessionEnv(ws, agentOrDie(ws, "tia"), woken.PATH, woken.SF_PATH_PREPEND), tia);
+  // a recipient that prepends nothing loses tia's run too: on a stack with env only, or on none
+  // (Marie and Niilo on #127)
+  assert.deepEqual(sessionEnv(ws, agentOrDie(ws, "dot"), tia.PATH, tia.SF_PATH_PREPEND), { DOCS: "1", PATH: system, SF_PATH_PREPEND: "" });
+  for (const name of ["cal", "ada", "rae"])
+    assert.deepEqual(sessionEnv(ws, agentOrDie(ws, name), tia.PATH, tia.SF_PATH_PREPEND), { PATH: system, SF_PATH_PREPEND: "" }, name);
+  // and with no sender's run to take out, they keep the launcher's PATH, as before
+  assert.equal(sessionEnv(ws, agentOrDie(ws, "cal"), system, ""), undefined);
+  assert.deepEqual(sessionEnv(ws, agentOrDie(ws, "dot"), system, ""), { DOCS: "1" });
   // a sender with no stack prepended nothing, so nothing comes out: the system PATH stays whole behind bea's own
   assert.deepEqual(sessionEnv(ws, bea, "/usr/local/bin:/usr/bin:/opt/java/bin:/bin", ""),
     { PATH: "/opt/java/bin:/usr/local/bin:/usr/bin:/opt/java/bin:/bin", SF_PATH_PREPEND: "/opt/java/bin" });
