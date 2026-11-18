@@ -2233,7 +2233,7 @@ function commandWords(words: string[], via: { name: string; opts: string[] }[] =
       }
       // `command -v gh` and `command -V gh` look a name up and run nothing (Marie on #128)
       if (name === "command" && /^-[pvV]*[vV][pvV]*$/.test(o)) return [];
-      if (opts.includes(o)) seen.push(words[i++] as string);
+      if (name === "xargs" && !o.startsWith("--") ? xargsShort(o).next : opts.includes(o)) seen.push(words[i++] as string);
     }
     if (name === "timeout") i++;
     while ((name === "env" || name === "sudo") && assignment(words[i])) i++;
@@ -2268,17 +2268,38 @@ function shownInput(s: Simple, into: string): string[] {
 
 // xargs's replace string, from the options commandWords read: -I's value (attached or the next word),
 // -i's or --replace's (else {}); null when there is none, and the input is appended.
+// One xargs short-option word, read as xargs reads it: left to right, the first letter that takes a
+// value ends the cluster and the rest of the word is that value (Marie on #128), so -dI is a
+// delimiter of I and -ri is -r -i. I, d, E, n, L, P, s and a with nothing after them take the next
+// word; i, e and l take only an attached value. Only I and i set the replace slot (i's is {}).
+const XARGS_VALUE = "IiedElnLPsa";
+function xargsShort(o: string): { next: boolean; slot?: string | "next" } {
+  for (let j = 1; j < o.length; j++) {
+    const c = o[j] as string;
+    if (!XARGS_VALUE.includes(c)) continue;
+    const rest = o.slice(j + 1);
+    const next = !"iel".includes(c) && rest === "";
+    if (c === "I") return { next, slot: next ? "next" : rest };
+    if (c === "i") return { next, slot: rest || "{}" };
+    return { next };
+  }
+  return { next: false };
+}
+
+// xargs' replace string, from the options commandWords recorded (each value after its option).
 function replaceString(opts: string[]): string | null {
   let r: string | null = null;
   for (let i = 0; i < opts.length; i++) {
     const o = opts[i] as string;
-    if (o === "-I") r = opts[++i] ?? "";
-    else if (/^-[^-]/.test(o) && o.includes("I")) {
-      const at = o.indexOf("I");
-      r = o.slice(at + 1) || (opts[++i] ?? "");
-    } else if (/^-i/.test(o)) r = o.slice(2) || "{}";
-    else if (o === "--replace") r = "{}";
+    if (o === "--replace") r = "{}";
     else if (o.startsWith("--replace=")) r = o.slice("--replace=".length) || "{}";
+    else if (o.startsWith("--")) {
+      if (WRAPPER_VALUES.xargs?.includes(o)) i++;
+    } else {
+      const x = xargsShort(o);
+      const v = x.next ? (opts[++i] ?? "") : undefined;
+      if (x.slot !== undefined) r = x.slot === "next" ? (v as string) : x.slot;
+    }
   }
   return r;
 }
