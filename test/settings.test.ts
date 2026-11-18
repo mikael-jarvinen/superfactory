@@ -54,9 +54,9 @@ test("each role renders its own hooks and rules into logs/run/", () => {
   assert.match(commandFor(lead, "Stop", undefined), / hook status --agent ada --inbox$/);
   assert.equal(builder.hooks.Stop, undefined);
 
-  assert.match(commandFor(lead, "PreToolUse", "Bash|Read|Grep|mcp__github__.*"), / hook guard --role lead --policy protect --allow-close \S+\/allow-close\.jsonl$/);
-  assert.match(commandFor(builder, "PreToolUse", "Bash|Read|Grep|mcp__github__.*"), / hook guard --role builder --policy protect$/);
-  assert.match(commandFor(reviewer, "PreToolUse", "Bash|Read|Grep|mcp__github__.*"), / hook guard --role reviewer --policy readonly$/);
+  assert.match(commandFor(lead, "PreToolUse", "Bash|Read|Grep|mcp__.*"), / hook guard --role lead --policy protect --allow-close \S+\/allow-close\.jsonl$/);
+  assert.match(commandFor(builder, "PreToolUse", "Bash|Read|Grep|mcp__.*"), / hook guard --role builder --policy protect$/);
+  assert.match(commandFor(reviewer, "PreToolUse", "Bash|Read|Grep|mcp__.*"), / hook guard --role reviewer --policy readonly$/);
   assert.equal(lead.permissions?.defaultMode, "bypassPermissions");
   assert.equal(reviewer.permissions?.defaultMode, "auto");
 
@@ -82,8 +82,8 @@ test("[peers] isolate_machines sets isolatePeerMachines for every session, true 
 test("[github] lead_merges is rendered into the lead's guard and nobody else's", () => {
   const dir = tempWorkspace(TOML + '\n[github]\nlead_merges = ["acme/web"]\n');
   after(() => rmSync(dir, { recursive: true, force: true }));
-  assert.match(commandFor(render(dir, "ada"), "PreToolUse", "Bash|Read|Grep|mcp__github__.*"), / --lead-merge acme\/web$/);
-  for (const name of ["bea", "rae"]) assert.doesNotMatch(commandFor(render(dir, name), "PreToolUse", "Bash|Read|Grep|mcp__github__.*"), /--lead-merge/, name);
+  assert.match(commandFor(render(dir, "ada"), "PreToolUse", "Bash|Read|Grep|mcp__.*"), / --lead-merge acme\/web$/);
+  for (const name of ["bea", "rae"]) assert.doesNotMatch(commandFor(render(dir, name), "PreToolUse", "Bash|Read|Grep|mcp__.*"), /--lead-merge/, name);
 });
 
 // Jira moved to the "claude.ai Atlassian MCP" connector, and a matcher written for the old one let
@@ -130,7 +130,7 @@ test("a builder on a stack gets the stack's env, with its directories first on P
 test("the rendered guard runs, labelled with the role it was rendered for", () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
-  const guard = commandFor(render(dir, "ada"), "PreToolUse", "Bash|Read|Grep|mcp__github__.*");
+  const guard = commandFor(render(dir, "ada"), "PreToolUse", "Bash|Read|Grep|mcp__.*");
   const bash = (command: string) => ({ tool_name: "Bash", tool_input: { command } });
 
   const push = runHook(guard, bash("timeout 60 git push origin main"));

@@ -131,7 +131,7 @@ test("the designer's settings: edits only in its work dir, the guard's redirects
   assert.ok(!deny.some((x) => x.startsWith(`Edit(/${work}`)));
   for (const p of [join(dir, "repos"), join(dir, "lead"), join(dir, "factory.toml"), join(dir, "designers", "CLAUDE.md")])
     assert.ok(deny.some((x) => x === `Edit(/${p}/**)` || x === `Edit(/${p})`), `${p} stays denied`);
-  const guard = r.hooks.PreToolUse.find((e: { matcher?: string }) => e.matcher === "Bash|Read|Grep|mcp__github__.*").hooks[0].command as string;
+  const guard = r.hooks.PreToolUse.find((e: { matcher?: string }) => e.matcher === "Bash|Read|Grep|mcp__.*").hooks[0].command as string;
   assert.match(guard, /--role designer --policy readonly --write-dir \S*designers\/work/);
   assert.deepEqual(r.worktree, { bgIsolation: "none" }, "the work dir is in the factory's own checkout, where a background session may not edit until it isolates");
 });

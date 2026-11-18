@@ -169,6 +169,10 @@ interface Simple {
 
 // Simple commands with the files their redirects write. `2>` arrives as "2" then ">", and the
 // bare fd is not a word. `>&1` duplicates a descriptor and writes no file.
+// a word that may come before a command's name without being it
+const prefixWord = (w: string) => KEYWORDS.has(w) || /^[A-Za-z_]\w*=/.test(w) || /^-|^\d+[smhd]?$/.test(w) ||
+  ["command", "nohup", "builtin", "env", "timeout"].includes(posix.basename(w.replace(/^\\/, "")));
+
 function simpleCommands(toks: Tok[]): Simple[] {
   const flat = toks.flatMap((k) => (k.op ? splitOps(k.t).map((t) => ({ t, op: true })) : [k]));
   const out: Simple[] = [];
@@ -192,7 +196,9 @@ function simpleCommands(toks: Tok[]): Simple[] {
       if (t === "<" || t === "<>") reads.push(target);
       i++;
     } else if (t === "$") {
-      // the $ of $( ... ); what is inside is its own simple command
+      // the $ of $( ... ); what is inside is its own simple command. At a command position its output
+      // is the command, so a `$(` word stands in for it there and the guard sees one it cannot read.
+      if (cur.every(prefixWord)) cur.push("$(");
     } else if (t.includes("`")) {
       refuse("backtick command substitution");
     } else {
@@ -596,9 +602,68 @@ export function checkGhCommand(args: string[]): void {
     refuse(`gh ${c} ${sub}: ${GH_ALIAS_HINT}`);
 }
 
+// A `gh api` call read as gh reads it: its method, endpoint and fields. With no -X, a field or
+// --input makes it a POST.
+const API_VALUES = new Set(["-X", "--method", "-f", "-F", "--field", "--raw-field", "-H", "--header", "-q", "--jq", "-t", "--template",
+  "--hostname", "--cache", "-p", "--preview", "--input"]);
+interface ApiCall { method: string; endpoint: string; fields: { key: string; value: string }[]; input: boolean }
+function apiCall(args: string[]): ApiCall {
+  let method: string | undefined;
+  let endpoint: string | undefined;
+  let input = false;
+  const fields: { key: string; value: string }[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    const eq = a.startsWith("--") ? a.indexOf("=") : -1;
+    const flag = eq > 0 ? a.slice(0, eq) : /^-[A-Za-z]./.test(a) && API_VALUES.has(a.slice(0, 2)) ? a.slice(0, 2) : a;
+    if (!a.startsWith("-") || a === "-") {
+      endpoint ??= a;
+      continue;
+    }
+    if (!API_VALUES.has(flag)) continue;
+    const value = eq > 0 ? a.slice(eq + 1) : flag !== a ? a.slice(2) : (args[++i] ?? "");
+    if (flag === "-X" || flag === "--method") method = value.toUpperCase();
+    else if (flag === "--input") input = true;
+    else if (["-f", "-F", "--field", "--raw-field"].includes(flag)) {
+      const k = value.indexOf("=");
+      fields.push({ key: k < 0 ? value : value.slice(0, k), value: k < 0 ? "" : value.slice(k + 1) });
+    }
+  }
+  return { method: method ?? (fields.length || input ? "POST" : "GET"), endpoint: endpoint ?? "", fields, input };
+}
+
+// What a `gh api` write does to a PR, an issue or a repo (Marie on #124). On a repo that is not the
+// factory's own, setting a PR's or issue's state closes it, a lock is a lock, and a write to the repo
+// itself (DELETE, PATCH) is the human's. A GraphQL mutation that merges, closes, locks or deletes is
+// refused wherever it points, and one the guard cannot read is refused.
+const API_TARGET = /^repos\/([^/\s?]+)\/([^/\s?]+)(?:\/(pulls|issues)\/(\d+)(\/lock)?)?\/?(?:\?.*)?$/;
+const GQL_REFUSED = /\b(mergePullRequest|closePullRequest|reopenPullRequest|enablePullRequestAutoMerge|lockLockable|unlockLockable|deleteRepository|archiveRepository|mergeBranch)\b/i;
+function checkApiProtect(args: string[], ctx: GuardContext): void {
+  const a = apiCall(args);
+  if (a.method === "GET") return;
+  const ep = a.endpoint.replace(/^https?:\/\/[^/]+/, "").replace(/^\/+/, "");
+  if (ep === "graphql") {
+    const queries = a.fields.filter((f) => f.key === "query").map((f) => f.value);
+    if (a.input || queries.some((q) => q.startsWith("@") || /\$\(|`/.test(q) || /^\s*\$\w/.test(q)))
+      refuse("a GraphQL call the guard cannot read (query=@file, --input, a $(...) or a variable) is not allowed: put the query inline");
+    if (queries.some((q) => GQL_REFUSED.test(q) || (/\bupdatePullRequest\b/i.test(q) && /\bstate\b/i.test(q))))
+      refuse("merging, closing, locking or deleting through GraphQL is not allowed; use gh pr merge or gh pr close");
+    return;
+  }
+  const m = API_TARGET.exec(ep);
+  if (!m) return;
+  const repo = `${m[1]}/${m[2]}`;
+  if (ctx.ownRepos.some((r) => r.toLowerCase() === repo.toLowerCase())) return;
+  if (m[5]) refuse(`locking or unlocking ${repo}#${m[4]} through the API is the human's and colleagues' call`);
+  if (m[4] && (a.input || a.fields.some((f) => f.key === "state")))
+    refuse(`setting the state of ${repo}#${m[4]} through the API is not allowed; close it with gh pr close, and ${HOW_TO_CLOSE}`);
+  if (!m[3]) refuse(`a ${a.method} of the repo ${repo} itself is the human's call`);
+}
+
 function checkGhProtect(words: string[], ctx: GuardContext): void {
   const args = ghPath(words.slice(1));
   checkGhCommand(args);
+  if (args[0] === "api") checkApiProtect(args.slice(1), ctx);
   if (args[0] === "pr" && ["merge", "close", "lock", "unlock"].includes(args[1] ?? "")) {
     const repo = ghPrRepo(args);
     if (repo === null) refuse("merging or closing a PR needs an explicit --repo owner/name (or a PR URL) so the guard can confirm whose repo it is");
@@ -648,7 +713,7 @@ function checkGhProtect(words: string[], ctx: GuardContext): void {
 }
 
 // A GitHub MCP tool that posts a comment, review body or reply: its body is held to the same rule.
-export const MCP_COMMENT_TOOLS = /^mcp__.*github.*__(add_issue_comment|add_reply_to_pull_request_comment|add_comment_to_pending_review|pull_request_review_write|update_issue_comment|create_pending_pull_request_review|submit_pending_pull_request_review|create_and_submit_pull_request_review)$/i;
+export const MCP_COMMENT_TOOLS = /^mcp__.+?__(add_issue_comment|add_reply_to_pull_request_comment|add_comment_to_pending_review|pull_request_review_write|update_issue_comment|create_pending_pull_request_review|submit_pending_pull_request_review|create_and_submit_pull_request_review)$/i;
 
 export function mcpCommentVerdict(tool: string, body: unknown): string | null {
   if (!MCP_COMMENT_TOOLS.test(tool) || typeof body !== "string" || !body.trim()) return null;
@@ -659,13 +724,17 @@ export function mcpCommentVerdict(tool: string, body: unknown): string | null {
 // Niilo, the -R/alias hotfix). A read passes. A merge, close or undraft is checked as the gh command
 // it equals, a comment must carry the marker, and a commit to a branch follows git push's rule for
 // protected branches. Any other write, including a tool the server adds later, is refused, and a
-// readonly session writes nothing.
-const MCP_GITHUB_READ = /^mcp__github__(get_\w+|list_\w+|search_\w+|issue_read|pull_request_read)$/;
+// readonly session writes nothing. The hook sees only mcp__<server>__<tool>, so a GitHub tool is
+// known by its tool name whatever its server is called; an unknown tool is refused only on a server
+// named like GitHub's, and every other server's tools pass (Niilo's ruling on #124).
+const MCP_TOOL = /^mcp__(.+?)__(.+)$/;
+const MCP_GITHUB_READ = /^(get_\w+|list_\w+|search_\w+|issue_read|pull_request_read)$/;
 const MCP_GITHUB_BRANCH_WRITES = new Set(["push_files", "create_or_update_file", "delete_file", "create_branch"]);
 const MCP_GITHUB_WRITES = new Set(["create_pull_request", "update_pull_request", "update_pull_request_branch", "issue_write", "sub_issue_write"]);
 function checkMcpGithub(tool: string, tin: Record<string, unknown>, ctx: GuardContext): void {
-  if (MCP_GITHUB_READ.test(tool)) return;
-  const name = tool.replace(/^mcp__github__/, "");
+  const [, server = "", name = ""] = MCP_TOOL.exec(tool) ?? [];
+  const known = MCP_COMMENT_TOOLS.test(tool) || name === "merge_pull_request" || MCP_GITHUB_BRANCH_WRITES.has(name) || MCP_GITHUB_WRITES.has(name);
+  if (!known && (!/github/i.test(server) || MCP_GITHUB_READ.test(name))) return;
   if (ctx.policy === "readonly") refuse(`${name} writes to GitHub, and this session may only read`);
   const str = (k: string) => (typeof tin[k] === "string" ? (tin[k] as string) : "");
   const repo = `${str("owner")}/${str("repo")}`;
@@ -685,6 +754,8 @@ function checkMcpGithub(tool: string, tin: Record<string, unknown>, ctx: GuardCo
     if (tin.state === "closed") checkGhProtect(["gh", "pr", "close", n, "-R", repo], ctx);
     if (tin.draft === false) checkGhProtect(["gh", "pr", "ready", n, "-R", repo], ctx);
   }
+  // the Issues API closes a PR by its number too, and the guard cannot tell an issue from a PR
+  if (name === "issue_write" && tin.state === "closed") checkGhProtect(["gh", "pr", "close", String(tin.issue_number ?? ""), "-R", repo], ctx);
 }
 
 export function mcpVerdict(tool: string, tin: Record<string, unknown>, ctx: GuardContext): string | null {
@@ -793,14 +864,14 @@ function checkReadonly({ words: raw, writes }: Simple, ctx: GuardContext): void 
 
 function checkProtect({ words: raw }: Simple, ctx: GuardContext): void {
   let words = stripPrefixes(raw);
+  // A command by path is read by its basename wherever it lives, so ~/.local/bin/gh is gh and
+  // /usr/lib/git-core/git is git, each checked as itself; any other name by path, a project script,
+  // runs. A command word from a variable or a substitution could run anything, so it is refused
+  // (Marie and Niilo on #124: `~/.local/bin/gh pr merge` and `$G pr merge` skipped every check).
+  while (words.length && (words[0] as string).includes("/")) words = stripPrefixes([posix.basename(words[0] as string), ...words.slice(1)]);
   if (!words.length) return;
-  let name;
-  try {
-    [name, words] = cmdName(words);
-  } catch (e) {
-    if (e instanceof Refused) return; // builders may run project scripts by path
-    throw e;
-  }
+  if (/[$`]/.test(words[0] as string)) refuse(`the command '${words[0]}' runs whatever it holds, which the guard cannot check: run gh/git by name`);
+  const name = (words[0] as string).toLowerCase();
   if (name === "git") return checkGitProtect(words, ctx);
   if (name === "gh") return checkGhProtect(words, ctx);
   // `bash -c '<script>'` is the script, checked like any other command line
@@ -994,7 +1065,7 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
     return target && str("output_mode") === "content"
       ? refused(`${target} holds secrets; Grep may list or count matches there, not print them`, target) : { code: 0 };
   }
-  if (typeof call.tool_name === "string" && call.tool_name.startsWith("mcp__github__")) {
+  if (typeof call.tool_name === "string" && call.tool_name.startsWith("mcp__")) {
     const reason = mcpVerdict(call.tool_name, tin, ctx);
     return reason === null ? { code: 0 } : refused(reason, call.tool_name);
   }

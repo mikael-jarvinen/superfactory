@@ -330,7 +330,23 @@ test("the GitHub MCP tools are held to the gh rules", () => {
     ["create_or_update_file", { owner: "acme", repo: "workspace", branch: "main", path: "a", content: "", message: "x" }, pr],
     ["issue_write", { ...api, method: "create", title: "t" }, pr],
   ];
+  // a GitHub tool is known by its tool name whatever its server is called (Niilo's ruling on #124)
+  refused.push(["issue_write", { ...api, method: "update", issue_number: 8701, state: "closed" }, pr],
+    ["issue_write", { ...api, method: "update", issue_number: 8702, state: "closed" }, lead]);
+  allowed.push(["issue_write", { ...api, method: "update", issue_number: 8701, state: "closed" }, lead],
+    ["issue_write", { ...api, method: "update", issue_number: 8702, state: "open" }, pr]);
+  const named: [string, Record<string, unknown>, GuardContext][] = [
+    ["mcp__gh__merge_pull_request", { ...api, pullNumber: 8701 }, pr], ["mcp__GitHub__merge_pull_request", { ...api, pullNumber: 8701 }, lead],
+    ["mcp__github_2__update_pull_request", { ...api, pullNumber: 8701, state: "closed" }, pr],
+    ["mcp__foo__issue_write", { ...api, method: "update", issue_number: 8702, state: "closed" }, lead],
+    ["mcp__claude_ai_GitHub__add_issue_comment", { ...api, issue_number: 1, body: "hi" }, pr],
+    ["mcp__GitHub__some_future_write", {}, lead], ["mcp__github_2__delete_repository", api, pr]];
+  const others: [string, Record<string, unknown>, GuardContext][] = [
+    ["mcp__plane__update_issue", { state: "closed" }, pr], ["mcp__claude_ai_Slack__x", {}, lead], ["mcp__home-assistant__call_service", {}, pr],
+    ["mcp__plane__update_issue", { state: "closed" }, ro], ["mcp__GitHub__get_me", {}, ro], ["mcp__github_2__pull_request_read", api, pr]];
   const wrong: string[] = [];
+  for (const [t, tin, ctx] of named) if (mcpVerdict(t, tin, ctx) === null) wrong.push(`${ctx.role} allowed: ${t} ${JSON.stringify(tin)}`);
+  for (const [t, tin, ctx] of others) if (mcpVerdict(t, tin, ctx) !== null) wrong.push(`${ctx.role} refused: ${t} (${mcpVerdict(t, tin, ctx)})`);
   for (const [t, tin, ctx] of refused) if (mcpVerdict(`mcp__github__${t}`, tin, ctx) === null) wrong.push(`${ctx.role} allowed: ${t} ${JSON.stringify(tin)}`);
   for (const [t, tin, ctx] of allowed) {
     const why = mcpVerdict(`mcp__github__${t}`, tin, ctx);
@@ -345,6 +361,56 @@ test("the GitHub MCP tools are held to the gh rules", () => {
   assert.match(merge.stderr ?? "", /merge of a PR on a product repo/);
   assert.equal(call("mcp__github__add_issue_comment", { ...api, issue_number: 1, body: "hi" }).code, 2);
   assert.equal(call("mcp__github__get_me", {}).code, 0);
+  assert.equal(call("mcp__GitHub__merge_pull_request", { ...api, pullNumber: 8701 }).code, 2);
+  assert.equal(call("mcp__plane__update_issue", { state: "closed" }).code, 0);
+});
+
+// A gh or git run by path skipped protect, because a path outside the trusted bin dirs was taken for a
+// project script, and a command word from a variable matched no check (Marie on #124). Now a path is
+// read by its basename, and a variable or substitution as the command word is refused.
+test("a gh or git by path is checked as itself, and one from a variable is refused", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const refused = ["~/.local/bin/gh pr merge 8701 -R acme/api", "/home/turing/.local/bin/gh pr close 8701 -R acme/api",
+    "$HOME/.local/bin/gh pr merge 8701 -R acme/api", "./gh pr merge 8701 -R acme/api", "./node_modules/.bin/gh pr merge 8701 -R acme/api",
+    "$G pr merge 8701 -R acme/api", "\"$G\" pr merge 8701 -R acme/api", "${G} pr view 1", "~/.local/bin/gh m 1",
+    "/usr/lib/git-core/git push origin main", "$GIT push origin main", "~/bin/bash -c \"gh pr merge 8701 -R acme/api\"",
+    "/usr/bin/env gh pr merge 8701 -R acme/api", "/usr/bin/env ~/.local/bin/gh pr lock 8701 -R acme/api",
+    "$(which gh) pr merge 8701 -R acme/api", "env $(which gh) pr merge 8701 -R acme/api", "\"$(which gh)\" pr merge 8701 -R acme/api", "`which gh` pr merge 8701 -R acme/api", "cd x && $G pr merge 8701 -R acme/api"];
+  const allowed = ["~/.local/bin/gh pr view 1", "./scripts/test.sh", "echo $(date) done", "X=$(git rev-parse HEAD) && echo $X", "./node_modules/.bin/vitest run", "/usr/bin/git status",
+    "~/.local/bin/gh pr list -R acme/api", "/usr/lib/git-core/git push -u origin fix-x", "vendor/bin/phpunit"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+  assert.match(verdict("$G pr view 1", pr) as string, /run gh\/git by name/);
+});
+
+// gh api reached a product PR's state, its lock and the repo itself, and GraphQL merged and closed
+// (Marie on #124). A write that does so on a repo not the factory's own is refused.
+test("gh api cannot close, lock, merge or delete on a product repo", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const gql = (q: string) => `gh api graphql -f query='mutation { ${q} { clientMutationId } }'`;
+  const refused = ["gh api -X PATCH repos/acme/api/pulls/8701 -f state=closed", "gh api -X PATCH repos/acme/api/issues/8701 -f state=closed",
+    "gh api repos/acme/api/issues/8701 -f state=closed", "gh api --method=PATCH /repos/acme/api/pulls/8701 -F state=closed",
+    "gh api -XPATCH repos/acme/api/pulls/8701 --raw-field=state=closed", "gh api -X PATCH repos/acme/api/pulls/8701 --input body.json",
+    "gh api -X PATCH 'repos/{owner}/{repo}/pulls/8701' -f state=closed", "gh api -X PUT repos/acme/api/issues/8701/lock", "gh api -X DELETE repos/acme/api/issues/8701/lock",
+    "gh api -X DELETE repos/acme/api", "gh api -X PATCH repos/acme/api -f archived=true",
+    gql(`mergePullRequest(input: {pullRequestId: "x"})`), gql(`closePullRequest(input: {pullRequestId: "x"})`),
+    gql(`enablePullRequestAutoMerge(input: {pullRequestId: "x"})`), gql(`deleteRepository(input: {repositoryId: "x"})`),
+    gql(`lockLockable(input: {lockableId: "x"})`), gql(`updatePullRequest(input: {pullRequestId: "x", state: CLOSED})`),
+    "gh api graphql -F query=@m.graphql", "gh api graphql --input q.json", "gh api graphql -f query=\"$(cat m.graphql)\""];
+  const allowed = ["gh api repos/acme/api/pulls/8701", "gh api -X GET repos/acme/api/pulls -f state=closed",
+    "gh api repos/acme/api/issues/8701/comments -f body='> Written by agent. x'", "gh api graphql -f query='query { viewer { login } }'",
+    "gh api -X PATCH repos/acme/workspace/pulls/3 -f state=closed", "gh api -X PATCH repos/acme/api/pulls/8701 -f title=x",
+    gql(`addComment(input: {subjectId: "x", body: "> Written by agent. will merge after CI"})`)];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
 });
 
 // Mikko, 2026-11-14: the lead may merge test PRs and bug fixes again. Only on a lead_merges repo, only

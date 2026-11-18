@@ -218,8 +218,9 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
       const close = t.guard === "protect" && s.role === "lead" ? ["--allow-close", allowClosePath(ws.stateDir)] : [];
       // only the lead merges on a lead_merges repo; nobody else's settings name them
       const merges = t.guard === "protect" && s.role === "lead" ? ws.config.github.leadMerges.flatMap((r) => ["--lead-merge", r]) : [];
-      // the GitHub MCP tools merge, close and comment as gh does, so the guard sees them too
-      add("PreToolUse", "Bash|Read|Grep|mcp__github__.*", ["hook", "guard", "--role", s.role, "--policy", t.guard as Policy, ...dirs, ...repos, ...close, ...merges], 10);
+      // the GitHub MCP tools merge, close and comment as gh does, so the guard sees them too, under
+      // whatever name their server has; it passes every other server's tools
+      add("PreToolUse", "Bash|Read|Grep|mcp__.*", ["hook", "guard", "--role", s.role, "--policy", t.guard as Policy, ...dirs, ...repos, ...close, ...merges], 10);
     } else if (h === "no-dialogs") {
       add("PreToolUse", DIALOGS, ["hook", "no-dialogs", "--lead", leadName], 5);
     } else if (h === "no-side-channels") {
