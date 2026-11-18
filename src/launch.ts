@@ -28,16 +28,27 @@ export function roleOf(ws: Workspace, agent: Agent): Role {
 // session's own process too, so PATH is written out whole: the stack's directories, then the PATH of
 // the factory that launches the session. A PATH that lost the launcher's entries would cost the
 // session its keychain, and with it its login.
-export function sessionEnv(ws: Workspace, agent: Agent, path = process.env.PATH ?? ""): Record<string, string> | undefined {
+// What a stack put first on a session's PATH, so the next render can take exactly that back out.
+export const PREPENDED = "SF_PATH_PREPEND";
+
+export function sessionEnv(ws: Workspace, agent: Agent, path = process.env.PATH ?? "", sent = process.env[PREPENDED] ?? ""): Record<string, string> | undefined {
   const stack = agent.stack ? ws.config.stacks[agent.stack] : undefined;
   if (!stack) return undefined;
   const env = { ...stack.env };
-  // path is this process's, and a wake renders a recipient's settings in its sender's hook: the
-  // directories any stack puts first come out of it, so a sender's stack never reaches the
-  // recipient's PATH (CodeRabbit on #127)
-  const stackDirs = new Set(Object.values(ws.config.stacks).flatMap((s) => s.pathPrepend));
-  if (stack.pathPrepend.length)
-    env.PATH = [...stack.pathPrepend, ...path.split(":").filter((d) => d && !stackDirs.has(d))].join(":");
+  // path is this process's, and a wake renders a recipient's settings in its sender's hook, whose
+  // PATH starts with what the sender's stack prepended (CodeRabbit on #127). Only that comes out,
+  // once per directory, so a directory another stack shares with the system PATH, /usr/local/bin
+  // say, keeps its own place. The recipient's own directories go first.
+  if (stack.pathPrepend.length) {
+    const rest = path.split(":").filter(Boolean);
+    for (const d of sent.split(":").filter(Boolean)) {
+      const i = rest.indexOf(d);
+      if (i >= 0) rest.splice(i, 1);
+    }
+    const own = new Set(stack.pathPrepend);
+    env.PATH = [...stack.pathPrepend, ...rest.filter((d) => !own.has(d))].join(":");
+    env[PREPENDED] = stack.pathPrepend.join(":");
+  }
   return Object.keys(env).length ? env : undefined;
 }
 
