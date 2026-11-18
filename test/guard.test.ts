@@ -384,7 +384,7 @@ test("a gh or git by path is checked as itself, and one from a variable is refus
     for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
   }
   assert.deepEqual(wrong, []);
-  assert.match(verdict("$G pr view 1", pr) as string, /run gh\/git by name/);
+  assert.match(verdict("$G pr view 1", pr) as string, /run it by its name or its plain path/);
 });
 
 // gh api reached a product PR's state, its lock and the repo itself, and GraphQL merged and closed
@@ -469,6 +469,25 @@ test("stdin by any name, a clustered env flag, every find action and ssh on stdi
     "ssh niilo", "ssh -T niilo <<'E'\nuptime\nE"];
   const wrong: string[] = [];
   for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// The command word is read by its shape, an allowlist; every trick Marie listed at ae2e8d06 goes
+// through the one rule (Marie and Niilo on #124, round 8).
+test("a command word is a bare name, a plain path or refused", () => {
+  const M = "gh pr merge 1 -R acme/api";
+  const refused = [`/usr/bin/e[n]v ${M}`, `/usr/bin/e?v ${M}`, `/usr/*/env ${M}`, `/usr/bin/en* ${M}`, "{env,gh,pr,merge,1,-R,acme/api}",
+    "{/usr/bin/env,gh,pr,merge,1,-R,acme/api}", `/usr/bin/{env,} ${M}`, `~+/bin/env ${M}`, `cd /usr && ~+/bin/env ${M}`, `~-/bin/env ${M}`,
+    `~root/../usr/bin/env ${M}`, `env -C /usr bin/env ${M}`, `env --chdir=/ usr/bin/nice ${M}`,
+    `find /usr/bin -maxdepth 0 -execdir bin/env ${M} \\;`, `e[n]v ${M}`, `'/usr/bin/e*v' ${M}`, `{ ${M}; }`, `../bin/env ${M}`, `nice ~+/gh pr view 1`];
+  const allowed = ["./scripts/env PATH=report", "./node_modules/.bin/tsc -p .", "/usr/bin/env npm test", "~/agents/bin/pr-send.sh 124 abc",
+    '"./scripts/a b.sh"', "npm test", "/usr/bin/git status", "[ -f x ] && echo y", "[[ -f x ]] && echo y", ": > out.log", "{ ls; echo x; } > out",
+    "scripts/report", "~/agents/bin/pr-send.sh 124 abc", "env -C sub npm test"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, { ...pr, role: "lead" }]) {
     for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
     for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
   }

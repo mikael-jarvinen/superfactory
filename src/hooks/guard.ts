@@ -27,6 +27,11 @@
 // find -exec, ssh <host> ...) and a shell reading its script from a heredoc or a here-string. Code it
 // cannot read is outside it: python/node/perl/ruby -c or -e, make, npm scripts, a script file. It
 // stops habits and mistakes, not a session set on getting around it.
+//
+// A command word is read by its shape, an allowlist (commandWord): a bare name; an absolute or ~/
+// path, read as its basename when it resolves into a system bin dir; a relative path with no ..,
+// a project script unless it resolves there. Any other word (a glob, a brace, ~+, a variable) is
+// refused.
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { posix } from "node:path";
@@ -46,6 +51,7 @@ export interface GuardContext {
   // $HOME/... command word may hold anything
   homeAssigned?: boolean;
   // set by checkCommand when the line changes directory, so a relative path cannot be resolved
+  // (cd, pushd, popd, env -C or --chdir, find -execdir or -okdir)
   cwdChanged?: boolean;
   policy: Policy;
   writeDirs: string[];
@@ -85,8 +91,6 @@ function trustedDir(dir: string): boolean {
   trustedReal ??= new Set([...TRUSTED_BIN_DIRS].map(resolveDir));
   return trustedReal.has(resolveDir(dir));
 }
-// the commands stripPrefixes reads as wrappers, and the ones it refuses
-const WRAPPER_NAMES = new Set(["env", "nice", "setsid", "stdbuf", "flock", "timeout", "nohup"]);
 
 class Refused extends Error {}
 
@@ -293,7 +297,7 @@ function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
   return out;
 }
 
-const KEYWORDS = new Set(["if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "in", "!", "time"]);
+const KEYWORDS = new Set(["if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "in", "!", "time", "{", "}"]);
 const REFUSED_WRAPPERS = new Set(["sudo", "doas", "exec", "eval", "source", ".", "xargs", "parallel", "watch", "caffeinate", "script"]);
 const SHELLS = new Set(["bash", "sh", "zsh", "dash", "fish", "ksh"]);
 
@@ -1038,33 +1042,46 @@ function sshCommand(args: string[]): string {
   return "";
 }
 
-function checkProtect({ words: raw, reads, stdin = [], piped = false }: Simple, ctx: GuardContext): void {
-  let words = stripPrefixes(raw);
-  // gh, git and the shells by path are read by their basename wherever they live, so ~/.local/bin/gh
-  // is gh and /usr/lib/git-core/git is git, each checked as itself. Any other command by path is read
-  // as itself (/usr/bin/env, /usr/bin/nice) from a dir that resolves to a system bin dir, and
-  // anywhere else it is a project script, which runs (./scripts/env is not env). A command word from a
-  // variable or a substitution could run anything, so it is refused (Marie and Niilo on #124:
-  // `~/.local/bin/gh pr merge` and `$G pr merge` skipped every check).
-  // A command word holding a variable is split by the shell, so `$G/x` runs whatever G holds: only
-  // $HOME/ or ${HOME}/ before a plain path is read as that path, while the line leaves HOME alone
-  // (Marie on #124 at e6b2e171: `$G/x` with G='/usr/bin/gh pr merge 1 #' merged).
-  while (words.length && (words[0] as string).includes("/")) {
-    let w = words[0] as string;
-    if (/[$`]/.test(w)) {
-      const home = /^\$(HOME|\{HOME\})(\/[^$`]*)$/.exec(w);
-      if (!home || ctx.homeAssigned) refuse(`the command '${w}' runs whatever its variable holds, which the guard cannot check: run it by its path`);
-      else w = `~${home[2]}`;
+// The command word, read by its shape: an allowlist, applied to every command word including the
+// one after a wrapper (Marie and Niilo on #124, round 8). Returns the words to check with a bare name
+// first, or [] for a project script, which runs. Every other shape is refused.
+//  1. A bare name, [A-Za-z0-9._+:-], run from PATH: itself.
+//  2. An absolute path, or one under ~/, $HOME/ or ${HOME}/ (unless the line names HOME otherwise):
+//     its basename when its directory resolves to a system bin dir or the basename is one the guard
+//     checks wherever it lives (gh, git, ssh, find, the shells); otherwise a script.
+//  3. A relative path with no .. segment: the same, resolved from cwd; on a line that changes
+//     directory (cd, pushd, popd, env -C, find -execdir) it cannot be resolved, so it is its basename.
+// Refused: a glob or brace character, quoted or not ({env,gh,...}, /usr/bin/e?v), any other ~ form
+// (~+, ~-, ~user), a variable, a substitution or a backtick, which the shell expands into anything.
+const BARE_WORD = /^([\w.+:-]+|\[\[?)$/;
+const CHECKED_ANYWHERE = new Set(["gh", "git", "ssh", "find"]);
+function commandWord(words: string[], ctx: GuardContext): string[] {
+  for (;;) {
+    let w = words[0];
+    if (w === undefined || BARE_WORD.test(w)) return words;
+    const cannot = (why: string) => refuse(`the command '${w}' ${why}, which the guard cannot check: run it by its name or its plain path`);
+    const home = /^\$(?:HOME|\{HOME\})(\/.*)$/.exec(w);
+    if (home) {
+      if (ctx.homeAssigned) cannot("is under a HOME this line sets");
+      w = `~${home[1]}`;
     }
+    if (/[$`]/.test(w)) cannot("runs whatever its variable or substitution holds");
+    if (/[*?[\]{}]/.test(w)) cannot("is a glob or a brace expansion");
+    if (!w.includes("/")) cannot("is not a plain name");
+    if (/^~(?!\/)/.test(w) || w.indexOf("~", 1) >= 0) cannot("uses a ~ form other than ~/");
+    const relative = !w.startsWith("/") && !w.startsWith("~");
+    if (relative && w.split("/").includes("..")) cannot("climbs out of the project with ..");
     const b = posix.basename(w);
-    const dir = posix.dirname(w);
-    // a wrapper by a relative path after a cd may be the system one, so it is read as the wrapper
-    const unknown = ctx.cwdChanged && !dir.startsWith("/") && !dir.startsWith("~") && (WRAPPER_NAMES.has(b) || REFUSED_WRAPPERS.has(b));
-    if (!["gh", "git"].includes(b.toLowerCase()) && !SHELLS.has(b) && !unknown && !trustedDir(dir)) return;
+    const own = CHECKED_ANYWHERE.has(b.toLowerCase()) || SHELLS.has(b);
+    if (!own && !(relative && ctx.cwdChanged) && !trustedDir(posix.dirname(w))) return [];
     words = stripPrefixes([b, ...words.slice(1)]);
   }
+}
+
+function checkProtect({ words: raw, reads, stdin = [], piped = false }: Simple, ctx: GuardContext): void {
+  let words = stripPrefixes(raw);
+  words = commandWord(words, ctx);
   if (!words.length) return;
-  if (/[$`]/.test(words[0] as string)) refuse(`the command '${words[0]}' runs whatever it holds, which the guard cannot check: run gh/git by name`);
   const name = (words[0] as string).toLowerCase();
   if (name === "git") return checkGitProtect(words, ctx);
   if (name === "gh") return checkGhProtect(words, ctx);
@@ -1219,7 +1236,7 @@ const HEREDOC = /<<-?\s*['"]?(\w+)['"]?[^\n]*\n([\s\S]*?)\n\1\s*(\n|$)/;
 
 function checkCommand(cmd: string, ctx: GuardContext): void {
   if (!ctx.homeAssigned && /\bHOME\b/.test(cmd.replace(/\$\{?HOME\b/g, ""))) ctx = { ...ctx, homeAssigned: true };
-  if (!ctx.cwdChanged && /(^|[^\w.-])(cd|pushd|popd)\b/.test(cmd)) ctx = { ...ctx, cwdChanged: true };
+  if (!ctx.cwdChanged && /(^|[^\w.-])(cd|pushd|popd)\b|\s-(execdir|okdir)\b|\s--chdir\b|\benv\b[^;&|\n]*\s-[A-Za-z]*C/.test(cmd)) ctx = { ...ctx, cwdChanged: true };
   // heredocs: keep the header, drop the body so its lines are not parsed as commands. The newline
   // after the closing delimiter stays: without it the next line was read as the header's arguments.
   // Each body is kept by its number, which takes the delimiter's place after its own `<<`, so the body
