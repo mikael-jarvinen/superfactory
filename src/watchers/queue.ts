@@ -26,6 +26,9 @@ export interface QueueState {
   merged: string[];
   conflicting: string[];
   outcomes: string[];
+  // The summary of every ticket in the queue at its last read: a dispatch titles a new record from it,
+  // since waiting work has no record until then (Niilo on #129).
+  titles: Record<string, string>;
 }
 
 export const queueStateFile = (ws: Workspace) => join(ws.logsDir, "queue.state");
@@ -34,9 +37,12 @@ export function loadQueueState(ws: Workspace): QueueState {
   try {
     const d = JSON.parse(readFileSync(queueStateFile(ws), "utf8")) as Partial<QueueState>;
     const list = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
-    return { known: list(d.known), merged: list(d.merged), conflicting: list(d.conflicting), outcomes: list(d.outcomes) };
+    const titles = d.titles && typeof d.titles === "object" && !Array.isArray(d.titles)
+      ? Object.fromEntries(Object.entries(d.titles).filter((e): e is [string, string] => typeof e[1] === "string"))
+      : {};
+    return { known: list(d.known), merged: list(d.merged), conflicting: list(d.conflicting), outcomes: list(d.outcomes), titles };
   } catch {
-    return { known: [], merged: [], conflicting: [], outcomes: [] };
+    return { known: [], merged: [], conflicting: [], outcomes: [], titles: {} };
   }
 }
 
@@ -231,6 +237,9 @@ export function runQueue(ws: Workspace, out: (line: string) => void = console.lo
     merged: delivered ? [...prev.merged, ...m.urls].slice(-50) : prev.merged,
     conflicting: delivered ? [...c.keep, ...c.fresh] : c.keep,
     outcomes: [...prev.outcomes, outcome].slice(-8),
+    titles: read?.outcome === "read"
+      ? Object.fromEntries(read.keys.filter((k) => read.summaries[k]).map((k) => [k, squash(read.summaries[k] as string, 90)]))
+      : prev.titles,
   };
   writeFileSync(queueStateFile(ws), JSON.stringify(state) + "\n");
   logTo(log, `outcome=${outcome}${lines.length ? ` delivered=${delivered}` : ""}`);

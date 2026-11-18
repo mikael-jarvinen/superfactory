@@ -40,6 +40,7 @@ import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/en
 import {
   allRecs, appendEvent, BUSY, OFF, onBoard, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removePr, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
+import { trackerTitle } from "./tracker/title.js";
 import { chars, FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.js";
 import { failure } from "./failures.js";
 import { runQueue } from "./watchers/queue.js";
@@ -61,7 +62,7 @@ usage: factory [--workspace <dir>] <command> [options]
   restart-lead [--fresh]          stop the lead, then up
   status [--all]                  sessions joined with the state store
   sessions [--all] [--fleet]      raw \`claude agents --json\`, or one line per fleet member
-  dispatch <agent> <KEY> [--repo <repo>] [--prompt-file <f>] [--force]
+  dispatch <agent> <KEY> [--repo <repo>] [--prompt-file <f>] [--title T] [--force]
                                   fresh building session for one item in a per-item worktree.
                                   Dispatch from the backlog, off the board, building or fixing; anywhere else needs
                                   --force. A live session already on KEY keeps its context, and
@@ -290,14 +291,16 @@ function cmdState(ws: Workspace, argv: string[]) {
 }
 
 function cmdDispatch(ws: Workspace, argv: string[]) {
-  const { v, p } = args("dispatch", argv, { repo: { type: "string" }, "prompt-file": { type: "string" }, force: { type: "boolean" } }, [2, 2]);
+  const { v, p } = args("dispatch", argv, { repo: { type: "string" }, "prompt-file": { type: "string" }, title: { type: "string" }, force: { type: "boolean" } }, [2, 2]);
   const [name, ticket] = p as [string, string];
   const force = !!v.force;
   const ag = agentOrDie(ws, name);
   if (!validKey(ws, ticket)) throw new FactoryError(`${pyRepr(ticket)} is ${KEY_HINT}`);
   if (ag.role === "designer") {
     if (str(v.repo)) throw new FactoryError(`a designer reads every repo and works in none, so it takes no --repo`);
-    return dispatchDesigner(ws, ag, ticket, force, str(v["prompt-file"]));
+    dispatchDesigner(ws, ag, ticket, force, str(v["prompt-file"]));
+    titled(ws, ticket, str(v.title));
+    return;
   }
   if (ag.role !== "builder") throw new FactoryError(`${name} is a ${ag.role}, not a builder or a designer. Reviewers are started per review with \`factory review\`.`);
   const allowed = ag.repos;
@@ -372,6 +375,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
     saveRec(ws, rec);
     appendEvent(ws, { t: now(), ticket, from: cur, to: cur, agent: name, evidence: `re-dispatched (building session ${started.id})`, note: how, pr: rec.pr ?? null });
   }
+  titled(ws, ticket, str(v.title));
   console.log(`${name} started (${started.id}) for ${ticket} as a BUILDING session`);
   console.log(`  worktree ${wt} (${how})`);
   console.log(`  appendix ${appendix ? appendix.labels.join(", ") : "-"}`);
@@ -379,6 +383,19 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (d?.approved) console.log(`  design approved by ${ws.config.human.name} (${d.approved_at}): slides ${d.slides} canvas ${d.canvas}. The brief carries it.`);
   else if (d) console.log(`  warning: ${ticket} has a design ${ws.config.human.name} has not approved (${d.slides ?? d.canvas ?? "no link"})`);
   console.log(`  next: SendMessage to ${name}: what to build or fix, the scope, and notify_when_idle`);
+}
+
+// A dispatch titles its record: --title, else the tracker's title when the record has none, so no
+// card shows a bare key (Niilo on #129). LOCAL- work with no title says how to give it one.
+function titled(ws: Workspace, ticket: string, given: string | undefined) {
+  const rec = loadRec(ws, ticket);
+  if (!rec) return;
+  const title = given ?? (rec.title ? undefined : trackerTitle(ws, ticket));
+  if (title) {
+    rec.title = squash(title, 90);
+    saveRec(ws, rec);
+  }
+  if (!rec.title) console.log(`  warning: ${ticket} has no title; the card shows its bare key. Give it one: factory state ${ticket} --title "<what it is>"`);
 }
 
 // Reads the prompt and the appendix, and refuses on either, before anything is stopped; the launch

@@ -168,6 +168,8 @@ test("the queue says what is new once, and says it again when the note could not
   assert.deepEqual([title("WEB-3").state, title("WEB-3").title], [null, "Add the export"]);
   assert.ok(!existsSync(join(ws, "state", "WEB-4.json")), "the watcher makes no record");
   assert.equal(title("WEB-2").title, undefined, "a ticket already building is not touched");
+  assert.deepEqual((JSON.parse(read("queue.state")) as { titles: Record<string, string> }).titles,
+    { "WEB-2": "Fix login", "WEB-3": "Add the export", "WEB-4": "Retire the old page" }, "every summary is kept, for the dispatch that makes WEB-4's record");
 
   r = run(["watch", "queue"], [reader], routes);
   assert.equal(r.status, 0);

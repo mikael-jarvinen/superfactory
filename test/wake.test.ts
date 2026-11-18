@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { defaultLogsDir } from "../src/config.js";
@@ -11,7 +11,10 @@ import { settingsFile } from "../src/launch.js";
 import { recipient } from "../src/hooks/wake.js";
 import { ListingTimedOut, Unreachable } from "../src/remote.js";
 import { type Transport, transportFor } from "../src/transport.js";
+import * as T from "../src/tickets/store.js";
+import { trackerTitle } from "../src/tracker/title.js";
 import { wake } from "../src/wake.js";
+import { queueStateFile } from "../src/watchers/queue.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, fakeDaemon, TOML, tempWorkspace } from "./helpers.js";
 
@@ -460,6 +463,77 @@ test("only a hosted agent's settings explain a failed send", () => {
     assert.match(post("rae")[0]!, / hook wake --from-host far$/, ev);
     assert.deepEqual(post("bea"), [], ev);
   }
+});
+
+// Niilo on #129: waiting work has no record, so the dispatch that makes one titles it, and no card
+// shows a bare key. --title wins; else the summary the queue watcher last read; else it says how.
+test("a dispatch titles a new record: --title, else the queue's last read of the tracker", () => {
+  const { ws } = fakeFleet(TOML + `
+[roles.designer]
+cwd = "designers"
+model = "opus"
+settings = "designer"
+add_dirs = ["web"]
+
+[[agents]]
+name = "dee"
+role = "designer"
+`);
+  mkdirSync(join(ws, "designers"), { recursive: true });
+  mkdirSync(join(ws, "briefs"), { recursive: true });
+  writeFileSync(join(ws, "briefs", "app.md"), "the app stack's brief");
+  const web = join(ws, "repos", "web");
+  mkdirSync(web, { recursive: true });
+  writeFileSync(join(web, "AGENTS.md"), "the repo's brief");
+  const origin = join(ws, "web-origin.git");
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+  for (const a of [["init", "-q", "-b", "main"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
+    ["remote", "add", "origin", origin], ["push", "-q", "origin", "main"]])
+    execFileSync("git", ["-C", web, ...a]);
+  const qs = queueStateFile(openWorkspace(ws, {}));
+  mkdirSync(dirname(qs), { recursive: true });
+  writeFileSync(qs, JSON.stringify({ known: [], merged: [], conflicting: [], outcomes: ["read"],
+    titles: { "TEST-30": "Rename the export", "TEST-31": "Draw the export" } }));
+  const rec = (k: string) => JSON.parse(readFileSync(join(ws, "state", `${k}.json`), "utf8")) as { state: string; title?: string };
+
+  let r = factory(ws, ["dispatch", "bea", "TEST-30"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual([rec("TEST-30").state, rec("TEST-30").title], ["building", "Rename the export"], "the builder's record has the tracker's title");
+  assert.doesNotMatch(r.stdout, /no title/);
+
+  r = factory(ws, ["dispatch", "dee", "TEST-31"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual([rec("TEST-31").state, rec("TEST-31").title], ["designing", "Draw the export"], "and so has the designer's");
+
+  r = factory(ws, ["dispatch", "dee", "TEST-31", "--title", "Draw the export, round two"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(rec("TEST-31").title, "Draw the export, round two", "--title wins over a title the record has");
+
+  assert.equal(factory(ws, ["state", "TEST-30", "off"]).status, 0);
+  r = factory(ws, ["dispatch", "bea", "TEST-32", "--force"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(rec("TEST-32").title, undefined, "a key the tracker read never saw gets no title");
+  assert.match(r.stdout, /warning: TEST-32 has no title; the card shows its bare key\. Give it one: factory state TEST-32 --title/);
+});
+
+// A local tracker's title is the ticket's own; a key it does not hold has none.
+test("the tracker's title on a local tracker is the ticket's", () => {
+  const LOCAL = `${TOML.replace(/\[tracker\][\s\S]*?done = "Done"\n/, "")}
+[tracker]
+kind = "local"
+
+[[tracker.projects]]
+key = "RPE"
+name = "RPE Training App"
+`;
+  const dir = tempWorkspace(LOCAL);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const ws = openWorkspace(dir, {});
+  T.create(ws, { project: "RPE", number: 1, t: "2026-11-18T10:00:00Z", title: "Log a set's RPE", state: "Backlog", source: { system: "plane" } },
+    { human: false, name: "plane", importer: true });
+  assert.equal(trackerTitle(ws, "RPE-1"), "Log a set's RPE");
+  assert.equal(trackerTitle(ws, "RPE-2"), undefined);
+  assert.equal(trackerTitle(ws, "LOCAL-gone"), undefined);
 });
 
 // Mikael, 2026-11-18: queued is no longer a state. A record written while it was one is off the board,
