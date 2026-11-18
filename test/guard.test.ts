@@ -1198,6 +1198,13 @@ const ROUND_128: [string, string, string][] = [
   [OK, "-b then a marked body", "gh issue comment 5 -R acme/api -b '> Written by agent. ok'"],
   [NO, "gh api -f=body=", "gh api repos/acme/api/issues/5/comments -f=body=hi"],
   [OK, "gh api -f=body= marked", "gh api repos/acme/api/issues/5/comments '-f=body=> Written by agent. ok'"],
+  // KJID: GraphQL's ignored tokens (# comments, commas) between a field and its arguments or body: and its value
+  [NO, "a # comment before a mutation's arguments", `gh api graphql -f query='mutation{addComment #c\n(input:{subjectId:"X",body:"hi"}){clientMutationId}}'`],
+  [NO, "a # comment between body: and its value", `gh api graphql -f query='mutation{addComment(input:{subjectId:"X",body: #c\n"hi"}){clientMutationId}}'`],
+  [NO, "a comma before a mutation's arguments", `gh api graphql -f query='mutation{addComment,(input:{subjectId:"X",body:"hi"}){clientMutationId}}'`],
+  [NO, "a comma after body:", `gh api graphql -f query='mutation{addComment(input:{subjectId:"X",body:,"hi"}){clientMutationId}}'`],
+  [OK, "a body: in a # comment is no input", `gh api graphql -f query='mutation{addComment(input:{subjectId:"X",body:"> Written by agent. ok"}){clientMutationId}} # body: "hi"'`],
+  [OK, "a # inside a marked body is a letter", `gh api graphql -f query='mutation{addComment(input:{subjectId:"X",body:"> Written by agent. #1, done"}){clientMutationId}}'`],
 ];
 
 test("the shapes CodeRabbit found in #128 at 5332c327 are read as bash and gh read them", () => {

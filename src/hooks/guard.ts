@@ -1045,7 +1045,35 @@ function collectBodies(v: unknown, out: string[]): boolean {
   return true;
 }
 
-function checkQuery(q: string, vars: Vars): void {
+// A query as GraphQL reads it: a # comment, to the end of its line, and a comma are ignored tokens,
+// so they may stand between a field and its (, or between body: and its value; a string's own #
+// and , stay (CodeRabbit on #128). An unclosed string is refused.
+function gqlSource(q: string): string {
+  let out = "";
+  for (let i = 0; i < q.length; i++) {
+    const c = q[i] as string;
+    if (c === '"') {
+      const block = q.startsWith('"""', i);
+      let j = i + (block ? 3 : 1);
+      for (; j < q.length; j++) {
+        if (q[j] === "\\") j++;
+        else if (block ? q.startsWith('"""', j) : q[j] === '"') break;
+        else if (!block && q[j] === "\n") j = q.length;
+      }
+      if (j >= q.length) refuse("a GraphQL string that does not close cannot be checked");
+      const end = j + (block ? 3 : 1);
+      out += q.slice(i, end);
+      i = end - 1;
+    } else if (c === "#") {
+      while (i + 1 < q.length && q[i + 1] !== "\n" && q[i + 1] !== "\r") i++;
+      out += " ";
+    } else out += c === "," ? " " : c;
+  }
+  return out;
+}
+
+function checkQuery(raw: string, vars: Vars): void {
+  const q = gqlSource(raw);
   // a read passes; so does a mutation that posts no comment (resolveReviewThread)
   if (!/\bmutation\b/.test(q) || !COMMENT_MUTATIONS.test(q)) return;
   for (const m of q.matchAll(/\bbody\s*:\s*("""[\s\S]*?"""|"(?:[^"\\]|\\.)*"|\$\w+)/g)) {
