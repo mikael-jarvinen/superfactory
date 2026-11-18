@@ -748,7 +748,7 @@ test("the review watcher tells a colleague's comment above the factory's reply, 
   const hb = join(openWorkspace(ws).logsDir, "reviews.heartbeat");
   const state = readFileSync(join(ws, "state", "reviews.state"), "utf8");
   rmSync(hb, { force: true });
-  r = run(["watch", "reviews"], [], routes(answer(null, [{ message: "Something went wrong while executing your query." }])));
+  r = run(["watch", "reviews"], [], routes({ ...answer(null, [{ message: "Something went wrong while executing your query.", path: ["r0", "p7"] }]), status: 1 }));
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stdout, /reviews: partial/);
   assert.ok(!existsSync(hb), "no heartbeat");
@@ -756,6 +756,49 @@ test("the review watcher tells a colleague's comment above the factory's reply, 
   r = run(["watch", "reviews"], [], routes(answer(pr([finding, reply]))));
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.ok(existsSync(hb), "a clean read beats it");
+});
+
+// CodeRabbit on #119, round 3: GitHub returns what it could beside its errors, and gh exits 1 with
+// that output. A read with errors counted as read, and could move a cursor past what it did not get.
+test("the review watcher does not count a read with GraphQL errors or a failed exit as read", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  assert.equal(factory(ws, ["state", "WEB-2", "queued", "--title", "Fix login"]).status, 0);
+  const file = join(ws, "state", "WEB-2.json");
+  const pr7 = { repo: "acme/web", number: 7 };
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
+  const at = (min: number) => new Date(Date.parse("2026-11-17T10:00:00Z") + min * 60_000).toISOString();
+  const c = (databaseId: number, min: number, body: string) => ({ databaseId, createdAt: at(min), publishedAt: at(min), body, author: { login: "sam", __typename: "User" } });
+  const page = (nodes: object[], next?: string) => ({ pageInfo: { hasNextPage: !!next, endCursor: next ?? null }, nodes });
+  const pr = (comments: object[], next?: string) => ({
+    url: "https://github.com/acme/web/pull/7", reviews: page([]), reviewThreads: page([]), comments: page(comments, next),
+  });
+  const answer = (p: object, extra: object = {}) => ({ stdout: { data: { viewer: { login: "alex-gh" }, r0: { p7: p } }, ...extra } });
+  const routes = (...a: object[]) => ({ "pr list": { stdout: [] }, "api graphql": a.length === 1 ? a[0] as object : a });
+  assert.equal(run(["watch", "reviews"], [], routes(answer(pr([c(1, 0, "First.")])))).status, 0);
+  assert.equal(notes().length, 0, "first sight tells only open threads");
+  const state = () => readFileSync(join(ws, "state", "reviews.state"), "utf8");
+  const before = state();
+  const two = [c(1, 0, "First."), c(2, 1, "Second.")];
+  const err = (path?: string[]) => ({ errors: [{ message: "Something went wrong.", ...(path ? { path } : {}) }] });
+
+  const cases: [string, Record<string, unknown>, RegExp][] = [
+    ["an error on the PR, beside its data", routes({ ...answer(pr(two), err(["r0", "p7", "comments"])), status: 1 }), /reviews: partial/],
+    ["an error naming no PR", routes({ ...answer(pr(two), err()), status: 1 }), /reviews: unreadable/],
+    ["a failed exit with parseable data", routes({ ...answer(pr(two)), status: 1 }), /reviews: unreadable/],
+    ["a page with errors", routes(answer(pr(two, "C1")), { stdout: { data: { repository: { pullRequest: { comments: page([c(3, 2, "Third.")]) } } }, errors: [{ message: "x" }] }, status: 1 }), /reviews: partial/],
+    ["a page from a failed exit", routes(answer(pr(two, "C1")), { stdout: { data: { repository: { pullRequest: { comments: page([c(3, 2, "Third.")]) } } } }, status: 1 }), /reviews: partial/],
+  ];
+  for (const [name, rt, outcome] of cases) {
+    rmSync(join(ws, "routes.json.counts"), { force: true }); // each case's replies from the first
+    const r = run(["watch", "reviews"], [], rt);
+    assert.equal(r.status, 1, `${name}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, outcome, name);
+    assert.equal(notes().length, 0, `${name}: nothing told`);
+    assert.equal(state(), before, `${name}: the cursor is kept`);
+  }
+  const r = run(["watch", "reviews"], [], routes(answer(pr(two))));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(notes()[0] ?? "", /"Second\." \[comment 2\]/, "the next clean read tells it");
 });
 
 // A reviews.state from before the ids holds a time per PR: what came before it is read.

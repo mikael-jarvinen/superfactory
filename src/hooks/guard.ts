@@ -588,6 +588,7 @@ const UNCHECKABLE = `a comment's body must be checkable: ${COMMENT_HINT}`;
 const UNMARKED = `this comment would read as the human's own: ${COMMENT_HINT}`;
 
 // The GraphQL mutations that post or edit a comment, a review's body or a reply.
+// One list, for spotting them and for their input variables, so the two cannot drift.
 const COMMENT_MUTATIONS = /\b(addComment|addPullRequestReview|addPullRequestReviewComment|addPullRequestReviewThread|addPullRequestReviewThreadReply|updateIssueComment|updatePullRequestReview|updatePullRequestReviewComment|submitPullRequestReview)\s*\(/;
 
 function checkGraphqlComment(args: string[]): void {
@@ -615,9 +616,16 @@ function checkGraphqlComment(args: string[]): void {
       if (!markedBody(text)) refuse(UNMARKED);
     }
   }
-  // a body given another way (a variables object, an input: $x) cannot be read here
-  if (/\binput\s*:\s*\$\w+/.test(q.value) && /\b(addComment|addPullRequestReview|addPullRequestReviewComment|addPullRequestReviewThread|addPullRequestReviewThreadReply|updateIssueComment|updatePullRequestReview|updatePullRequestReviewComment)\s*\(/.test(q.value))
-    refuse(UNCHECKABLE);
+  // An input object in a variable: gh builds it from -f 'i[body]=...' fields, so each body in it is
+  // checked; the whole object as one value, or any part of it from a file, cannot be.
+  for (const m of q.value.matchAll(/\binput\s*:\s*\$(\w+)/g)) {
+    const v = m[1] as string;
+    if (!fields.some((f) => f.key.startsWith(`${v}[`))) refuse(UNCHECKABLE);
+    for (const f of fields) {
+      if (f.key === v || (f.key.startsWith(`${v}[`) && f.typed && f.value.startsWith("@"))) refuse(UNCHECKABLE);
+      if (f.key.startsWith(`${v}[`) && /\[body\]$/.test(f.key) && !markedBody(f.value)) refuse(UNMARKED);
+    }
+  }
 }
 
 function checkCommentWrite(args: string[]): void {

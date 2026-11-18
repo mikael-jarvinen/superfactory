@@ -279,29 +279,45 @@ export function reviewComments(ws: Workspace, recs: Rec[], log: string): ReviewR
   const keys = [...watched.keys()];
   const r = watcherGh(["api", "graphql", "-f", `query=${reviewQuery(keys)}`]);
   let calls = 1;
+  const repos = [...new Set(keys.map((k) => k.split("#")[0] as string))];
   let data: Record<string, unknown> | undefined;
-  let errors = "";
+  let errs: GqlError[] = [];
   try {
     const d = JSON.parse(r.stdout);
     data = d?.data;
-    errors = graphqlErrors(d);
+    errs = Array.isArray(d?.errors) ? d.errors : [];
   } catch {
     // below
   }
+  // GitHub returns what it could beside its errors, and gh then exits nonzero. An error whose path
+  // names a PR (r<i>.p<n>) leaves that PR unread; any other error, or a failed exit with no error
+  // to say why, leaves the whole read unread.
+  const failed = new Set<string>();
+  let whole = r.status !== 0 && !errs.length;
+  for (const e of errs) {
+    const [rk, pk] = (Array.isArray(e?.path) ? e.path : []).map(String);
+    const key = /^r\d+$/.test(rk ?? "") && /^p\d+$/.test(pk ?? "") ? `${repos[Number((rk as string).slice(1))]}#${(pk as string).slice(1)}` : "";
+    if (watched.has(key)) failed.add(key);
+    else whole = true;
+  }
   const viewer = (data?.viewer as { login?: string } | undefined)?.login;
-  if (!data || !viewer) {
-    logTo(log, `reviews: cannot read the review comments${r.stderr.trim() ? `: ${r.stderr.trim()}` : ""}`);
+  if (!data || !viewer || whole) {
+    const why = errs.length ? errs.map((e) => e?.message ?? "?").join("; ") : r.stderr.trim();
+    logTo(log, `reviews: cannot read the review comments${why ? `: ${why}` : ""}`);
     return { ok: false, lines: [], cursors: prev, prs: watched.size, calls, unread: keys };
   }
-  if (errors) logTo(log, `reviews: GitHub answered with errors: ${errors}`);
-  const repos = [...new Set(keys.map((k) => k.split("#")[0] as string))];
+  if (errs.length) logTo(log, `reviews: GitHub answered with errors: ${errs.map((e) => e?.message ?? "?").join("; ")}`);
   const more = (q: string) => {
     calls++;
     const m = watcherGh(["api", "graphql", "-f", `query=${q}`]);
     try {
       const d = JSON.parse(m.stdout);
       const e = graphqlErrors(d);
-      if (e) logTo(log, `reviews: GitHub answered a page with errors: ${e}`);
+      // a page with errors may be partial: it is not read
+      if (e || m.status !== 0) {
+        logTo(log, `reviews: cannot read a page: ${e || m.stderr.trim() || `gh exited ${m.status}`}`);
+        return undefined;
+      }
       return d?.data as Record<string, unknown> | undefined;
     } catch {
       logTo(log, `reviews: cannot read a page${m.stderr.trim() ? `: ${m.stderr.trim()}` : ""}`);
@@ -314,7 +330,7 @@ export function reviewComments(ws: Workspace, recs: Rec[], log: string): ReviewR
   for (const key of keys) {
     const [repo, n] = key.split("#") as [string, string];
     const node = (data[`r${repos.indexOf(repo)}`] as Record<string, PrNode | null> | undefined)?.[`p${n}`];
-    if (!node || !readRest(key, node, more)) {
+    if (!node || failed.has(key) || !readRest(key, node, more)) {
       logTo(log, `reviews: cannot read ${key}${node ? " past its first page" : ""}; it is read again next run`);
       unread.push(key);
       if (prev[key]) cursors[key] = prev[key];
@@ -325,6 +341,11 @@ export function reviewComments(ws: Workspace, recs: Rec[], log: string): ReviewR
     if (items.length) lines.push(...prLines(watched.get(key) as Rec, key, node.url, items, ws.config.human.name));
   }
   return { ok: true, lines, cursors, prs: watched.size, calls, unread, rate: data.rateLimit as ReviewRead["rate"] };
+}
+
+interface GqlError {
+  message?: string;
+  path?: unknown[];
 }
 
 const graphqlErrors = (d: unknown): string => {

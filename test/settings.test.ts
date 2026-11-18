@@ -218,6 +218,9 @@ test("a template with marked-comments refuses an unmarked comment and passes a m
   assert.equal(bash("gh pr review 7 --comment -bhi"), 2, "N3: an attached value");
   assert.equal(bash("gh api graphql -f query='mutation { addComment(input: {subjectId: \"X\", body: \"hi\"}) { clientMutationId } }'"), 2, "N4");
   assert.equal(bash("gh api repos/acme/web/pulls/7/reviews -f 'body=> Written by agent.' -f 'comments[][body]=nit'"), 2, "N5");
+  const submit = "gh api graphql -f query='mutation($i: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $i) { clientMutationId } }' -f 'i[pullRequestReviewId]=R'";
+  assert.equal(bash(`${submit} -f 'i[body]=hi'`), 2, "round 3: an input variable's body");
+  assert.equal(bash(`${submit} -f 'i[body]=> Written by agent. ok'`), 0, "a marked one passes");
   // N6: every MCP tool reaches the hook, which matches GitHub's comment tools in any case.
   assert.ok(matches("mcp__claude_ai_github__add_issue_comment") && matches("mcp__claude_ai_Slack__send"));
   assert.equal(mcp("mcp__claude_ai_github__add_issue_comment", "Fixed."), 2, "lowercase github is held too");
