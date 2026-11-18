@@ -13,7 +13,7 @@ import type { Repo } from "../config.js";
 import { allRecs, recPrs } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { splitlines } from "../util.js";
-import { api, type CheckRun, checkRuns, type CommitStatus, gh, json, prCommits, prView, type Review, reviewComments, reviews, statuses, Unreadable } from "./github.js";
+import { api, type CheckRun, checkRuns, commitPulls, type CommitStatus, gh, json, prCommits, prView, type Review, reviewComments, reviews, statuses, Unreadable } from "./github.js";
 import { MEDIA_BEGIN } from "./media.js";
 import { seconds } from "./send.js";
 
@@ -69,6 +69,8 @@ const NOT_A_REVIEW = /rate limit|skipped|no review|not run/i;
 const RATE_LIMITED = /rate limit/i;
 // A draft it did not review: "Review skipped" or "Review paused", as its status or its check-run.
 const SKIPPED = /skipped|paused/i;
+// Its check-run's title when it reviewed, or found the diff already reviewed.
+const REVIEWED_RUN = /^(finished|review completed)$/i;
 
 export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
   const pr = prView(repo, n);
@@ -206,7 +208,7 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
     // over a diff it already reviewed, it says "Already reviewed the last commit" and posts no
     // review object (lyyti-events#847, 2026-10-27).
     const reviewedRun = !st && latestRun?.status === "completed" && latestRun.conclusion === "success" &&
-      /^(finished|review completed)$/i.test(latestRun.output?.title ?? "");
+      REVIEWED_RUN.test(latestRun.output?.title ?? "");
     if (st?.state === "pending") fail(`${bot.status} is reviewing ${short} (${desc})`, "waits");
     else if (!reviewedRun && !(st?.state === "success" && !NOT_A_REVIEW.test(desc))) {
       const rs = reviews(repo, n);
@@ -232,11 +234,13 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
           // to one review an hour, and every fix round queued behind it; Mikael chose to keep it for
           // the first version of each PR and let later versions go without it. Its unresolved
           // threads still block, below.
-          const earlier = earlierReview(repo, n, botLogin, bot.status, sha, rs);
-          if (earlier.unreadable) fail(`COULD NOT READ ${earlier.unreadable} -- cannot say whether ${bot.status} reviewed an earlier head of #${n}`, "unreadable");
+          // The rate-limit waiver needs no history, so it goes first: a history read that fails
+          // does not hold back a PR the waiver lets go.
+          const limited = (st && RATE_LIMITED.test(desc)) || (latestRun && rateLimitedRun(latestRun));
+          const earlier: Earlier = limited ? {} : earlierReview(repo, n, botLogin, sha, rs, isBot, isBotRun);
+          if (limited) remarks.push(`${bot.status} is rate limited and has not reviewed ${short}; sent without its review`);
+          else if (earlier.unreadable) fail(`COULD NOT READ ${earlier.unreadable} -- cannot say whether ${bot.status} reviewed an earlier head of #${n}`, "unreadable");
           else if (earlier.sha) remarks.push(`${bot.status} reviewed an earlier head, ${earlier.sha.slice(0, 7)}, not ${short}; later versions go without its review`);
-          else if ((st && RATE_LIMITED.test(desc)) || (latestRun && rateLimitedRun(latestRun)))
-            remarks.push(`${bot.status} is rate limited and has not reviewed ${short}; sent without its review`);
           else if (skipped) failures.push({ text: `${bot.status} has not reviewed ${short}: ${skipped} -- ${ask}`, kind: "fatal", trigger: bot.trigger });
           else if (!st && age < graceS()) fail(`${bot.status} has posted nothing at ${short} yet, ${age}s after its first check -- waiting up to ${graceS()}s`, "waits");
           else if (st) fail(`${bot.status} has not reviewed ${short}: its status here says "${desc}" -- ${ask}`);
@@ -292,9 +296,18 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
 }
 
 // The latest earlier head of PR #n that the review bot reviewed: a review with a body, an inline
-// comment of its own (not a reply), or its own status saying it finished, on any sha but the head.
-// Read in that order, so a PR it reviewed costs no reads beyond the reviews already in hand.
-function earlierReview(repo: Repo, n: number, botLogin: string, status: string, head: string, rs: Review[]): { sha?: string; unreadable?: string } {
+// comment of its own (not a reply), or, at a commit of the PR's, its own status or check-run saying
+// it finished, on any sha but the head. Read in that order, so a PR it reviewed costs no reads beyond
+// the reviews already in hand. Reviews and comments are this PR's own. A status or check-run belongs
+// to a commit, not a PR, so it counts only at a commit no other PR has: a stacked PR carries its lower
+// PR's commits and the reviews the bot did there (CodeRabbit on superfactory#119).
+interface Earlier {
+  sha?: string;
+  unreadable?: string;
+}
+
+function earlierReview(repo: Repo, n: number, botLogin: string, head: string, rs: Review[],
+  isBotStatus: (s: CommitStatus) => boolean, isBotRun: (c: CheckRun) => boolean): Earlier {
   const mine = (login: string | undefined) => (login ?? "").replace(/\[bot\]$/, "") === botLogin;
   const review = rs.filter((r) => mine(r.user?.login) && !!r.body?.trim() && !!r.commit_id && r.commit_id !== head).at(-1);
   if (review?.commit_id) return { sha: review.commit_id };
@@ -306,10 +319,19 @@ function earlierReview(repo: Repo, n: number, botLogin: string, status: string, 
   if (commits === undefined) return { unreadable: `the commits of #${n}` };
   for (const { sha } of [...commits].reverse()) {
     if (sha === head) continue;
+    const short = sha.slice(0, 7);
     const sts = statuses(repo, sha);
-    if (sts === undefined) return { unreadable: `the commit statuses at ${sha.slice(0, 7)}` };
-    if (sts.some((s) => s.context.toLowerCase() === status.toLowerCase() && s.state === "success" && !NOT_A_REVIEW.test(s.description ?? "")))
-      return { sha };
+    if (sts === undefined) return { unreadable: `the commit statuses at ${short}` };
+    let reviewed = sts.some((s) => isBotStatus(s) && s.state === "success" && !NOT_A_REVIEW.test(s.description ?? ""));
+    if (!reviewed) {
+      const runs = checkRuns(repo, sha);
+      if (runs === undefined) return { unreadable: `the check-runs at ${short}` };
+      reviewed = runs.some((c) => isBotRun(c) && c.status === "completed" && c.conclusion === "success" && REVIEWED_RUN.test(c.output?.title ?? ""));
+    }
+    if (!reviewed) continue;
+    const prs = commitPulls(repo, sha);
+    if (prs === undefined) return { unreadable: `the PRs of commit ${short}` };
+    if (prs.length && prs.every((p) => p.number === n)) return { sha };
   }
   return {};
 }

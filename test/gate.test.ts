@@ -308,7 +308,11 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
   const EARLIER = /CodeRabbit reviewed an earlier head, bbbbbbb, not aaaaaaa; later versions go without its review/;
 
   // never reviewed: refused, with the same ask as before
-  let r = ready({ [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, [`api repos/${REMOTE}/commits/${OLD}/status`]: { stdout: { statuses: [] } } });
+  const oldStatus = `api repos/${REMOTE}/commits/${OLD}/status`;
+  const oldRuns = `api repos/${REMOTE}/commits/${OLD}/check-runs?per_page=100&page=1`;
+  const oldPulls = `api repos/${REMOTE}/commits/${OLD}/pulls?per_page=100&page=1`;
+  const onlyThisPr = { [oldPulls]: { stdout: [{ number: N }] } };
+  let r = ready({ [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, [oldStatus]: { stdout: { statuses: [] } }, [oldRuns]: checkRuns() });
   assert.equal(r.status, 1, r.stdout);
   assert.match(r.stdout, /CodeRabbit has not reviewed aaaaaaa: its status here says "Review skipped: draft pull request" -- comment "@coderabbitai review" on the PR, then run this again/);
 
@@ -316,8 +320,11 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
   const evidence: Routes[] = [
     { [rv]: { stdout: [{ user: { login: "coderabbitai[bot]" }, commit_id: OLD, state: "COMMENTED", body: REVIEW_BODY }] } },
     { [cm]: { stdout: [{ user: { login: "coderabbitai[bot]" }, original_commit_id: OLD, in_reply_to_id: null }] } },
-    { [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] },
-      [`api repos/${REMOTE}/commits/${OLD}/status`]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review completed" }] } } },
+    { [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, ...onlyThisPr,
+      [oldStatus]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review completed" }] } } },
+    // its finished check-run there, with no status: a rebase it had already reviewed
+    { [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, ...onlyThisPr, [oldStatus]: { stdout: { statuses: [] } },
+      [oldRuns]: checkRuns(check("test"), rabbitRun("Review completed", { conclusion: "success" })) },
   ];
   for (const over of evidence) {
     r = ready(over);
@@ -325,6 +332,23 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
     assert.match(r.stdout, EARLIER);
     assert.match(r.stdout, /^SENDABLE/m);
   }
+
+  // a status or check-run on a commit another PR also has is that PR's review: a stacked PR carries
+  // its lower PR's commits (CodeRabbit on superfactory#119)
+  for (const over of evidence.slice(2)) {
+    r = ready({ ...over, [oldPulls]: { stdout: [{ number: N - 1 }, { number: N }] } });
+    assert.equal(r.status, 1, r.stdout);
+    assert.doesNotMatch(r.stdout, /earlier head/);
+  }
+  // a skipped or unfinished check-run there is no review
+  for (const run of [rabbitRun("Review skipped", { conclusion: "skipped" }), rabbitRun("Review completed", { status: "in_progress", conclusion: null }), rabbitRun("Review completed")]) {
+    r = ready({ ...evidence[3], [oldRuns]: checkRuns(run) });
+    assert.equal(r.status, 1, r.stdout);
+  }
+  // the PRs of the commit unreadable: not a pass
+  r = ready({ ...evidence[2], [oldPulls]: { status: 1 } });
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /COULD NOT READ the PRs of commit bbbbbbb/);
 
   // its reply in a thread on an older head is not a review of it
   r = ready({ [cm]: { stdout: [{ user: { login: "coderabbitai[bot]" }, original_commit_id: OLD, in_reply_to_id: 11 }] } });
@@ -457,6 +481,13 @@ test("a rate-limited review bot lets the PR go without its review, said as a rem
   r = run(green({ [st]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review rate limited" }] } }, [rv]: { stdout: [] } }), ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 0, r.stdout);
   assert.ok(r.stdout.includes(REMARK), "its status alone says it too");
+
+  // the waiver needs no history: a failed read of the PR's comments or commits does not hold it back
+  for (const broken of [`api repos/${REMOTE}/pulls/${N}/comments?per_page=100&page=1`, `api repos/${REMOTE}/pulls/${N}/commits?per_page=100&page=1`]) {
+    r = run(green({ ...limited, [broken]: { status: 1 } }), ["pr-ready", "web", String(N)]);
+    assert.equal(r.status, 0, r.stdout);
+    assert.ok(r.stdout.includes(REMARK), r.stdout);
+  }
 
   r = run(green(limited), ["pr-send", "web", String(N), HEAD]);
   assert.equal(r.status, 0, r.stderr);
