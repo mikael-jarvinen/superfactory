@@ -50,11 +50,13 @@ const url = (ws: Workspace) => `http://${ws.config.board.host}:${ws.config.board
 // describe what is true of a work item sitting there, not what somebody should do about it.
 const DESCRIPTIONS: Record<string, string> = {
   "designing": "The ticket changes the UI and had no design, so a designer is drawing one: a canvas of " +
-    "the screens it changes, then a slideset that walks {human} through them.",
+    "the screens it changes, then a slideset that walks {human} through them. It came onto the board " +
+    "when the designer was dispatched: work nobody is doing yet waits in the backlog.",
   "design-review": "{human}'s. The slideset and its canvas are sent and frozen. Nothing is built until " +
     "{human} approves the design, and a change {human} asks for goes back to the designer.",
   "building": "A teammate is writing the code in a worktree of its own. There is no plan to approve " +
-    "first, so {lead}'s brief is the whole specification and the first thing {human} sees is the PR.",
+    "first, so {lead}'s brief is the whole specification and the first thing {human} sees is the PR. It came " +
+    "onto the board when the builder was dispatched: work nobody is doing yet waits in the backlog.",
   "agent-review": "A draft PR exists against the base branch, and a reviewer reads the diff in a fresh " +
     "session that has seen nothing before it.",
   "fixing": "The builder is back on the same item, closing every finding the review reported.",

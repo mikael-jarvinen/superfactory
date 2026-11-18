@@ -101,6 +101,8 @@ test("the server: pages, the snapshot, posting, and only the tail of the log", {
   assert.deepEqual(snap.columns, ["designing", "design-review", "building", "agent-review", "fixing", "gate", "your-review", "colleague-review", "blocked"],
     "no pr-open column: a pr-open item shows in agent-review");
   assert.equal(snap.descriptions["pr-open"], undefined);
+  assert.equal(snap.descriptions["queued"], undefined, "no queued column: waiting work lives in the backlog");
+  for (const col of ["designing", "building"]) assert.match(snap.descriptions[col], /work nobody is doing yet waits in the backlog/, col);
   assert.equal(snap.tickets[3].question, "asked about the header row");
   type Member = { name: string; ticket: string | null; in_review: string[] };
   const member = (n: string) => snap.teams.flatMap((g: { members: Member[] }) => g.members).find((m: Member) => m.name === n) as Member;
