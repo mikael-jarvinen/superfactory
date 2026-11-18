@@ -87,8 +87,8 @@ const BASE = { autoMemoryEnabled: false, crossSessionInbound: "accept", isolateP
 
 const DIALOGS = "EnterPlanMode|ExitPlanMode|AskUserQuestion";
 const CHAT = "mcp__claude_ai_Slack__.*";
-// Bash and the GitHub MCP tools, for the marked-comments hook; the hook picks the comment writes.
-const COMMENT_TOOLS = "Bash|mcp__.*[Gg]it[Hh]ub.*__.*";
+// Every MCP tool: the hook picks the GitHub comment tools itself (MCP_COMMENT_TOOLS, any case).
+const COMMENT_TOOLS = "Bash|mcp__.*";
 // The tracker's write tools, by tracker kind. Reads stay open to everyone. Jira comes through the
 // "claude.ai Atlassian MCP" connector (mcp__claude_ai_Atlassian_MCP__*), whose execute-family tools
 // run any discovered operation; the older "claude.ai Atlassian" connector's names stay covered in
