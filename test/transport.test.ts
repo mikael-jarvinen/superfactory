@@ -178,7 +178,7 @@ case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; 
   local.stop("bea", "r1", false);
   assert.equal(runClaude(ws, "round", "P", ["Read"], join(dir, "round.log")).status, 0);
   assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["agents job=", "agents job=", "--bg job=", "respawn job=", "stop job=", "-p job="], "claude never sees the job");
-  const unit = new RegExp(`^--unit=factory-job-superfactory\\.bea\\.round-${procStat(process.pid)?.pgid}-${process.pid}-\\d+$`);
+  const unit = new RegExp(`^--unit=factory-job-superfactory\\.bea\\.round-${(procStat(process.pid)?.pgid ?? process.pid)}-${process.pid}-\\d+$`);
   const got = lines(scopes);
   assert.equal(got.length, 6);
   for (const c of got) assert.match(c[1] as string, unit, c.join(" "));
@@ -267,7 +267,7 @@ test("on Linux a watcher's claude -p runs in a scope too, and one that gets none
 });
 
 test("a scheduler job's calls get scopes named after its run, and claude never sees the job", () => {
-  const pgid = procStat(process.pid)?.pgid;
+  const pgid = (procStat(process.pid)?.pgid ?? process.pid);
   const [, first] = claudeScoped(["agents"], "linux", { [JOB_ENV]: "superfactory.ada up" });
   const [, second] = claudeScoped(["agents"], "linux", { [JOB_ENV]: "superfactory.ada up" });
   assert.match(first[0] as string, new RegExp(`^--unit=factory-job-superfactory\\.ada_up-${pgid}-${process.pid}-\\d+$`));
