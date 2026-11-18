@@ -124,6 +124,43 @@ test("a wiki beside Jira: the CLI, the /wiki page and its API, and no tickets an
   assert.equal((await post("/api/tickets", { project: "RPE", title: "x" })).status, 404, "no tickets to write to");
 });
 
+test("wiki remove: needs the sha it saw, keeps the last version in history, and drops the page from the list", () => {
+  const dir = tempWorkspace(WIKI);
+  const ws = openWorkspace(dir);
+  const run = (args: string[]) => factory(dir, args);
+  const f = join(tempDir(), "page.md");
+  writeFileSync(f, "Thread one.\n");
+  assert.equal(run(["wiki", "edit", "feedback", "--file", f, "--title", "Feedback"]).status, 0);
+  assert.equal(run(["wiki", "edit", "feedback/slack-01", "--file", f, "--title", "Slack 01"]).status, 0);
+  const first = W.read(ws, "AGENTIC", "feedback");
+  writeFileSync(f, "Thread one, and a note.\n");
+  assert.equal(run(["wiki", "edit", "feedback", "--file", f, "--base", first.sha]).status, 0);
+  const last = W.read(ws, "AGENTIC", "feedback");
+
+  let r = run(["wiki", "remove", "AGENTIC/feedback"]);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /pass --base <sha>/);
+  r = run(["wiki", "remove", "AGENTIC/feedback", "--base", first.sha]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /changed since it was opened; nothing was saved/);
+  assert.ok(W.pageExists(ws, "AGENTIC", "feedback"), "a refused removal leaves the page");
+
+  r = run(["wiki", "remove", "AGENTIC/feedback", "--base", last.sha, "--as", "ada"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /AGENTIC\/feedback removed/);
+  assert.equal(W.pageExists(ws, "AGENTIC", "feedback"), false);
+  assert.deepEqual(W.list(ws, "AGENTIC").map((p) => p.path), ["feedback/slack-01"], "a child page is its own page and stays");
+  const lines = readFileSync(join(ws.stateDir, "wiki", "AGENTIC", ".history", "feedback.jsonl"), "utf8").trim().split("\n")
+    .map((l) => JSON.parse(l) as { by: string; sha: string; title: string; body: string; removed?: boolean });
+  assert.equal(lines.length, 3, "two saves and the removal");
+  assert.deepEqual({ ...lines[2], t: undefined }, { t: undefined, by: "ada", sha: last.sha, title: "Feedback", body: last.body, removed: true });
+  r = run(["wiki", "show", "AGENTIC/feedback"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /no page AGENTIC\/feedback/);
+  r = run(["wiki", "remove", "AGENTIC/feedback", "--base", last.sha]);
+  assert.notEqual(r.status, 0, "nothing left to remove");
+});
+
 // The header as common.js draws it: what the snapshot's `tracker` says decides the links.
 test("the header: a local tracker links its backlog and wiki, a wiki alone links only the wiki", () => {
   const nav = (t: unknown) => {

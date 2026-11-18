@@ -1,9 +1,10 @@
 // The wiki: one markdown file a page, <wiki dir>/<PROJECT>/<path>.md, which cat and grep read. It is
 // a local tracker's own, or [wiki] beside any other tracker; config.ts decides which, and where.
-// Each save appends the whole page to .history/<path>.jsonl first. A save names the sha it started
-// from and is refused if the page changed since; the check and the write share a lock.
+// Each save appends the whole page to .history/<path>.jsonl first, and so does a removal. A save or a
+// removal names the sha it started from and is refused if the page changed since; the check and the
+// write share a lock.
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Workspace } from "../workspace.js";
 import { FactoryError, now } from "../util.js";
@@ -154,6 +155,30 @@ export function save(ws: Workspace, s: SaveInput): Page {
     writeFileSync(tmp, text);
     renameSync(tmp, f);
     return read(ws, s.project, s.path);
+  });
+}
+
+export interface RemoveInput {
+  project: string;
+  path: string;
+  by: string;
+  // The sha the remover last saw; a page changed since is refused, as a save is.
+  base: string;
+  t?: string;
+}
+
+// Removes a page from the list. Its final text goes to .history first, as an edit's does, marked
+// removed, so the page is never gone without its last version kept.
+export function remove(ws: Workspace, r: RemoveInput): Page {
+  const f = pageFile(ws, r.project, r.path);
+  return withLock(join(wikiDir(ws, r.project), ".locks", `${r.path.replace(/\//g, "~")}.lock`), () => {
+    const cur = read(ws, r.project, r.path);
+    if (r.base !== cur.sha) throw new Conflict(cur);
+    const h = historyFile(ws, r.project, r.path);
+    mkdirSync(dirname(h), { recursive: true });
+    appendFileSync(h, JSON.stringify({ t: r.t ?? now(), by: r.by, sha: cur.sha, title: cur.title, body: cur.body, removed: true }) + "\n");
+    unlinkSync(f);
+    return cur;
   });
 }
 
