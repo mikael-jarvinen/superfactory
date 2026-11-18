@@ -1019,6 +1019,19 @@ const fromFile = (f: Field) => f.typed && f.value.startsWith("@");
 // The REST paths that post a comment, a review or a reply.
 const COMMENT_PATHS = /(^|\/)(issues|pulls)\/(\d+\/)?(comments|reviews)\b|\/replies\b|(^|\/)commits\/[^/]+\/comments\b/;
 
+// Whether a REST endpoint may post a comment. The shell fills an expansion in it ($N, ${N}, $(...),
+// `...`) before gh sees it, so an expansion reads as any one segment (issues/$N/comments is a comment
+// route), and an endpoint whose route an expansion may supply, one with no literal segment after its
+// last expansion ("$P", repos/o/r/issues/$N), is taken as one that may (CodeRabbit on #128).
+const EXPANSION = /\$\{[^}]*\}|\$\([^)]*\)|\$\w+|\$[@*#?$!-]|`[^`]*`/g;
+function commentRoute(endpoint: string): boolean {
+  const path = endpoint.replace(/\?.*$/s, "");
+  if (COMMENT_PATHS.test(path.replace(EXPANSION, "0"))) return true;
+  let end = -1;
+  for (const m of path.matchAll(EXPANSION)) end = (m.index as number) + m[0].length;
+  return end >= 0 && !/^\/[^/$`]+/.test(path.slice(end));
+}
+
 // The GraphQL mutations that post or edit a comment, a review's body or a reply.
 const COMMENT_MUTATIONS = /\b(addComment|addPullRequestReview|addPullRequestReviewComment|addPullRequestReviewThread|addPullRequestReviewThreadReply|updateIssueComment|updatePullRequestReview|updatePullRequestReviewComment|submitPullRequestReview)\s*\(/;
 
@@ -1173,7 +1186,7 @@ function checkCommentWrite(raw: string[]): void {
   if (/^(api\/)?graphql\/?(\?.*)?$/i.test(endpoint.replace(/^https?:\/\/[^/]+/i, "").replace(/^\/+/, ""))) return checkGraphql(p);
   const fields = fieldsOf(p);
   const method = (last(p, "method") ?? (fields.length || last(p, "input") !== undefined ? "POST" : "GET")).toUpperCase();
-  if (method === "GET" || method === "DELETE" || !COMMENT_PATHS.test(endpoint)) return;
+  if (method === "GET" || method === "DELETE" || !commentRoute(endpoint)) return;
   if (last(p, "input") !== undefined) refuse(UNCHECKABLE);
   // a review's own body and each of its comments' (comments[][body])
   for (const f of fields) {

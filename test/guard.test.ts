@@ -1212,6 +1212,14 @@ const ROUND_128: [string, string, string][] = [
   [NO, "the GraphQL URL with --input", "gh api https://api.github.com/graphql --input q.json"],
   [OK, "the GraphQL URL with a marked body", `gh api https://api.github.com/graphql -f query='mutation{addComment(input:{subjectId:"X",body:"> Written by agent. ok"}){clientMutationId}}'`],
   [OK, "a read by the GraphQL URL", `gh api https://api.github.com/graphql -f query='query{viewer{login}}'`],
+  // KJId: an issue number, or a whole route, from the shell
+  [NO, "a $N comments path", `gh api "repos/acme/api/issues/$N/comments" -f body=hi`],
+  [NO, "a \${N} reviews path", "gh api repos/acme/api/pulls/\${N}/reviews -f body=hi -f event=COMMENT"],
+  [NO, "a route from a variable", `gh api "$P" -f body=hi`],
+  [NO, "an issue route ending in a variable", `gh api "repos/acme/api/issues/$N" -f body=hi`],
+  [OK, "a $N comments path with a marked body", `gh api "repos/acme/api/issues/$N/comments" -f body='> Written by agent. ok'`],
+  [OK, "a $R PR edit", `gh api -X PATCH "repos/$R/pulls/5" -f title=x -f body=y`],
+  [OK, "a $N read", `gh api "repos/acme/api/issues/$N/comments"`],
 ];
 
 test("the shapes CodeRabbit found in #128 at 5332c327 are read as bash and gh read them", () => {
