@@ -2181,6 +2181,24 @@ const WRAPPER_VALUES: Record<string, string[]> = {
   stdbuf: ["-i", "-o", "-e", "--input", "--output", "--error"],
 };
 
+// An env option as getopt reads it: the -S/--split-string value it carries (taking the next word when
+// none is attached), null for another option it has read whole (-u NAME, -iC dir), undefined for
+// one left to the generic reading.
+function envSplit(o: string, nextWord: () => string | undefined): string | null | undefined {
+  if (o === "--split-string") return nextWord() ?? "";
+  if (o.startsWith("--split-string=")) return o.slice(15);
+  if (o.startsWith("--") || !/^-[^-]/.test(o)) return undefined;
+  for (let j = 1; j < o.length; j++) {
+    const c = o[j] as string;
+    if (c === "S") return j + 1 < o.length ? o.slice(j + 1) : nextWord() ?? "";
+    if (c === "u" || c === "C") {
+      if (j + 1 === o.length) nextWord();
+      return null;
+    }
+  }
+  return null;
+}
+
 // The words from the command a simple command runs: past shell keywords, VAR=value words and the
 // wrappers above with their options (timeout's duration too). `echo gh pr comment` runs echo.
 function commandWords(words: string[]): string[] {
@@ -2200,6 +2218,12 @@ function commandWords(words: string[]): string[] {
       const o = words[i] as string;
       i++;
       if (o === "--") break;
+      // env -S splits its value into the command and its first arguments (CodeRabbit on #128)
+      if (name === "env") {
+        const split = envSplit(o, () => words[i++]);
+        if (split === null) continue;
+        if (split !== undefined) return commandWords([...tokenize(split).map((k) => k.t), ...words.slice(i)]);
+      }
       // `command -v gh` and `command -V gh` look a name up and run nothing (Marie on #128)
       if (name === "command" && /^-[pvV]*[vV][pvV]*$/.test(o)) return [];
       if (opts.includes(o)) i++;
@@ -2212,8 +2236,8 @@ function commandWords(words: string[]): string[] {
 
 // Whether a line may run gh once bash has removed its quotes: g"h", 'g'h, g\h and g$'h' are all gh
 // (CodeRabbit on #128). It only picks the lines the comment rule parses, so it may say yes too often;
-// the rule itself reads the parsed command names.
-export const namesGh = (cmd: string): boolean => /\bgh\b/i.test(cmd.replace(/\$(?=['"])/g, "").replace(/["'\\]/g, ""));
+// the rule itself reads the parsed command names. env's -Sgh names it too.
+export const namesGh = (cmd: string): boolean => /(?:\b|-[A-Za-z]*S)gh\b/i.test(cmd.replace(/\$(?=['"])/g, "").replace(/["'\\]/g, ""));
 
 // Only the comment rule, for a session that runs no guard (an assistant) or whose guard leaves gh
 // alone: the marked-comments hook. A gh run as a command is checked, by name or path, behind any

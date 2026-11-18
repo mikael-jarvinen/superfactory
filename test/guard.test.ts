@@ -1227,6 +1227,13 @@ const ROUND_128: [string, string, string][] = [
   [NO, "g$'h'", "g$'h' pr comment 5 -R acme/api --body hi"],
   [NO, `g""h behind env`, `env g""h pr comment 5 -R acme/api --body hi`],
   [OK, `g"h" with a marked body`, `g"h" pr comment 5 -R acme/api --body '> Written by agent. ok'`],
+  // KJIz: env -S, whose value is the command line it runs
+  [NO, "env -S", `env -S 'gh pr comment 5 -R acme/api --body hi'`],
+  [NO, "env -S with the value attached", `env '-Sgh pr comment 5 -R acme/api --body hi'`],
+  [NO, "env --split-string=", `env '--split-string=gh pr comment 5 -R acme/api' --body hi`],
+  [NO, "env -iS after -u", `env -u X -iS 'gh pr comment 5 -R acme/api --body hi'`],
+  [OK, "env -S with a marked body", `env -S 'gh pr comment 5 -R acme/api --body "> Written by agent. ok"'`],
+  [OK, "env -u then a command", `env -u X gh pr comment 5 -R acme/api --body '> Written by agent. ok'`],
 ];
 
 test("the shapes CodeRabbit found in #128 at 5332c327 are read as bash and gh read them", () => {
