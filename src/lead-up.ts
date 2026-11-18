@@ -9,7 +9,8 @@
 import type { Agent } from "./config.js";
 import { findSession, type Session, waitForName } from "./fleet.js";
 import { armText } from "./hooks/status.js";
-import { GIT_HTTPS_ENV, launch, launchArgs, leadPrompt, refreshSettings, roleAppendix, roleOf } from "./launch.js";
+import { GIT_HTTPS_ENV, launch, launchArgs, leadPrompt, refreshSession, roleAppendix, roleOf } from "./launch.js";
+import { writeCurrentAppendix } from "./transport.js";
 import { forgetStopped, freshCommand, lastStopped, resumable } from "./stopped.js";
 import { isAgentSession, type Transport } from "./transport.js";
 import { FactoryError } from "./util.js";
@@ -17,9 +18,11 @@ import type { Workspace } from "./workspace.js";
 
 export const resumePrompt = (ws: Workspace) => `You were restarted by \`factory up\`. ${armText(ws)}`;
 
-// A resumed session gets its messages back, not the system prompt it started with, so the appendix
-// goes on the command line again. A fresh launch's argv with `--resume <id>` before the prompt, so
-// the two cannot pass the appendix differently.
+// A fresh launch's argv with `--resume <id>` before the prompt. A resumed session keeps the system
+// prompt it started with, its appendix included, and claude ignores --append-system-prompt-file and
+// --append-system-prompt given on a resume (Otto on Claude Code 2.1.327). So the appendix on this
+// command line does nothing; the current one reaches the session through its SessionStart hook
+// (hooks/appendix.ts), from the file resume() writes first.
 export function resumeArgs(ws: Workspace, agent: Agent, sessionId: string, prompt: string, appendixPath: string | null): string[] {
   const args = launchArgs(ws, agent, prompt, appendixPath, undefined);
   return [...args.slice(0, -1), "--resume", sessionId, prompt];
@@ -53,11 +56,12 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
     // fails (a role's template gone) leaves the last render there, so the lead comes back on it
     // rather than staying down, and the failure is said loudly (CodeRabbit on #127).
     try {
-      refreshSettings(ws, ld);
+      refreshSession(ws, ld, appendix);
     } catch (e) {
       out(`WARNING: ${ld.name}'s settings could not be rendered (${(e as Error).message}); respawning on the last rendered settings. Fix the template, then \`factory stop ${ld.name}\` and \`factory up\`: up leaves a running lead as it is.`);
     }
-    const r = t.respawn(ld.name, sid);
+    // a hosted lead's daemon writes its settings and appendix from the request
+    const r = t.respawn(ld.name, sid, undefined, ld.host ? appendix : undefined);
     if (r.ok && waitForName(t, ld.name, waitS)) {
       out(`${ld.name} respawned from ${sid}: ${r.said}`);
       return;
@@ -73,6 +77,8 @@ function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId:
   const prompt = resumePrompt(ws);
   const cwd = old.cwd ?? (roleOf(ws, ld).cwd as string);
   try {
+    // the resumed session's SessionStart hook hands it this (resumeArgs)
+    writeCurrentAppendix(ws.runDir, ld.name, appendix);
     t.start({ agent: ld, cwd, prompt, appendix, runDir: ws.runDir, phase: undefined, args: (p) => resumeArgs(ws, ld, sessionId, prompt, p), env: { ...process.env, ...GIT_HTTPS_ENV } });
     // the resumed conversation runs under a new id, the one a later stop records (the row it
     // replaced is removed below)

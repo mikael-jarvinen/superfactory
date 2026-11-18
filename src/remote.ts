@@ -5,7 +5,9 @@
 //                                 with `alive`, which only that machine can tell
 //   POST /agents/<name>/start     {cwd, prompt, appendix, phase} -> {id}; the daemon renders the
 //                                 claude command line from its own copy of the config
-//   POST /agents/<name>/respawn   {id} -> {ok, said, why}
+//   POST /agents/<name>/respawn   {id, appendix?} -> {ok, said, why}; with appendix (text or null),
+//                                 the daemon renders the agent's settings and writes its current
+//                                 appendix first (launch.ts's refreshHosted), as a local respawn does
 //   POST /agents/<name>/stop      {id, remove}
 //
 // A builder with a host has its repos' checkouts there too, and its worktrees are made and checked
@@ -194,10 +196,10 @@ export function remote(h: Host): Transport {
       return typeof r.body.id === "string" ? r.body.id : "?";
     },
     // Inside timeoutMs, its child's slack included.
-    respawn(name, id, timeoutMs) {
+    respawn(name, id, timeoutMs, appendix) {
       const ms = timeoutMs === undefined ? 60_000 : Math.min(60_000, timeoutMs - CHILD_SLACK_MS);
       if (ms < 1_000) return { ok: false, said: "", why: `${timeoutMs} ms is too little for a respawn on ${h.name}` };
-      const r = ask(() => callSync(h, "POST", agentPath(name, "respawn"), { id }, ms));
+      const r = ask(() => callSync(h, "POST", agentPath(name, "respawn"), { id, ...(appendix !== undefined ? { appendix } : {}) }, ms));
       if (r instanceof Unreachable) return { ok: false, said: "", why: r.message };
       return { ok: r.body.ok === true, said: String(r.body.said ?? ""), why: String(r.body.why ?? r.body.said ?? "") };
     },
@@ -229,6 +231,7 @@ export function remote(h: Host): Transport {
 }
 
 // ---------------------------------------------------------------- the daemon's side
+
 
 export type Served = { status: number; body: Record<string, unknown> };
 

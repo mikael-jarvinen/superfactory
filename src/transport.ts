@@ -3,7 +3,7 @@
 // host's daemon (remote.ts).
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Agent, Repo } from "./config.js";
@@ -63,7 +63,9 @@ export interface Transport {
   start(req: StartRequest): string;
   // said: claude's stdout. why: its stderr (else stdout), read when the session does not come back.
   // Within timeoutMs; one too short for a respawn is a failure, not a longer call.
-  respawn(name: string, id: string, timeoutMs?: number): { ok: boolean; said: string; why: string };
+  // appendix: the agent's current appendix, which a host's daemon writes before it respawns (the
+  // local side writes it itself; refreshSession in launch.ts); undefined sends none.
+  respawn(name: string, id: string, timeoutMs?: number, appendix?: string | null): { ok: boolean; said: string; why: string };
   stop(name: string, id: string, remove: boolean): void;
   // The worktree for the item, made or reused (worktree.ts's ensureWorktree); throws when it cannot.
   worktree(q: WorktreeRequest): { wt: string; how: string };
@@ -226,7 +228,26 @@ export const local: Transport = {
 // logs/run/, which a reboot keeps as it does not keep /tmp. It is named by its content: a respawn
 // reads the brief its session started with even after the brief changed, and a brief launched again
 // unchanged reuses its file. Written beside it and renamed, so a reader never sees half of one.
+// Where an agent's current appendix is kept, by name alone, for the SessionStart hook that gives a
+// resumed session its brief again (hooks/appendix.ts): a session's own appendix file is named by its
+// text, so a resumed one cannot tell which is current.
+export const currentAppendixPath = (runDir: string, name: string): string => join(runDir, `appendix-${name}-current.md`);
+
+// Writes an agent's current appendix, or removes it when the agent has none.
+export function writeCurrentAppendix(runDir: string, name: string, text: string | null): void {
+  const path = currentAppendixPath(runDir, name);
+  if (text === null) return rmSync(path, { force: true });
+  mkdirSync(runDir, { recursive: true });
+  if (existsSync(path) && readFileSync(path, "utf8") === text) return;
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, text);
+  renameSync(tmp, path);
+}
+
+// The file a start passes as --append-system-prompt-file, and the agent's current appendix with it:
+// every start writes this, a host daemon's too, so the current copy is never older than the last start.
 export function appendixFile(runDir: string, name: string, text: string): string {
+  writeCurrentAppendix(runDir, name, text);
   mkdirSync(runDir, { recursive: true });
   const path = join(runDir, `appendix-${name}-${createHash("sha256").update(text).digest("hex").slice(0, 16)}.md`);
   if (!existsSync(path) || readFileSync(path, "utf8") !== text) {

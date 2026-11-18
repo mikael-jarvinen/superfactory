@@ -15,6 +15,7 @@ import type { Agent } from "./config.js";
 import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
 import { bringUpLead } from "./lead-up.js";
 import { wake, wakeForRound, wokeLine } from "./wake.js";
+import { hook as appendixHook } from "./hooks/appendix.js";
 import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
 import { hook as noSideChannelsHook } from "./hooks/no-side-channels.js";
@@ -52,10 +53,12 @@ const USAGE = `factory: start, stop, dispatch and track a fleet of Claude Code s
 
 usage: factory [--workspace <dir>] <command> [options]
 
-  doctor                          what this machine and workspace lack to run the fleet: one
+  doctor [--resume-probe]         what this machine and workspace lack to run the fleet: one
                                   \`ok\` or \`MISSING ... [fix: ...]\` line per check, derived from
                                   config, then each stack script's own doctor. Reads only.
-                                  Exit 1 when anything is missing.
+                                  Exit 1 when anything is missing. --resume-probe also starts
+                                  and resumes a throwaway \`claude -p\` session (two model
+                                  turns) to check a resumed session is handed its brief.
   up [--fresh]                    start the board, and the lead (resuming its thread if one exists);
                                   in the background, bring up every stack slot that does not answer
   down                            stop every fleet session and the board
@@ -853,8 +856,8 @@ function cmdSchedule(ws: Workspace, argv: string[]): number {
 
 // The board port check binds, which is asynchronous, so this one finishes after main returns.
 function cmdDoctor(ws: Workspace, argv: string[]) {
-  args("doctor", argv, {}, [0, 0]);
-  doctor(ws).then((code) => {
+  const { v } = args("doctor", argv, { "resume-probe": { type: "boolean" } }, [0, 0]);
+  doctor(ws, console.log, { resumeProbe: v["resume-probe"] === true }).then((code) => {
     if (code) console.error("factory: something is missing; each MISSING line says how to fix it");
     process.exitCode = code;
   }, (e: unknown) => {
@@ -906,6 +909,7 @@ const HOOK_FNS: Record<HookName, (argv: string[], input: string, workspace?: str
   "no-dialogs": noDialogsHook,
   "no-side-channels": noSideChannelsHook,
   "wake": wakeHook,
+  "appendix": appendixHook,
 };
 
 // Runs before the workspace is opened: everything a hook needs is on its command line, and a
