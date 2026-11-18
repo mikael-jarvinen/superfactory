@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, test } from "node:test";
 import { allowClosePath } from "../src/allow-close.js";
-import { type GuardContext, verdict } from "../src/hooks/guard.js";
+import { commentVerdict, type GuardContext, verdict } from "../src/hooks/guard.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, tempWorkspace } from "./helpers.js";
 
@@ -81,43 +83,6 @@ const table: [GuardContext, number, string[]][] = [
   ]],
   // A comment goes out under the human's login: the watcher tells the factory's from the human's by
   // the marker (superfactory#119, L2), so a protected session posts only marked or trigger bodies.
-  [pr, REFUSE, [
-    "gh pr comment 1 --body hi", "gh pr comment 1 -b 'Fixed in abc'", "gh issue comment 1 --body=hi", "gh pr comment 1",
-    'gh pr comment 1 --body "$(cat f)"', "gh pr comment 1 --body-file f", "gh pr comment 1 -F f", "gh pr comment 1 -e",
-    "gh pr review 1 --request-changes -b 'please fix'", "gh pr review 1 --comment --body-file f",
-    "gh api repos/o/r/pulls/1/comments/2/replies -f body='Fixed in abc'", "gh api -X POST repos/o/r/issues/1/comments -f body=hi",
-    "gh api repos/o/r/pulls/1/reviews -f event=COMMENT -f body=hi", "gh api repos/o/r/pulls/1/comments/2/replies -F body=@f",
-    "gh api repos/o/r/issues/1/comments --input f.json", "gh api -X PATCH repos/o/r/issues/comments/5 -f body=hi",
-    "gh api repos/o/r/pulls/1/comments/2/replies -fbody=hi",
-    // superfactory#119 round 2: an attached short value (N3), a GraphQL comment mutation (N4) and a
-    // review's nested comment bodies (N5)
-    "gh pr review 1 --comment -bhi", "gh pr comment 1 -bhi", "gh pr review 1 --comment -Ff.md",
-    "gh api graphql -f query='mutation { addComment(input: {subjectId: \"X\", body: \"hi\"}) { clientMutationId } }'",
-    "gh api graphql -f query='mutation($b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \"T\", body: $b}) { clientMutationId } }' -f b=hi",
-    "gh api graphql -f query='mutation($i: AddCommentInput!) { addComment(input: $i) { clientMutationId } }' --input v.json",
-    "gh api graphql -f query='mutation($i: UpdateIssueCommentInput!) { updateIssueComment(input: $i) { clientMutationId } }'",
-    "gh api graphql -F query=@m.graphql",
-    // round 3: submitPullRequestReview's input variable, and bodies built into one with -f 'i[body]='
-    "gh api graphql -f query='mutation($i: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $i) { clientMutationId } }'",
-    "gh api graphql -f query='mutation($i: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $i) { clientMutationId } }' -f 'i[pullRequestReviewId]=R' -f 'i[event]=COMMENT' -f 'i[body]=hi'",
-    "gh api graphql -f query='mutation($i: AddCommentInput!) { addComment(input: $i) { clientMutationId } }' -f 'i[subjectId]=X' -F 'i[body]=@note.md'",
-    "gh api graphql -f query='mutation($i: AddCommentInput!) { addComment(input: $i) { clientMutationId } }' -f 'i={\"body\":\"hi\"}'",
-    "gh api repos/o/r/pulls/1/reviews -f body='> Written by agent. ok' -f 'comments[][path]=a.ts' -f 'comments[][body]=nit'",
-  ]],
-  [pr, ALLOW, [
-    "gh pr comment 1 --body '> Written by agent.\n\nFixed in abc'", 'gh pr comment 1 -b "> Written by agent. Fixed"',
-    "gh pr comment 1 --body '@coderabbitai review'", "gh pr review 1 --approve", "gh pr review 1 --comment -b '> Written by agent. ok'",
-    "gh api repos/o/r/pulls/1/comments/2/replies -f body='> Written by agent.\n\nFixed in abc'", "gh api repos/o/r/pulls/1/comments",
-    "gh api repos/o/r/issues/1/comments -f per_page=100", "gh api repos/o/r/issues/1/labels -f labels[]=x",
-    "gh pr review 1 --comment '-b> Written by agent. ok'",
-    "gh api graphql -f query='mutation { addComment(input: {subjectId: \"X\", body: \"> Written by agent. ok\"}) { clientMutationId } }'",
-    "gh api graphql -f query='mutation($b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \"T\", body: $b}) { clientMutationId } }' -f 'b=@coderabbitai resolve'",
-    "gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: \"T\"}) { clientMutationId } }'",
-    "gh api graphql -f query='query { viewer { login } }'",
-    "gh api graphql -f query='mutation($i: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $i) { clientMutationId } }' -f 'i[pullRequestReviewId]=R' -f 'i[event]=APPROVE'",
-    "gh api graphql -f query='mutation($i: AddCommentInput!) { addComment(input: $i) { clientMutationId } }' -f 'i[subjectId]=X' -f 'i[body]=> Written by agent. ok'",
-    "gh api repos/o/r/pulls/1/reviews -f body='> Written by agent. ok' -f 'comments[][path]=a.ts' -f 'comments[][body]=> Written by agent. nit'",
-  ]],
   // Beyond the old table. timeout is unwrapped and its command checked rather than refused; a shell's
   // -c script is checked; ");" is two operators; a quoted "|" or ">" is a word; >&1 writes no file.
   [ro, REFUSE, ["(ls); git commit -m x", "timeout 5 git commit -m x", "env GIT_DIR=/x/.git git log"]],
@@ -261,10 +226,13 @@ test("the lead closes a product PR only once the human has named it", () => {
   const r = factory(dir, ["allow-close", "api", "8701", "--words", "I allow you to close the PR"]);
   assert.equal(r.status, 0, r.stderr);
   const lead: GuardContext = { ...pr, role: "lead", allowClose: allowClosePath(openWorkspace(dir).stateDir) };
-  for (const c of ["gh pr close 8701 -R acme/api", "gh pr close 8701 --repo Acme/api --comment 'Superseded by #8702'",
-    "gh pr close https://github.com/acme/api/pull/8701", "gh pr close https://github.com/acme/api/pull/8701/files -c x",
-    "cat > /tmp/c.md <<'EOF'\nSuperseded.\nEOF\ngh pr close 8701 -R acme/api --comment \"$(cat /tmp/c.md)\""])
+  for (const c of ["gh pr close 8701 -R acme/api", "gh pr close 8701 --repo Acme/api --comment '> Written by agent. Superseded by #8702'",
+    "gh pr close https://github.com/acme/api/pull/8701", "gh pr close https://github.com/acme/api/pull/8701/files -c '> Written by agent. x'"])
     assert.equal(verdict(c, lead), null, c);
+  // Its close comment is still a comment under the human's login (#119 round 4).
+  for (const c of ["gh pr close 8701 --repo Acme/api --comment 'Superseded by #8702'",
+    "cat > /tmp/c.md <<'EOF'\n> Written by agent. Superseded.\nEOF\ngh pr close 8701 -R acme/api --comment \"$(cat /tmp/c.md)\""])
+    assert.match(verdict(c, lead) ?? "", /Written by agent/, c);
   const refused = {
     "an unrecorded PR": verdict("gh pr close 8702 -R acme/api", lead),
     "the same number in another repo": verdict("gh pr close 8701 -R acme/web", lead),
@@ -334,4 +302,171 @@ test("the lead's guard finds the allow-close list through its workspace when the
   assert.notEqual(verdict("gh pr close 8701 -R acme/api", { ...lead, role: "builder" }), null);
   // the flag overrides the workspace: a list that names nothing closes nothing
   assert.notEqual(verdict("gh pr close 8701 -R acme/api", { ...lead, allowClose: `${dir}/nothing.jsonl` }), null);
+});
+
+// The comment rule, every shape (superfactory#119, rounds 1 to 4). Every comment the factory posts
+// goes out under the human's login, so its body must start with the marker, or be a bot trigger, and
+// be checkable in the command. gh's arguments are read as gh reads them: the last of a repeated flag
+// wins, a short flag's value may be attached, `=` forms work, and -- ends the options. Only a gh
+// that runs as a command is checked. Each row runs through the marked-comments hook, and each gh row
+// that names no file through the protect guard too, which must agree on a comment it refuses.
+const M = "> Written by agent.";
+const NO = "refused";
+const OK = "allowed";
+const ADD = (body: string) => `gh api graphql -f query='mutation { addComment(input: {subjectId: "X", body: ${body}}) { clientMutationId } }'`;
+const REPLY = "gh api graphql -f query='mutation($b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \"T\", body: $b}) { clientMutationId } }'";
+const SUBMIT = "gh api graphql -f query='mutation($i: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $i) { clientMutationId } }'";
+const ADD_IN = "gh api graphql -f query='mutation($i: AddCommentInput!) { addComment(input: $i) { clientMutationId } }'";
+const COMMENT_SHAPES: [string, string, string][] = [
+  // gh pr/issue comment
+  [OK, "marked", `gh pr comment 1 --body '${M}\n\nFixed in abc'`],
+  [OK, "marked, -b", `gh pr comment 1 -b "${M} Fixed"`],
+  [OK, "a bot trigger", "gh pr comment 1 --body '@coderabbitai review'"],
+  [OK, "marked, -R before the number", `gh pr comment -R o/r 1 --body '${M}'`],
+  [OK, "marked, attached", `gh pr comment 1 '-b${M} ok'`],
+  [OK, "marked, = form", `gh issue comment 1 '--body=${M} ok'`],
+  [OK, "the last body is marked", `gh pr comment 1 -b hi -b '${M} ok'`],
+  [OK, "--web: the human writes it", "gh pr comment 1 --web"],
+  [OK, "--delete-last posts nothing", "gh pr comment 1 --delete-last --yes"],
+  [NO, "unmarked", "gh pr comment 1 --body hi"],
+  [NO, "unmarked, -b", "gh pr comment 1 -b 'Fixed in abc'"],
+  [NO, "unmarked, = form", "gh issue comment 1 --body=hi"],
+  [NO, "unmarked, attached", "gh pr comment 1 -bhi"],
+  [NO, "unmarked, -R before the number", "gh pr comment -R o/r 1 -b hi"],
+  [NO, "the last body is unmarked", `gh pr comment 1 -b '${M}' -b hi`],
+  [NO, "the last body is unmarked, = form", `gh pr comment 1 --body '${M}' --body=hi`],
+  [NO, "--edit-last, unmarked", "gh pr comment 1 --edit-last -b hi"],
+  [NO, "no body", "gh pr comment 1"],
+  [NO, "after --, -b is not a flag", `gh pr comment 1 -- -b '${M}'`],
+  [NO, "a body from $(...)", 'gh pr comment 1 --body "$(cat f)"'],
+  [NO, "a body from a variable", 'gh pr comment 1 --body "$BODY"'],
+  [NO, "--body-file", "gh pr comment 1 --body-file f"],
+  [NO, "-F", "gh pr comment 1 -F f"],
+  [NO, "-F attached", "gh pr comment 1 -Ff.md"],
+  [NO, "-e", "gh pr comment 1 -e"],
+  [NO, "--editor", "gh issue comment 1 --editor"],
+  // gh pr review
+  [OK, "an approval", "gh pr review 1 --approve"],
+  [OK, "marked", `gh pr review 1 --comment -b '${M} ok'`],
+  [OK, "marked, attached after a boolean cluster", `gh pr review 1 -c '-b${M} ok'`],
+  [NO, "unmarked", "gh pr review 1 --request-changes -b 'please fix'"],
+  [NO, "unmarked, attached", "gh pr review 1 --comment -bhi"],
+  [NO, "the last body is unmarked", `gh pr review 1 -c -b '${M}' --body=hi`],
+  [NO, "--body-file", "gh pr review 1 --comment --body-file f"],
+  [NO, "-F attached", "gh pr review 1 --comment -Ff.md"],
+  // close and reopen with a comment
+  [OK, "close, no comment", "gh pr close 1"],
+  [OK, "close, marked", `gh pr close 1 -c '${M} superseded'`],
+  [OK, "issue close with a reason", "gh issue close 2 -r completed"],
+  [OK, "reopen, no comment", "gh issue reopen 2"],
+  [NO, "pr close -c", "gh pr close 1 -c hi"],
+  [NO, "pr close --comment=", "gh pr close 1 --comment=hi"],
+  [NO, "pr close, attached", "gh pr close 1 -chi"],
+  [NO, "pr close, after a boolean", "gh pr close 1 -d -c hi"],
+  [NO, "issue close --comment", "gh issue close 2 --comment hi"],
+  [NO, "issue close, a reason and a comment", "gh issue close 2 -r completed -c hi"],
+  [NO, "pr reopen -c", "gh pr reopen 1 -c hi"],
+  [NO, "issue reopen -c", "gh issue reopen 2 -c hi"],
+  // REST
+  [OK, "a read", "gh api repos/o/r/pulls/1/comments"],
+  [OK, "a read with -X GET and fields", "gh api -X GET repos/o/r/issues/1/comments -f per_page=100"],
+  [OK, "a delete", "gh api -X DELETE repos/o/r/issues/comments/5"],
+  [OK, "not a comment", "gh api repos/o/r/issues/1/labels -f 'labels[]=x'"],
+  [OK, "a marked reply", `gh api repos/o/r/pulls/1/comments/2/replies -f body='${M}\n\nFixed in abc'`],
+  [OK, "a marked review and its comments", `gh api repos/o/r/pulls/1/reviews -f body='${M} ok' -f 'comments[][path]=a.ts' -f 'comments[][body]=${M} nit'`],
+  [NO, "an unmarked reply", "gh api repos/o/r/pulls/1/comments/2/replies -f body='Fixed in abc'"],
+  [NO, "attached -f", "gh api repos/o/r/pulls/1/comments/2/replies -fbody=hi"],
+  [NO, "an issue comment", "gh api -X POST repos/o/r/issues/1/comments -f body=hi"],
+  [NO, "a leading slash", "gh api /repos/o/r/issues/1/comments -f body=hi"],
+  [NO, "a full URL", "gh api https://api.github.com/repos/o/r/issues/1/comments -f body=hi"],
+  [NO, "a review body", "gh api repos/o/r/pulls/1/reviews -f event=COMMENT -f body=hi"],
+  [NO, "a review's comment", `gh api repos/o/r/pulls/1/reviews -f 'body=${M} ok' -f 'comments[][path]=a.ts' -f 'comments[][body]=nit'`],
+  [NO, "a submitted review", "gh api repos/o/r/pulls/1/reviews/5/events -f event=COMMENT -f body=hi"],
+  [NO, "an edit", "gh api -X PATCH repos/o/r/issues/comments/5 -f body=hi"],
+  [NO, "a commit comment", "gh api repos/o/r/commits/abc/comments -f body=hi"],
+  [NO, "a second body field", `gh api repos/o/r/issues/1/comments -f 'body=${M}' -f body=hi`],
+  [NO, "a body from a file", "gh api repos/o/r/pulls/1/comments/2/replies -F body=@f"],
+  [NO, "--input", "gh api repos/o/r/issues/1/comments --input f.json"],
+  // GraphQL
+  [OK, "a read", "gh api graphql -f query='query { viewer { login } }'"],
+  [OK, "a read from a file", "gh api graphql -F query=@read.graphql"],
+  [OK, "a read from --input", "gh api graphql --input read.json"],
+  [OK, "a mutation that posts nothing", "gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: \"T\"}) { clientMutationId } }'"],
+  [OK, "a marked literal", ADD(`"${M} ok"`)],
+  [OK, "a marked block string", ADD(`"""${M} ok"""`)],
+  [OK, "a marked $variable", `${REPLY} -f 'b=${M} ok'`],
+  [OK, "a trigger $variable", `${REPLY} -f 'b=@coderabbitai resolve'`],
+  [OK, "an approval through input", `${SUBMIT} -f 'i[pullRequestReviewId]=R' -f 'i[event]=APPROVE'`],
+  [OK, "a marked body in input", `${ADD_IN} -f 'i[subjectId]=X' -f 'i[body]=${M} ok'`],
+  [OK, "a marked mutation from a file", "gh api graphql -F query=@marked.graphql"],
+  [OK, "a marked mutation from --input", "gh api graphql --input marked.json"],
+  [NO, "an unmarked literal", ADD('"hi"')],
+  [NO, "an unmarked block string", ADD('"""hi"""')],
+  [NO, "an unmarked $variable", `${REPLY} -f b=hi`],
+  [NO, "a $variable not given", REPLY],
+  [NO, "submit, no input", SUBMIT],
+  [NO, "submit, an unmarked body in input", `${SUBMIT} -f 'i[pullRequestReviewId]=R' -f 'i[body]=hi'`],
+  [NO, "an input body from a file", `${ADD_IN} -f 'i[subjectId]=X' -F 'i[body]=@note.md'`],
+  [NO, "the input as one value", `${ADD_IN} -f 'i={"body":"hi"}'`],
+  [NO, "an unmarked mutation from a file", "gh api graphql -F query=@unmarked.graphql"],
+  [NO, "an unmarked mutation from --input", "gh api graphql --input unmarked.json"],
+  [NO, "a query file that is not there", "gh api graphql -F query=@missing.graphql"],
+  [NO, "a query from stdin", "gh api graphql -F query=@-"],
+  [NO, "a query from $(...)", "gh api graphql -f query=\"$(cat <<'EOF'\nmutation{addComment(input:{subjectId:\"x\",body:\"hi\"}){clientMutationId}}\nEOF\n)\""],
+  [NO, "a query from a variable", 'gh api graphql -f query="$Q"'],
+  // where gh runs: behind wrappers, in other commands' bodies, by path
+  [NO, "sudo", "sudo gh pr comment 1 -b hi"],
+  [NO, "sudo -u", "sudo -u x gh pr comment 1 -b hi"],
+  [NO, "env", "env A=1 gh pr comment 1 -b hi"],
+  [NO, "an assignment", "A=1 gh pr comment 1 -b hi"],
+  [NO, "timeout", "timeout 5 gh pr comment 1 -b hi"],
+  [NO, "nice", "nice -n 5 gh pr comment 1 -b hi"],
+  [NO, "xargs", "printf 1 | xargs -I{} gh pr comment {} -b hi"],
+  [NO, "command", "command gh pr comment 1 -b hi"],
+  [NO, "nohup", "nohup gh pr comment 1 -b hi"],
+  [NO, "exec", "exec gh pr comment 1 -b hi"],
+  [NO, "by path", "/usr/bin/gh pr comment 1 -b hi"],
+  [NO, "by a linuxbrew path", "/home/linuxbrew/.linuxbrew/bin/gh pr comment 1 -b hi"],
+  [NO, "bash -c", 'bash -c "gh issue comment 3 -b hi"'],
+  [NO, "sh -lc", "sh -lc 'gh issue comment 3 -b hi'"],
+  [NO, "eval", "eval gh pr comment 1 -b hi"],
+  [NO, "after &&", "cd /x && gh pr comment 1 -b hi"],
+  [NO, "after ;", "ls; gh pr comment 1 -b hi"],
+  [NO, "a subshell", "(gh pr comment 1 -b hi)"],
+  [NO, "inside $(...)", "echo $(gh pr comment 1 -b hi)"],
+  [NO, "a for body", "for i in 1; do gh pr comment $i -b hi; done"],
+  [NO, "an if body", "if true; then gh pr comment 1 -b hi; fi"],
+  [OK, "echo prints it", "echo gh pr comment 1 -b hi"],
+  [OK, "printf prints it", "printf '%s\\n' gh pr comment 1"],
+  [OK, "grep searches for it", 'grep "gh api" f'],
+  [OK, "a commit message names it", 'git commit -m "gh pr comment 1 -b hi"'],
+  [OK, "a heredoc prints it", "cat <<'EOF'\ngh pr comment 1 -b hi\nEOF"],
+  [OK, "gh reads", "gh pr view 1 --comments"],
+  [OK, "gh checks", "gh pr checks 1"],
+  [OK, "xargs, no gh", "printf x | xargs echo"],
+  [OK, "sudo, no gh", "sudo ls"],
+  [OK, "watch, no gh", "watch ls"],
+];
+
+test("the comment rule: every shape a gh comment takes, refused or allowed", () => {
+  const dir = mkdtempSync(join(tmpdir(), "comment-rule-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const unmarked = 'mutation { addComment(input: {subjectId: "X", body: "hi"}) { clientMutationId } }';
+  const marked = `mutation { addComment(input: {subjectId: "X", body: "${M} ok"}) { clientMutationId } }`;
+  writeFileSync(join(dir, "read.graphql"), "query { viewer { login } }");
+  writeFileSync(join(dir, "unmarked.graphql"), unmarked);
+  writeFileSync(join(dir, "marked.graphql"), marked);
+  writeFileSync(join(dir, "read.json"), JSON.stringify({ query: "query { viewer { login } }" }));
+  const reply = "mutation($b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \"T\", body: $b}) { clientMutationId } }";
+  writeFileSync(join(dir, "unmarked.json"), JSON.stringify({ query: reply, variables: { b: "hi" } }));
+  writeFileSync(join(dir, "marked.json"), JSON.stringify({ query: reply, variables: { b: `${M} ok` } }));
+  const wrong: string[] = [];
+  for (const [want, name, cmd] of COMMENT_SHAPES) {
+    const hook = commentVerdict(cmd, dir);
+    if ((hook === null ? OK : NO) !== want) wrong.push(`hook ${want === OK ? "refused" : "allowed"} ${name}: ${cmd}${hook ? ` (${hook})` : ""}`);
+    // The protect guard runs the same rule on a gh it runs; its own policy may refuse more, so it is
+    // held only to refusing what the rule refuses.
+    if (want === NO && /^gh /.test(cmd) && !/@|--input/.test(cmd) && verdict(cmd, pr) === null) wrong.push(`protect allowed ${name}: ${cmd}`);
+  }
+  assert.deepEqual(wrong, []);
 });

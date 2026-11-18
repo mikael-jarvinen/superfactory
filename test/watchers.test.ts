@@ -801,6 +801,39 @@ test("the review watcher does not count a read with GraphQL errors or a failed e
   assert.match(notes()[0] ?? "", /"Second\." \[comment 2\]/, "the next clean read tells it");
 });
 
+// CodeRabbit on #119, round 4 (R1): a repo the token cannot read (moved, deleted, access lost) made
+// every poll unreadable for every PR. Now its PRs wait, named with GitHub's error, and the rest are read.
+test("the review watcher reads the other repos when one cannot be read, and names it", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  const watch = (key: string, p: { repo: string; number: number }) => {
+    assert.equal(factory(ws, ["state", key, "queued", "--title", key]).status, 0);
+    const file = join(ws, "state", `${key}.json`);
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: p, prs: [p] }));
+  };
+  watch("WEB-2", { repo: "acme/web", number: 7 });
+  watch("OLD-1", { repo: "acme/old", number: 3 });
+  const page = (nodes: object[]) => ({ pageInfo: { hasNextPage: false, endCursor: null }, nodes });
+  const thread = { id: "PRRT_1", isResolved: false, path: "src/a.ts", line: 1, originalLine: 1, comments: page([{ databaseId: 1, createdAt: "2026-11-17T10:00:00Z", publishedAt: "2026-11-17T10:00:00Z", body: "Rename this.", author: { login: "sam", __typename: "User" } }]) };
+  const web = { url: "https://github.com/acme/web/pull/7", comments: page([]), reviews: page([]), reviewThreads: page([thread]) };
+  const gone = { message: "Could not resolve to a Repository with the name 'acme/old'.", type: "NOT_FOUND" };
+  // the repos are aliased in key order: OLD-1's acme/old is r0, WEB-2's acme/web is r1
+  const answer = (path: string[]) => ({ stdout: { data: { viewer: { login: "alex-gh" }, r0: null, r1: { p7: web } }, errors: [{ ...gone, path }] }, status: 1 });
+  const routes = (a: object) => ({ "pr list": { stdout: [] }, "api graphql": a });
+  let r = run(["watch", "reviews"], [], routes(answer(["r0"])));
+  const q = readFileSync(join(ws, "gh.log"), "utf8");
+  assert.match(q, /r0: repository\(owner: \\"acme\\", name: \\"old\\"\)/, q);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /reviews: cannot read acme\/old#3 \(acme\/old: Could not resolve to a Repository/);
+  assert.match(r.stdout, /reviews: partial/);
+  assert.equal(notes().length, 1, "acme/web was still read");
+  assert.match(notes()[0] as string, /"Rename this\."/);
+  assert.ok(!("acme/old#3" in JSON.parse(readFileSync(join(ws, "state", "reviews.state"), "utf8"))), "acme/old has no cursor yet");
+  // An error the watcher cannot place still leaves the whole read unread.
+  r = run(["watch", "reviews"], [], routes(answer(["r9"])));
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /reviews: unreadable/);
+});
+
 // A reviews.state from before the ids holds a time per PR: what came before it is read.
 test("the review watcher reads a time cursor from before the ids as everything up to it", () => {
   const { ws, run, notes } = watcherWorkspace();
