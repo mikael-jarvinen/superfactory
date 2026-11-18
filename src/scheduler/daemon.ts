@@ -41,7 +41,7 @@ export function daemonAlive(s: SchedulerState | null, now = Date.now()): s is Sc
   return now - Date.parse(s.at) <= 3 * s.checkSeconds * 1000 && alive(s.pid);
 }
 
-const FIX = "systemctl --user restart factory-scheduler, which reads config again";
+export const FIX = "systemctl --user restart factory-scheduler, which reads config again";
 
 // For the doctor: the daemon is up and has every job config asks for, and none it does not.
 export function checks(ws: Workspace): Check[] {

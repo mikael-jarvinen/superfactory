@@ -12,7 +12,7 @@ import { basename, join } from "node:path";
 import { fleetLines, owedNote, type Session } from "../fleet.js";
 import { type CheckRun, checkRuns, json } from "../gate/github.js";
 import { readTail } from "../messages.js";
-import { loaded } from "../scheduler/index.js";
+import { loaded, scheduleFix } from "../scheduler/index.js";
 import { allRecs, BUSY, isLocal, recPrs, WAITING_ON_LEAD, WAITING_ON_YOU } from "../state.js";
 import { trackerOf } from "../tracker/read.js";
 import type { Workspace } from "../workspace.js";
@@ -282,7 +282,7 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
     }
     if ((ws.config.watchers.reviewsEveryMinutes ?? 5) > 0) {
       const r = heartbeatAge(ws, "reviews");
-      out.push(r === null ? "  reviews heartbeat MISSING -- has it ever read GitHub? factory schedule install"
+      out.push(r === null ? `  reviews heartbeat MISSING -- has it ever read GitHub? ${scheduleFix()}`
         : `  reviews heartbeat ${r}s ago${r > reviewsStaleS(ws) ? `  STALE (over ${Math.floor(reviewsStaleS(ws) / 60)} min: new review comments are not being told)` : ""}`);
     }
     const a = heartbeatAge(ws, "round");

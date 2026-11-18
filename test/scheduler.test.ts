@@ -3,7 +3,9 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { scheduleFix } from "../src/scheduler/index.js";
 import { every, render } from "../src/scheduler/launchd.js";
+import { gatherFacts } from "../src/watchers/round.js";
 import { FactoryError } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
 import { CLI, TOML, tempWorkspace } from "./helpers.js";
@@ -48,4 +50,13 @@ test("the scheduler renders one plist per job from config, labelled by the lead"
   const off = workspace(`${TOML}\n[watchers]\nreviews_every_minutes = 0\n`);
   assert.ok(!render(off, {}).some((r) => r.job.name === "reviews"), "reviews_every_minutes = 0 turns the review watcher off");
   assert.ok(!existsSync(join(ws.runDir, "launchd", "superfactory.ada.relay.plist")));
+});
+
+// Marie on superfactory#119 (L1): a reviews job that has never run on Linux is a daemon started
+// before config asked for it, which `factory schedule install` does not fix; a restart does.
+test("a missing reviews heartbeat names the fix for this machine's scheduler", () => {
+  assert.equal(scheduleFix("linux"), "systemctl --user restart factory-scheduler, which reads config again");
+  assert.equal(scheduleFix("darwin"), "factory schedule install");
+  const text = gatherFacts(workspace(TOML)).text;
+  assert.ok(text.includes(`reviews heartbeat MISSING -- has it ever read GitHub? ${scheduleFix()}`), text);
 });

@@ -7,6 +7,10 @@ import * as launchd from "./launchd.js";
 
 export const usesLaunchd = () => process.platform === "darwin";
 
+// What starts a job that has never run: on Linux the daemon reads its jobs from config only when it
+// starts, so a job config gained since needs a restart; on a Mac each job is its own plist.
+export const scheduleFix = (platform = process.platform): string => (platform === "darwin" ? "factory schedule install" : daemon.FIX);
+
 // For the round: one line per job.
 export const loaded = (ws: Workspace): string[] => (usesLaunchd() ? launchd.loaded(ws) : daemon.loaded(ws));
 
