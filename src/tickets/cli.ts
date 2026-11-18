@@ -39,6 +39,9 @@ export const TICKET_USAGE = `  ticket ...                      the local tracker
     edit <page> --file F [--title T] [--base <sha>] [--as A]
                                   save the file as the page; an existing page needs --base, the
                                   sha \`show\` printed, and is refused if it changed since
+    remove <page> --base <sha> [--as A]
+                                  take the page off the list; its last version stays in its
+                                  history. Refused without --base, or if it changed since
     history <page>                who saved it when`;
 
 type Options = NonNullable<ParseArgsConfig["options"]>;
@@ -252,6 +255,15 @@ export function cmdWiki(ws: Workspace, argv: string[]): number {
       if (!title) throw new FactoryError("wiki edit: a new page needs --title", 2);
       const pg = W.save(ws, { project: r.project, path: r.path, title, body: parsed.body, by: actor.name, base: exists ? (s(v.base) as string) : null });
       console.log(`  ${pg.project}/${pg.path} saved, sha ${pg.sha}`);
+      return 0;
+    }
+    case "remove": {
+      const { v, p } = parse("wiki remove", rest, { base: { type: "string" }, ...as }, 1, 1);
+      const actor = cliActor(ws, s(v.as));
+      const r = pageRef(ws, p[0] as string);
+      if (!s(v.base)) throw new FactoryError(`wiki remove: pass --base <sha> from \`factory wiki show ${r.project}/${r.path}\``, 2);
+      const pg = W.remove(ws, { project: r.project, path: r.path, by: actor.name, base: s(v.base) as string });
+      console.log(`  ${pg.project}/${pg.path} removed; its last version, sha ${pg.sha}, is in its history`);
       return 0;
     }
     case "history": {
