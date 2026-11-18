@@ -587,16 +587,16 @@ test("the review watcher tells the lead about new review comments, once, and not
   const finding = thread("PRRT_bot2", "src/c.ts", 9, false, c("coderabbitai", 20, "<!-- metadata -->\n_⚠️ Potential issue_\n\nThe loop never ends when `n` is 0.", "Bot"));
   const question = { ...c("sam", 21, "Why not reuse the existing exporter?"), state: "COMMENTED" };
   const routes = (a: object) => ({ "pr list": { stdout: [] }, "api graphql": a });
-  const cursor = () => (JSON.parse(readFileSync(join(ws, "state", "reviews.state"), "utf8")) as Record<string, string>)["acme/web#7"];
+  const cursor = () => (JSON.parse(readFileSync(join(ws, "state", "reviews.state"), "utf8")) as Record<string, string[]>)["acme/web#7"];
 
-  // First sight: only a resolved thread, so nothing is outstanding; the cursor starts at it.
+  // First sight: only a resolved thread, so nothing is outstanding; it is read.
   let r = run(["watch", "reviews"], [], routes(answer([old])));
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.equal(r.calls.length, 0, "no model");
   assert.ok(existsSync(logs("reviews.heartbeat")), "a read writes the heartbeat");
   assert.match(read("reviews.log"), /outcome=quiet prs=1 gh_calls=1 ms=\d+/);
   assert.deepEqual(notes(), []);
-  assert.equal(cursor(), at(0));
+  assert.deepEqual(cursor(), ["c100"]);
 
   // A colleague's comment is news. A bot thread the factory has answered is handled, and neither
   // the factory's reply nor a label bot is news.
@@ -608,7 +608,7 @@ test("the review watcher tells the lead about new review comments, once, and not
     '  - colleague sam, change request, app/Report.php:42: "Using Collection class instead of standard arrays would read better here." [thread PRRT_ask, comment 101]',
   ].join("\n");
   assert.deepEqual(notes(), [first]);
-  assert.equal(cursor(), at(12));
+  assert.deepEqual(cursor(), ["c100", "c101", "c102", "c103", "i104"]);
 
   // The same comments again: the cursor keeps them from being told twice.
   r = run(["watch", "reviews"], [], routes(answer([old, ask, replied], [], [label])));
@@ -628,7 +628,7 @@ test("the review watcher tells the lead about new review comments, once, and not
   r = run(["watch", "reviews"], [], routes({ status: 1, stderr: "HTTP 502" }));
   assert.equal(r.status, 1);
   assert.equal(notes().length, 2);
-  assert.equal(cursor(), at(21));
+  assert.deepEqual(cursor(), ["c100", "c101", "c102", "c103", "c105", "i104", "r106"]);
   assert.equal(statSync(logs("reviews.heartbeat")).mtimeMs, before);
   assert.match(read("reviews.log"), /reviews: cannot read the review comments: HTTP 502/);
 
@@ -636,6 +636,102 @@ test("the review watcher tells the lead about new review comments, once, and not
   r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes(answer([old, ask, replied, finding], [question], [label])));
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.doesNotMatch(readFileSync(join(ws, "gh.log"), "utf8"), /graphql/);
+});
+
+// CodeRabbit on superfactory#119: a time cursor lost what it read. A review is published when it is
+// submitted while its inline comments keep the draft's time (M1); two comments in one second, read
+// on either side of a poll, lost the second (L4); and only the first 100 threads, 50 comments of a
+// thread and last 50 reviews were read (L3). Marie on #119 (L2): the factory's sessions reply under
+// the human's login, so its reply must not be told as the human's.
+test("the review watcher reads by id: a late-submitted review, a comment in the same second, a second page, and not its own replies", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  assert.equal(factory(ws, ["state", "WEB-2", "queued", "--title", "Fix login"]).status, 0);
+  const file = join(ws, "state", "WEB-2.json");
+  const pr7 = { repo: "acme/web", number: 7 };
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
+  const at = (min: number) => new Date(Date.parse("2026-11-17T10:00:00Z") + min * 60_000).toISOString();
+  const sam = { login: "sam", __typename: "User" };
+  const c = (databaseId: number, min: number, body: string, extra: object = {}) => ({ databaseId, createdAt: at(min), publishedAt: at(min), body, author: sam, ...extra });
+  const page = (nodes: object[], next?: string) => ({ pageInfo: { hasNextPage: !!next, endCursor: next ?? null }, nodes });
+  const thread = (id: string, line: number, comments: object[], next?: string) =>
+    ({ id, isResolved: false, path: "src/a.ts", line, originalLine: line, comments: page(comments, next) });
+  const pr = (threads: object[], reviews: object[] = [], comments: object[] = [], more: { threads?: string; reviews?: string } = {}) => ({
+    url: "https://github.com/acme/web/pull/7", reviewThreads: page(threads, more.threads), reviews: page(reviews, more.reviews), comments: page(comments),
+  });
+  const answer = (p: object) => ({ stdout: { data: { viewer: { login: "alex-gh" }, rateLimit: { cost: 1, remaining: 4999, resetAt: at(60) }, r0: { p7: p } } } });
+  const routes = (...a: object[]) => ({ "pr list": { stdout: [] }, "api graphql": a.length === 1 ? a[0] as object : a });
+  const told = (i: number) => (notes()[i] ?? "").split("\n").filter((l) => l.startsWith("  - "));
+  const first = thread("PRRT_1", 1, [c(1, 0, "Rename this.")]);
+
+  assert.equal(run(["watch", "reviews"], [], routes(answer(pr([first])))).status, 0);
+  assert.equal(notes().length, 1, "first sight tells the open thread");
+
+  // A review drafted at minute 2, submitted at 30; its inline comment, pending while drafted, has
+  // no publishedAt then and is not read; a comment in the first second (minute 5) is read.
+  const draft = c(10, 2, "Use the exporter.", { publishedAt: null });
+  const pending = { ...c(20, 2, "", { publishedAt: null }), state: "PENDING", submittedAt: null };
+  const a5 = c(30, 5, "First of the second.");
+  let r = run(["watch", "reviews"], [], routes(answer(pr([first, thread("PRRT_2", 2, [draft])], [pending], [{ ...a5, author: sam }]))));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(told(1), ['  - colleague sam, change request, top-level: "First of the second." [comment 30]']);
+
+  // Now the review is submitted at 30, its comment published with it; a second comment shares
+  // minute 5 with the first; and the factory's reply, under the human's login, starts after a newline.
+  const reply = { ...c(40, 31, "\n> Written by agent.\n\nFixed in abc1234."), author: { login: "alex-gh", __typename: "User" } };
+  const submitted = { ...c(20, 2, "Please split this.", { publishedAt: at(30) }), state: "CHANGES_REQUESTED", submittedAt: at(30) };
+  r = run(["watch", "reviews"], [], routes(answer(pr([first, thread("PRRT_2", 2, [{ ...draft, publishedAt: at(30) }])], [submitted], [a5, c(31, 5, "Second of the second."), reply]))));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(told(2), [
+    '  - colleague sam, change request, top-level: "Second of the second." [comment 31]',
+    '  - colleague sam, change request, src/a.ts:2: "Use the exporter." [thread PRRT_2, comment 10]',
+    '  - colleague sam, change request, review: "Please split this." [review 20]',
+  ]);
+
+  // A second page of threads and of a thread's comments, and of reviews, each read by its own query.
+  const base = [first, thread("PRRT_2", 2, [{ ...draft, publishedAt: at(30) }])];
+  const long = thread("PRRT_3", 3, [c(50, 40, "Page one.")], "TC1");
+  r = run(["watch", "reviews"], [], routes(
+    answer(pr([...base, long], [submitted], [a5, c(31, 5, "x"), reply], { threads: "T1", reviews: "R1" })),
+    { stdout: { data: { repository: { pullRequest: { reviewThreads: page([thread("PRRT_4", 4, [c(60, 41, "Thread on page two.")])]) } } } } },
+    { stdout: { data: { repository: { pullRequest: { reviews: page([{ ...c(70, 42, "Review on page two."), state: "COMMENTED", submittedAt: at(42) }]) } } } } },
+    { stdout: { data: { node: { comments: page([c(51, 43, "Comment on page two.")]) } } } },
+  ));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(told(3), [
+    '  - colleague sam, change request, src/a.ts:3: "Page one." [thread PRRT_3, comment 50]',
+    '  - colleague sam, change request, src/a.ts:4: "Thread on page two." [thread PRRT_4, comment 60]',
+    '  - colleague sam, change request, review: "Review on page two." [review 70]',
+    '  - colleague sam, change request, src/a.ts:3: "Comment on page two." [thread PRRT_3, comment 51]',
+  ]);
+
+  // A page that cannot be read leaves nothing read: the next good read tells it.
+  const state = readFileSync(join(ws, "state", "reviews.state"), "utf8");
+  const more = thread("PRRT_5", 5, [c(80, 50, "Behind a bad page.")]);
+  r = run(["watch", "reviews"], [], routes(answer(pr([more], [], [], { threads: "T2" })), { status: 1, stderr: "HTTP 502" }));
+  assert.equal(r.status, 1);
+  assert.equal(readFileSync(join(ws, "state", "reviews.state"), "utf8"), state);
+  assert.equal(notes().length, 4);
+});
+
+// A reviews.state from before the ids holds a time per PR: what came before it is read.
+test("the review watcher reads a time cursor from before the ids as everything up to it", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  assert.equal(factory(ws, ["state", "WEB-2", "queued"]).status, 0);
+  const file = join(ws, "state", "WEB-2.json");
+  const pr7 = { repo: "acme/web", number: 7 };
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
+  writeFileSync(join(ws, "state", "reviews.state"), JSON.stringify({ "acme/web#7": "2026-11-17T10:05:00.000Z" }));
+  const sam = { login: "sam", __typename: "User" };
+  const comments = [
+    { databaseId: 1, createdAt: "2026-11-17T10:05:00.000Z", body: "Old.", author: sam },
+    { databaseId: 2, createdAt: "2026-11-17T10:06:00.000Z", body: "New.", author: sam },
+  ];
+  const answer = { stdout: { data: { viewer: { login: "alex-gh" }, r0: { p7: { url: "https://github.com/acme/web/pull/7", reviewThreads: { nodes: [] }, reviews: { nodes: [] }, comments: { nodes: comments } } } } } };
+  assert.equal(run(["watch", "reviews"], [], { "pr list": { stdout: [] }, "api graphql": answer }).status, 0);
+  assert.equal(notes().length, 1);
+  assert.match(notes()[0] as string, /"New\." \[comment 2\]/);
+  assert.doesNotMatch(notes()[0] as string, /Old/);
+  assert.deepEqual(JSON.parse(readFileSync(join(ws, "state", "reviews.state"), "utf8")), { "acme/web#7": ["i1", "i2"] });
 });
 
 // The first live note, 2026-11-17: CodeRabbit opens a finding with an <img> icon inside bold, and the
