@@ -39,6 +39,17 @@
 // is checked as a command. Skipped: the arguments of a program that never runs another (DATA_ONLY:
 // echo, grep, ls, which, cat, ...; rg without --pre; command -v), and docker run's image word. A git
 // -c setting git runs as a command (core.pager, core.sshCommand, *.textconv, ...) is checked too.
+// The trigger is any argument whose program, past wrappers (env, nice, timeout, watch, xargs, sudo,
+// ...), commandWord names as one the guard reads specially. A string argument run as a shell line
+// (tmux new-session/new-window/split-window/run-shell/..., su/runuser -c) is parsed in full like
+// bash -c, and a failed parse refuses. Any other string argument holding shell syntax is read for its
+// commands that reach gh, git, ssh or a shell (foo 'true; gh pr merge ...'): prose that only looks
+// like one (a gh word that is no gh command, a cut that does not parse) is left as text.
+//
+// Scheduled commands: the lines piped, heredoc'd or here-stringed into `crontab` or `crontab -` (each
+// line's command after its five time fields or @word, up to an unescaped %), `at` and `batch` are
+// checked as commands. Text the guard cannot see is outside it, like a script file: `crontab <file>`,
+// `at -f <file>`, and a pipe from anything but echo or printf (cat cron.txt | crontab -).
 import { accessSync, constants as fsConstants, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { posix } from "node:path";
@@ -240,6 +251,8 @@ interface Simple {
   stdin?: string[];
   // whether its stdin is the pipe from the command before it
   piped?: boolean;
+  // what echo and printf earlier in the line print, which a pipe may carry to it
+  upstream?: string[];
 }
 
 // Simple commands with the files their redirects write. `2>` arrives as "2" then ">", and the
@@ -1155,9 +1168,14 @@ function commandWord(words: string[], ctx: GuardContext): string[] {
 }
 
 const ARGV_CHECKED = new Set(["gh", "git", "ssh"]);
-// whether an argument word, read as a command word, names gh, git, git-<sub>, ssh, a shell or busybox
+// the programs the guard reads specially: an argument naming one starts a check. Builtins (exec,
+// eval, source, .) are left out, since a program cannot exec them.
+const TRIGGERS = new Set([...ARGV_CHECKED, ...SHELLS, "sh", "busybox", "find", "xargs", "crontab", "at", "batch",
+  ...[...WRAPPERS, ...REFUSED_WRAPPERS].filter((w) => !["exec", "eval", "source", "."].includes(w))]);
+// whether an argument word, read as a command word, names a program the guard reads specially
 function namesChecked(w: string, ctx: GuardContext): boolean {
   if (!BARE_WORD.test(w) && !/^(\/|~\/|\.\/|\$\{?HOME\}?\/)[^\s*?[\]{}`]*$/.test(w)) return false;
+  if (TRIGGERS.has((w.split("/").pop() ?? "").toLowerCase())) return true;
   let named: string[];
   try {
     named = commandWord([w], ctx);
@@ -1165,8 +1183,80 @@ function namesChecked(w: string, ctx: GuardContext): boolean {
     if (e instanceof Refused && /busybox/.test(e.message)) throw e;
     return false;
   }
-  const n = (named[0] ?? "").toLowerCase();
-  return ARGV_CHECKED.has(n) || SHELLS.has(n) || n === "sh";
+  // nothing left: a wrapper by another name, which stripPrefixes took off
+  if (!named.length) return !KEYWORDS.has(w) && !w.includes("/");
+  return TRIGGERS.has((named[0] as string).toLowerCase());
+}
+
+// whether words[i] is a string the program runs through sh: tmux's shell-command arguments, and the
+// -c of su, runuser and sg
+const TMUX_SHELL_CMDS = new Set(["new-session", "new", "new-window", "neww", "split-window", "splitw", "respawn-pane", "respawnp",
+  "respawn-window", "respawnw", "run-shell", "run", "if-shell", "if", "pipe-pane", "pipep", "display-popup", "popup"]);
+function runsShellString(words: string[], i: number): boolean {
+  const name = (words[0] as string).toLowerCase();
+  if (name === "tmux") return words.slice(1, i).some((w) => TMUX_SHELL_CMDS.has(w));
+  if (["su", "runuser", "sg"].includes(name)) return ["-c", "--command"].includes(words[i - 1] as string) || /^--command=/.test(words[i] as string);
+  return false;
+}
+
+// the commands in a string, split at shell separators whatever the quoting, that start with a
+// program the guard reads specially (after keywords and assignments) and reach gh, git, ssh or a
+// shell: each is checked as a line from that word, or by its words when it does not parse. A piece
+// that starts with any other word, or reaches none of those (`sudo usermod` in a message), is text.
+function checkTriggerPieces(line: string, ctx: GuardContext): void {
+  // the program the piece runs, past its wrappers, is gh, git, ssh or a shell
+  const reaches = (ws: string[]): boolean => {
+    try {
+      const n = posix.basename(commandWord(ws, ctx)[0] ?? "").toLowerCase();
+      return ARGV_CHECKED.has(n) || SHELLS.has(n) || n === "sh" || n === "busybox";
+    } catch {
+      return false;
+    }
+  };
+  // what only a real command line can mean is refused; a piece that does not parse, a gh word that
+  // is no gh command, ssh with no command, or a $variable command is prose cut from a message
+  // (and in a string that does not parse, a shell word with nothing after it, `readKeyboard(sh)`)
+  const textual = (check: () => void, cut = false): void => {
+    try {
+      check();
+    } catch (e) {
+      if (!(e instanceof Refused)) throw e;
+      if (!/^(cannot parse|gh \S+: gh aliases and extensions|ssh with no command|the command '\$)/.test(e.message) &&
+        !(cut && /reading its script from a pipe/.test(e.message))) throw e;
+    }
+  };
+  // a string that parses is read by the guard's own parser; any other is split at separators
+  let simples: Simple[] | null = null;
+  try {
+    simples = simpleCommands(tokenize(line));
+  } catch {
+    simples = null;
+  }
+  if (simples) {
+    for (const simple of simples) {
+      const ws = simple.words;
+      let k = 0;
+      while (k < ws.length && (KEYWORDS.has(ws[k] as string) || /^[A-Za-z_]\w*=/.test(ws[k] as string))) k++;
+      if (k >= ws.length || !namesChecked(ws[k] as string, ctx)) continue;
+      if (reaches(ws.slice(k))) textual(() => checkProtect({ ...simple, words: ws.slice(k) }, ctx), !simple.piped && !simple.stdin?.length && !simple.reads.length);
+    }
+    return;
+  }
+  for (const piece of line.split(/[;&|\n`()]|\$\(/)) {
+    const ws = piece.trim().split(/\s+/).filter(Boolean);
+    let k = 0;
+    while (k < ws.length && (KEYWORDS.has(ws[k] as string) || /^[A-Za-z_]\w*=/.test(ws[k] as string))) k++;
+    if (k >= ws.length || !namesChecked(ws[k] as string, ctx)) continue;
+    if (!reaches(ws.slice(k))) continue;
+    textual(() => {
+      try {
+        checkCommand(ws.slice(k).join(" "), ctx);
+      } catch (e) {
+        if (!(e instanceof Refused) || !/^cannot parse/.test(e.message)) throw e;
+        checkProtect({ words: ws.slice(k), writes: [], reads: [] }, ctx);
+      }
+    }, true);
+  }
 }
 
 // Programs that only ever read their arguments as data. Not man (-P, MANPAGER), less, more, vi,
@@ -1202,11 +1292,12 @@ function dockerImage(words: string[]): number {
   return -1;
 }
 
-function checkProtect({ words: raw, reads, stdin = [], piped = false }: Simple, ctx: GuardContext): void {
+function checkProtect({ words: raw, reads, stdin = [], piped = false, upstream = [] }: Simple, ctx: GuardContext): void {
   let words = stripPrefixes(raw);
   words = commandWord(words, ctx);
   if (!words.length) return;
   const name = (words[0] as string).toLowerCase();
+  if (name === "crontab" || name === "at" || name === "batch") checkScheduled(name, words, [...stdin, ...(piped ? upstream : [])], ctx);
   // Fail closed on argv: a program the guard does not read as gh, git, ssh or a shell may still run
   // its arguments (ionice, strace, systemd-run, docker exec), so any later word that names one of
   // those, by commandWord's shape and file rule, is checked as a command from there on, and a word
@@ -1221,7 +1312,12 @@ function checkProtect({ words: raw, reads, stdin = [], piped = false }: Simple, 
       // an option's value, --pre=gh, and a line an editor runs, vi -c '!gh pr merge 1'
       const value = /^--?[\w-]+=/.test(w) ? w.slice(w.indexOf("=") + 1) : w;
       const line = value.trim().replace(/^[:!]+/, "");
-      if (/\s/.test(line) && namesChecked(line.split(/\s+/)[0] as string, ctx)) checkCommand(line, ctx);
+      // a string a program runs through sh (tmux new 'a; b', su -c) is parsed as a shell line and
+      // every command in it checked; one that does not parse is refused. Any other program's string
+      // may be code or a message (python3 -c, sed, a commit body), so only the commands in it that
+      // start with a program the guard reads specially are checked, each as a shell line.
+      if (/\s|[;&|`]/.test(line) && runsShellString(words, i)) checkCommand(line, ctx);
+      else if (/[\s;&|`(]/.test(line)) checkTriggerPieces(line, ctx);
       else if (namesChecked(line, ctx)) checkProtect({ words: [line, ...words.slice(i + 1)], writes: [], reads: [], stdin, piped }, ctx);
     }
   }
@@ -1376,6 +1472,64 @@ function checkSecrets({ words: raw, reads }: Simple): void {
 // The body starts on the line after the one holding <<DELIM, whatever else is on that line.
 const HEREDOC = /<<-?\s*['"]?(\w+)['"]?[^\n]*\n([\s\S]*?)\n\1\s*(\n|$)/;
 
+// What echo or printf prints, with its backslash escapes, or null for any other command
+function printedText(words: string[]): string | null {
+  const name = posix.basename(words[0] ?? "");
+  const esc = (t: string): string => t.replace(/\\(n|t|\\)/g, (_, c: string) => (c === "n" ? "\n" : c === "t" ? "\t" : "\\"));
+  if (name === "echo") {
+    let i = 1;
+    while (/^-[neE]+$/.test(words[i] ?? "")) i++;
+    return esc(words.slice(i).join(" "));
+  }
+  if (name === "printf") {
+    const fmt = words[1];
+    if (fmt === undefined) return "";
+    const args = words.slice(2);
+    let out = "";
+    do {
+      out += fmt.replace(/%%|%[-+ #0-9.]*[a-zA-Z]/g, (f) => (f === "%%" ? "%" : (args.shift() ?? "")));
+    } while (args.length && /%[^%]/.test(fmt));
+    return esc(out);
+  }
+  return null;
+}
+
+// crontab, at and batch run the commands on their stdin later: each is checked now. A cron line is
+// its command after the five time fields or an @word, up to the first unescaped % (cron's stdin); a
+// blank line, a # comment and a VAR=value line are not commands, and any other line is checked whole.
+// A file they read instead is outside the guard (see the header).
+function checkScheduled(name: string, words: string[], texts: string[], ctx: GuardContext): void {
+  let file = false;
+  for (let i = 1; i < words.length; i++) {
+    const w = words[i] as string;
+    if (name === "crontab") {
+      if (w === "-u") i++;
+      else if (/^-[lrei]+$/.test(w)) return; // list, remove, edit: nothing is read from stdin
+      else if (w !== "-" && !w.startsWith("-")) file = true;
+    } else {
+      if (/^-[qtfm]*[qtf]$/.test(w)) {
+        if (w.endsWith("f")) file = true;
+        i++;
+      } else if (/^-[a-zA-Z]*[lrdc]/.test(w) && w.startsWith("-")) return; // list, remove, cat a job
+      else if (w.startsWith("-") && /f/.test(w)) file = true;
+    }
+  }
+  if (file) return;
+  for (const text of texts) {
+    if (name !== "crontab") {
+      checkCommand(text, ctx);
+      continue;
+    }
+    for (const raw of text.split("\n")) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#") || /^[A-Za-z_]\w*\s*=/.test(line)) continue;
+      const m = /^@\w+\s+(.*)$/s.exec(line) ?? /^(?:\S+\s+){5}(.*)$/s.exec(line);
+      const command = m ? (m[1] as string).replace(/(^|[^\\])%.*$/s, "$1") : line;
+      checkCommand(command, ctx);
+    }
+  }
+}
+
 function checkCommand(cmd: string, ctx: GuardContext): void {
   if (!ctx.homeAssigned && /\bHOME\b/.test(cmd.replace(/\$\{?HOME\b/g, ""))) ctx = { ...ctx, homeAssigned: true };
   if (!ctx.cwdChanged && /(^|[^\w.-])(cd|pushd|popd)\b|\s-(execdir|okdir)\b|\s--chdir\b|\benv\b[^;&|\n]*\s-[A-Za-z]*C/.test(cmd)) ctx = { ...ctx, cwdChanged: true };
@@ -1389,7 +1543,11 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
     const header = (m[0].split("\n", 1)[0] as string).replace(/^<<-?\s*['"]?\w+['"]?/, `<< HEREDOC${bodies.push(m[2] as string) - 1}`);
     text = text.slice(0, m.index) + header + "\n" + text.slice(m.index + m[0].length);
   }
+  const said: string[] = [];
   for (const simple of simpleCommands(tokenize(text), bodies)) {
+    if (simple.piped) simple.upstream = [...said];
+    const printed = printedText(stripPrefixes(simple.words));
+    if (printed !== null) said.push(printed);
     checkSecrets({ ...simple, words: stripPrefixes(simple.words) });
     if (ctx.policy === "readonly") checkReadonly(simple, ctx);
     else checkProtect(simple, ctx);

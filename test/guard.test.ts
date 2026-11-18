@@ -549,6 +549,36 @@ test("an argument that names a checked program is checked as a command", () => {
   assert.deepEqual(wrong, []);
 });
 
+// The argv scan starts at any program the guard reads specially, past its wrappers; a string run as a
+// shell line is parsed in full, and a string holding shell syntax is read for the commands in it
+// (Marie at 233933a, round 10). Text into crontab, at and batch is checked as the commands it schedules
+// (Marie and Niilo, round 10).
+test("strings a program runs and lines it schedules are checked as commands", () => {
+  const M = "gh pr merge 1 -R acme/api";
+  const refused = [`echo pr merge 1 -R acme/api | ionice -c3 xargs gh`, `ionice -c3 env -S'${M}'`, `ionice -c3 watch -x ${M}`,
+    `tmux new-session -d 'true; ${M}'`, `ionice -c3 watch 'true; ${M}'`, `tmux new -d 'echo x && ${M}'`, `ionice -c3 sh -c 'true; ${M}'`,
+    `tmux split-window 'cd /x; ${M}'`, `tmux run-shell '${M}'`, `su -c 'true; ${M}' bot`, `runuser -u bot --command='${M}'`,
+    `foo 'true; ${M}'`, `foo --cmd='x && ${M}'`, `foo "$(${M})"`, `foo 'cat x | sh'`, `tmux new -d 'echo "x'`,
+    // crontab, at and batch
+    `echo '* * * * * ${M}' | crontab -`, `crontab - <<'E'\n@reboot ${M}\nE`,
+    `printf '# c\\nPATH=/usr/bin\\n*/5 * * * * cd /x && ${M}\\n' | crontab -`, `at now <<< '${M}'`, `echo 'true; ${M}' | batch`,
+    `echo '0 1 * * * ${M}' | crontab -u bot -`, `echo '${M}' | at -m now`, `printf '%s\\n' '@daily ${M}' | crontab`,
+    `crontab <<< '0 1 * * * x; ${M}'`];
+  const allowed = ["tmux new -d 'npm test; echo done'", "docker run img sh -c 'npm test && echo ok'", "tmux new -s w", "tmux attach -t w",
+    "crontab -l", "(crontab -l; echo '30 3 * * 1 ~/agents/bin/agent-compact.sh warren') | crontab -", "crontab /tmp/cron.new",
+    "echo 'npm test' | at now + 1 hour", "at -f /tmp/job.sh now", "echo '5 * * * * echo 50% done' | crontab -", "at -l", "crontab -r",
+    // prose and code that only look like commands
+    `./bin/delegations.sh done drake abc "draft, CLEAN; gh confirms head+base"`, `node -e "x.then(m => { const sh = m.d(1); f(sh) })"`,
+    `sed -e 's#^const x = a;#const SH = Number(SHIFT) * DAY;#' f`, `awk '$4 ~ /gh +(-R|--repo)|gh +pr/' f`,
+    `tg-notify.sh "run sudo usermod -aG docker bot; then watch the trial"`, `until [ "$(ssh h 'pgrep -fc x || true')" = "" ]; do sleep 2; done`];
+  const wrong: string[] = [];
+  for (const ctx of [pr, { ...pr, role: "lead" }]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
 // The command word is read by its shape, an allowlist; every trick Marie listed at ae2e8d06 goes
 // through the one rule (Marie and Niilo on #124, round 8).
 test("a command word is a bare name, a plain path or refused", () => {
