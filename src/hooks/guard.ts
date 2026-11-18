@@ -710,7 +710,28 @@ function checkGraphql(p: GhArgs): void {
   });
 }
 
-function checkCommentWrite(args: string[]): void {
+// gh's command path as cobra finds it. Flags may come before each command word, and pr's and issue's
+// persistent -R/--repo takes the next word (gh -R o/r pr comment 1, gh pr --repo o/r close 2). The
+// words come back with the path first and every other word after it in its order, so a parser of
+// the command's flags still sees the repo (Marie on #119, after round 4). api's path is one word.
+const GH_PATH_VALUES = new Set(["-R", "--repo"]);
+export function ghPath(args: string[]): string[] {
+  const path: string[] = [];
+  const rest: string[] = [];
+  let i = 0;
+  for (; i < args.length && path.length < (path[0] === "api" ? 1 : 2); i++) {
+    const a = args[i] as string;
+    if (a === "--") break;
+    if (a.startsWith("-") && a !== "-") {
+      rest.push(a);
+      if (GH_PATH_VALUES.has(a) && i + 1 < args.length) rest.push(args[++i] as string);
+    } else path.push(a);
+  }
+  return [...path, ...rest, ...args.slice(i)];
+}
+
+function checkCommentWrite(raw: string[]): void {
+  const args = ghPath(raw);
   const [g, sub] = args;
   if ((g === "pr" || g === "issue") && sub) {
     const cmd = `${g} ${sub}`;
@@ -749,7 +770,7 @@ function checkCommentWrite(args: string[]): void {
 }
 
 function checkGhProtect(words: string[], ctx: GuardContext): void {
-  const args = words.slice(1); // its comment rule runs over the whole line, in checkCommand
+  const args = ghPath(words.slice(1)); // its comment rule runs over the whole line, in checkCommand
   if (args[0] === "pr" && ["merge", "close", "lock", "unlock"].includes(args[1] ?? "")) {
     const repo = ghPrRepo(args);
     if (repo === null) refuse("merging or closing a PR needs an explicit --repo owner/name (or a PR URL) so the guard can confirm whose repo it is");

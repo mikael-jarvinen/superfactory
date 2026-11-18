@@ -247,11 +247,21 @@ test("the lead closes a product PR only once the human has named it", () => {
     "no repo": verdict("gh pr close 8701", lead),
     "an assistant": verdict("gh pr close 8701 -R acme/api", { ...lead, role: "assistant" }),
     "a lead with no list": verdict("gh pr close 8701 -R acme/api", { ...pr, role: "lead" }),
+    // gh takes -R/--repo before pr, or before its subcommand (Marie, after round 4)
+    "a merge, -R before pr": verdict("gh -R acme/api pr merge 8701", lead),
+    "a merge, --repo= before merge": verdict("gh pr --repo=acme/api merge 8701 --squash", lead),
+    "a lock, --repo before pr": verdict("gh --repo acme/api pr lock 8701", lead),
+    "an unrecorded PR, -R before pr": verdict("gh -R acme/api pr close 8702", lead),
   };
   for (const [what, reason] of Object.entries(refused)) assert.notEqual(reason, null, `${what} should be refused`);
   assert.match(refused["an unrecorded PR"] as string, /acme\/api#8702 is not on the allow-close list; .*factory allow-close <repo-key> <n> --words/);
   assert.match(refused["a merge of the recorded PR"] as string, /^merge of a PR on a product repo/);
   assert.match(refused["no number"] as string, /needs its number or URL/);
+  assert.match(refused["a merge, -R before pr"] as string, /^merge of a PR on a product repo/);
+  assert.match(refused["a lock, --repo before pr"] as string, /^lock of a PR on a product repo/);
+  assert.match(refused["an unrecorded PR, -R before pr"] as string, /acme\/api#8702 is not on the allow-close list/);
+  assert.equal(verdict("gh -R acme/api pr close 8701", lead), null);
+  assert.equal(verdict("gh pr -R acme/api close 8701 -c '> Written by agent. superseded'", lead), null);
   // the factory's own repos are unchanged
   assert.equal(verdict("gh pr close 3 -R acme/workspace", { ...pr, role: "assistant" }), null);
   // the words are the permission
@@ -345,6 +355,16 @@ const COMMENT_SHAPES: [string, string, string][] = [
   [NO, "-F attached", "gh pr comment 1 -Ff.md"],
   [NO, "-e", "gh pr comment 1 -e"],
   [NO, "--editor", "gh issue comment 1 --editor"],
+  // pr's and issue's -R/--repo before the subcommand, or before pr/issue itself (Marie, after round 4)
+  [NO, "gh -R o/r pr comment", "gh -R o/r pr comment 1 -b hi"],
+  [NO, "gh --repo o/r pr comment", "gh --repo o/r pr comment 1 -b hi"],
+  [NO, "gh --repo=o/r issue comment", "gh --repo=o/r issue comment 2 -b hi"],
+  [NO, "gh pr -R o/r comment", "gh pr -R o/r comment 1 -b hi"],
+  [NO, "gh -Ro/r pr comment", "gh -Ro/r pr comment 1 -b hi"],
+  [NO, "gh issue --repo o/r close -c", "gh issue --repo o/r close 2 -c hi"],
+  [NO, "gh pr --repo=o/r review", "gh pr --repo=o/r review 1 -c -b hi"],
+  [OK, "gh -R o/r pr comment, marked", `gh -R o/r pr comment 1 -b '${M} ok'`],
+  [OK, "gh -R o/r pr view", "gh -R o/r pr view 1"],
   // gh pr review
   [OK, "an approval", "gh pr review 1 --approve"],
   [OK, "marked", `gh pr review 1 --comment -b '${M} ok'`],
