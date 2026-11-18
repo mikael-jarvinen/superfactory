@@ -97,6 +97,11 @@ const table: [GuardContext, number, string[]][] = [
     "gh api graphql -f query='mutation($i: AddCommentInput!) { addComment(input: $i) { clientMutationId } }' --input v.json",
     "gh api graphql -f query='mutation($i: UpdateIssueCommentInput!) { updateIssueComment(input: $i) { clientMutationId } }'",
     "gh api graphql -F query=@m.graphql",
+    // round 3: submitPullRequestReview's input variable, and bodies built into one with -f 'i[body]='
+    "gh api graphql -f query='mutation($i: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $i) { clientMutationId } }'",
+    "gh api graphql -f query='mutation($i: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $i) { clientMutationId } }' -f 'i[pullRequestReviewId]=R' -f 'i[event]=COMMENT' -f 'i[body]=hi'",
+    "gh api graphql -f query='mutation($i: AddCommentInput!) { addComment(input: $i) { clientMutationId } }' -f 'i[subjectId]=X' -F 'i[body]=@note.md'",
+    "gh api graphql -f query='mutation($i: AddCommentInput!) { addComment(input: $i) { clientMutationId } }' -f 'i={\"body\":\"hi\"}'",
     "gh api repos/o/r/pulls/1/reviews -f body='> Written by agent. ok' -f 'comments[][path]=a.ts' -f 'comments[][body]=nit'",
   ]],
   [pr, ALLOW, [
@@ -109,6 +114,8 @@ const table: [GuardContext, number, string[]][] = [
     "gh api graphql -f query='mutation($b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \"T\", body: $b}) { clientMutationId } }' -f 'b=@coderabbitai resolve'",
     "gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: \"T\"}) { clientMutationId } }'",
     "gh api graphql -f query='query { viewer { login } }'",
+    "gh api graphql -f query='mutation($i: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $i) { clientMutationId } }' -f 'i[pullRequestReviewId]=R' -f 'i[event]=APPROVE'",
+    "gh api graphql -f query='mutation($i: AddCommentInput!) { addComment(input: $i) { clientMutationId } }' -f 'i[subjectId]=X' -f 'i[body]=> Written by agent. ok'",
     "gh api repos/o/r/pulls/1/reviews -f body='> Written by agent. ok' -f 'comments[][path]=a.ts' -f 'comments[][body]=> Written by agent. nit'",
   ]],
   // Beyond the old table. timeout is unwrapped and its command checked rather than refused; a shell's
