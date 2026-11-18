@@ -519,6 +519,27 @@ test("comments, placeholders, branch updates and a scheduler's stdin are read as
   assert.notEqual(verdict(`cat <<EOF # x\nhi\nEOF\n${M}`, lead), null);
 });
 
+// An escaped blank inside a $(...) never ends a word, so the # after it is no comment and cannot
+// swallow the ). Read as one, it let a push to main through (Marie and CodeRabbit on #127).
+test("an escaped blank before a # inside $(...) starts no comment", () => {
+  const P = "git push origin main";
+  const refused = [
+    `echo "$(echo \\ # )"; ${P}; exit #\n)"`, // Marie's
+    `echo $(echo \\ # ); ${P}; exit #\n)`, // without the outer double quotes
+    `echo "$(echo \\\t# )"; ${P}; exit #\n)"`, // an escaped tab
+    `echo \\ # x; ${P}`, // outside $(...)
+    `echo "$(echo $(echo \\ # ); ${P}; exit #\n))"`, // nested: the push runs in the outer substitution
+    `echo $(echo $(echo \\ # )); ${P}; exit #\n))`, // nested, unquoted
+    `echo "$(true # )\n${P})"`, // a real comment still ends at its line
+  ];
+  // inside double quotes, what follows the substitution is text
+  const allowed = [`echo "$(ls # c )\n)"`, `echo "$(echo \\ #x)"`, `echo "$(ls \\\n# c )\n)"`, `echo "$(echo $(echo \\ # )); ${P}; exit #\n))"`];
+  const wrong: string[] = [];
+  for (const c of refused) if (verdict(c, pr) === null) wrong.push(`allowed: ${JSON.stringify(c)}`);
+  for (const c of allowed) if (verdict(c, pr) !== null) wrong.push(`refused: ${JSON.stringify(c)} (${verdict(c, pr)})`);
+  assert.deepEqual(wrong, []);
+});
+
 // Claude Code lets a call through when its hook times out (10 s), so a GitHub that does not answer
 // must end the guard's lookups in time for it to refuse (CodeRabbit on #127).
 test("a GitHub that does not answer is a refusal inside the hook's timeout", () => {
