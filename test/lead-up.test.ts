@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import type { Session } from "../src/fleet.js";
 import { lead } from "../src/fleet.js";
-import { leadPrompt } from "../src/launch.js";
+import { leadPrompt, settingsFile } from "../src/launch.js";
 import { bringUpLead, resumePrompt } from "../src/lead-up.js";
 import type { StartRequest, Transport } from "../src/transport.js";
 import { FactoryError } from "../src/util.js";
@@ -93,6 +93,17 @@ test("a resume that fails falls back to respawn, as before", () => {
   assert.deepEqual(respawned, ["d1079ed1"]);
   assert.match(said[0]!, /^resuming .* failed \(claude --bg failed: no such session\); respawning instead$/);
   assert.equal(said[1], `${ld.name} respawned from d1079ed1: respawned`);
+});
+
+// The respawn reruns the old command line, whose --settings is this file: rendered again first, a lead
+// stopped before an upgrade comes back with the current hooks (CodeRabbit on #124).
+test("a lead respawned here comes back with its settings rendered again", () => {
+  const file = settingsFile(ws, ld);
+  writeFileSync(file, "{}\n");
+  const { t, respawned } = fake([stopped()], { startFails: true });
+  bringUpLead(ws, ld, t, false, () => {}, 1);
+  assert.deepEqual(respawned, ["d1079ed1"]);
+  assert.ok(JSON.parse(readFileSync(file, "utf8")).hooks?.PreToolUse?.length, "the stale file was rendered again");
 });
 
 test("a listing with no session id, or a lead on another host, is respawned", () => {

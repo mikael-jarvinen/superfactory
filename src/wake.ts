@@ -6,6 +6,7 @@
 // up to 10 s more to be addressable from another machine, hence WAKE_SETTLE_S.
 import type { Agent } from "./config.js";
 import { findSession, pollForName, type Session } from "./fleet.js";
+import { refreshSettings } from "./launch.js";
 import { ask, Unreachable } from "./remote.js";
 import { isAgentSession, LISTING_TIMEOUT_MS, newest, type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
@@ -50,6 +51,7 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   if (!old?.id || (o.match && !o.match(old))) return { is: "none" };
   const respawnMs = left() - LISTING_TIMEOUT_MS;
   if (respawnMs < 1000) return late(`respawning ${old.id}`);
+  refreshSettings(ws, agent);
   const r = t.respawn(agent.name, old.id, Number.isFinite(respawnMs) ? respawnMs : undefined);
   if (!r.ok) return { is: "failed", why: `respawn of ${old.id} failed: ${r.why || "no reason given"}` };
   const waitS = o.waitS ?? 60;
