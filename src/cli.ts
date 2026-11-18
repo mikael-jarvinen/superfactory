@@ -4,6 +4,7 @@ import { basename } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { recordAllowClose } from "./allow-close.js";
 import { followInbox } from "./board/inbox.js";
+import { markHandledMany, queue as waitingQueue, queueTrouble } from "./board/queue.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
 import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owesSession, lead, listing, type Session, stopSession, stopWorktree, waitForName } from "./fleet.js";
@@ -39,7 +40,7 @@ import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/en
 import {
   allRecs, appendEvent, BUSY, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removePr, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
-import { FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.js";
+import { chars, FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.js";
 import { failure } from "./failures.js";
 import { runQueue } from "./watchers/queue.js";
 import { runRound } from "./watchers/round.js";
@@ -93,9 +94,16 @@ usage: factory [--workspace <dir>] <command> [options]
   drop <LOCAL-key>... [--note N] [--force]
                                   delete a LOCAL record; tracker tickets are never droppable
   say "<text>" [--ticket K] [--link URL] [--kind ${KINDS.join("|")}] [--via ${VIAS.join("|")}]
+        [--answers ID[,ID...]]
                                   post to the message page and ring the machine. --via telegram
                                   marks a copy of a text the human already got on Telegram
-                                  (SF_NOTIFY=0 mutes it, SF_NOTIFY_SOUND names the sound)
+                                  (SF_NOTIFY=0 mutes it, SF_NOTIFY_SOUND names the sound).
+                                  --answers marks those queue items handled once it is posted;
+                                  an id not in the queue refuses before anything is posted
+  queue                           what waits on the human: id, when, ticket, kind and the start
+                                  of each open decision or blocked question, oldest first
+  handled <id>... [--ticket K]    mark queue items handled, as the page's button does; --ticket
+                                  marks every open one on K. An unknown id marks nothing
   messages [-n 20]                the last n messages. Never read the log whole: it is
                                   append-only and unbounded.
   board [--stop]                  start the board in the background, or stop it
@@ -636,14 +644,76 @@ function cmdDrop(ws: Workspace, argv: string[]) {
 
 function cmdSay(ws: Workspace, argv: string[]) {
   const s = { type: "string" } as const;
-  const { v, p } = args("say", argv, { ticket: s, link: s, kind: s, via: s }, [1, Infinity]);
+  const { v, p } = args("say", argv, { ticket: s, link: s, kind: s, via: s, answers: { type: "string", multiple: true } }, [1, Infinity]);
   const kind = str(v.kind) ?? "note";
   if (!(KINDS as readonly string[]).includes(kind))
     throw new UsageError(`say: --kind: invalid choice: ${pyRepr(kind)} (choose from ${KINDS.map(pyRepr).join(", ")})`);
   const via = str(v.via);
   if (via !== undefined && !(VIAS as readonly string[]).includes(via))
     throw new UsageError(`say: --via: invalid choice: ${pyRepr(via)} (choose from ${VIAS.map(pyRepr).join(", ")})`);
+  // --answers names the queue items this message settles. They are checked before anything is
+  // posted, so a wrong id posts nothing, and marked handled once the message is in the log.
+  const answers = queueIds((v.answers as unknown as string[] | undefined) ?? []);
+  if (answers.length) {
+    const pre = markHandledMany(ws, answers, true);
+    if (!pre.ok) throw new FactoryError(`say: --answers: ${pre.error}; nothing posted`);
+  }
   say(ws, p, { ticket: str(v.ticket), link: str(v.link), kind: kind as Kind, via: via as Via | undefined });
+  if (answers.length) {
+    const r = markHandledMany(ws, answers);
+    if (!r.ok) throw new FactoryError(`say: posted, but could not mark ${answers.join(", ")} handled: ${r.error}`);
+    handledLines(r);
+  }
+}
+
+// Ids given as separate words or comma-separated, in order, each once.
+const queueIds = (words: string[]) => [...new Set(words.flatMap((w) => w.split(",")).map((w) => w.trim()).filter(Boolean))];
+
+function handledLines(r: { marked: string[]; already: string[] }) {
+  for (const id of r.marked) console.log(`  handled ${id}`);
+  for (const id of r.already) console.log(`  ${id} was already handled`);
+}
+
+// When an item was asked, in this machine's time, to the minute.
+function askedAt(at: string | null): string {
+  const d = at ? new Date(at) : null;
+  if (!d || !Number.isFinite(d.getTime())) return "-";
+  const n = (x: number) => String(x).padStart(2, "0");
+  return `${d.getFullYear()}-${n(d.getMonth() + 1)}-${n(d.getDate())} ${n(d.getHours())}:${n(d.getMinutes())}`;
+}
+
+// What waits on the human, oldest first, one line each, for the lead to read and clear.
+function cmdQueue(ws: Workspace, argv: string[]) {
+  args("queue", argv, {}, [0, 0]);
+  const trouble = queueTrouble(ws);
+  if (trouble) console.error(`factory: ${trouble}`);
+  const items = waitingQueue(ws);
+  if (!items.length) {
+    console.log("nothing waiting on the human");
+    return;
+  }
+  for (const i of items) {
+    const text = squash(i.text, 101);
+    const head = chars(text).slice(0, 100).join("");
+    console.log(`${i.id}  ${askedAt(i.at)}  ${i.ticket ?? "-"}  ${i.kind}  ${head}${head.length < text.length ? "…" : ""}`);
+  }
+}
+
+// Mark queue items handled, by id or every open one on a ticket. An unknown id refuses the whole call.
+function cmdHandled(ws: Workspace, argv: string[]) {
+  const { v, p } = args("handled", argv, { ticket: { type: "string" } }, [0, Infinity]);
+  const ticket = str(v.ticket);
+  if (!p.length && !ticket) throw new UsageError("handled: give the queue ids, or --ticket K");
+  const ids = queueIds(p);
+  if (ticket) {
+    const on = waitingQueue(ws).filter((i) => i.ticket === ticket).map((i) => i.id);
+    if (!on.length) console.log(`  nothing open on ${ticket}`);
+    for (const id of on) if (!ids.includes(id)) ids.push(id);
+  }
+  if (!ids.length) return;
+  const r = markHandledMany(ws, ids);
+  if (!r.ok) throw new FactoryError(`handled: ${r.error}; nothing marked`, r.retry ? 2 : 1);
+  handledLines(r);
 }
 
 function cmdBoard(ws: Workspace, argv: string[]) {
@@ -800,6 +870,8 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void 
   "state": cmdState,
   "drop": cmdDrop,
   "say": cmdSay,
+  "queue": cmdQueue,
+  "handled": cmdHandled,
   "messages": cmdMessages,
   "board": cmdBoard,
   "pr-ready": cmdPrReady,
