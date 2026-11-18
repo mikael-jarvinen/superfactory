@@ -60,6 +60,15 @@ export function isClaude(pid: number, c: ClaudeInstall): boolean {
   });
 }
 
+// pid's arguments, none when its command line reads empty (a process in exec, or exiting) or cannot be read.
+function cmdline(pid: number): string[] {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 // Whether pid is a claude or runs under one. A process whose claude has died and that was
 // reparented is no longer under it.
 function underClaude(pid: number, c: ClaudeInstall): boolean {
@@ -172,9 +181,9 @@ export function inJobScopes(label: string, pgid: number, slice: string | null): 
 }
 
 // The processes left by run pgid of job label, an ended one: in its group in the scheduler's
-// cgroup, and in its claude calls' scopes. null when one is left and there is no claude to tell a
-// session from a leftover. live holds the pids of runs still recorded as going, whose groups are
-// not to be touched.
+// cgroup, and in its claude calls' scopes. null, to wait for the next check, when one is left that
+// cannot be told from a claude session: there is no claude to tell it by, or its reading is unsure.
+// live holds the pids of runs still recorded as going, whose groups are not to be touched.
 function leftovers(label: string, pgid: number, live: Set<number>, log: (line: string) => void, slice: string | null): Leftover[] | null {
   if (process.platform !== "linux" || !pgid || procStat(pgid) || live.has(pgid)) return [];
   const inGroup = [...new Set([...inOwnCgroup(pgid, log), ...inJobScopes(label, pgid, slice)])].filter((pid) => pid !== process.pid);
@@ -189,7 +198,14 @@ function leftovers(label: string, pgid: number, live: Set<number>, log: (line: s
   const found: Leftover[] = [];
   for (const pid of inGroup) {
     const st = procStat(pid);
-    if (st && !underClaude(pid, c)) found.push({ pid, comm: st.comm, stamp: startStamp(pid) });
+    if (!st || st.state === "Z") continue; // gone, or dead already: nothing to kill
+    if (underClaude(pid, c)) continue;
+    // A process caught in exec, such as a systemd-run becoming the claude it runs, can read with an
+    // empty cmdline and so not as a claude, then be one by the time it is signalled. When the reading
+    // is unsure (an empty cmdline, or a name that changed under it), the group waits for the next check.
+    const after = procStat(pid);
+    if (after && (after.comm !== st.comm || (after.state !== "Z" && !cmdline(pid).length))) return null;
+    if (after) found.push({ pid, comm: st.comm, stamp: startStamp(pid) });
   }
   return found;
 }

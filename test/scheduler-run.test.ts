@@ -62,6 +62,7 @@ echo "HOME=$HOME USER=$USER TMPDIR=$TMPDIR DBUS=$DBUS_SESSION_BUS_ADDRESS XDG=$X
 if [ "$1" = agents ] && tr '\\0' ' ' < /proc/$PPID/cmdline | grep -q ' up $' && [ ! -e ${join(dir, "spawned")} ]; then
   touch ${join(dir, "spawned")}
   if [ -e ${join(dir, "stray-ignores-term")} ]; then sh -c "trap '' TERM; exec sleep 600" >/dev/null 2>&1 &
+  elif [ -e ${join(dir, "stray-blank-argv")} ]; then perl -e '$0 = ""; sleep 600' >/dev/null 2>&1 &
   else sleep 600 >/dev/null 2>&1 &
   fi
   echo $! > ${join(dir, "stray.pid")}
@@ -294,6 +295,27 @@ test("what an ended run leaves in its process group is cleaned up, but never a c
   assert.match(d.out, new RegExp(`job ${UP.replace(/\./g, "\\.")}: ended, leaving ${stray} \\(sleep\\) in its process group or scopes; SIGTERM`), d.out);
   assert.ok(runningNotZombie(session), "a claude in the group is left alone");
   assert.ok(runningNotZombie(child), "and so is what runs under it");
+  d.kill();
+});
+
+// A process caught in exec, as a systemd-run becoming the claude it runs, reads with no command line
+// for a moment, and was then killed as no claude: up's next listing, in CI on #128. A stray that blanks
+// its own command line stands in for one, and is not killed while it reads so.
+test("a process whose command line reads empty is not killed, and its group waits for the next check", { skip: noCleanup() }, async () => {
+  const t = await setup();
+  writeFileSync(join(t.dir, "stray-blank-argv"), "");
+  const d = t.start();
+  await until("up to leave its stray", () => t.pidIn("stray.pid") && t.pidIn("session.pid") && t.pidIn("child.pid") && t.upRunning());
+  const pid = t.state().jobs[UP].pid;
+  t.upPids.add(pid);
+  const stray = t.pidIn("stray.pid") as number;
+  await until("the stray to blank its command line", () => readFileSync(`/proc/${stray}/cmdline`, "utf8").replace(/\0/g, "") === "");
+  process.kill(pid, "SIGKILL");
+  await until("up's end to be seen", () => d.out.includes(`job ${UP} exited`));
+  await sleep(3000); // three checks
+  assert.ok(runningNotZombie(stray), "left alone");
+  assert.doesNotMatch(d.out, /ended, leaving/, d.out);
+  assert.ok(t.state().jobs[UP].clearing?.includes(pid), "still to be cleared");
   d.kill();
 });
 
