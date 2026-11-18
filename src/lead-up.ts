@@ -9,7 +9,7 @@
 import type { Agent } from "./config.js";
 import { findSession, type Session, waitForName } from "./fleet.js";
 import { armText } from "./hooks/status.js";
-import { GIT_HTTPS_ENV, launch, launchArgs, leadPrompt, roleAppendix, roleOf } from "./launch.js";
+import { GIT_HTTPS_ENV, launch, launchArgs, leadPrompt, refreshSettings, roleAppendix, roleOf } from "./launch.js";
 import type { Transport } from "./transport.js";
 import { FactoryError } from "./util.js";
 import type { Workspace } from "./workspace.js";
@@ -36,6 +36,7 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
   if (old) {
     const sid = old.id as string;
     if (!ld.host && typeof old.sessionId === "string" && resume(ws, ld, t, old, old.sessionId, waitS, out, appendix)) return;
+    refreshSettings(ws, ld);
     const r = t.respawn(ld.name, sid);
     if (r.ok && waitForName(t, ld.name, waitS)) {
       out(`${ld.name} respawned from ${sid}: ${r.said}`);
