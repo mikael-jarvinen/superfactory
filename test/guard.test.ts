@@ -469,6 +469,11 @@ test("comments, placeholders, branch updates and a scheduler's stdin are read as
   const refused = [`${put} -F branch={branch}`, `${put} -f branch={branch}`, `${put} -F 'branch={owner}-x'`,
     "gh pr update-branch 8702 -R acme/api", "gh pr update-branch https://github.com/acme/api/pull/8702 --rebase",
     "gh pr update-branch 8709 -R acme/api", "gh pr update-branch 8701", "gh pr update-branch -R acme/api",
+    // the same write by the API (Niilo on #127)
+    "gh api -X PUT repos/acme/api/pulls/8702/update-branch", "gh api --method put /repos/acme/api/pulls/8702/update-branch/",
+    "gh api -XPUT https://api.github.com/repos/acme/api/pulls/8702/update-branch", "gh api repos/acme/api/pulls/8702/update-branch -f update_method=rebase",
+    "gh api -X PUT repos/{owner}/{repo}/pulls/8701/update-branch", "gh api -X PUT repos/acme/api/pulls/$N/update-branch",
+    "R=acme/api; gh api -X PUT repos/$R/pulls/8701/update-branch", "gh api -X PUT repos/acme/api/pulls/8709/update-branch",
     `# Merge it\n${M}`, `#!/bin/sh\n${M}`, `ls  # a\n${M}`, `ls \\\n# x\n${M}`, `echo a#b; ${M}`,
     `# see <<EOF\n${M}\nEOF`, `echo x # <<EOF\n${M}\nEOF`,
     `echo '<<EOF'\n${M}\nEOF`, `printf '%s' "cat <<'E'"\n${M}\nE`, `echo "$(echo ')')" '<<EOF'\n${M}\nEOF`,
@@ -476,6 +481,8 @@ test("comments, placeholders, branch updates and a scheduler's stdin are read as
     'echo "`date`"', "echo a`date`", "ssh h 'echo `date`'"];
   const allowed = [`${put} -F branch=feat/x`, `at now <<< true < /dev/null`,
     "gh pr update-branch 8701 -R acme/api", "gh pr update-branch 3 -R acme/workspace",
+    "gh api -X PUT repos/acme/api/pulls/8701/update-branch", "gh api -X PUT repos/acme/api/pulls/8701/update-branch -f update_method=rebase",
+    "gh api repos/acme/api/pulls/8702/update-branch", "gh api -X PUT repos/acme/workspace/pulls/3/update-branch",
     "# Run the checks\nnpm test", `ls # ; ${M}`, `echo '#'; ls`, `echo "a #b"`, `echo a\\#b`,
     `printf 'cat <<EOF\\n$(date\\nEOF\\n'`, `x="$(cat <<'E'\nit's\nE\n)"; echo "$x"`,
     `cat <<EOF\nEOF \nit's\nEOF`, `echo "#" <<EOF\nit's\nEOF`, `echo "it's" | at now <<< true`, `echo "it's" | at now < job.txt`,

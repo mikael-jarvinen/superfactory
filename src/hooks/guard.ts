@@ -940,6 +940,13 @@ function checkApiProtect(args: string[], ctx: GuardContext): void {
     return;
   }
   const own = (repo: string) => ctx.ownRepos.some((r) => r.toLowerCase() === repo.toLowerCase());
+  // PUT pulls/N/update-branch is `gh pr update-branch` by another route, a write to the PR's head
+  // (Niilo on #127). gh fills {owner} and {repo} from the cwd's remote, which the guard cannot read.
+  if (/\/pulls\/[^/]*\/update-branch\/?(\?|$)/i.test(ep)) {
+    const u = /^repos\/([\w.-]+\/[\w.-]+)\/pulls\/(\d+)\/update-branch\/?(?:\?.*)?$/i.exec(ep);
+    if (!u) refuse("updating a PR's branch through the API needs repos/owner/name/pulls/<number>/update-branch spelled out, so the guard can read its head");
+    checkPrHeadWrite((u as RegExpExecArray)[1] as string, (u as RegExpExecArray)[2] as string, ctx);
+  }
   const w = API_REPO_WRITE.exec(ep);
   if (w && !own(`${w[1]}/${w[2]}`)) {
     const repo = `${w[1]}/${w[2]}`;
