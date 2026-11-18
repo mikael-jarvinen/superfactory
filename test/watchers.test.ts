@@ -6,6 +6,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { run } from "../src/util.js";
 import { claudeArgs, type ClaudeRun, runFailure, TIMED_OUT, watcherGh } from "../src/watchers/job.js";
+import { reviewQuery } from "../src/watchers/reviews.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, TOML, tempWorkspace } from "./helpers.js";
 
@@ -799,6 +800,38 @@ test("the review watcher does not count a read with GraphQL errors or a failed e
   const r = run(["watch", "reviews"], [], routes(answer(pr(two))));
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(notes()[0] ?? "", /"Second\." \[comment 2\]/, "the next clean read tells it");
+});
+
+// GitHub's node limit, as it counts it: each connection's first, times the firsts of the connections
+// it is nested in, summed over the query.
+function declaredNodes(query: string): number {
+  const stack = [1];
+  let total = 0;
+  let pending: number | undefined;
+  for (const m of query.matchAll(/\(([^)]*)\)|\{|\}/g)) {
+    const tok = m[0];
+    if (tok.startsWith("(")) {
+      const first = /\bfirst:\s*(\d+)/.exec(m[1] as string);
+      pending = first ? Number(first[1]) : undefined;
+    } else if (tok === "{") {
+      const parent = stack[stack.length - 1] as number;
+      const here = pending === undefined ? parent : parent * pending;
+      if (pending !== undefined) total += here;
+      stack.push(here);
+      pending = undefined;
+    } else stack.pop();
+  }
+  return total;
+}
+
+// CodeRabbit on superfactory#128 (KJJ2): the one query for every watched PR declared 100 threads of
+// 100 comments each, 10,300 nodes a PR, so 49 PRs passed GitHub's 500,000 and the whole read was
+// refused every poll. Two hundred PRs across two repos stay under it.
+test("the review watcher's query stays under GitHub's node limit for many PRs", () => {
+  assert.equal(declaredNodes("query { a(first: 100) { b(first: 10) { x } } c(first: 5) { y } }"), 100 + 1000 + 5, "the counter");
+  const keys = Array.from({ length: 200 }, (_, i) => `acme/${i % 2 ? "web" : "api"}#${i + 1}`);
+  const n = declaredNodes(reviewQuery(keys));
+  assert.ok(n < 500_000, `${n} declared nodes for ${keys.length} PRs`);
 });
 
 // CodeRabbit on superfactory#128 (KJKF): readRest followed hasNextPage without checking the cursor

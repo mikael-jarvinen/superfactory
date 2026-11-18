@@ -80,9 +80,15 @@ export interface PrNode {
 }
 
 const PAGE = 100;
+// A thread's comments in the query for every PR: GitHub refuses a query that declares over 500,000
+// nodes, counting each nested connection's first times its parents'. 100 threads of 100 comments
+// made 10,300 per PR, so 49 watched PRs were refused, every poll, with no path to say which
+// (CodeRabbit on superfactory#128). 10 makes 1,300; readRest reads a longer thread's comments by
+// their own query, a page of PAGE at a time.
+const THREAD_FIRST_PAGE = 10;
 const PAGE_INFO = "pageInfo { hasNextPage endCursor }";
 const FIELDS = "databaseId createdAt publishedAt body author { login __typename }";
-const THREAD_COMMENTS = (after?: string) => `comments(first: ${PAGE}${after ? `, after: "${after}"` : ""}) { ${PAGE_INFO} nodes { ${FIELDS} } }`;
+const THREAD_COMMENTS = (after?: string) => `comments(first: ${after ? `${PAGE}, after: "${after}"` : THREAD_FIRST_PAGE}) { ${PAGE_INFO} nodes { ${FIELDS} } }`;
 const CONNECTIONS = {
   reviewThreads: `id isResolved path line originalLine ${THREAD_COMMENTS()}`,
   reviews: `state submittedAt ${FIELDS}`,
