@@ -163,6 +163,18 @@ test("factory wake: already live, woken, or not", () => {
   assert.match(r.stderr, /cal has no session to wake/);
 });
 
+// A respawn reruns the old command line, whose --settings is this file (CodeRabbit on #124).
+test("a woken session comes back with its settings rendered again", () => {
+  const { ws, put } = fakeFleet();
+  put("all.json", [sess("b1", "bea")]);
+  put("after.json", [sess("b1", "bea")]);
+  const file = settingsFile(openWorkspace(ws, {}), agentOrDie(openWorkspace(ws, {}), "bea"));
+  writeFileSync(file, "{}\n");
+  const r = factory(ws, ["wake", "bea"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(JSON.parse(readFileSync(file, "utf8")).hooks?.PreToolUse?.length, "the stale file was rendered again");
+});
+
 test("every role's settings wake the recipient before SendMessage, inside the hook's timeout", () => {
   const dir = tempWorkspace(ASSISTANT_TOML);
   after(() => rmSync(dir, { recursive: true, force: true }));

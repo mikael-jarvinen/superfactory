@@ -21,7 +21,16 @@ npm install -g .
 ```
 
 `npm install -g .` links the `factory` command to this clone. To upgrade, pull and run
-`npm run build` again.
+`npm run build` again, here and on every machine a `[hosts.<name>]` names: a hosted agent starts
+through the factory daemon on its host, which renders its settings there, so upgrade that host's
+clone the same way and restart its daemon before you relaunch the host's agents. Then relaunch every
+session: `factory restart-lead`, and every open worker or agent session. A session reads its hooks
+when it starts, so one opened before the upgrade keeps the old guard matcher, and the GitHub MCP
+tools go unguarded there. A session here that is off needs nothing: `factory wake`, the wake before
+a message and `factory restart-lead`'s respawn render the agent's settings again before they respawn
+it. A respawn on a host reruns the command line its daemon rendered, so start a stopped hosted agent
+fresh once its host is upgraded: `factory restart-lead --fresh`, or `--force` on the command that
+starts it.
 
 ## Make a workspace
 

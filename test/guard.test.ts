@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { allowClosePath } from "../src/allow-close.js";
-import { commentVerdict, type GuardContext, verdict } from "../src/hooks/guard.js";
+import { commentVerdict, type GuardContext, hook, mcpVerdict, verdict } from "../src/hooks/guard.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, tempWorkspace } from "./helpers.js";
 
 const ro: GuardContext = { role: "reviewer", policy: "readonly", writeDirs: [], ownRepos: [] };
-const pr: GuardContext = { role: "builder", policy: "protect", writeDirs: [], org: "acme", ownRepos: ["acme/workspace", "alex/factory"] };
+const pr: GuardContext = { role: "builder", policy: "protect", writeDirs: [], org: "acme", ownRepos: ["acme/workspace", "alex/factory"], defaultBranch: (r) => (r === "acme/trunk-repo" ? "trunk" : r === "acme/offline" ? null : "main") };
 
 const REFUSE = 2;
 const ALLOW = 0;
@@ -267,6 +267,525 @@ test("the lead closes a product PR only once the human has named it", () => {
   // the words are the permission
   assert.notEqual(factory(dir, ["allow-close", "api", "8703"]).status, 0);
   assert.notEqual(factory(dir, ["allow-close", "nope", "8703", "--words", "x"]).status, 0);
+});
+
+// gh runs a user alias, a shell alias or an extension as readily as its own commands, and the guard
+// cannot know what one does: `gh alias set m 'pr merge'` then `gh m 8701 -R acme/api` was a product
+// merge in two calls. Only gh's built-in commands pass, and aliases and extensions cannot be made.
+test("a gh alias or extension is refused, and so is making one", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const refused = ["gh alias set m 'pr merge'", "gh m 8701 -R acme/api", "gh -R acme/api m 8701", "gh alias set pc 'pr comment'",
+    "gh pc 1 -b hi", "gh alias set --shell x 'gh pr merge 8701 -R acme/api'", "gh x", "gh alias import a.yml", "gh alias delete co",
+    "gh co 12", "gh extension install o/gh-x", "gh ext install o/gh-x", "gh extensions upgrade --all", "gh extension exec x",
+    "command gh m 8701 -R acme/api", "gh -- m 8701", "bash -c 'gh m 8701 -R acme/api'"];
+  const allowed = ["gh pr checkout 12", "gh pr co 12", "gh alias list", "gh alias ls", "gh ext list", "gh pr view 1", "gh --version", "gh --help", "gh help", "gh -R acme/api pr checks 1"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (!/aliases and extensions can't be checked/.test(verdict(c, ctx) ?? "")) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// The guard's matcher was Bash|Read|Grep, so the GitHub MCP tools merged, closed and commented past
+// it. Now a merge, close or undraft is checked as its gh command, a comment needs the marker, a
+// commit to a protected branch is refused, an unknown write is refused, and reads pass.
+test("the GitHub MCP tools are held to the gh rules", () => {
+  const dir = tempWorkspace();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.equal(factory(dir, ["allow-close", "api", "8701", "--words", "I allow you to close the PR"]).status, 0);
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  const lead: GuardContext = { ...pr, role: "lead", leadMerges: ["acme/web"], allowClose: allowClosePath(openWorkspace(dir).stateDir) };
+  const api = { owner: "acme", repo: "api" };
+  const M = "> Written by agent. done";
+  type Row = [string, Record<string, unknown>, GuardContext];
+  const refused: Row[] = [
+    ["merge_pull_request", { ...api, pullNumber: 8701 }, lead],
+    ["merge_pull_request", { ...api, pullNumber: 8701, merge_method: "squash" }, pr],
+    ["merge_pull_request", { owner: "acme", repo: "web", pullNumber: 506 }, lead], // no head
+    ["merge_pull_request", { owner: "acme", repo: "web", pullNumber: 506, expectedHeadSha: sha }, pr],
+    ["update_pull_request", { ...api, pullNumber: 8702, state: "closed" }, lead],
+    ["update_pull_request", { ...api, pullNumber: 8701, state: "closed" }, pr],
+    ["update_pull_request", { ...api, pullNumber: 8701, draft: false }, pr],
+    ["add_issue_comment", { ...api, issue_number: 1, body: "hi" }, pr],
+    ["add_reply_to_pull_request_comment", { ...api, pullNumber: 1, commentId: 2, body: "fixed" }, lead],
+    ["pull_request_review_write", { ...api, pullNumber: 1, method: "create", event: "COMMENT", body: "lgtm" }, pr],
+    ["update_issue_comment", { ...api, comment_id: 3, body: "edited" }, pr],
+    ["push_files", { ...api, branch: "main", files: [], message: "x" }, pr],
+    ["create_or_update_file", { ...api, branch: "master", path: "a", content: "", message: "x" }, lead],
+    ["delete_file", { ...api, branch: "main", path: "a", message: "x" }, pr],
+    // a product repo's own default branch, no branch at all, or a default the guard cannot read
+    ["push_files", { owner: "acme", repo: "trunk-repo", branch: "trunk", files: [], message: "x" }, pr],
+    ["create_or_update_file", { ...api, path: "a", content: "", message: "x" }, pr],
+    ["delete_file", { owner: "acme", repo: "offline", branch: "fix-x", path: "a", message: "x" }, lead],
+    ["create_repository", { name: "x" }, lead],
+    ["delete_repository", { ...api }, lead],
+    ["fork_repository", { ...api }, pr],
+    ["some_future_write", {}, lead],
+    ["add_issue_comment", { ...api, issue_number: 1, body: M }, ro],
+    ["create_pull_request", { ...api, title: "t", head: "x", base: "main" }, ro],
+  ];
+  const allowed: Row[] = [
+    ["get_me", {}, ro], ["pull_request_read", { ...api, pullNumber: 1, method: "get" }, ro], ["list_pull_requests", api, pr],
+    ["search_code", { query: "x" }, ro], ["issue_read", { ...api, issue_number: 1, method: "get" }, pr],
+    ["merge_pull_request", { owner: "acme", repo: "web", pullNumber: 506, expectedHeadSha: sha, merge_method: "squash" }, lead],
+    ["merge_pull_request", { owner: "acme", repo: "workspace", pullNumber: 3 }, pr],
+    ["update_pull_request", { ...api, pullNumber: 8701, state: "closed" }, lead],
+    ["update_pull_request", { ...api, pullNumber: 8701, title: "t", body: "unmarked description" }, pr],
+    ["update_pull_request", { ...api, pullNumber: 8701, draft: true }, pr],
+    ["add_issue_comment", { ...api, issue_number: 1, body: M }, pr],
+    ["add_issue_comment", { ...api, issue_number: 1, body: "@coderabbitai review" }, pr],
+    ["pull_request_review_write", { ...api, pullNumber: 1, method: "resolve_thread", threadId: "PRRT_x" }, pr],
+    ["create_pull_request", { ...api, title: "t", head: "x", base: "main", draft: true }, pr],
+    ["push_files", { ...api, branch: "fix-x", files: [], message: "x" }, pr],
+    ["push_files", { owner: "acme", repo: "trunk-repo", branch: "fix-x", files: [], message: "x" }, pr],
+    ["create_or_update_file", { owner: "acme", repo: "workspace", branch: "main", path: "a", content: "", message: "x" }, pr],
+    ["issue_write", { ...api, method: "create", title: "t" }, pr],
+  ];
+  // a GitHub tool is known by its tool name whatever its server is called (Niilo's ruling on #124)
+  refused.push(["issue_write", { ...api, method: "update", issue_number: 8701, state: "closed" }, pr],
+    ["issue_write", { ...api, method: "update", issue_number: 8702, state: "closed" }, lead]);
+  allowed.push(["issue_write", { ...api, method: "update", issue_number: 8701, state: "closed" }, lead],
+    ["issue_write", { ...api, method: "update", issue_number: 8702, state: "open" }, pr]);
+  const named: [string, Record<string, unknown>, GuardContext][] = [
+    ["mcp__gh__merge_pull_request", { ...api, pullNumber: 8701 }, pr], ["mcp__GitHub__merge_pull_request", { ...api, pullNumber: 8701 }, lead],
+    ["mcp__github_2__update_pull_request", { ...api, pullNumber: 8701, state: "closed" }, pr],
+    ["mcp__foo__issue_write", { ...api, method: "update", issue_number: 8702, state: "closed" }, lead],
+    ["mcp__claude_ai_GitHub__add_issue_comment", { ...api, issue_number: 1, body: "hi" }, pr],
+    ["mcp__GitHub__some_future_write", {}, lead], ["mcp__github_2__delete_repository", api, pr]];
+  const others: [string, Record<string, unknown>, GuardContext][] = [
+    ["mcp__plane__update_issue", { state: "closed" }, pr], ["mcp__claude_ai_Slack__x", {}, lead], ["mcp__home-assistant__call_service", {}, pr],
+    ["mcp__plane__update_issue", { state: "closed" }, ro], ["mcp__GitHub__get_me", {}, ro], ["mcp__github_2__pull_request_read", api, pr]];
+  const wrong: string[] = [];
+  for (const [t, tin, ctx] of named) if (mcpVerdict(t, tin, ctx) === null) wrong.push(`${ctx.role} allowed: ${t} ${JSON.stringify(tin)}`);
+  for (const [t, tin, ctx] of others) if (mcpVerdict(t, tin, ctx) !== null) wrong.push(`${ctx.role} refused: ${t} (${mcpVerdict(t, tin, ctx)})`);
+  for (const [t, tin, ctx] of refused) if (mcpVerdict(`mcp__github__${t}`, tin, ctx) === null) wrong.push(`${ctx.role} allowed: ${t} ${JSON.stringify(tin)}`);
+  for (const [t, tin, ctx] of allowed) {
+    const why = mcpVerdict(`mcp__github__${t}`, tin, ctx);
+    if (why !== null) wrong.push(`${ctx.role} refused: ${t} ${JSON.stringify(tin)} (${why})`);
+  }
+  assert.deepEqual(wrong, []);
+  // the hook routes the MCP tools to this check
+  const argv = ["--role", "builder", "--policy", "protect", "--org", "acme", "--own-repo", "acme/workspace"];
+  const call = (tool_name: string, tool_input: Record<string, unknown>) => hook(argv, JSON.stringify({ tool_name, tool_input }));
+  const merge = call("mcp__github__merge_pull_request", { ...api, pullNumber: 8701 });
+  assert.equal(merge.code, 2);
+  assert.match(merge.stderr ?? "", /merge of a PR on a product repo/);
+  assert.equal(call("mcp__github__add_issue_comment", { ...api, issue_number: 1, body: "hi" }).code, 2);
+  assert.equal(call("mcp__github__get_me", {}).code, 0);
+  assert.equal(call("mcp__GitHub__merge_pull_request", { ...api, pullNumber: 8701 }).code, 2);
+  assert.equal(call("mcp__plane__update_issue", { state: "closed" }).code, 0);
+});
+
+// A gh or git run by path skipped protect, because a path outside the trusted bin dirs was taken for a
+// project script, and a command word from a variable matched no check (Marie on #124). Now a path is
+// read by its basename, and a variable or substitution as the command word is refused.
+test("a gh or git by path is checked as itself, and one from a variable is refused", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const refused = ["~/.local/bin/gh pr merge 8701 -R acme/api", "/home/turing/.local/bin/gh pr close 8701 -R acme/api",
+    "$HOME/.local/bin/gh pr merge 8701 -R acme/api", "./gh pr merge 8701 -R acme/api", "./node_modules/.bin/gh pr merge 8701 -R acme/api",
+    "$G pr merge 8701 -R acme/api", "\"$G\" pr merge 8701 -R acme/api", "${G} pr view 1", "~/.local/bin/gh m 1",
+    "/usr/lib/git-core/git push origin main", "$GIT push origin main", "~/bin/bash -c \"gh pr merge 8701 -R acme/api\"",
+    "/usr/bin/env gh pr merge 8701 -R acme/api", "/usr/bin/env ~/.local/bin/gh pr lock 8701 -R acme/api",
+    "$(which gh) pr merge 8701 -R acme/api", "env $(which gh) pr merge 8701 -R acme/api", "\"$(which gh)\" pr merge 8701 -R acme/api", "`which gh` pr merge 8701 -R acme/api", "cd x && $G pr merge 8701 -R acme/api"];
+  const allowed = ["~/.local/bin/gh pr view 1", "./scripts/test.sh", "echo $(date) done", "X=$(git rev-parse HEAD) && echo $X", "./node_modules/.bin/vitest run", "/usr/bin/git status",
+    "~/.local/bin/gh pr list -R acme/api", "/usr/lib/git-core/git push -u origin fix-x", "vendor/bin/phpunit"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+  assert.match(verdict("$G pr view 1", pr) as string, /run it by its name or its plain path/);
+});
+
+// gh api reached a product PR's state, its lock and the repo itself, and GraphQL merged and closed
+// (Marie on #124). A write that does so on a repo not the factory's own is refused.
+test("gh api cannot close, lock, merge or delete on a product repo", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const gql = (q: string) => `gh api graphql -f query='mutation { ${q} { clientMutationId } }'`;
+  const refused = ["gh api -X PATCH repos/acme/api/pulls/8701 -f state=closed", "gh api -X PATCH repos/acme/api/issues/8701 -f state=closed",
+    "gh api repos/acme/api/issues/8701 -f state=closed", "gh api --method=PATCH /repos/acme/api/pulls/8701 -F state=closed",
+    "gh api -XPATCH repos/acme/api/pulls/8701 --raw-field=state=closed", "gh api -X PATCH repos/acme/api/pulls/8701 --input body.json",
+    "gh api -X PATCH 'repos/{owner}/{repo}/pulls/8701' -f state=closed", "gh api -X PUT repos/acme/api/issues/8701/lock", "gh api -X DELETE repos/acme/api/issues/8701/lock",
+    "gh api -X DELETE repos/acme/api", "gh api -X PATCH repos/acme/api -f archived=true",
+    gql(`mergePullRequest(input: {pullRequestId: "x"})`), gql(`closePullRequest(input: {pullRequestId: "x"})`),
+    gql(`enablePullRequestAutoMerge(input: {pullRequestId: "x"})`), gql(`deleteRepository(input: {repositoryId: "x"})`),
+    gql(`lockLockable(input: {lockableId: "x"})`), gql(`updatePullRequest(input: {pullRequestId: "x", state: CLOSED})`),
+    "gh api graphql -F query=@m.graphql", "gh api graphql --input q.json", "gh api graphql -f query=\"$(cat m.graphql)\""];
+  const allowed = ["gh api repos/acme/api/pulls/8701", "gh api -X GET repos/acme/api/pulls -f state=closed",
+    "gh api repos/acme/api/issues/8701/comments -f body='> Written by agent. x'", "gh api graphql -f query='query { viewer { login } }'",
+    "gh api -X PATCH repos/acme/workspace/pulls/3 -f state=closed", "gh api -X PATCH repos/acme/api/pulls/8701 -f title=x",
+    gql(`addComment(input: {subjectId: "x", body: "> Written by agent. will merge after CI"})`)];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// gh api merged a branch into main, committed to it and transferred the repo (Marie on #124 at
+// eb982692). On a product repo those are refused, and a contents write must name a feature branch.
+test("gh api cannot merge, commit to main or transfer on a product repo", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const gql = (q: string) => `gh api graphql -f query='mutation { ${q} { clientMutationId } }'`;
+  const put = "gh api -X PUT repos/acme/api/contents/a.txt -f message=m -f content=eA==";
+  const refused = [put, `${put} -f branch=main`, `${put} -f branch=refs/heads/master`, `${put} --input body.json`,
+    "gh api -X DELETE repos/acme/api/contents/a.txt -f message=m -f sha=abc", "gh api --method PUT /repos/acme/api/contents/src/a.ts -F message=m -F content=@a.b64",
+    "gh api -X POST repos/acme/api/merges -f base=main -f head=feat", "gh api repos/acme/api/merges -f base=feat/x -f head=main",
+    "gh api -X POST repos/acme/api/transfer -f new_owner=x",
+    gql(`enqueuePullRequest(input: {pullRequestId: "x"})`), gql(`createCommitOnBranch(input: {branch: {branchName: "main"}})`)];
+  // the repo's own default branch, whatever it is called, and one the guard cannot read (CodeRabbit on #124)
+  const trunk = "gh api -X PUT repos/acme/trunk-repo/contents/a.txt -f message=m -f content=eA==";
+  refused.push(`${trunk} -f branch=trunk`, `${trunk} -f branch=refs/heads/Trunk`,
+    "gh api -X PUT repos/acme/offline/contents/a.txt -f message=m -f content=eA== -f branch=feat/x");
+  const allowed = ["gh api -X PUT repos/acme/workspace/contents/a.txt -f message=m -f content=eA==", `${put} -f branch=feat/x`,
+    "gh api repos/acme/api/contents/a.txt", "gh api repos/acme/api/merges", `${trunk} -f branch=feat/x`];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// A push to a branch named by a variable or a substitution could be a push to main (Niilo on #124).
+test("a git push whose ref the guard cannot read is refused", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const refused = ["git push origin $B", "git push -u origin \"$B\"", "git push origin ${B}", "git push origin $(echo main)",
+    "git push origin \"$(git branch --show-current)\"", "git push origin HEAD:\"$B\"", "git push origin HEAD:$(echo main)",
+    "git push origin feat $(echo main)", "git push origin `echo main`", "git push \"$R\" feat", "git push --force-with-lease origin \"$B\""];
+  const allowed = ["git push -u origin feat/x", "git push origin HEAD:feat/x", "git commit -m \"$(date)\"", "B=feat/x && git push -u origin feat/x",
+    "echo $(git rev-parse HEAD)"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+  assert.match(verdict("git push -u origin \"$B\"", pr) as string, /name the branch/);
+});
+
+// Marie's third round on #124 at 7453c070: stdin by another name, env's clustered flags, find's second
+// action, ssh fed on stdin, an unresolvable contents branch; and a heredoc header with a redirect
+// after it, whose body was read as commands.
+test("stdin by any name, a clustered env flag, every find action and ssh on stdin are checked", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const M = "gh pr merge 1 -R acme/api";
+  const put = "gh api -X PUT repos/acme/api/contents/a.txt -f message=m -f content=eA==";
+  const refused = [`echo '${M}' | bash -s < /dev/stdin`, `bash /dev/stdin <<< '${M}'`, `echo '${M}' | bash /dev/fd/0`, `echo '${M}' | sh /proc/self/fd/0`,
+    `bash - <<< '${M}'`, `env -vS '${M}'`, `env -iS '${M}'`, `env -iS'${M}'`, `env -i -u X ${M}`,
+    `find . -exec true \\; -exec ${M} \\;`, `find . -name x -exec true {} + -execdir ${M} {} +`,
+    `echo '${M}' | ssh localhost`, `ssh localhost <<< '${M}'`, `ssh localhost < cmds.sh`, `ssh -T localhost <<'E'\n${M}\nE`,
+    `${put} -f branch=$B`, `${put} -f "branch=$(echo main)"`, "bash <<E > out\n" + M + "\nE"];
+  const allowed = ["cat <<'EOF' > notes.md\ngh pr merge is how we ship\nEOF", "cat <<'EOF' >> n.md\ngh pr merge is how we ship\nEOF",
+    "tee n.md <<'EOF' >/dev/null\ngh pr merge is how we ship\nEOF", "cat > notes.md <<'EOF'\ngh pr merge is how we ship\nEOF",
+    "bash scripts/x.sh < /dev/null", "env -i LANG=C npm test", "find . -exec true \\; -exec wc -l {} +", "ssh niilo uptime < /dev/null",
+    "ssh niilo", "ssh -T niilo <<'E'\nuptime\nE"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// The program is the file that runs, not its spelling: rsh is ssh, rbash is bash, git-push is git
+// push (Marie and Niilo on #124, round 9). Links in a temp dir make the rows hold on any box.
+test("a command is named by the file that runs", () => {
+  const M = "gh pr merge 1 -R acme/api";
+  const bin = mkdtempSync(join(tmpdir(), "guard-bin-"));
+  after(() => rmSync(bin, { recursive: true, force: true }));
+  const env = ["/usr/bin/env", "/bin/env"].find(existsSync) as string;
+  const sh = ["/usr/bin/bash", "/bin/bash"].find(existsSync) as string;
+  symlinkSync(env, join(bin, "e"));
+  symlinkSync(sh, join(bin, "r"));
+  symlinkSync(sh, join(bin, "gpush"));
+  mkdirSync(join(bin, "git-core"));
+  writeFileSync(join(bin, "git-core", "git"), "", { mode: 0o755 });
+  symlinkSync("git", join(bin, "git-core", "git-push"));
+  writeFileSync(join(bin, "busybox"), "", { mode: 0o755 });
+  symlinkSync("busybox", join(bin, "static-sh"));
+  // link/.. is the link target's parent, as the kernel walks it, not bin (CodeRabbit on #124)
+  mkdirSync(join(bin, "real", "child"), { recursive: true });
+  symlinkSync(join(bin, "real", "child"), join(bin, "link"));
+  symlinkSync(env, join(bin, "real", "e2"));
+  writeFileSync(join(bin, "e2"), "", { mode: 0o755 });
+  const refused = [`'${bin}/e' ${M}`, `PATH='${bin}':$PATH e ${M}`, `'${bin}/r' -c '${M}'`, `'${bin}/git-core/git-push' origin main`,
+    `'${bin}/git-core/git-push' origin --delete x`, `'${bin}/static-sh' -c '${M}'`, `'${bin}/busybox' env ${M}`, `busybox sh -c '${M}'`,
+    `nice '${bin}/e' ${M}`, `ksh93 -c '${M}'`, `tcsh -c '${M}'`, `mksh-static -c '${M}'`, "git-push origin main", `env '${bin}/r' -c '${M}'`,
+    `'${bin}/link/../e2' ${M}`];
+  for (const [name, row] of [["/usr/bin/rsh", `rsh niilo '${M}'`], ["/usr/bin/rsh", `/usr/bin/rsh niilo '${M}'`], ["/usr/bin/slogin", `slogin niilo '${M}'`],
+    ["/usr/bin/rbash", `rbash -c '${M}'`], ["/usr/bin/static-sh", `static-sh -c '${M}'`], ["/usr/bin/busybox", `busybox env ${M}`],
+    ["/usr/lib/git-core/git-push", "/usr/lib/git-core/git-push origin main"], ["/usr/lib/git-core/git-push", "/usr/lib/git-core/git-push origin --delete x"]] as const)
+    if (existsSync(name)) refused.push(row);
+  const allowed = ["git status", "/usr/bin/git status", "ssh niilo uptime", "npm test", "./scripts/report", "~/agents/bin/pr-send.sh 124 abc",
+    `'${bin}/e' npm test`, `'${bin}/git-core/git-push' origin feature/x`, "sh -c 'npm test'", "awk 1 x.txt", "python3 -V"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, { ...pr, role: "lead" }]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// A program the guard does not read may run its arguments, so any later word naming gh, git, ssh, a
+// shell or busybox is checked from there; only a program that can never run another, and docker
+// run's image word, are skipped (Marie and Niilo on #124, round 9).
+test("an argument that names a checked program is checked as a command", () => {
+  const M = "gh pr merge 1 -R acme/api";
+  const bin = mkdtempSync(join(tmpdir(), "guard-argv-"));
+  after(() => rmSync(bin, { recursive: true, force: true }));
+  const refused = [`ionice -c3 ${M}`, `taskset -c 0 ${M}`, `prlimit ${M}`, `setpriv ${M}`, `unshare -U ${M}`, `strace -o /dev/null ${M}`,
+    `chrt -o 0 ${M}`, `setarch x86_64 ${M}`, `linux64 ${M}`, `systemd-run --user --pipe -q ${M}`, `docker exec c ${M}`,
+    // the escape forms of the exceptions, and the programs kept scanned
+    "man -P gh git", `man -P gh ${M}`, "rg --pre gh x .", "rg --pre=gh x .", "rg --pre-glob '*' --pre gh x .", `command ${M}`,
+    `less -f ${M}`, `more ${M}`, `vi -c '!${M}' x`, `view -c ':!${M}' x`, `awk 1 ${M}`, `sed -n p ${M}`, `find . -exec ${M} \\;`,
+    `xargs ${M}`, "tar -I gh -cf x.tar .", "tar --to-command=gh -xf x.tar", "rsync -e gh a b:", `make -f x ${M}`,
+    `git -c 'core.pager=${M}' log`, `git -c core.sshCommand='${M}' fetch`, `git -c 'diff.x.textconv=${M}' diff`, `docker run --rm img ${M}`, `docker run --rm --name w img sh -c '${M}'`,
+    `docker run --rm --entrypoint gh img pr merge 1 -R acme/api`, `docker container create img ${M}`, `watch '${M}'`,
+    // a data-only program's arguments are skipped only when it is the command word
+    `ionice -c3 echo ${M}`, `strace -f grep x ${M}`,
+    // the systemd-run and docker exec forms the transcripts hit stay refused
+    'systemd-run --user bash -c "PATH=$P npm test"', 'systemd-run --user --collect bash -c "$SC"',
+    "systemd-run --user bash -c 'exec npm test'", "docker exec c sh -c 'head $f/*'"];
+  const ionice = ["/usr/bin/ionice", "/bin/ionice"].find(existsSync);
+  if (ionice) {
+    symlinkSync(ionice, join(bin, "w"));
+    refused.push(`'${bin}/w' ${M}`);
+  }
+  const allowed = ["which gh", "which -a gh hub", "ls ~/.local/bin/gh /usr/local/bin/gh", "ls -l /usr/bin/gh /usr/local/bin/gh", "command -v gh",
+    "command -V gh", "type gh", "man git", "grep -rn 'gh pr merge' .", "rg 'gh pr merge' .", "rg -n gh src", "apt-cache show git",
+    "dpkg-query -W git", "timeout 5 git status", "ionice -c3 git status", "systemd-run --user --pipe -q npm test", "echo git push origin main",
+    "printf '%s\\n' gh git", "readlink -f /bin/sh", "realpath /bin/sh", "stat /usr/bin/gh", "file /bin/sh", "ps aux | grep bash",
+    "cat ~/.local/bin/gh | head", "docker run -d --name w busybox sleep 120", "docker create --name w --label x=1 busybox true",
+    "docker run --rm -e A=1 -v /x:/y bash:5 true", "docker exec c npm test", "git -c core.pager=cat log", "git -c 'core.pager=less -R' log"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, { ...pr, role: "lead" }]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// The argv scan starts at any program the guard reads specially, past its wrappers; a string run as a
+// shell line is parsed in full, and a string holding shell syntax is read for the commands in it
+// (Marie at 233933a, round 10). Text into crontab, at and batch is checked as the commands it schedules
+// (Marie and Niilo, round 10).
+test("strings a program runs and lines it schedules are checked as commands", () => {
+  const M = "gh pr merge 1 -R acme/api";
+  const refused = [`echo pr merge 1 -R acme/api | ionice -c3 xargs gh`, `ionice -c3 env -S'${M}'`, `ionice -c3 watch -x ${M}`,
+    `tmux new-session -d 'true; ${M}'`, `ionice -c3 watch 'true; ${M}'`, `tmux new -d 'echo x && ${M}'`, `ionice -c3 sh -c 'true; ${M}'`,
+    `tmux split-window 'cd /x; ${M}'`, `tmux run-shell '${M}'`, `su -c 'true; ${M}' bot`, `runuser -u bot --command='${M}'`,
+    `foo 'true; ${M}'`, `foo --cmd='x && ${M}'`, `foo "$(${M})"`, `foo 'cat x | sh'`, `tmux new -d 'echo "x'`,
+    // crontab, at and batch
+    `echo '* * * * * ${M}' | crontab -`, `crontab - <<'E'\n@reboot ${M}\nE`,
+    `printf '# c\\nPATH=/usr/bin\\n*/5 * * * * cd /x && ${M}\\n' | crontab -`, `at now <<< '${M}'`, `echo 'true; ${M}' | batch`,
+    `echo '0 1 * * * ${M}' | crontab -u bot -`, `echo '${M}' | at -m now`, `printf '%s\\n' '@daily ${M}' | crontab`,
+    `crontab <<< '0 1 * * * x; ${M}'`,
+    // escapes and formats printedText cannot read (Marie at c197d465)
+    `printf '* * * * * \\x67h pr merge 1 -R acme/api\\n' | crontab -`, `printf '* * * * * \\147h pr merge 1 -R acme/api\\n' | crontab -`,
+    `echo -e '* * * * * \\x67h pr merge 1 -R acme/api' | crontab -`, `printf '* * * * * %.2s pr merge 1 -R acme/api\\n' ghx | crontab -`,
+    `printf '* * * * * %b pr merge 1 -R acme/api\\n' '\\x67h' | crontab -`, `printf '\\x67h pr merge 1 -R acme/api\\n' | at now`,
+    // git's relocating options stay refused
+    "git --exec-path=/tmp/x status", "git --git-dir=/x push origin main", "git -C /x --exec-path=/tmp/x log",
+    // round 11 (Marie and CodeRabbit at aaf79c48): printf's --, a substitution in any word the line
+    // consumes (a redirect target, a here-string), an unquoted heredoc's body, the last input on fd 0,
+    // and what a group or a compound command prints into the pipe after it
+    `printf -- '* * * * * ${M}\\n' | crontab -`, `printf -- '%s\\n' '${M}' | at now`,
+    `echo x > "$(${M})"`, `cat < "$(${M})"`, `echo x 2> "\`${M}\`"`, `echo x >> "$(${M})"`, `cat <<< "$(${M})"`, `cat 0< "$(${M})"`,
+    `cat <<E\n$(${M})\nE`, `cat <<E\n\`${M}\`\nE`, `cat <<E > out.md\nrun $(true) then $(${M})\nE`, `bash <<'A' <<'B'\ntrue\nA\n${M}\nB`,
+    `bash <<'END-DATA'\n${M}\nEND-DATA`, `bash 3<<'A' <<'B'\ntrue\nA\n${M}\nB`,
+    `{ echo '${M}'; echo true; } | at now`, `if true; then echo '${M}'; fi | at now`, `while true; do echo '${M}'; done | at now`,
+    // the last round (Marie at 15e3b5d3): a partly quoted delimiter, and what a group's stdin carries
+    `bash <<EN'D-DATA'\n${M}\nEND-DATA`, `bash <<\\E\n${M}\nE`, `echo '${M}' | { echo b; cat | at now; }`,
+    `{ echo '${M}'; } | { echo c; cat | at now; }`, `{ echo '${M}'; { echo true; }; } | at now`];
+  const allowed = ["tmux new -d 'npm test; echo done'", "docker run img sh -c 'npm test && echo ok'", "tmux new -s w", "tmux attach -t w",
+    "crontab -l", "(crontab -l; echo '30 3 * * 1 ~/agents/bin/agent-compact.sh warren') | crontab -",
+    "printf '%s\\n' '30 3 * * 1 ~/agents/bin/agent-compact.sh warren' | crontab -", "echo '0 * * * * npm test' | crontab -",
+    "printf '%s\\n' 'a\\x41' | crontab -", "printf '\\x41\\n' | grep A", "crontab /tmp/cron.new",
+    "echo 'npm test' | at now + 1 hour", "at -f /tmp/job.sh now", "echo '5 * * * * echo 50% done' | crontab -", "at -l", "crontab -r",
+    // prose and code that only look like commands
+    `./bin/delegations.sh done drake abc "draft, CLEAN; gh confirms head+base"`, `node -e "x.then(m => { const sh = m.d(1); f(sh) })"`,
+    `sed -e 's#^const x = a;#const SH = Number(SHIFT) * DAY;#' f`, `awk '$4 ~ /gh +(-R|--repo)|gh +pr/' f`,
+    `tg-notify.sh "run sudo usermod -aG docker bot; then watch the trial"`, `until [ "$(ssh h 'pgrep -fc x || true')" = "" ]; do sleep 2; done`,
+    // git's global options that only print (Niilo, round 10)
+    "git --version", "git --help", "git --help push", "git --exec-path", "git --html-path", "git --man-path", "git --info-path",
+    "bash -c 'git --version'", "git --no-pager --version", "git --exec-path /tmp/x status",
+    // round 11: a literal $ before a quoted (, a quoted heredoc's body, an input fd 0 no longer reads,
+    // a hyphenated delimiter, and what an earlier pipeline printed
+    `echo '$'"(USD"`, `echo '$'"(USD)"`, `echo x > "$(true)"`, "echo x > out.txt", `cat <<'E'\n$(${M})\nE`, `cat <<E\n\\$(${M})\nE`,
+    "cat <<E > README.md\nrun `npm test`, then $(date)\nE", `cat <<'END-DATA'\na "b\nEND-DATA`, `bash <<'A' <<'B'\necho "x\nA\ntrue\nB`,
+    `bash <<'A' < /dev/null\n${M}\nA`, `echo 'unmatched " quote'; echo true | at now`, `echo '${M}' && echo true | at now`,
+    `(echo '${M}'); echo true | at now`,
+    // the last round: a delimiter quoted in part, and a pipeline in a group, loop, if or subshell
+    `cat <<EN'D-DATA'\na "b\nEND-DATA`, `cat <<\\E\na "b\nE`, `cat <<-"E"x\n\ta "b\n\tEx`,
+    `{ echo 'unmatched " quote'; echo true | at now; }`, `( echo 'unmatched " quote'; echo true | at now )`,
+    `if true; then echo 'unmatched " q'; echo true | at now; fi`, `{ echo '${M}' && echo true | at now; }`,
+    `while true; do echo '${M}'; echo true | at now; done`];
+  const wrong: string[] = [];
+  for (const ctx of [pr, { ...pr, role: "lead" }]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// The command word is read by its shape, an allowlist; every trick Marie listed at ae2e8d06 goes
+// through the one rule (Marie and Niilo on #124, round 8).
+test("a command word is a bare name, a plain path or refused", () => {
+  const M = "gh pr merge 1 -R acme/api";
+  const refused = [`/usr/bin/e[n]v ${M}`, `/usr/bin/e?v ${M}`, `/usr/*/env ${M}`, `/usr/bin/en* ${M}`, "{env,gh,pr,merge,1,-R,acme/api}",
+    "{/usr/bin/env,gh,pr,merge,1,-R,acme/api}", `/usr/bin/{env,} ${M}`, `~+/bin/env ${M}`, `cd /usr && ~+/bin/env ${M}`, `~-/bin/env ${M}`,
+    `~root/../usr/bin/env ${M}`, `env -C /usr bin/env ${M}`, `env --chdir=/ usr/bin/nice ${M}`,
+    `find /usr/bin -maxdepth 0 -execdir bin/env ${M} \\;`, `e[n]v ${M}`, `'/usr/bin/e*v' ${M}`, `{ ${M}; }`, `../bin/env ${M}`, `nice ~+/gh pr view 1`];
+  const allowed = ["./scripts/env PATH=report", "./node_modules/.bin/tsc -p .", "/usr/bin/env npm test", "~/agents/bin/pr-send.sh 124 abc",
+    '"./scripts/a b.sh"', "npm test", "/usr/bin/git status", "[ -f x ] && echo y", "[[ -f x ]] && echo y", ": > out.log", "{ ls; echo x; } > out",
+    "scripts/report", "~/agents/bin/pr-send.sh 124 abc", "env -C sub npm test"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, { ...pr, role: "lead" }]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// The trusted-dir check compared how a directory was written, not where it resolves (Marie on #124
+// at 4cf72e6e).
+test("a wrapper by any path that resolves to a system bin dir is the wrapper", () => {
+  const M = "gh pr merge 1 -R acme/api";
+  const refused = [`/usr/bin/../bin/env ${M}`, `/usr//bin/env ${M}`, `/bin/./nice ${M}`, `/usr/bin/../bin/timeout 5 ${M}`,
+    `/proc/self/root/usr/bin/env ${M}`, `~/../../../../../../usr/bin/env ${M}`, `$HOME/../../../../../../usr/bin/env ${M}`,
+    `cd /usr && bin/env ${M}`, `cd /; usr/bin/nice ${M}`];
+  // /usr/bin/X11 is a link to . on Ubuntu
+  if (existsSync("/usr/bin/X11")) refused.push(`/usr/bin/X11/env ${M}`, `/usr/bin/X11/X11/nice ${M}`);
+  const allowed = ["./scripts/env PATH=report", "./node_modules/.bin/tsc -p .", "/usr/bin/env npm test", "~/agents/bin/pr-send.sh 124 abc",
+    "/usr/bin/../bin/env npm test", "cd sub && ./scripts/report"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, { ...pr, role: "lead" }]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// On ubuntu-26.04 /usr/bin/env, nice, timeout and nohup are links to Rust coreutils' files in
+// /usr/lib/cargo/bin/coreutils, outside the bin dirs, and a path to one was no wrapper, so what came
+// after it ran unchecked (Marie on #124, CI on 26.04). Here a bin dir of the fixture's own holds the
+// same links: a name in it is the program it is written as, and a link to its file is that program.
+test("a system program whose file lies outside the bin dirs is still that program", () => {
+  const M = "gh pr merge 1 -R acme/api";
+  const root = mkdtempSync(join(tmpdir(), "guard-cargo-"));
+  after(() => rmSync(root, { recursive: true, force: true }));
+  const [bin, cargo, other] = ["bin", "cargo", "other"].map((d) => join(root, d)) as [string, string, string];
+  for (const d of [bin, cargo, other]) mkdirSync(d);
+  for (const n of ["env", "nice", "timeout", "nohup", "ls"]) {
+    writeFileSync(join(cargo, n), "", { mode: 0o755 });
+    symlinkSync(join(cargo, n), join(bin, n));
+  }
+  symlinkSync(join(cargo, "env"), join(other, "e"));
+  symlinkSync(join(bin, "env"), join(other, "e2"));
+  const ctx: GuardContext = { ...pr, binDirs: [bin] };
+  const refused = [`'${bin}/env' ${M}`, `'${bin}/env' git push origin main`, `'${bin}/nice' ${M}`, `'${bin}/timeout' 5 ${M}`,
+    `'${bin}/nohup' git push origin main`, `'${bin}/../bin/env' ${M}`, `'${other}/e' ${M}`, `'${other}/e2' ${M}`,
+    `PATH='${bin}' env ${M}`, `PATH='${other}':$PATH e ${M}`, `'${bin}/env' '${bin}/nice' ${M}`];
+  const allowed = [`'${bin}/env' npm test`, `'${bin}/ls' -la`, `'${other}/e' npm test`, `'${bin}/timeout' 5 npm test`];
+  const wrong: string[] = [];
+  for (const c of [ctx, { ...ctx, role: "lead" }]) {
+    for (const r of refused) if (verdict(r, c) === null) wrong.push(`${c.role} allowed: ${r}`);
+    for (const r of allowed) if (verdict(r, c) !== null) wrong.push(`${c.role} refused: ${r} (${verdict(r, c)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// A command word's directory from a variable lost its `$` to the basename, and the shell splits it
+// (Marie on #124 at e6b2e171).
+test("a command word from a variable is refused, except a plain path under $HOME", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const refused = ["$G/x", "${G}/x a", "$G/gh pr view 1", "$D/../x", "HOME='/usr/bin/gh pr merge 1 -R acme/api #'; $HOME/x",
+    "export HOME=/x; $HOME/gh pr view 1", "$HOME/.local/bin/gh pr merge 1 -R acme/api", "$HOME/$X/gh pr view 1", "`echo x`/y"];
+  const allowed = ["$HOME/.local/bin/gh pr view 1", '"$HOME/.local/bin/gh" pr list', "${HOME}/agents/bin/pr-send.sh 124 abc",
+    "~/agents/bin/pr-send.sh 124 abc", "$HOME/agents/bin/pr-send.sh 124 abc"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// A heredoc's body was tied to the last command on its header line, not to the one whose << it is
+// (Marie on #124 at beb31d9e).
+test("a heredoc is the stdin of the command that opens it", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const M = "gh pr merge 1 -R acme/api";
+  const refused = [`bash < x.sh <<'E' | cat\n${M}\nE`, `ssh niilo <<'E' | cat\n${M}\nE`, `cat <<'A' | bash <<'B'\nx\nA\n${M}\nB`,
+    `bash <<'E' >out 2>&1 | cat\n${M}\nE`];
+  const allowed = ["bash <<'E' | tee log\nnpm test\nE", "bash <<'E' && echo ok\nnpm test\nE", "cat <<'E' | grep x\ngh pr merge\nE",
+    "bash < x.sh | cat", `cat <<'A' | bash <<'B'\n${M}\nA\nnpm test\nB`];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// Marie on #124 at beb31d9e, and CodeRabbit's review of eb982692: gh issue close/reopen/lock/unlock
+// act on a PR; GraphQL closes issues; HEAD is a read; a query cannot mutate; a wrapper's name on a
+// project script is not the wrapper.
+test("gh issue state changes are checked as gh pr, and the review's false refusals pass", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const dir = tempWorkspace();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const r = factory(dir, ["allow-close", "api", "8701", "--words", "I allow you to close the PR"]);
+  assert.equal(r.status, 0, r.stderr);
+  const recorded: GuardContext = { ...lead, allowClose: allowClosePath(openWorkspace(dir).stateDir) };
+  const gql = (q: string) => `gh api graphql -f query='mutation { ${q} { clientMutationId } }'`;
+  const refused = ["gh issue close 8702 -R acme/api", "gh issue reopen 8701 -R acme/api", "gh issue lock 8701 -R acme/api", "gh issue unlock 8701 -R acme/api",
+    "gh issue close https://github.com/acme/api/issues/8702", "gh pr reopen 8701 -R acme/api", "gh issue close 8702", gql(`closeIssue(input: {issueId: "x"})`),
+    gql(`reopenIssue(input: {issueId: "x"})`), gql(`updateIssue(input: {id: "x", state: CLOSED})`),
+    "gh api graphql -f query='mutation M { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'",
+    "/usr/bin/env PATH=x ls", "/usr/bin/env gh pr merge 1 -R acme/api", "/usr/bin/nice gh pr merge 1 -R acme/api", "$D/env gh pr merge 1 -R acme/api"];
+  const allowed = ["gh issue close 3 -R acme/workspace", "gh issue lock 3 -R acme/workspace", "gh issue comment 8701 -R acme/api -b '> Written by agent. x'",
+    "gh issue view 8701 -R acme/api", "gh issue create -R acme/api -t x -b y", "gh api -X HEAD repos/acme/api", "gh api -X HEAD repos/acme/api/contents/a.txt",
+    "gh api graphql -f query='query closePullRequest { viewer { login } }'", "gh api graphql -f query='{ repository(owner: \"acme\", name: \"api\") { mergeCommitAllowed } }'",
+    "./scripts/env PATH=report", "./bin/nice report"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  for (const c of ["gh issue close 8701 -R acme/api", "gh issue close 8701 -R acme/api -r 'not planned'"]) if (verdict(c, recorded) !== null) wrong.push(`recorded lead refused: ${c} (${verdict(c, recorded)})`);
+  for (const c of ["gh issue close 8701 -R acme/api"]) if (verdict(c, pr) === null) wrong.push(`builder allowed: ${c}`);
+  assert.deepEqual(wrong, []);
+});
+
+// Wrappers and shells ran gh past every check (Marie on #124 at eb982692): nice, setsid, stdbuf,
+// flock, env -S, find -exec, ssh, a shell reading its script from a pipe, a here-string, a heredoc or
+// a <( ... ), and a substitution inside quotes or a <( ... ). Each is now read through to its command.
+test("gh run through a wrapper, a substitution or a shell on stdin is checked", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const M = "gh pr merge 1 -R acme/api";
+  const refused = [`nice ${M}`, `nice -n 5 ${M}`, `nice -n5 ${M}`, `setsid ${M}`, `setsid -f ${M}`, `stdbuf -o0 ${M}`, `stdbuf -o 0 -e L ${M}`,
+    `flock /tmp/l ${M}`, `flock -w 5 /tmp/l ${M}`, `flock /tmp/l -c '${M}'`, `env -S "${M}"`, `env --split-string="${M}"`, `env -S"${M}"`,
+    `env -u X ${M}`, `env -C /tmp ${M}`, `nice env timeout 5 setsid ${M}`,
+    `find . -exec ${M} \;`, `find . -execdir ${M} {} +`, `find . -name x -ok ${M} \;`,
+    `echo '${M}' | bash`, `echo '${M}' | sh`, `cat x | bash -s`, `bash <<< '${M}'`, `bash <(echo '${M}')`, `sh -s <<'E'\n${M}\nE`, `bash -l <<E\necho hi\n${M}\nE`,
+    `ssh localhost ${M}`, `ssh -p 22 -o BatchMode=yes localhost '${M}'`, `ssh -tt host -- ${M}`, `ssh host -p 22 ${M}`,
+    `echo "$(${M})"`, `X="$(${M})"`, `cat <(${M})`, `tee >(${M}) < x`, `echo "a $(echo "$(${M})") b"`, `flock /tmp/l $(which gh) pr view 1`];
+  const allowed = ["nice -n 5 npm test", "flock /tmp/l make build", "find . -name '*.ts' -exec wc -l {} +", "bash scripts/x.sh", "bash -e scripts/x.sh a b",
+    "bash < scripts/x.sh", "ssh niilo 'systemctl --user status gh-runner-ci@2'", "echo hi | cat", "bash -c 'npm test'", "setsid -f npm run dev",
+    "stdbuf -oL npm test | tee /tmp/log", `git commit -m "$(cat <<'EOF'\nfix: merge the gh pr merge rows\nEOF\n)"`, "echo \"$((1 + 2))\"",
+    "diff <(git show HEAD:a) <(cat a)", "sh -s <<'E'\nnpm test\nE", `grep "\\$(" src/a.ts`, `echo "$(date) and $(git rev-parse HEAD)"`];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+  assert.match(verdict(`echo '${M}' | bash`, pr) as string, /reading its script from a pipe/);
 });
 
 // Mikko, 2026-11-14: the lead may merge test PRs and bug fixes again. Only on a lead_merges repo, only
