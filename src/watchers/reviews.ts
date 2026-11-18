@@ -109,26 +109,43 @@ export function reviewQuery(keys: string[]): string {
   return `query { viewer { login } rateLimit { cost remaining resetAt } ${parts.join(" ")} }`;
 }
 
+// The cursor to read a connection's next page after: null when it has no next page, and false when
+// its page info cannot be followed (CodeRabbit on superfactory#128): a next page with no cursor (an
+// empty `after` reads page one again), or a cursor already read (the same page forever).
+function nextCursor(info: Page<unknown>["pageInfo"] | undefined, seen: Set<string>): string | null | false {
+  if (!info?.hasNextPage) return null;
+  const at = info.endCursor;
+  if (typeof at !== "string" || !at || seen.has(at)) return false;
+  seen.add(at);
+  return at;
+}
+
 // The rest of a PR's connections past their first page, and of each thread's comments past its
-// first, read into node. False when a page cannot be read: then nothing of the PR is taken as read.
+// first, read into node. False when a page cannot be read, or its page info does not move on: then
+// nothing of the PR is taken as read.
 function readRest(key: string, node: PrNode, query: (q: string) => Record<string, unknown> | undefined): boolean {
   const [repo, n] = key.split("#") as [string, string];
   const [, owner, name] = repo.match(OWNER_REPO) as [string, string, string];
   for (const c of Object.keys(CONNECTIONS) as Conn[]) {
     const conn = node[c] as Page<unknown>;
-    while (conn.pageInfo?.hasNextPage) {
-      const d = query(`query { repository(owner: "${owner}", name: "${name}") { pullRequest(number: ${n}) { ${connection(c, conn.pageInfo.endCursor ?? "")} } } }`);
+    const seen = new Set<string>();
+    for (let at = nextCursor(conn.pageInfo, seen); at !== null; at = nextCursor(conn.pageInfo, seen)) {
+      if (at === false) return false;
+      const d = query(`query { repository(owner: "${owner}", name: "${name}") { pullRequest(number: ${n}) { ${connection(c, at)} } } }`);
       const next = ((d?.repository as Record<string, unknown> | undefined)?.pullRequest as Record<string, Page<unknown>> | undefined)?.[c];
-      if (!next || !Array.isArray(next.nodes)) return false;
+      // a fetched page without its page info cannot say the connection is complete
+      if (!next || !Array.isArray(next.nodes) || !next.pageInfo) return false;
       conn.nodes.push(...next.nodes);
       conn.pageInfo = next.pageInfo;
     }
   }
   for (const t of node.reviewThreads.nodes) {
-    while (t.comments.pageInfo?.hasNextPage) {
-      const d = query(`query { node(id: "${t.id}") { ... on PullRequestReviewThread { ${THREAD_COMMENTS(t.comments.pageInfo.endCursor ?? "")} } } }`);
+    const seen = new Set<string>();
+    for (let at = nextCursor(t.comments.pageInfo, seen); at !== null; at = nextCursor(t.comments.pageInfo, seen)) {
+      if (at === false) return false;
+      const d = query(`query { node(id: "${t.id}") { ... on PullRequestReviewThread { ${THREAD_COMMENTS(at)} } } }`);
       const next = (d?.node as { comments?: Page<Comment> } | undefined)?.comments;
-      if (!next || !Array.isArray(next.nodes)) return false;
+      if (!next || !Array.isArray(next.nodes) || !next.pageInfo) return false;
       t.comments.nodes.push(...next.nodes);
       t.comments.pageInfo = next.pageInfo;
     }

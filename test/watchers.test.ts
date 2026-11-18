@@ -801,6 +801,59 @@ test("the review watcher does not count a read with GraphQL errors or a failed e
   assert.match(notes()[0] ?? "", /"Second\." \[comment 2\]/, "the next clean read tells it");
 });
 
+// CodeRabbit on superfactory#128 (KJKF): readRest followed hasNextPage without checking the cursor
+// moved. The same endCursor again read the same page forever; a null one sent `after: ""`, which reads
+// page one forever; a page with no pageInfo ended the read as if the connection were complete. Each
+// now leaves the PR unread with its cursor kept, after no more calls than the pages it could follow.
+// The fake gh errors after a few repeats, so a regression fails on the call count rather than hangs.
+test("the review watcher does not follow a page cursor that does not move on", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  assert.equal(factory(ws, ["state", "WEB-2", "queued", "--title", "Fix login"]).status, 0);
+  const file = join(ws, "state", "WEB-2.json");
+  const pr7 = { repo: "acme/web", number: 7 };
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
+  const at = (min: number) => new Date(Date.parse("2026-11-17T10:00:00Z") + min * 60_000).toISOString();
+  const c = (databaseId: number, min: number, body: string) => ({ databaseId, createdAt: at(min), publishedAt: at(min), body, author: { login: "sam", __typename: "User" } });
+  const info = (hasNextPage: boolean, endCursor: string | null) => ({ hasNextPage, endCursor });
+  const page = (nodes: object[], pageInfo: object | null = info(false, null)) => ({ ...(pageInfo ? { pageInfo } : {}), nodes });
+  const thread = (comments: object) => ({ id: "PRRT_1", isResolved: true, path: "a.ts", line: 1, originalLine: 1, comments });
+  const pr = (comments: object, threads: object[] = []) => ({ url: "https://github.com/acme/web/pull/7", reviews: page([]), reviewThreads: page(threads), comments });
+  const answer = (p: object) => ({ stdout: { data: { viewer: { login: "alex-gh" }, r0: { p7: p } } } });
+  const more = (comments: object) => ({ stdout: { data: { repository: { pullRequest: { comments } } } } });
+  const moreThread = (comments: object) => ({ stdout: { data: { node: { comments } } } });
+  const stop = { status: 1, stderr: "fake gh: too many calls" };
+  const routes = (...a: object[]) => ({ "pr list": { stdout: [] }, "api graphql": a });
+  const graphqlCalls = () => readFileSync(join(ws, "gh.log"), "utf8").split("\n").filter((l) => l.includes('"graphql"')).length;
+  const state = () => readFileSync(join(ws, "state", "reviews.state"), "utf8");
+
+  assert.equal(run(["watch", "reviews"], [], routes(answer(pr(page([c(1, 0, "First.")]))))).status, 0);
+  const before = state();
+  const same = page([c(2, 1, "Second.")], info(true, "C1"));
+  const cases: [string, object[], number][] = [
+    ["the same cursor again", [answer(pr(page([c(1, 0, "First.")], info(true, "C1")))), more(same), more(same), more(same), stop], 2],
+    ["a next page with a null cursor, on the first page", [answer(pr(page([c(1, 0, "First.")], info(true, null)))), more(same), more(same), stop], 1],
+    ["a next page with a null cursor, on a later page", [answer(pr(page([c(1, 0, "First.")], info(true, "C1")))), more(page([c(2, 1, "Second.")], info(true, null))), more(same), more(same), stop], 2],
+    ["a later page with no pageInfo", [answer(pr(page([c(1, 0, "First.")], info(true, "C1")))), more(page([c(2, 1, "Second.")], null)), stop], 2],
+    ["a thread's comments with the same cursor again", [answer(pr(page([c(1, 0, "First.")]), [thread(page([c(9, 0, "T.")], info(true, "TC1")))])), moreThread(page([c(10, 1, "T2.")], info(true, "TC1"))), moreThread(page([], info(true, "TC1"))), stop], 2],
+    ["a thread's comments with a null cursor", [answer(pr(page([c(1, 0, "First.")]), [thread(page([c(9, 0, "T.")], info(true, null)))])), moreThread(page([])), stop], 1],
+  ];
+  for (const [name, replies, calls] of cases) {
+    rmSync(join(ws, "routes.json.counts"), { force: true });
+    const r = run(["watch", "reviews"], [], routes(...replies));
+    assert.equal(r.status, 1, `${name}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /reviews: partial/, name);
+    assert.equal(graphqlCalls(), calls, `${name}: no page read twice`);
+    assert.equal(notes().length, 0, `${name}: nothing told`);
+    assert.equal(state(), before, `${name}: the cursor is kept`);
+  }
+  // A cursor that moves on is still followed to the end.
+  rmSync(join(ws, "routes.json.counts"), { force: true });
+  const r = run(["watch", "reviews"], [], routes(answer(pr(page([c(1, 0, "First.")], info(true, "C1")))), more(page([c(2, 1, "Second.")], info(true, "C2"))), more(page([c(3, 2, "Third.")])), stop));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(graphqlCalls(), 3);
+  assert.match(notes()[0] ?? "", /"Second\." \[comment 2\][\s\S]*"Third\." \[comment 3\]/);
+});
+
 // CodeRabbit on #119, round 4 (R1): a repo the token cannot read (moved, deleted, access lost) made
 // every poll unreadable for every PR. Now its PRs wait, named with GitHub's error, and the rest are read.
 test("the review watcher reads the other repos when one cannot be read, and names it", () => {
