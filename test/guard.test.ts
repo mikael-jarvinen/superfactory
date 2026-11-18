@@ -1220,6 +1220,13 @@ const ROUND_128: [string, string, string][] = [
   [OK, "a $N comments path with a marked body", `gh api "repos/acme/api/issues/$N/comments" -f body='> Written by agent. ok'`],
   [OK, "a $R PR edit", `gh api -X PATCH "repos/$R/pulls/5" -f title=x -f body=y`],
   [OK, "a $N read", `gh api "repos/acme/api/issues/$N/comments"`],
+  // KJIn: gh spelled with quotes, which bash removes before it names the command
+  [NO, `g"h"`, `g"h" pr comment 5 -R acme/api --body hi`],
+  [NO, `'g'h`, `'g'h pr comment 5 -R acme/api --body hi`],
+  [NO, "g\\h", "g\\h pr comment 5 -R acme/api --body hi"],
+  [NO, "g$'h'", "g$'h' pr comment 5 -R acme/api --body hi"],
+  [NO, `g""h behind env`, `env g""h pr comment 5 -R acme/api --body hi`],
+  [OK, `g"h" with a marked body`, `g"h" pr comment 5 -R acme/api --body '> Written by agent. ok'`],
 ];
 
 test("the shapes CodeRabbit found in #128 at 5332c327 are read as bash and gh read them", () => {

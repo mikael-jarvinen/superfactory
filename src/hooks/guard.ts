@@ -2151,7 +2151,7 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
     text = text.slice(0, h.start) + header + "\n" + text.slice(h.end);
   }
   // the comment rule, over the whole line so a cd before a gh is seen (readonly refuses gh writes)
-  if (ctx.policy !== "readonly" && /\bgh\b/.test(cmd)) checkComments(cmd);
+  if (ctx.policy !== "readonly" && namesGh(cmd)) checkComments(cmd);
   // What a pipe carries: in each scope from the line inward, what was printed there since its last cut,
   // up to where the next scope inward opened (a group's stdin is what was piped into it).
   const said: string[] = [];
@@ -2210,6 +2210,11 @@ function commandWords(words: string[]): string[] {
   return [];
 }
 
+// Whether a line may run gh once bash has removed its quotes: g"h", 'g'h, g\h and g$'h' are all gh
+// (CodeRabbit on #128). It only picks the lines the comment rule parses, so it may say yes too often;
+// the rule itself reads the parsed command names.
+export const namesGh = (cmd: string): boolean => /\bgh\b/i.test(cmd.replace(/\$(?=['"])/g, "").replace(/["'\\]/g, ""));
+
 // Only the comment rule, for a session that runs no guard (an assistant) or whose guard leaves gh
 // alone: the marked-comments hook. A gh run as a command is checked, by name or path, behind any
 // wrapper; a shell's -c script and eval's words are checked as a command line.
@@ -2234,7 +2239,7 @@ function checkComments(cmd: string): void {
 // The comment rule alone (superfactory#119, N1): a command that names no gh cannot post through it,
 // and nothing here refuses for any other reason, so the hook never takes a tool away.
 export function commentVerdict(cmd: string): string | null {
-  if (!/\bgh\b/.test(cmd)) return null;
+  if (!namesGh(cmd)) return null;
   try {
     checkComments(cmd);
     return null;
