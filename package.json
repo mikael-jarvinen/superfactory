@@ -15,7 +15,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "rm -rf dist && tsc && cp -R src/board/static dist/src/board/",
+    "build": "rm -rf dist && tsc && cp -R src/board/static dist/src/board/ && chmod +x dist/src/cli.js",
     "prepare": "npm run build",
     "test": "npm run build && node --test 'dist/test/*.test.js'"
   },
