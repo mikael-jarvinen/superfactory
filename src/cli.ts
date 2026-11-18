@@ -328,7 +328,12 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (t.alive(s)) {
     const on = basename((s.cwd ?? "").replace(/\/+$/, ""));
     if (on === ticket && !force) {
-      if (loadRec(ws, ticket)?.state !== "fixing")
+      // An item taken off the board while its session ran goes back on as building, as a fresh
+      // dispatch would put it; off the board it can go nowhere else (CodeRabbit on #129).
+      const cur = loadRec(ws, ticket)?.state ?? null;
+      if (cur === null)
+        transition(ws, ticket, "building", { agent: name, stack, worktree: s.cwd, evidence: `back on the board on the live session ${s.id}, context kept` });
+      else if (cur !== "fixing")
         transition(ws, ticket, "fixing", { agent: name, evidence: `fix round sent to the live session ${s.id}, context kept` });
       console.log(`${name} is still on ${ticket} (${s.id}), so it keeps its context.`);
       const noSlot = ag.host ? null : slotless(ws, stack, ticket, s.cwd ?? "");

@@ -510,6 +510,14 @@ role = "designer"
   assert.match(r.stdout, /bea is still on TEST-30 .*so it keeps its context/);
   assert.equal(rec("TEST-30").title, "Rename the export, round two", "--title on the live session's round");
   assert.equal(factory(ws, ["state", "TEST-30", "blocked", "--evidence", "parked for the next case"]).status, 0);
+  // taken off the board with its session left running, it goes back on as building, not fixing,
+  // which off the board cannot reach (CodeRabbit on #129)
+  assert.equal(factory(ws, ["state", "TEST-30", "off"]).status, 0);
+  r = factory(ws, ["dispatch", "bea", "TEST-30"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /bea is still on TEST-30 .*so it keeps its context/);
+  assert.equal(rec("TEST-30").state, "building");
+  assert.equal((JSON.parse(readFileSync(join(ws, "state", "TEST-30.json"), "utf8")) as { worktree: string }).worktree, wt);
 
   r = factory(ws, ["dispatch", "dee", "TEST-31"]);
   assert.equal(r.status, 0, r.stderr);
