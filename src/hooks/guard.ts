@@ -956,6 +956,15 @@ interface GhArgs {
   bools: Set<string>;
 }
 
+// A boolean given a value (--web=false) is what pflag's ParseBool makes of it, the last one winning;
+// a value it does not parse fails the command, which posts nothing, and is read as off so the body
+// is still checked (CodeRabbit on #128: --web=false stays inline and posts its --body).
+const PFLAG_TRUE = new Set(["1", "t", "T", "true", "TRUE", "True"]);
+function setBool(bools: Set<string>, name: string, value: string | undefined): void {
+  if (value === undefined || PFLAG_TRUE.has(value)) bools.add(name);
+  else bools.delete(name);
+}
+
 export function parseGh(cmd: string, args: string[]): GhArgs {
   const vals = GH_VALUES[cmd] ?? {};
   const bools = GH_BOOLS[cmd] ?? {};
@@ -970,12 +979,17 @@ export function parseGh(cmd: string, args: string[]): GhArgs {
       const eq = a.indexOf("=");
       const name = eq < 0 ? a : a.slice(0, eq);
       if (vals[name]) out.flags.push([vals[name] as string, eq < 0 ? args[++i] ?? "" : a.slice(eq + 1)]);
-      else out.bools.add(bools[name] ?? name.slice(2));
+      else setBool(out.bools, bools[name] ?? name.slice(2), eq < 0 ? undefined : a.slice(eq + 1));
     } else if (a.startsWith("-") && a.length > 1) {
       for (let j = 1; j < a.length; j++) {
         const f = `-${a[j]}`;
         if (vals[f]) {
           out.flags.push([vals[f] as string, j + 1 < a.length ? a.slice(j + 1) : args[++i] ?? ""]);
+          break;
+        }
+        // -w=false: pflag reads what follows the = as the boolean's value
+        if (a[j + 1] === "=") {
+          setBool(out.bools, bools[f] ?? f.slice(1), a.slice(j + 2));
           break;
         }
         out.bools.add(bools[f] ?? f.slice(1));

@@ -1182,6 +1182,15 @@ const ROUND_128: [string, string, string][] = [
   [OK, "an empty $'' then a marked \"...\"", `gh pr comment 5 -R acme/api --body $''"> Written by agent. x"`],
   [OK, "an empty $'' then a marked $'...'", `gh pr comment 5 -R acme/api --body $''$'> Written by agent. x'`],
   [OK, "a $'...' after a line continuation", "gh pr comment 5 -R acme/api --body $\\\n'> Written by agent. x'"],
+  // KJH3: a boolean's value is read; --web=false and --delete-last=false post the --body inline
+  [NO, "--web=false", "gh pr comment 5 -R acme/api --web=false --body hi"],
+  [NO, "-w=false", "gh pr comment 5 -R acme/api -w=false --body hi"],
+  [NO, "--delete-last=false", "gh pr comment 5 -R acme/api --delete-last=false --body hi"],
+  [NO, "--web then --web=0", "gh issue comment 5 -R acme/api --web --web=0 --body hi"],
+  [NO, "--web=maybe, which gh refuses", "gh pr comment 5 -R acme/api --web=maybe --body hi"],
+  [OK, "--web=true opens the browser", "gh pr comment 5 -R acme/api --web=true --body hi"],
+  [OK, "--web=false then --web", "gh pr comment 5 -R acme/api --web=false --web"],
+  [OK, "--web=false with a marked body", "gh pr comment 5 -R acme/api --web=false --body '> Written by agent. ok'"],
 ];
 
 test("the shapes CodeRabbit found in #128 at 5332c327 are read as bash and gh read them", () => {
