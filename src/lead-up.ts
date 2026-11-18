@@ -18,13 +18,13 @@ import type { Workspace } from "./workspace.js";
 
 export const resumePrompt = (ws: Workspace) => `You were restarted by \`factory up\`. ${armText(ws)}`;
 
-// A fresh launch's argv with `--resume <id>` before the prompt. A resumed session keeps the system
-// prompt it started with, its appendix included, and claude ignores --append-system-prompt-file and
-// --append-system-prompt given on a resume (Otto on Claude Code 2.1.327). So the appendix on this
-// command line does nothing; the current one reaches the session through its SessionStart hook
-// (hooks/appendix.ts), from the file resume() writes first.
-export function resumeArgs(ws: Workspace, agent: Agent, sessionId: string, prompt: string, appendixPath: string | null): string[] {
-  const args = launchArgs(ws, agent, prompt, appendixPath, undefined);
+// A fresh launch's argv with `--resume <id>` before the prompt, and no appendix flag: a resumed
+// session keeps the system prompt it started with, its appendix included, and claude ignores
+// --append-system-prompt-file and --append-system-prompt given on a resume (Otto on Claude Code
+// 2.1.327). The current appendix reaches it through its SessionStart hook (hooks/appendix.ts), from
+// the file resume() writes first.
+export function resumeArgs(ws: Workspace, agent: Agent, sessionId: string, prompt: string): string[] {
+  const args = launchArgs(ws, agent, prompt, null, undefined);
   return [...args.slice(0, -1), "--resume", sessionId, prompt];
 }
 
@@ -79,7 +79,7 @@ function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId:
   try {
     // the resumed session's SessionStart hook hands it this (resumeArgs)
     writeCurrentAppendix(ws.runDir, ld.name, appendix);
-    t.start({ agent: ld, cwd, prompt, appendix, runDir: ws.runDir, phase: undefined, args: (p) => resumeArgs(ws, ld, sessionId, prompt, p), env: { ...process.env, ...GIT_HTTPS_ENV } });
+    t.start({ agent: ld, cwd, prompt, appendix, runDir: ws.runDir, phase: undefined, args: () => resumeArgs(ws, ld, sessionId, prompt), env: { ...process.env, ...GIT_HTTPS_ENV } });
     // the resumed conversation runs under a new id, the one a later stop records (the row it
     // replaced is removed below)
     forgetStopped(ws, ld.name);

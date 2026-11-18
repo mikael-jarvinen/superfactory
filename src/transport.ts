@@ -183,10 +183,10 @@ export const local: Transport = {
   },
   alive: sessionAlive,
   start(req) {
+    // A start with no appendix removes the current copy too, so a later resume is handed none.
     let path: string | null = null;
-    if (req.appendix) {
-      path = appendixFile(req.runDir, req.agent.name, req.appendix);
-    }
+    if (req.appendix) path = appendixFile(req.runDir, req.agent.name, req.appendix);
+    else writeCurrentAppendix(req.runDir, req.agent.name, null);
     const argv = req.args(path);
     const r = scopeCheck(argv, run(...claudeScoped(argv), { cwd: req.cwd, env: claudeEnv(req.env) }, `claude ${argv[0]}`));
     if (r.status !== 0) die(`claude --bg failed: ${r.stderr.trim() || r.stdout.trim()}`);

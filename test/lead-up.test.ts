@@ -160,7 +160,8 @@ test("a lead gets its appendix, in the run dir, whether it is resumed or started
   assert.equal(r.started[0]!.appendix, ADA);
   assert.equal(r.started[0]!.runDir, w.runDir);
   const args = r.started[0]!.args;
-  assert.ok(args.indexOf("--append-system-prompt-file") >= 0 && args.indexOf("--append-system-prompt-file") < args.indexOf("--resume"), args.join(" "));
+  // claude ignores the appendix flags on a resume, so none is given; the hook hands it over
+  assert.ok(args.includes("--resume") && !args.some((a) => a.startsWith("--append-system-prompt")), args.join(" "));
   const f = fake([]);
   bringUpLead(w, a, f.t, true, () => {}, 1);
   assert.equal(f.started[0]!.appendix, ADA);

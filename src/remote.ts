@@ -232,7 +232,6 @@ export function remote(h: Host): Transport {
 
 // ---------------------------------------------------------------- the daemon's side
 
-
 export type Served = { status: number; body: Record<string, unknown> };
 
 const PLAIN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
