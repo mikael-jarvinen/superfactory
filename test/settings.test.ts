@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { closeSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { inboxLock } from "../src/board/inbox.js";
@@ -172,4 +172,39 @@ test("the lead's stop is held once while nothing holds the inbox", () => {
   assert.notEqual(fd, null);
   after(() => closeSync(fd as number));
   assert.equal(stop(false).stdout, "");
+});
+
+// Mikko via Niilo on superfactory#119 (L2): every session's GitHub comments go out under the human's
+// login, so each must carry the marker, not only the guarded lead's and builders'. A template that
+// names marked-comments renders a hook on Bash and the GitHub MCP tools that holds them to it.
+test("a template with marked-comments refuses an unmarked comment and passes a marked one or a trigger", () => {
+  const dir = tempWorkspace(TOML.replace('settings = "builder"', 'settings = "settings/marked.json"'));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "settings"), { recursive: true });
+  writeFileSync(join(dir, "settings", "marked.json"), JSON.stringify({ hooks: ["no-dialogs", "marked-comments"] }));
+  const r = render(dir, "bea");
+  const entry = r.hooks.PreToolUse?.find((e) => / hook marked-comments$/.test(e.hooks[0]?.command ?? ""));
+  assert.ok(entry, "the hook is rendered");
+  const matches = (tool: string) => new RegExp(`^(${entry.matcher})$`).test(tool);
+  for (const t of ["Bash", "mcp__github__add_issue_comment", "mcp__github__add_reply_to_pull_request_comment", "mcp__claude_ai_GitHub__add_issue_comment"])
+    assert.ok(matches(t), t);
+  assert.ok(!matches("Read") && !matches("mcp__claude_ai_Slack__send"), "nothing else");
+  const cmd = entry.hooks[0]?.command as string;
+  const bash = (command: string) => runHook(cmd, { tool_name: "Bash", tool_input: { command } }).status;
+  const mcp = (tool: string, body: string) => runHook(cmd, { tool_name: tool, tool_input: { body } }).status;
+
+  assert.equal(bash("gh pr comment 7 -R acme/web --body '> Written by agent.\n\nFixed in abc1234.'"), 0, "marked passes");
+  assert.equal(bash("gh api repos/acme/web/pulls/7/comments/9/replies -f body='> Written by agent. Fixed'"), 0, "a marked reply passes");
+  assert.equal(bash("gh pr comment 7 --body '@coderabbitai review'"), 0, "a trigger passes");
+  assert.equal(bash("gh pr view 7 --comments"), 0, "a read passes");
+  assert.equal(bash("gh pr comment 7 --body 'Fixed in abc1234.'"), 2, "unmarked is refused");
+  assert.equal(bash("cd /x && gh api repos/acme/web/pulls/7/comments/9/replies -f body=Fixed"), 2, "an unmarked reply is refused");
+  assert.equal(bash("bash -c \"gh issue comment 3 -b hi\""), 2, "inside a shell -c too");
+  assert.equal(bash('gh pr comment 7 --body "$(cat note.md)"'), 2, "an unchecked body is refused");
+
+  assert.equal(mcp("mcp__github__add_issue_comment", "> Written by agent.\n\nFixed."), 0, "marked passes");
+  assert.equal(mcp("mcp__github__add_reply_to_pull_request_comment", "@coderabbitai resolve"), 0, "a trigger passes");
+  assert.equal(mcp("mcp__github__add_issue_comment", "Fixed."), 2, "unmarked is refused");
+  assert.equal(mcp("mcp__github__pull_request_review_write", "Looks good to me."), 2, "an unmarked review body is refused");
+  assert.equal(mcp("mcp__github__get_file_contents", "anything"), 0, "a read passes");
 });
