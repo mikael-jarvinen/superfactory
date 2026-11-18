@@ -6,6 +6,7 @@ import { after, test } from "node:test";
 import { inboxLock } from "../src/board/inbox.js";
 import { tryLock } from "../src/tickets/lock.js";
 import { agentOrDie } from "../src/fleet.js";
+import { hook as markedComments } from "../src/hooks/marked-comments.js";
 import { statusFile } from "../src/hooks/status.js";
 import { sessionEnv, settingsFile } from "../src/launch.js";
 import { TEMPLATES_DIR } from "../src/settings.js";
@@ -261,4 +262,14 @@ test("a template with marked-comments refuses an unmarked comment and passes a m
   assert.ok(matches("mcp__claude_ai_github__add_issue_comment") && matches("mcp__claude_ai_Slack__send"));
   assert.equal(mcp("mcp__claude_ai_github__add_issue_comment", "Fixed."), 2, "lowercase github is held too");
   assert.equal(mcp("mcp__claude_ai_Slack__send", "hi"), 0, "another server's tool passes");
+});
+
+// CodeRabbit on superfactory#128 (KJJU): valid JSON that is not an object (null, an array, a number,
+// a string) is not a hook envelope. The hook refuses it with the invalid-input diagnostic, not a throw.
+test("marked-comments refuses valid JSON that is not an object envelope", () => {
+  for (const input of ["null", "[]", "3", '"s"']) {
+    const r = markedComments([], input);
+    assert.equal(r.code, 2, input);
+    assert.match(r.stderr ?? "", /hook input was not the expected JSON/, input);
+  }
 });
