@@ -2163,18 +2163,9 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
   }
   // the comment rule, over the whole line so a cd before a gh is seen (readonly refuses gh writes)
   if (ctx.policy !== "readonly" && namesGh(cmd)) checkComments(cmd);
-  // What a pipe carries: in each scope from the line inward, what was printed there since its last cut,
-  // up to where the next scope inward opened (a group's stdin is what was piped into it).
-  const said: string[] = [];
-  const opened = new Map<number, number>([[0, 0]]);
-  const cut = new Map<number, number>([[0, 0]]);
+  const pipe = pipeTracker();
   for (const simple of simpleCommands(tokenize(text), bodies)) {
-    const path = simple.scope ?? [0];
-    for (const id of simple.cuts ?? []) cut.set(id, said.length);
-    for (const id of path) if (!opened.has(id)) [opened, cut].forEach((m) => m.set(id, said.length));
-    if (simple.piped) simple.upstream = path.flatMap((id, k) => said.slice(cut.get(id) ?? 0, k + 1 < path.length ? opened.get(path[k + 1] as number) : said.length));
-    const printed = printedText(stripPrefixes(simple.words));
-    if (printed !== null) said.push(printed);
+    pipe(simple, printedText(stripPrefixes(simple.words)));
     checkSecrets({ ...simple, words: stripPrefixes(simple.words) });
     if (ctx.policy === "readonly") checkReadonly(simple, ctx);
     else checkProtect(simple, ctx);
@@ -2182,9 +2173,11 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
 }
 
 // The wrappers a command can run behind, and their options that take a value (`sudo -u x`).
+// --replace takes its value only as --replace=R, so it is not here: `xargs --replace bash -c {}` runs
+// bash (Marie on #128).
 const WRAPPER_VALUES: Record<string, string[]> = {
   sudo: ["-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T", "--user", "--group", "--host", "--prompt", "--chdir"],
-  xargs: ["-I", "-n", "-L", "-P", "-d", "-E", "-s", "-a", "--max-args", "--max-lines", "--max-procs", "--delimiter", "--eof", "--max-chars", "--arg-file", "--replace"],
+  xargs: ["-I", "-n", "-L", "-P", "-d", "-E", "-s", "-a", "--max-args", "--max-lines", "--max-procs", "--delimiter", "--eof", "--max-chars", "--arg-file"],
   env: ["-u", "-C", "-S", "--unset", "--chdir", "--split-string"],
   timeout: ["-s", "-k", "--signal", "--kill-after"],
   nice: ["-n", "--adjustment"],
@@ -2240,7 +2233,7 @@ function commandWords(words: string[], via: { name: string; opts: string[] }[] =
       }
       // `command -v gh` and `command -V gh` look a name up and run nothing (Marie on #128)
       if (name === "command" && /^-[pvV]*[vV][pvV]*$/.test(o)) return [];
-      if (opts.includes(o)) i++;
+      if (opts.includes(o)) seen.push(words[i++] as string);
     }
     if (name === "timeout") i++;
     while ((name === "env" || name === "sudo") && assignment(words[i])) i++;
@@ -2248,10 +2241,59 @@ function commandWords(words: string[], via: { name: string; opts: string[] }[] =
   return [];
 }
 
+// What a pipe carries: in each scope from the line inward, what was printed there since its last cut,
+// up to where the next scope inward opened (a group's stdin is what was piped into it). Called on each
+// simple command in order with what it prints; sets a piped one's upstream.
+function pipeTracker(): (simple: Simple, printed: string | null) => void {
+  const said: string[] = [];
+  const opened = new Map<number, number>([[0, 0]]);
+  const cut = new Map<number, number>([[0, 0]]);
+  return (simple, printed) => {
+    const path = simple.scope ?? [0];
+    for (const id of simple.cuts ?? []) cut.set(id, said.length);
+    for (const id of path) if (!opened.has(id)) [opened, cut].forEach((m) => m.set(id, said.length));
+    if (simple.piped) simple.upstream = path.flatMap((id, k) => said.slice(cut.get(id) ?? 0, k + 1 < path.length ? opened.get(path[k + 1] as number) : said.length));
+    if (printed !== null) said.push(printed);
+  };
+}
+
+// What a command's stdin can be, of what the line shows: its heredocs and here-strings, and what echo
+// and printf print earlier in a pipe. Printed text with an escape this cannot read is refused, as
+// what gh or a shell is given from it cannot be checked (printf '\147h pr comment ...' | sh).
+function shownInput(s: Simple, into: string): string[] {
+  const out = [...(s.stdin ?? []), ...(s.piped && !s.redirected0 ? (s.upstream ?? []) : [])];
+  if (out.includes(UNREADABLE)) refuse(`what echo or printf prints into ${into} here cannot be read, so a comment it posts cannot be checked: write the line plainly`);
+  return out;
+}
+
+// xargs's replace string, from the options commandWords read: -I's value (attached or the next word),
+// -i's or --replace's (else {}); null when there is none, and the input is appended.
+function replaceString(opts: string[]): string | null {
+  let r: string | null = null;
+  for (let i = 0; i < opts.length; i++) {
+    const o = opts[i] as string;
+    if (o === "-I") r = opts[++i] ?? "";
+    else if (/^-[^-]/.test(o) && o.includes("I")) {
+      const at = o.indexOf("I");
+      r = o.slice(at + 1) || (opts[++i] ?? "");
+    } else if (/^-i/.test(o)) r = o.slice(2) || "{}";
+    else if (o === "--replace") r = "{}";
+    else if (o.startsWith("--replace=")) r = o.slice("--replace=".length) || "{}";
+  }
+  return r;
+}
+
 // Whether a line may run gh once bash has removed its quotes: g"h", 'g'h, g\h and g$'h' are all gh
 // (CodeRabbit on #128). It only picks the lines the comment rule parses, so it may say yes too often;
 // the rule itself reads the parsed command names. env's -Sgh names it too.
-export const namesGh = (cmd: string): boolean => /(?:\b|-[A-Za-z]*S)gh\b/i.test(cmd.replace(/\$(?=['"])/g, "").replace(/["'\\]/g, ""));
+// A \n or \t that echo or printf prints splits words as well: printf 'a\ngh ...' | sh runs gh (Marie
+// on #128), so each is read both ways. An octal, hex or unicode escape can spell gh itself
+// (printf '\147h ...' | sh), so a line with one is parsed, where printed text it cannot read is
+// refused only on its way into a shell.
+const GH_WORD = /(?:\b|-[A-Za-z]*S)gh\b/i;
+export const namesGh = (cmd: string): boolean =>
+  /\\(?:[0-7]|x[0-9a-f]|[uU][0-9a-f])/i.test(cmd) ||
+  [cmd, cmd.replace(/\\[nt]/g, " ")].some((c) => GH_WORD.test(c.replace(/\$(?=['"])/g, "").replace(/["'\\]/g, "")));
 
 // Only the comment rule, for a session that runs no guard (an assistant) or whose guard leaves gh
 // alone: the marked-comments hook. A gh run as a command is checked, by name or path, behind any
@@ -2267,33 +2309,39 @@ function checkComments(cmd: string): void {
   // a backtick runs its command line: that line is checked here, and the protect policy refuses
   // backticks on its own, so a status line that prints `date` is no refusal here (CodeRabbit on #128)
   for (const body of backtickBodies(text)) if (namesGh(body)) checkComments(body);
-  // what echo and printf print earlier in the line, which a pipe may carry to a shell (over-checks)
-  const printed: string[] = [];
+  // what echo and printf print earlier in a pipe, which it may carry to a shell (pipeTracker)
+  const pipe = pipeTracker();
   for (const s of simpleCommands(tokenize(text), bodies, "pass")) {
     // commandWords, not protect's stripPrefixes: this rule holds sessions that run no protect guard,
     // so an env override or a wrapper is no refusal here (Marie on #128)
     const via: { name: string; opts: string[] }[] = [];
     const words = commandWords(s.words, via);
-    const p = printedText(words);
-    if (p !== null) printed.push(p);
+    pipe(s, printedText(words));
     const name = posix.basename((words[0] ?? "").replace(/^\\/, "")).toLowerCase();
     // xargs runs its command with its input as more arguments (Marie on #128: echo '...' | xargs gh,
     // and | xargs -0 bash -c). A gh or a shell it runs is checked with each text the line shows that
     // input can be. Input the line does not show is refused, except under -I, where it only fills the
-    // {} slots of a command the line shows whole: that command is checked as written.
+    // replace string's slots of a command the line shows whole: that command is checked as written.
+    // Shown input under -I goes into those slots, each line and the whole text, so a -c script made
+    // of it is the script checked (Marie on #128: xargs -I{} sh -c '{}').
     const xargs = via.find((v) => v.name === "xargs");
     if (xargs && (name === "gh" || SHELLS.has(name))) {
-      const inputs = [...(s.stdin ?? []), ...(s.piped && !s.redirected0 ? printed : [])];
-      const replace = xargs.opts.some((o) => /^(-I|-i|--replace)/.test(o));
-      if (!inputs.length && !replace) refuse(`xargs runs ${name} on input this line does not show, so a comment it posts cannot be checked`);
+      const inputs = shownInput(s, name);
+      const slot = replaceString(xargs.opts);
+      if (!inputs.length && slot === null) refuse(`xargs runs ${name} on input this line does not show, so a comment it posts cannot be checked`);
       const q = (w: string) => `'${w.replace(/'/g, "'\\''")}'`;
       const script = SHELLS.has(name) ? shellScript(words.slice(1)) : {};
       for (const input of inputs) {
+        if (slot !== null) {
+          for (const line of new Set([input, ...input.split(/\n|\\n/)]))
+            checkComments(words.map((w) => q(slot ? w.split(slot).join(line.replace(/^[ \t]+/, "")) : w)).join(" "));
+          continue;
+        }
         // a shell whose -c has no script yet takes the input as it (xargs -0 passes it whole)
         if (script.code === "") checkComments(input);
         checkComments(`${words.map(q).join(" ")} ${input}`);
       }
-      if (replace) checkComments(words.map(q).join(" "));
+      if (slot !== null) checkComments(words.map(q).join(" "));
       continue;
     }
     if (name === "gh") checkCommentWrite(words.slice(1));
@@ -2303,7 +2351,7 @@ function checkComments(cmd: string): void {
       // no -c and no script file: the shell runs its stdin, a heredoc or here-string included, which
       // a quoted heredoc's delimiter does not keep from running (CodeRabbit on #128)
       else if (script.file === undefined)
-        for (const input of [...(s.stdin ?? []), ...(s.piped && !s.redirected0 ? printed : [])]) if (namesGh(input)) checkComments(input);
+        for (const input of shownInput(s, name)) if (namesGh(input)) checkComments(input);
     } else if (name === "eval" && words.length > 1) checkComments(words.slice(1).join(" "));
   }
 }
