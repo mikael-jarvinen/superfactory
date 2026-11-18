@@ -31,8 +31,8 @@ import { dirname, join } from 'node:path';
 const OUT = process.env.DEMO_OUT as string;
 if (!OUT) throw new Error('DEMO_OUT is not set: run this through `factory demo`');
 const BASE = process.env.DEMO_BASE_URL ?? 'http://localhost:3000/';
-// `factory demo --before` films into <KEY>-before. For a change only: one spec makes both videos.
-const STATE = OUT.endsWith('-before') ? 'Before' : 'After';
+// `factory demo --before` sets DEMO_BEFORE=1. For a change only: one spec makes both videos.
+const STATE = process.env.DEMO_BEFORE === '1' ? 'Before' : 'After';
 
 // ---------------------------------------------------------------- the camera: no need to edit
 const PACE = Number(process.env.DEMO_PACE ?? 1);

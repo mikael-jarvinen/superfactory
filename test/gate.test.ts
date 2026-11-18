@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { beforeSha } from "../src/gate/demo.js";
+import { beforeSha, demoEnv } from "../src/gate/demo.js";
 import { BEFORE_BEGIN, BEFORE_END, MEDIA_BEGIN, MEDIA_END, STAMP } from "../src/gate/media.js";
 import { proseLines } from "../src/gate/ready.js";
 import { loadRec, saveRec } from "../src/state.js";
@@ -837,6 +837,15 @@ test("demo --before --base-ref accepts a stacked PR's base and still refuses an 
   g("switch", "-q", "--detach", unrelated);
   assert.equal(beforeSha(dir, "lower").sha, undefined, "an unrelated commit is no base");
 
+  // CodeRabbit on #119 (L7): a base branch whose files equal main's is still the base named.
+  g("switch", "-qc", "same", "main");
+  g("commit", "-q", "--allow-empty", "-m", "same files as main");
+  const same = g("rev-parse", "HEAD");
+  g("update-ref", "refs/remotes/origin/same", same);
+  g("switch", "-q", "--detach", "origin/same");
+  assert.equal(beforeSha(dir, "same").sha, same, "--base-ref's head first");
+  assert.equal(beforeSha(dir).sha, g("rev-parse", "origin/main"), "without --base-ref, main as before");
+
   // --base-ref names a branch on origin; a sha or a branch never fetched is refused outright.
   assert.throws(() => beforeSha(dir, lower), /is not a branch on origin/);
   assert.throws(() => beforeSha(dir, "unrelated"), /is not a branch on origin; `git fetch origin unrelated` first/);
@@ -870,4 +879,18 @@ test("pr-media puts a stacked PR's base-stamped demo under Before and refuses ma
   r = media();
   assert.equal(r.status, 1);
   assert.match(r.stderr, /the demo captured ccccccc but the PR head is aaaaaaa and its base \(lower\) is eeeeeee/);
+});
+
+// CodeRabbit on #119 (L8): the spec read Before from DEMO_OUT's "-before" suffix, so a key or a
+// moved output dir could film the wrong label. factory demo says it, and the template reads it.
+test("factory demo tells the spec which film it is by DEMO_BEFORE, and the template reads it", () => {
+  const dir = tempWorkspace(TOML);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const ws = openWorkspace(dir, {});
+  writeFileSync(join(dir, "demo.env"), "DEMO_BEFORE=1\n");
+  assert.equal(demoEnv(ws, "/pw/node_modules/@playwright/test", "/tmp/demo/WEB-1-before", "/s", undefined, true).DEMO_BEFORE, "1");
+  assert.equal(demoEnv(ws, "/pw/node_modules/@playwright/test", "/tmp/demo/WEB-1", "/s", undefined, false).DEMO_BEFORE, undefined, "an after run is never Before");
+  const spec = readFileSync(fileURLToPath(new URL("../../templates/demo.spec.ts", import.meta.url)), "utf8");
+  assert.match(spec, /const STATE = process\.env\.DEMO_BEFORE === '1' \? 'Before' : 'After';/);
+  assert.doesNotMatch(spec, /endsWith\('-before'\)/);
 });
