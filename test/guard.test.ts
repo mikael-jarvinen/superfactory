@@ -592,7 +592,10 @@ test("strings a program runs and lines it schedules are checked as commands", ()
     `echo x > "$(${M})"`, `cat < "$(${M})"`, `echo x 2> "\`${M}\`"`, `echo x >> "$(${M})"`, `cat <<< "$(${M})"`, `cat 0< "$(${M})"`,
     `cat <<E\n$(${M})\nE`, `cat <<E\n\`${M}\`\nE`, `cat <<E > out.md\nrun $(true) then $(${M})\nE`, `bash <<'A' <<'B'\ntrue\nA\n${M}\nB`,
     `bash <<'END-DATA'\n${M}\nEND-DATA`, `bash 3<<'A' <<'B'\ntrue\nA\n${M}\nB`,
-    `{ echo '${M}'; echo true; } | at now`, `if true; then echo '${M}'; fi | at now`, `while true; do echo '${M}'; done | at now`];
+    `{ echo '${M}'; echo true; } | at now`, `if true; then echo '${M}'; fi | at now`, `while true; do echo '${M}'; done | at now`,
+    // the last round (Marie at 15e3b5d3): a partly quoted delimiter, and what a group's stdin carries
+    `bash <<EN'D-DATA'\n${M}\nEND-DATA`, `bash <<\\E\n${M}\nE`, `echo '${M}' | { echo b; cat | at now; }`,
+    `{ echo '${M}'; } | { echo c; cat | at now; }`, `{ echo '${M}'; { echo true; }; } | at now`];
   const allowed = ["tmux new -d 'npm test; echo done'", "docker run img sh -c 'npm test && echo ok'", "tmux new -s w", "tmux attach -t w",
     "crontab -l", "(crontab -l; echo '30 3 * * 1 ~/agents/bin/agent-compact.sh warren') | crontab -",
     "printf '%s\\n' '30 3 * * 1 ~/agents/bin/agent-compact.sh warren' | crontab -", "echo '0 * * * * npm test' | crontab -",
@@ -610,7 +613,12 @@ test("strings a program runs and lines it schedules are checked as commands", ()
     `echo '$'"(USD"`, `echo '$'"(USD)"`, `echo x > "$(true)"`, "echo x > out.txt", `cat <<'E'\n$(${M})\nE`, `cat <<E\n\\$(${M})\nE`,
     "cat <<E > README.md\nrun `npm test`, then $(date)\nE", `cat <<'END-DATA'\na "b\nEND-DATA`, `bash <<'A' <<'B'\necho "x\nA\ntrue\nB`,
     `bash <<'A' < /dev/null\n${M}\nA`, `echo 'unmatched " quote'; echo true | at now`, `echo '${M}' && echo true | at now`,
-    `(echo '${M}'); echo true | at now`];
+    `(echo '${M}'); echo true | at now`,
+    // the last round: a delimiter quoted in part, and a pipeline in a group, loop, if or subshell
+    `cat <<EN'D-DATA'\na "b\nEND-DATA`, `cat <<\\E\na "b\nE`, `cat <<-"E"x\n\ta "b\n\tEx`,
+    `{ echo 'unmatched " quote'; echo true | at now; }`, `( echo 'unmatched " quote'; echo true | at now )`,
+    `if true; then echo 'unmatched " q'; echo true | at now; fi`, `{ echo '${M}' && echo true | at now; }`,
+    `while true; do echo '${M}'; echo true | at now; done`];
   const wrong: string[] = [];
   for (const ctx of [pr, { ...pr, role: "lead" }]) {
     for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);

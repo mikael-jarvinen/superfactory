@@ -263,9 +263,11 @@ interface Simple {
   piped?: boolean;
   // what echo and printf earlier in the line print, which a pipe may carry to it
   upstream?: string[];
-  // the first command of a pipeline outside any group, loop or subshell: nothing printed before it
-  // reaches a pipe after it (CodeRabbit on #124: `echo 'a " b'; echo true | at now`)
-  fresh?: boolean;
+  // the groups, loops, ifs and subshells it is inside, outermost first, each by its own number; 0 is the line
+  scope?: number[];
+  // the scopes a ;, &&, || or & closed a pipeline in just before it: what was printed in such a scope before
+  // it reaches no pipe after it (CodeRabbit on #124: `echo 'a " b'; echo true | at now`, and the same in a { })
+  cuts?: number[];
 }
 
 // Simple commands with the files their redirects write. `2>` arrives as "2" then ">", and the
@@ -282,15 +284,17 @@ function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
   // fd 0's input: the last <, <<, <<< or <> on it is the one the command reads
   let in0: string | null = null;
   let piped = false;
-  let fresh = true;
-  // open groups and compound commands ({ }, if/while/until/for/case/select), for `fresh`
-  let depth = 0;
+  // open groups, compound commands ({ }, if/while/until/for/case/select) and subshells, for `cuts`
+  const scope: number[] = [0];
+  let scopes = 0;
+  let cuts: number[] = [];
+  let substitutions = 0;
   const outer: ({ cur: string[]; writes: string[]; reads: string[]; stdin: string[]; in0: string | null } | null)[] = [];
   const flush = () => {
     if (in0 !== null) stdin.push(in0);
     if (cur.length || writes.length || reads.length || stdin.length) {
-      out.push({ words: cur, writes, reads, stdin, piped, fresh });
-      fresh = false;
+      out.push({ words: cur, writes, reads, stdin, piped, scope: [...scope], cuts });
+      cuts = [];
     }
     [cur, writes, reads, stdin, in0, piped] = [[], [], [], [], null, false];
   };
@@ -300,6 +304,7 @@ function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
     if (k && !k.op && k.t.includes("`")) refuse("backtick command substitution");
   };
   const open = () => {
+    substitutions++;
     outer.push({ cur, writes, reads, stdin, in0 });
     [cur, writes, reads, stdin, in0] = [[], [], [], [], null];
   };
@@ -314,15 +319,21 @@ function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
     } else if (op && t === "(") {
       flush();
       outer.push(null); // a subshell
+      scope.push(++scopes);
     } else if (op && t === ")") {
       flush();
       const o = outer.pop();
-      if (o) ({ cur, writes, reads, stdin, in0 } = o);
+      if (o) {
+        ({ cur, writes, reads, stdin, in0 } = o);
+        substitutions--;
+      } else if (o === null && scope.length > 1) scope.pop();
     } else if (op ? SEPARATORS.has(t) : t === "{" || t === "}") {
       flush();
-      if (!op) depth += t === "{" ? 1 : -1;
+      if (!op && t === "{") scope.push(++scopes);
+      else if (!op && scope.length > 1) scope.pop();
       piped = t === "|" || t === "|&";
-      if (!piped && op && t !== "(" && t !== ")" && depth === 0 && outer.length === 0) fresh = true;
+      // in a substitution the cut is not tracked, and what was printed stays (over-checks)
+      if (!piped && op && substitutions === 0) cuts.push(scope[scope.length - 1] as number);
     } else if (op) {
       // the target is a word too, and a substitution in it runs: `echo x > "$(gh ...)"` (Marie on #124)
       const next = flat[i + 1];
@@ -344,8 +355,8 @@ function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
       i++;
       open();
     } else {
-      if (!cur.length && /^(if|while|until|for|case|select)$/.test(t)) depth++;
-      if (!cur.length && /^(fi|done|esac)$/.test(t)) depth--;
+      if (!cur.length && /^(if|while|until|for|case|select)$/.test(t)) scope.push(++scopes);
+      if (!cur.length && /^(fi|done|esac)$/.test(t) && scope.length > 1) scope.pop();
       cur.push(t);
     }
   }
@@ -1527,11 +1538,34 @@ function checkSecrets({ words: raw, reads }: Simple): void {
 
 // ---------------------------------------------------------------- the hook
 
-// The body starts on the line after the one holding <<DELIM, whatever else is on that line.
-// The delimiter is any word, END-DATA as well as EOF (CodeRabbit on #124); quoted, the body is text,
-// and unquoted, bash runs each $(...) and `...` in it.
-const HEREDOC = /<<-?\s*(['"]?)([^\s'"<>;&|()]+)\1[^\n]*\n([\s\S]*?)\n\2\s*(\n|$)/;
-const HEREDOC_HEAD = /^<<-?\s*(['"]?)[^\s'"<>;&|()]+\1/;
+// The body starts on the line after the one holding <<DELIM, whatever else is on that line, and ends
+// at a line that is the delimiter (after tabs, for <<-). The delimiter is any word, END-DATA as well as
+// EOF, quoted in whole or in part (CodeRabbit on #124: <<EN'D-DATA' ends at END-DATA). With any part
+// quoted the body is text; unquoted, bash runs each $(...) and `...` in it.
+const HEREDOC_OPEN = /(?<!<)<<(-?)[ \t]*((?:[^\s'"<>;&|()\\]|\\.|'[^']*'|"(?:[^"\\]|\\.)*")+)/g;
+interface Heredoc { start: number; head: number; rest: string; body: string; quoted: boolean; end: number }
+function nextHeredoc(text: string, from: number): Heredoc | null {
+  HEREDOC_OPEN.lastIndex = from;
+  for (let m = HEREDOC_OPEN.exec(text); m; m = HEREDOC_OPEN.exec(text)) {
+    const word = m[2] as string;
+    const delim = word.replace(/\\(.)|'([^']*)'|"((?:[^"\\]|\\.)*)"/g, (_, e?: string, sq?: string, dq?: string) =>
+      e ?? sq ?? (dq ?? "").replace(/\\([$`"\\\n])/g, "$1"));
+    const head = m.index + m[0].length;
+    const nl = text.indexOf("\n", head);
+    if (nl < 0) return null;
+    let at = nl + 1;
+    while (at <= text.length) {
+      const eol = text.indexOf("\n", at);
+      const line = text.slice(at, eol < 0 ? text.length : eol);
+      if ((m[1] ? line.replace(/^\t+/, "") : line).trimEnd() === delim)
+        return { start: m.index, head, rest: text.slice(head, nl), body: text.slice(nl + 1, Math.max(nl + 1, at - 1)), quoted: /['"\\]/.test(word), end: eol < 0 ? text.length : eol + 1 };
+      if (eol < 0) break;
+      at = eol + 1;
+    }
+    // no closing line: the lines stay and are read as commands, which over-checks
+  }
+  return null;
+}
 
 // What echo or printf prints, or null for any other command. Only \\n, \\t and \\\\ are read, and
 // only %s, %d and %%: any other escape (\\x67, \\147, \\c) in echo's words or printf's format, or any
@@ -1647,15 +1681,21 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
   // is the stdin of the command that opens it (Marie on #124: `bash < x.sh <<'E' | cat`).
   let text = cmd;
   const bodies: string[] = [];
-  for (let m = HEREDOC.exec(text); m; m = HEREDOC.exec(text)) {
-    const header = (m[0].split("\n", 1)[0] as string).replace(HEREDOC_HEAD, `<< HEREDOC${bodies.push(m[3] as string) - 1}`);
-    if (!m[1]) for (const body of bodySubstitutions(m[3] as string)) checkCommand(body, ctx);
-    text = text.slice(0, m.index) + header + "\n" + text.slice(m.index + m[0].length);
+  for (let h = nextHeredoc(text, 0); h; h = nextHeredoc(text, h.start + 1)) {
+    if (!h.quoted) for (const body of bodySubstitutions(h.body)) checkCommand(body, ctx);
+    const header = `<< HEREDOC${bodies.push(h.body) - 1}${h.rest}`;
+    text = text.slice(0, h.start) + header + "\n" + text.slice(h.end);
   }
+  // What a pipe carries: in each scope from the line inward, what was printed there since its last cut,
+  // up to where the next scope inward opened (a group's stdin is what was piped into it).
   const said: string[] = [];
+  const opened = new Map<number, number>([[0, 0]]);
+  const cut = new Map<number, number>([[0, 0]]);
   for (const simple of simpleCommands(tokenize(text), bodies)) {
-    if (simple.fresh) said.length = 0;
-    if (simple.piped) simple.upstream = [...said];
+    const path = simple.scope ?? [0];
+    for (const id of simple.cuts ?? []) cut.set(id, said.length);
+    for (const id of path) if (!opened.has(id)) [opened, cut].forEach((m) => m.set(id, said.length));
+    if (simple.piped) simple.upstream = path.flatMap((id, k) => said.slice(cut.get(id) ?? 0, k + 1 < path.length ? opened.get(path[k + 1] as number) : said.length));
     const printed = printedText(stripPrefixes(simple.words));
     if (printed !== null) said.push(printed);
     checkSecrets({ ...simple, words: stripPrefixes(simple.words) });
