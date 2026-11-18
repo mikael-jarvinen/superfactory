@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -389,8 +389,6 @@ const COMMENT_SHAPES: [string, string, string][] = [
   [NO, "--input", "gh api repos/o/r/issues/1/comments --input f.json"],
   // GraphQL
   [OK, "a read", "gh api graphql -f query='query { viewer { login } }'"],
-  [OK, "a read from a file", "gh api graphql -F query=@read.graphql"],
-  [OK, "a read from --input", "gh api graphql --input read.json"],
   [OK, "a mutation that posts nothing", "gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: \"T\"}) { clientMutationId } }'"],
   [OK, "a marked literal", ADD(`"${M} ok"`)],
   [OK, "a marked block string", ADD(`"""${M} ok"""`)],
@@ -398,8 +396,6 @@ const COMMENT_SHAPES: [string, string, string][] = [
   [OK, "a trigger $variable", `${REPLY} -f 'b=@coderabbitai resolve'`],
   [OK, "an approval through input", `${SUBMIT} -f 'i[pullRequestReviewId]=R' -f 'i[event]=APPROVE'`],
   [OK, "a marked body in input", `${ADD_IN} -f 'i[subjectId]=X' -f 'i[body]=${M} ok'`],
-  [OK, "a marked mutation from a file", "gh api graphql -F query=@marked.graphql"],
-  [OK, "a marked mutation from --input", "gh api graphql --input marked.json"],
   [NO, "an unmarked literal", ADD('"hi"')],
   [NO, "an unmarked block string", ADD('"""hi"""')],
   [NO, "an unmarked $variable", `${REPLY} -f b=hi`],
@@ -408,43 +404,29 @@ const COMMENT_SHAPES: [string, string, string][] = [
   [NO, "submit, an unmarked body in input", `${SUBMIT} -f 'i[pullRequestReviewId]=R' -f 'i[body]=hi'`],
   [NO, "an input body from a file", `${ADD_IN} -f 'i[subjectId]=X' -F 'i[body]=@note.md'`],
   [NO, "the input as one value", `${ADD_IN} -f 'i={"body":"hi"}'`],
-  [NO, "an unmarked mutation from a file", "gh api graphql -F query=@unmarked.graphql"],
-  [NO, "an unmarked mutation from --input", "gh api graphql --input unmarked.json"],
-  [NO, "a query file that is not there", "gh api graphql -F query=@missing.graphql"],
-  [NO, "a query from stdin", "gh api graphql -F query=@-"],
   [NO, "a query from $(...)", "gh api graphql -f query=\"$(cat <<'EOF'\nmutation{addComment(input:{subjectId:\"x\",body:\"hi\"}){clientMutationId}}\nEOF\n)\""],
   [NO, "a query from a variable", 'gh api graphql -f query="$Q"'],
-  // A query file is read only when the gh is the call's only command: anything else in the call can
-  // move or change the file before gh reads it. Here sub/read.graphql is an unmarked comment while
-  // ./read.graphql is a read (Marie and CodeRabbit, round 4).
-  [OK, "a read from a file, behind timeout", "timeout 30 gh api graphql -F query=@read.graphql"],
-  [OK, "a read from an absolute path", "gh api graphql -F query=@DIR/read.graphql"],
-  [NO, "after cd &&", "cd sub && gh api graphql -F query=@read.graphql"],
-  [NO, "after cd in a subshell", "(cd sub; gh api graphql -F query=@read.graphql)"],
-  [NO, "--input after pushd", "pushd sub; gh api graphql --input read.json"],
-  [NO, "in bash -c", "bash -c 'cd sub && gh api graphql -F query=@read.graphql'"],
-  [NO, "alone in bash -c", "bash -c 'gh api graphql -F query=@read.graphql'"],
-  [NO, "in eval", "eval gh api graphql -F query=@read.graphql"],
-  [NO, "after cd, an absolute path", "cd sub && gh api graphql -F query=@DIR/read.graphql"],
-  [NO, "after cp", "cp sub/read.graphql read.graphql && gh api graphql -F query=@read.graphql"],
-  [NO, "a pipe into it", "cat x | gh api graphql -F query=@read.graphql"],
-  [NO, "beside a background job", "cp sub/read.graphql read.graphql & gh api graphql -F query=@read.graphql"],
-  [NO, "a command after it", "gh api graphql -F query=@read.graphql; cd sub"],
-  [NO, "a redirect", "gh api graphql -F query=@read.graphql > read.graphql"],
-  [NO, "a $(...) in another argument", 'gh api graphql -F query=@read.graphql -f x="$(cp sub/read.graphql read.graphql)"'],
-  [NO, "--input and a $(...) in a field", 'gh api graphql --input read.json -f x="$(cp sub/read.json read.json)"'],
-  [NO, "a $(...) in a header", 'gh api graphql -F query=@read.graphql -H "X: $(cp sub/read.graphql read.graphql)"'],
-  [NO, "an unquoted $(...)", "gh api graphql -F query=@read.graphql -f x=$(cp sub/read.graphql read.graphql)"],
-  [NO, "a backtick in another argument", 'gh api graphql -F query=@read.graphql -f x="`cp sub/read.graphql read.graphql`"'],
-  [NO, "a $(...) in the file name", 'gh api graphql -F query=@"$(echo read.graphql)"'],
-  [NO, "a process substitution", "gh api graphql -F query=@<(cat sub/read.graphql)"],
-  [NO, "a variable file name", "gh api graphql -F query=@$F"],
-  [NO, "a ~ path", "gh api graphql -F query=@~/read.graphql"],
-  [NO, "a glob", "gh api graphql -F query=@read.*"],
-  [OK, "a single-quoted $(...) is text", "gh api graphql -F query=@read.graphql -f x='$(cp sub/read.graphql read.graphql)'"],
-  [NO, "env -C", "env -C sub gh api graphql -F query=@read.graphql"],
-  [NO, "env --chdir=", "env --chdir=sub gh api graphql -F query=@read.graphql"],
-  [NO, "sudo -D", "sudo -D sub gh api graphql -F query=@read.graphql"],
+  // A query or request body from a file is refused, whatever it holds: gh reads it when it runs, and
+  // by then it could be anything (Niilo on R6, after round 4). Variables from files are refused when
+  // the mutation uses them as a body.
+  [NO, "-F query=@f", "gh api graphql -F query=@read.graphql"],
+  [NO, "-f query=@f", "gh api graphql -f query=@read.graphql"],
+  [NO, "--field query=@f", "gh api graphql --field query=@read.graphql"],
+  [NO, "--raw-field=query=@f", "gh api graphql --raw-field=query=@read.graphql"],
+  [NO, "-Fquery=@f", "gh api graphql -Fquery=@read.graphql"],
+  [NO, "-F query=@-", "gh api graphql -F query=@-"],
+  [NO, "an absolute query file", "gh api graphql -F query=@/abs/read.graphql"],
+  [NO, "--input f", "gh api graphql --input read.json"],
+  [NO, "--input=f", "gh api graphql --input=read.json"],
+  [NO, "--input -", "gh api graphql --input -"],
+  [NO, "a body variable from a file", `${REPLY} -F b=@body.txt`],
+  [NO, "an input body from a file, -F i[body]=@f", `${ADD_IN} -f 'i[subjectId]=X' -F 'i[body]=@f'`],
+  [NO, "a file-backed query beside a $(...)", 'gh api graphql -F query=@read.graphql -f x="$(cp a b)"'],
+  [NO, "a file-backed query after cd", "cd sub && gh api graphql -F query=@read.graphql"],
+  [OK, "a marked -F variable", `${REPLY} -F 'b=${M} ok'`],
+  [OK, "an @ inside a marked literal", ADD(`"${M} @someone"`)],
+  [OK, "an @ inside a marked variable", `${REPLY} -f 'b=${M} cc @x'`],
+  [OK, "a read beside a cd", "cd sub && gh api graphql -f query='query { viewer { login } }'"],
   [OK, "after cd, a marked inline comment", `cd sub && gh pr comment 1 -b '${M} ok'`],
   // where gh runs: behind wrappers, in other commands' bodies, by path
   [NO, "sudo", "sudo gh pr comment 1 -b hi"],
@@ -481,36 +463,23 @@ const COMMENT_SHAPES: [string, string, string][] = [
 ];
 
 test("the comment rule: every shape a gh comment takes, refused or allowed", () => {
+  // The file rows run where their files exist and hold only reads, so a refusal is the rule's, not
+  // a missing file's: nothing reads them.
   const dir = mkdtempSync(join(tmpdir(), "comment-rule-"));
-  after(() => rmSync(dir, { recursive: true, force: true }));
-  const unmarked = 'mutation { addComment(input: {subjectId: "X", body: "hi"}) { clientMutationId } }';
-  const marked = `mutation { addComment(input: {subjectId: "X", body: "${M} ok"}) { clientMutationId } }`;
-  writeFileSync(join(dir, "read.graphql"), "query { viewer { login } }");
-  writeFileSync(join(dir, "unmarked.graphql"), unmarked);
-  writeFileSync(join(dir, "marked.graphql"), marked);
-  writeFileSync(join(dir, "read.json"), JSON.stringify({ query: "query { viewer { login } }" }));
-  const reply = "mutation($b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \"T\", body: $b}) { clientMutationId } }";
-  writeFileSync(join(dir, "unmarked.json"), JSON.stringify({ query: reply, variables: { b: "hi" } }));
-  writeFileSync(join(dir, "marked.json"), JSON.stringify({ query: reply, variables: { b: `${M} ok` } }));
-  mkdirSync(join(dir, "sub"));
-  writeFileSync(join(dir, "sub", "read.graphql"), unmarked);
-  writeFileSync(join(dir, "sub", "read.json"), JSON.stringify({ query: reply, variables: { b: "hi" } }));
-  const wrong: string[] = [];
-  for (const [want, name, row] of COMMENT_SHAPES) {
-    const cmd = row.replace("@DIR/", `@${dir}/`);
-    const hook = commentVerdict(cmd, dir);
-    if ((hook === null ? OK : NO) !== want) wrong.push(`hook ${want === OK ? "refused" : "allowed"} ${name}: ${cmd}${hook ? ` (${hook})` : ""}`);
-    // The protect guard runs the same rule on a gh it runs; its own policy may refuse more, so it is
-    // held only to refusing what the rule refuses.
-    if (want === NO && /^gh /.test(cmd) && !/@|--input/.test(cmd) && verdict(cmd, pr) === null) wrong.push(`protect allowed ${name}: ${cmd}`);
-  }
-  // The protect guard reads files from its own process's directory: run it from the table's.
   const here = process.cwd();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "read.graphql"), "query { viewer { login } }");
+  writeFileSync(join(dir, "read.json"), JSON.stringify({ query: "query { viewer { login } }" }));
   process.chdir(dir);
+  const wrong: string[] = [];
   try {
-    assert.equal(verdict("gh api graphql -F query=@read.graphql", pr), null);
-    for (const c of ["cd sub && gh api graphql -F query=@read.graphql", "env -C sub gh api graphql --input read.json"])
-      if (verdict(c, pr) === null) wrong.push(`protect allowed: ${c}`);
+    for (const [want, name, cmd] of COMMENT_SHAPES) {
+      const hook = commentVerdict(cmd);
+      if ((hook === null ? OK : NO) !== want) wrong.push(`hook ${want === OK ? "refused" : "allowed"} ${name}: ${cmd}${hook ? ` (${hook})` : ""}`);
+      // The protect guard runs the same rule over the line; its own policy may refuse more, so it is
+      // held only to refusing what the rule refuses.
+      if (want === NO && /^gh /.test(cmd) && verdict(cmd, pr) === null) wrong.push(`protect allowed ${name}: ${cmd}`);
+    }
   } finally {
     process.chdir(here);
   }

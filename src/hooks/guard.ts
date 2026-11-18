@@ -22,7 +22,6 @@
 // newline before the command, `git -c x=y push origin main`, `git push origin CL-1:main`,
 // `--mirror`, `find -delete`, `python3 -c "open(...,'w')"`). An allowlist of shapes can be read and
 // audited; test/guard.test.ts is the contract.
-import { readFileSync } from "node:fs";
 import { posix } from "node:path";
 import { parseArgs } from "node:util";
 import { allowClosePath, closable } from "../allow-close.js";
@@ -646,20 +645,9 @@ interface Vars {
   bodies(name: string): string[] | null; // null: not given, or not checkable
 }
 
-// The file is read now and gh reads it later, so what the hook reads is what gh posts only when
-// nothing else in the call runs: no other command before, beside or around it (a cd, a cp, a pipe,
-// a background job, sh -c or eval), no redirect, and no wrapper that moves it (env -C, sudo -D).
-// cwd is null otherwise, and the file is not read (CodeRabbit and Marie on #119, round 4).
-function readGhFile(ref: string, cwd: string | null): string {
-  if (ref === "-") refuse(`a GraphQL query from stdin cannot be checked: put it in the command, or in a file named with -F query=@file`);
-  if (cwd === null)
-    refuse(`${ref} is checked for a comment only when gh runs on its own: run this gh as the only command in the call (no cd, pipe, redirect or other command), or put the query inline`);
-  try {
-    return readFileSync(posix.resolve(cwd as string, ref), "utf8");
-  } catch {
-    return refuse(`cannot read ${ref} to check it for a comment: put the query in the command`);
-  }
-}
+// A query from a file is read by gh when it runs, and could be anything by then, so it is not read
+// here: a file-backed query or request body is refused (Niilo on #119 R6, after round 4).
+const QUERY_FILE = "a GraphQL query from a file (query=@file, --input) cannot be checked for a comment: put the query inline";
 
 function collectBodies(v: unknown, out: string[]): boolean {
   if (Array.isArray(v)) return v.every((x) => collectBodies(x, out));
@@ -697,33 +685,16 @@ function checkQuery(q: string, vars: Vars): void {
   }
 }
 
-function checkGraphql(p: GhArgs, cwd: string | null): void {
-  const input = last(p, "input");
-  if (input !== undefined) {
-    // the request body, {query, variables}: read as gh will send it
-    let j: { query?: unknown; variables?: Record<string, unknown> };
-    try {
-      j = JSON.parse(readGhFile(input, cwd)) as typeof j;
-    } catch (e) {
-      if (e instanceof Refused) throw e;
-      return refuse(`${input} is not the JSON gh sends: put the query in the command`);
-    }
-    const vs = j.variables ?? {};
-    return checkQuery(typeof j.query === "string" ? j.query : "", {
-      value: (n) => (typeof vs[n] === "string" ? vs[n] as string : undefined),
-      bodies: (n) => {
-        const out: string[] = [];
-        return n in vs && collectBodies(vs[n], out) ? out : null;
-      },
-    });
-  }
+function checkGraphql(p: GhArgs): void {
+  if (last(p, "input") !== undefined) refuse(QUERY_FILE);
   const fields = fieldsOf(p);
   const qf = fields.filter((f) => f.key === "query").at(-1);
   if (!qf) return;
-  let q = qf.value;
-  if (fromFile(qf)) q = readGhFile(q.slice(1), cwd);
+  const q = qf.value;
+  // -f query=@f is sent as the text "@f", but it reads as a file to whoever wrote it: refused alike
+  if (q.startsWith("@")) refuse(QUERY_FILE);
   // a query the shell builds ($(...), `...`, $VAR) is not what this check sees
-  else if (/\$\(|`/.test(q) || /^\s*\$\w/.test(q)) refuse(`a GraphQL query built by the shell cannot be checked: write it out in the command, or in a file named with -F query=@file`);
+  if (/\$\(|`/.test(q) || /^\s*\$\w/.test(q)) refuse(`a GraphQL query built by the shell cannot be checked: put the query inline`);
   const named = (n: string) => fields.filter((f) => f.key === n || f.key.startsWith(`${n}[`));
   checkQuery(q, {
     value: (n) => {
@@ -739,7 +710,7 @@ function checkGraphql(p: GhArgs, cwd: string | null): void {
   });
 }
 
-function checkCommentWrite(args: string[], cwd: string | null): void {
+function checkCommentWrite(args: string[]): void {
   const [g, sub] = args;
   if ((g === "pr" || g === "issue") && sub) {
     const cmd = `${g} ${sub}`;
@@ -764,7 +735,7 @@ function checkCommentWrite(args: string[], cwd: string | null): void {
   if (g !== "api") return;
   const p = parseGh("api", args.slice(1));
   const endpoint = p.pos[0] ?? "";
-  if (endpoint === "graphql") return checkGraphql(p, cwd);
+  if (endpoint === "graphql") return checkGraphql(p);
   const fields = fieldsOf(p);
   const method = (last(p, "method") ?? (fields.length || last(p, "input") !== undefined ? "POST" : "GET")).toUpperCase();
   if (method === "GET" || method === "DELETE" || !COMMENT_PATHS.test(endpoint)) return;
@@ -1066,7 +1037,7 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
   for (let m = HEREDOC.exec(text); m; m = HEREDOC.exec(text))
     text = text.slice(0, m.index) + (m[0].split("\n", 1)[0] as string) + " HEREDOC\n" + text.slice(m.index + m[0].length);
   // the comment rule, over the whole line so a cd before a gh is seen (readonly refuses gh writes)
-  if (ctx.policy !== "readonly" && /\bgh\b/.test(cmd)) checkComments(cmd, process.cwd());
+  if (ctx.policy !== "readonly" && /\bgh\b/.test(cmd)) checkComments(cmd);
   for (const s of simpleCommands(tokenize(text))) {
     const simple = { ...s, words: s.words.filter((w) => w !== "HEREDOC") };
     checkSecrets({ ...simple, words: stripPrefixes(simple.words) });
@@ -1116,56 +1087,27 @@ function commandWords(words: string[]): string[] {
 // Only the comment rule, for a session that runs no guard (an assistant) or whose guard leaves gh
 // alone: the marked-comments hook. A gh run as a command is checked, by name or path, behind any
 // wrapper; a shell's -c script and eval's words are checked as a command line.
-// Whether the line runs a command substitution ($(...), `...`, <(...), >(...)) the shell starts
-// before the command it is in. Only single quotes make it literal; a backslash escapes outside them.
-function substitutes(line: string): boolean {
-  let single = false;
-  let double = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i] as string;
-    const two = line.slice(i, i + 2);
-    if (single) {
-      if (c === "'") single = false;
-    } else if (c === "\\") i++;
-    else if (c === "'" && !double) single = true;
-    else if (c === '"') double = !double;
-    else if (c === "`" || two === "$(" || (!double && (two === "<(" || two === ">("))) return true;
-  }
-  return false;
-}
-
-// A wrapper that runs its command in another directory: env -C dir, sudo -D dir.
-const RUNS_ELSEWHERE = /^(-[A-Za-z]*[CD]|--chdir(=|$))/;
-function movedByWrapper(raw: string[], words: string[]): boolean {
-  const at = raw.length - words.length; // the wrapper words before the command
-  return raw.slice(0, at).some((w, i) => RUNS_ELSEWHERE.test(w) && raw.slice(0, i).some((x) => ["env", "sudo"].includes(posix.basename(x))));
-}
-
-function checkComments(cmd: string, cwd: string, nested = false): void {
+function checkComments(cmd: string): void {
   let text = cmd;
   for (let m = HEREDOC.exec(text); m; m = HEREDOC.exec(text))
     text = text.slice(0, m.index) + (m[0].split("\n", 1)[0] as string) + " HEREDOC\n" + text.slice(m.index + m[0].length);
-  const simples = simpleCommands(tokenize(text));
-  // a substitution in any argument runs before gh, so it is another command (Marie, round 4)
-  const alone = !nested && simples.length === 1 && !simples[0]?.writes.length && !simples[0]?.reads.length && !substitutes(text);
-  for (const s of simples) {
-    const raw = s.words.filter((w) => w !== "HEREDOC");
-    const words = commandWords(raw);
+  for (const s of simpleCommands(tokenize(text))) {
+    const words = commandWords(s.words.filter((w) => w !== "HEREDOC"));
     const name = posix.basename((words[0] ?? "").replace(/^\\/, "")).toLowerCase();
-    if (name === "gh") checkCommentWrite(words.slice(1), alone && !movedByWrapper(raw, words) ? cwd : null);
+    if (name === "gh") checkCommentWrite(words.slice(1));
     else if (SHELLS.has(name)) {
       const i = words.findIndex((x, j) => j > 0 && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x));
-      if (i > 0 && words[i + 1] !== undefined) checkComments(words[i + 1] as string, cwd, true);
-    } else if (name === "eval" && words.length > 1) checkComments(words.slice(1).join(" "), cwd, true);
+      if (i > 0 && words[i + 1] !== undefined) checkComments(words[i + 1] as string);
+    } else if (name === "eval" && words.length > 1) checkComments(words.slice(1).join(" "));
   }
 }
 
 // The comment rule alone (superfactory#119, N1): a command that names no gh cannot post through it,
 // and nothing here refuses for any other reason, so the hook never takes a tool away.
-export function commentVerdict(cmd: string, cwd = process.cwd()): string | null {
+export function commentVerdict(cmd: string): string | null {
   if (!/\bgh\b/.test(cmd)) return null;
   try {
-    checkComments(cmd, cwd);
+    checkComments(cmd);
     return null;
   } catch (e) {
     return e instanceof Refused ? e.message : `the comment check failed (${(e as Error).message})`;
