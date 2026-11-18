@@ -125,7 +125,7 @@ The lead:
 | `factory dispatch <agent> <KEY>` | Start a builder on a work item, in a worktree of its own. A builder whose item is in review is free: its session is stopped here, with the checks `stop` makes. |
 | `factory stop <agent>` | Stop a teammate. Refuses when work is uncommitted or unpushed. |
 | `factory review` | Start the first free reviewer. |
-| `factory state <KEY> <new-state>` | Move a work item. `factory state --list` shows every open one. |
+| `factory state <KEY> <new-state>` | Move a work item. `factory state --list` shows every open one. Work nobody is doing yet waits in the tracker's backlog, not on the board, and a dispatch brings it on. LOCAL- work, with no backlog to wait in, is recorded off the board with `factory state <KEY> off --title "<what it is>"`, and `factory state --off` lists it. |
 | `factory drop <LOCAL-key>` | Delete a local work item's record. |
 | `factory say "<text>"` | Post to the message page. |
 | `factory board --inbox` | Follow the message page, for a monitor in the lead's session. |
