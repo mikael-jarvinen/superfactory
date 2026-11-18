@@ -609,3 +609,36 @@ role = "designer"
   assert.match(r.stdout, /the last round: canvas https:\/\/claude\.ai\/artifact\/c1 slides https:\/\/claude\.ai\/artifact\/s1/);
   assert.equal(JSON.parse(readFileSync(join(ws, "state", "TEST-21.json"), "utf8")).state, "designing");
 });
+
+// CodeRabbit on #129 at 5b7ae81f: a builder with several repos and no stack, kept on its live
+// session by a dispatch without --repo, keeps the stack of the repo its worktree is in, not the
+// default repo's.
+test("a dispatch kept on the live session keeps its worktree's stack, not the default repo's", () => {
+  const { ws, put } = fakeFleet(TOML + `
+[[agents]]
+name = "kit"
+role = "builder"
+repos = ["web", "api"]
+`);
+  for (const name of ["web", "api"]) {
+    const dir = join(ws, "repos", name), origin = join(ws, `${name}-origin.git`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "README"), name);
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+    for (const a of [["init", "-q", "-b", "main"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
+      ["remote", "add", "origin", origin], ["push", "-q", "origin", "main"]])
+      execFileSync("git", ["-C", dir, ...a]);
+  }
+  const rec = () => JSON.parse(readFileSync(join(ws, "state", "TEST-40.json"), "utf8")) as { state: string; stack: string | null; worktree: string };
+  let r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "api", "--title", "On the api"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(rec().stack, "api");
+  const wt = rec().worktree;
+  put("live.json", [sess("new1", "kit", { state: "idle", cwd: wt })]);
+  // off the board with its session running, then back on by a dispatch that names no repo
+  assert.equal(factory(ws, ["state", "TEST-40", "off"]).status, 0);
+  r = factory(ws, ["dispatch", "kit", "TEST-40"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /kit is still on TEST-40 .*so it keeps its context/);
+  assert.deepEqual([rec().state, rec().stack, rec().worktree], ["building", "api", wt], "api's stack, where the worktree is; not web's, the default");
+});

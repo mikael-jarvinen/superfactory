@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { worktreePath } from "./worktree.js";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
@@ -330,13 +331,18 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
     if (on === ticket && !force) {
       // An item taken off the board while its session ran goes back on as building, as a fresh
       // dispatch would put it; off the board it can go nowhere else (CodeRabbit on #129).
-      const cur = loadRec(ws, ticket)?.state ?? null;
+      const kept = loadRec(ws, ticket);
+      const cur = kept?.state ?? null;
+      // The stack is the kept worktree's: the repo it is in, else what the record has. The repo this
+      // dispatch defaults to can be another (CodeRabbit on #129).
+      const at = (s.cwd ?? "").replace(/\/+$/, "");
+      const keptStack = ag.stack ?? allowed.find((k) => worktreePath(ws.config.repos[k]!.path, ticket) === at) ?? kept?.stack ?? stack;
       if (cur === null)
-        transition(ws, ticket, "building", { agent: name, stack, worktree: s.cwd, evidence: `back on the board on the live session ${s.id}, context kept` });
+        transition(ws, ticket, "building", { agent: name, stack: keptStack, worktree: s.cwd, evidence: `back on the board on the live session ${s.id}, context kept` });
       else if (cur !== "fixing")
         transition(ws, ticket, "fixing", { agent: name, evidence: `fix round sent to the live session ${s.id}, context kept` });
       console.log(`${name} is still on ${ticket} (${s.id}), so it keeps its context.`);
-      const noSlot = ag.host ? null : slotless(ws, stack, ticket, s.cwd ?? "");
+      const noSlot = ag.host ? null : slotless(ws, keptStack, ticket, s.cwd ?? "");
       if (noSlot) console.log(`  warning: ${noSlot}\n  Put that in the fix brief.`);
       console.log(`  next: SendMessage the fix brief to ${name}; no new session was started`);
       // the session kept is no reason to drop a --title (CodeRabbit on #129)
