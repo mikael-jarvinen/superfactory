@@ -25,14 +25,14 @@
 //
 // Its limit: the guard checks the commands it can parse, through exec wrappers (env, nice, timeout,
 // find -exec, ssh <host> ...) and a shell reading its script from a heredoc or a here-string. Code it
-// cannot read is outside it: python/node/perl/ruby -c or -e, make, npm scripts, a script file. It
-// stops habits and mistakes, not a session set on getting around it.
+// cannot read is outside it: python/node/perl/ruby -c or -e, an editor's command (vi -c '!...'),
+// make, npm scripts, a script file. It stops habits and mistakes, not a session set on getting
+// around it.
 //
-// A command word is read by its shape, an allowlist (commandWord): a bare name; an absolute or ~/
-// path, read as its basename when it resolves into a system bin dir; a relative path with no ..,
-// a project script unless it resolves there. Any other word (a glob, a brace, ~+, a variable) is
-// refused.
-import { realpathSync } from "node:fs";
+// A command word is read by its shape, an allowlist (commandWord): a bare name, an absolute or ~/
+// path, or a relative path with no `..`. Any other word (a glob, a brace, ~+, a variable) is
+// refused. The program is then named by the file that runs: PATH, then realpath, then basename.
+import { accessSync, constants as fsConstants, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { posix } from "node:path";
 import { parseArgs } from "node:util";
@@ -1043,38 +1043,100 @@ function sshCommand(args: string[]): string {
 }
 
 // The command word, read by its shape: an allowlist, applied to every command word including the
-// one after a wrapper (Marie and Niilo on #124, round 8). Returns the words to check with a bare name
-// first, or [] for a project script, which runs. Every other shape is refused.
-//  1. A bare name, [A-Za-z0-9._+:-], run from PATH: itself.
-//  2. An absolute path, or one under ~/, $HOME/ or ${HOME}/ (unless the line names HOME otherwise):
-//     its basename when its directory resolves to a system bin dir or the basename is one the guard
-//     checks wherever it lives (gh, git, ssh, find, the shells); otherwise a script.
-//  3. A relative path with no .. segment: the same, resolved from cwd; on a line that changes
-//     directory (cd, pushd, popd, env -C, find -execdir) it cannot be resolved, so it is its basename.
+// one after a wrapper (Marie and Niilo on #124, round 8). Every other shape is refused:
+//  1. A bare name, [A-Za-z0-9._+:-].
+//  2. An absolute path, or one under ~/, $HOME/ or ${HOME}/ (unless the line names HOME otherwise).
+//  3. A relative path with no .. segment.
 // Refused: a glob or brace character, quoted or not ({env,gh,...}, /usr/bin/e?v), any other ~ form
 // (~+, ~-, ~user), a variable, a substitution or a backtick, which the shell expands into anything.
+//
+// Then the program is the file that runs, not its spelling (round 9: rsh and slogin are ssh, rbash
+// is bash, /usr/lib/git-core/git-push is git push): a bare name is looked up on PATH, a path is the
+// file itself, and its realpath's basename names it. gh, git, git-<sub> (as git <sub>), ssh, find and
+// the shells are themselves wherever they live; busybox, which is all of them, is refused. Any other
+// program is itself (env, nice, xargs, ...) when its file resolves into a system bin dir, and
+// otherwise a project script, which runs. A file that is not there is named by its spelling, and a
+// relative path on a line that changes directory (cd, pushd, popd, env -C, find -execdir) cannot be
+// resolved, so it is named by its spelling too. Returns the words to check, or [] for a script.
 const BARE_WORD = /^([\w.+:-]+|\[\[?)$/;
 const CHECKED_ANYWHERE = new Set(["gh", "git", "ssh", "find"]);
+// the programs stripPrefixes reads as wrappers, or refuses
+const WRAPPERS = new Set(["env", "nice", "setsid", "stdbuf", "flock", "timeout", "nohup", ...REFUSED_WRAPPERS]);
+function executable(p: string): boolean {
+  try {
+    accessSync(p, fsConstants.X_OK);
+    return statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+function onPath(name: string): string | null {
+  for (const dir of (process.env.PATH ?? "").split(":")) {
+    const p = posix.join(dir || process.cwd(), name);
+    if (executable(p)) return p;
+  }
+  return null;
+}
+function realFile(p: string): string | null {
+  try {
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+// the words a program name stands for when the guard checks it wherever it lives, or null
+function anywhere(name: string): string[] | null {
+  const n = name.toLowerCase();
+  if (n === "busybox") refuse("busybox runs any of its applets (sh, env, find, xargs, ...), which the guard cannot check: run the program itself");
+  if (/^git-[\w-]+$/.test(n)) return ["git", n.slice(4)];
+  if (CHECKED_ANYWHERE.has(n)) return [n];
+  if (SHELLS.has(name)) return [name];
+  // the other shells, and a versioned or static file of one (ksh93, mksh-static), read as sh
+  return /^(r?ba|da|z|k|mk|lk|tc|c|y|po|a)?sh(\d[\w.]*|-static)?$/.test(n) ? ["sh"] : null;
+}
 function commandWord(words: string[], ctx: GuardContext): string[] {
   for (;;) {
     let w = words[0];
-    if (w === undefined || BARE_WORD.test(w)) return words;
-    const cannot = (why: string) => refuse(`the command '${w}' ${why}, which the guard cannot check: run it by its name or its plain path`);
-    const home = /^\$(?:HOME|\{HOME\})(\/.*)$/.exec(w);
-    if (home) {
-      if (ctx.homeAssigned) cannot("is under a HOME this line sets");
-      w = `~${home[1]}`;
+    if (w === undefined) return words;
+    let file: string | null = null;
+    let trusted: boolean;
+    const bare = BARE_WORD.test(w);
+    if (bare) {
+      const found = onPath(w);
+      file = found && realFile(found);
+      // not on PATH: a builtin, or a program that is not there, named by its spelling
+      trusted = file === null;
+    } else {
+      const cannot = (why: string) => refuse(`the command '${w}' ${why}, which the guard cannot check: run it by its name or its plain path`);
+      const home = /^\$(?:HOME|\{HOME\})(\/.*)$/.exec(w);
+      if (home) {
+        if (ctx.homeAssigned) cannot("is under a HOME this line sets");
+        w = `~${home[1]}`;
+      }
+      if (/[$`]/.test(w)) cannot("runs whatever its variable or substitution holds");
+      if (/[*?[\]{}]/.test(w)) cannot("is a glob or a brace expansion");
+      if (!w.includes("/")) cannot("is not a plain name");
+      if (/^~(?!\/)/.test(w) || w.indexOf("~", 1) >= 0) cannot("uses a ~ form other than ~/");
+      const relative = !w.startsWith("/") && !w.startsWith("~");
+      if (relative && w.split("/").includes("..")) cannot("climbs out of the project with ..");
+      if (relative && ctx.cwdChanged) trusted = true;
+      else {
+        file = realFile(posix.resolve(process.cwd(), w.startsWith("~") ? homedir() + w.slice(1) : w));
+        trusted = file === null && trustedDir(posix.dirname(w));
+      }
     }
-    if (/[$`]/.test(w)) cannot("runs whatever its variable or substitution holds");
-    if (/[*?[\]{}]/.test(w)) cannot("is a glob or a brace expansion");
-    if (!w.includes("/")) cannot("is not a plain name");
-    if (/^~(?!\/)/.test(w) || w.indexOf("~", 1) >= 0) cannot("uses a ~ form other than ~/");
-    const relative = !w.startsWith("/") && !w.startsWith("~");
-    if (relative && w.split("/").includes("..")) cannot("climbs out of the project with ..");
-    const b = posix.basename(w);
-    const own = CHECKED_ANYWHERE.has(b.toLowerCase()) || SHELLS.has(b);
-    if (!own && !(relative && ctx.cwdChanged) && !trustedDir(posix.dirname(w))) return [];
-    words = stripPrefixes([b, ...words.slice(1)]);
+    const spelled = posix.basename(w);
+    if (file !== null) trusted = trustedDir(posix.dirname(file));
+    const real = file === null ? spelled : posix.basename(file);
+    // a system program keeps its spelling unless its file is a wrapper (/tmp/e linked to env is env)
+    // git runs the subcommand its argv[0] names, so a git-push linked to git is git push
+    const sub = real.toLowerCase() === "git" && /^git-[\w-]+$/i.test(spelled);
+    const named = (sub ? anywhere(spelled) : anywhere(real)) ?? anywhere(spelled) ?? (trusted ? [WRAPPERS.has(real) ? real : spelled] : null);
+    if (named === null) return bare ? words : [];
+    const next = stripPrefixes([...named, ...words.slice(1)]);
+    // stripPrefixes took nothing off, so this is the command; otherwise read the one after the wrapper
+    if (next[0] === named[0] && next.length === named.length + words.length - 1) return next;
+    words = next;
   }
 }
 

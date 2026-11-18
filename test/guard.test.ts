@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, test } from "node:test";
 import { allowClosePath } from "../src/allow-close.js";
 import { type GuardContext, hook, mcpVerdict, verdict } from "../src/hooks/guard.js";
@@ -469,6 +471,39 @@ test("stdin by any name, a clustered env flag, every find action and ssh on stdi
     "ssh niilo", "ssh -T niilo <<'E'\nuptime\nE"];
   const wrong: string[] = [];
   for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// The program is the file that runs, not its spelling: rsh is ssh, rbash is bash, git-push is git
+// push (Marie and Niilo on #124, round 9). Links in a temp dir make the rows hold on any box.
+test("a command is named by the file that runs", () => {
+  const M = "gh pr merge 1 -R acme/api";
+  const bin = mkdtempSync(join(tmpdir(), "guard-bin-"));
+  after(() => rmSync(bin, { recursive: true, force: true }));
+  const env = ["/usr/bin/env", "/bin/env"].find(existsSync) as string;
+  const sh = ["/usr/bin/bash", "/bin/bash"].find(existsSync) as string;
+  symlinkSync(env, join(bin, "e"));
+  symlinkSync(sh, join(bin, "r"));
+  symlinkSync(sh, join(bin, "gpush"));
+  mkdirSync(join(bin, "git-core"));
+  writeFileSync(join(bin, "git-core", "git"), "", { mode: 0o755 });
+  symlinkSync("git", join(bin, "git-core", "git-push"));
+  writeFileSync(join(bin, "busybox"), "", { mode: 0o755 });
+  symlinkSync("busybox", join(bin, "static-sh"));
+  const refused = [`${bin}/e ${M}`, `PATH=${bin}:$PATH e ${M}`, `${bin}/r -c '${M}'`, `${bin}/git-core/git-push origin main`,
+    `${bin}/git-core/git-push origin --delete x`, `${bin}/static-sh -c '${M}'`, `${bin}/busybox env ${M}`, `busybox sh -c '${M}'`,
+    `nice ${bin}/e ${M}`, `ksh93 -c '${M}'`, `tcsh -c '${M}'`, `mksh-static -c '${M}'`, "git-push origin main", `env ${bin}/r -c '${M}'`];
+  for (const [name, row] of [["/usr/bin/rsh", `rsh niilo '${M}'`], ["/usr/bin/rsh", `/usr/bin/rsh niilo '${M}'`], ["/usr/bin/slogin", `slogin niilo '${M}'`],
+    ["/usr/bin/rbash", `rbash -c '${M}'`], ["/usr/bin/static-sh", `static-sh -c '${M}'`], ["/usr/bin/busybox", `busybox env ${M}`],
+    ["/usr/lib/git-core/git-push", "/usr/lib/git-core/git-push origin main"], ["/usr/lib/git-core/git-push", "/usr/lib/git-core/git-push origin --delete x"]] as const)
+    if (existsSync(name)) refused.push(row);
+  const allowed = ["git status", "/usr/bin/git status", "ssh niilo uptime", "npm test", "./scripts/report", "~/agents/bin/pr-send.sh 124 abc",
+    `${bin}/e npm test`, `${bin}/git-core/git-push origin feature/x`, "sh -c 'npm test'", "awk 1 x.txt", "python3 -V"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, { ...pr, role: "lead" }]) {
     for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
     for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
   }
