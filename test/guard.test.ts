@@ -999,6 +999,19 @@ const COMMENT_SHAPES: [string, string, string][] = [
   [OK, "xargs, no gh", "printf x | xargs echo"],
   [OK, "sudo, no gh", "sudo ls"],
   [OK, "watch, no gh", "watch ls"],
+  // gh runs an alias or an extension as readily as its own commands, and either could post anything
+  [NO, "a gh alias", "gh co 5"],
+  [NO, "a gh alias past -R", "gh -R o/r xyz 1"],
+  [NO, "a gh alias behind a wrapper", "env gh co 5"],
+  [NO, "making a gh alias", "gh alias set c 'pr comment 1 -b hi'"],
+  [NO, "getting an extension", "gh extension install o/gh-x"],
+  [NO, "running an extension", "gh ext exec x"],
+  [NO, "an alias in sh -c", "sh -c 'gh co 5'"],
+  [OK, "gh's version", "gh --version"],
+  [OK, "listing aliases", "gh alias list"],
+  // an unquoted heredoc's $(...) runs as the shell reads the body; a quoted one's is text
+  [NO, "a heredoc body's substitution", "cat <<EOF\n$(gh pr comment 1 -b hi)\nEOF"],
+  [OK, "a quoted heredoc's substitution", "cat <<'EOF'\n$(gh pr comment 1 -b hi)\nEOF"],
 ];
 
 test("the comment rule: every shape a gh comment takes, refused or allowed", () => {
