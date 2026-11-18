@@ -28,13 +28,32 @@ export function roleOf(ws: Workspace, agent: Agent): Role {
 // session's own process too, so PATH is written out whole: the stack's directories, then the PATH of
 // the factory that launches the session. A PATH that lost the launcher's entries would cost the
 // session its keychain, and with it its login.
-export function sessionEnv(ws: Workspace, agent: Agent, path = process.env.PATH ?? ""): Record<string, string> | undefined {
+// What a stack put first on a session's PATH, so the next render can take exactly that back out.
+export const PREPENDED = "SF_PATH_PREPEND";
+
+export function sessionEnv(ws: Workspace, agent: Agent, path = process.env.PATH ?? "", sent = process.env[PREPENDED] ?? ""): Record<string, string> | undefined {
   const stack = agent.stack ? ws.config.stacks[agent.stack] : undefined;
-  if (!stack) return undefined;
-  const env = { ...stack.env };
-  if (stack.pathPrepend.length)
-    env.PATH = [...stack.pathPrepend, ...path.split(":").filter((d) => d && !stack.pathPrepend.includes(d))].join(":");
+  const prepend = stack?.pathPrepend ?? [];
+  const env: Record<string, string> = { ...stack?.env };
+  // path is this process's, and a wake renders a recipient's settings in its sender's hook, whose
+  // PATH starts with what the sender's stack prepended (CodeRabbit on #127). Exactly that run comes
+  // out, and nothing else: a render never dedupes, so a directory a stack shares with the system
+  // PATH, /usr/local/bin say, keeps its system copy and survives the next render (Marie's gate).
+  // A recipient that prepends nothing, on a stack or none, still loses the sender's run (Marie and
+  // Niilo on #127).
+  if (prepend.length || sent) {
+    env.PATH = [...prepend, ...withoutRun(path.split(":").filter(Boolean), sent.split(":").filter(Boolean))].join(":");
+    env[PREPENDED] = prepend.join(":");
+  }
   return Object.keys(env).length ? env : undefined;
+}
+
+// dirs without the first place where run appears whole, in order; dirs as they are if it never does.
+function withoutRun(dirs: string[], run: string[]): string[] {
+  if (!run.length) return dirs;
+  for (let i = 0; i + run.length <= dirs.length; i++)
+    if (run.every((d, j) => dirs[i + j] === d)) return [...dirs.slice(0, i), ...dirs.slice(i + run.length)];
+  return dirs;
 }
 
 // Rendered at every launch from the role's template and config, into logs/run/.
@@ -44,6 +63,13 @@ export function settingsFile(ws: Workspace, agent: Agent): string {
     name: agent.name, role: agent.role, template: role.settings, cwd: role.cwd, extraHooks: role.extraHooks, permissionMode: role.permissionMode,
     env: sessionEnv(ws, agent), ...(agent.host ? { host: agent.host } : {}),
   });
+}
+
+// A respawn reruns a session's old command line, whose --settings names this same file, so the file
+// is rendered again first: a session stopped before an upgrade comes back with the current hooks, the
+// guard's matcher among them (CodeRabbit on #124). A hosted agent's file is its host daemon's.
+export function refreshSettings(ws: Workspace, agent: Agent): void {
+  if (!agent.host) settingsFile(ws, agent);
 }
 
 export function buildAppendix(ws: Workspace, agent: Agent, repoDir: string | undefined): { text: string; labels: string[] } | null {

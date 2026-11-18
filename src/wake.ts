@@ -6,6 +6,7 @@
 // up to 10 s more to be addressable from another machine, hence WAKE_SETTLE_S.
 import type { Agent } from "./config.js";
 import { findSession, pollForName, type Session } from "./fleet.js";
+import { refreshSettings } from "./launch.js";
 import { ask, Unreachable } from "./remote.js";
 import { isAgentSession, LISTING_TIMEOUT_MS, newest, type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
@@ -48,6 +49,15 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   // stale "done" row would beat the newest stopped session.
   const old = newest(all.filter(isAgentSession(agent.name)));
   if (!old?.id || (o.match && !o.match(old))) return { is: "none" };
+  if (left() - LISTING_TIMEOUT_MS < 1000) return late(`respawning ${old.id}`);
+  // A failed render fails the wake: the caller is told, rather than an agent coming back on
+  // settings older than its role's (CodeRabbit on #127). The render takes time of its own, so the
+  // respawn's budget is what is left after it (CodeRabbit on #127).
+  try {
+    refreshSettings(ws, agent);
+  } catch (e) {
+    return { is: "failed", why: `${agent.name}'s settings could not be rendered: ${(e as Error).message}` };
+  }
   const respawnMs = left() - LISTING_TIMEOUT_MS;
   if (respawnMs < 1000) return late(`respawning ${old.id}`);
   const r = t.respawn(agent.name, old.id, Number.isFinite(respawnMs) ? respawnMs : undefined);
