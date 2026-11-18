@@ -21,6 +21,22 @@ chmodSync(join(fakeBin, "systemd-run"), 0o755);
 process.env.PATH = `${fakeBin}${delimiter}${process.env.PATH ?? ""}`;
 process.on("exit", () => rmSync(fakeBin, { recursive: true, force: true }));
 
+// Nor may a test read this box's claude: its config dir (transcripts, the daemon's roster) or the
+// daemon's sockets. Every test file gets a claude daemon of its own that is up: a roster naming the
+// test process, which outlives every factory it runs, and one control socket. A test that sets its
+// own CLAUDE_CONFIG_DIR gives it the roster with fakeDaemon.
+export function fakeDaemon(configDir: string, pid = process.pid): void {
+  mkdirSync(join(configDir, "daemon"), { recursive: true });
+  writeFileSync(join(configDir, "daemon", "roster.json"), JSON.stringify({ supervisorPid: pid }));
+}
+const fakeClaude = realpathSync(mkdtempSync(join(tmpdir(), "sf-claude-")));
+fakeDaemon(join(fakeClaude, "config"));
+mkdirSync(join(fakeClaude, "sockets", "d1"), { recursive: true });
+writeFileSync(join(fakeClaude, "sockets", "d1", "control.sock"), "");
+process.env.CLAUDE_CONFIG_DIR = join(fakeClaude, "config");
+process.env.SF_CC_DAEMON_DIR = join(fakeClaude, "sockets");
+process.on("exit", () => rmSync(fakeClaude, { recursive: true, force: true }));
+
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function until(what: string, fn: () => unknown, ms = 15_000) {
@@ -113,8 +129,16 @@ colleague-review = "In Review"
 done = "Done"
 `;
 
+// Every temp dir a test file makes is removed when its process exits, whether or not the test
+// removed it: node --test runs each file in its own process, and a dir a test forgot stayed in /tmp.
+const made: string[] = [];
+process.on("exit", () => {
+  for (const d of made) rmSync(d, { recursive: true, force: true });
+});
 export function tempDir(prefix = "sf-test-"): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  const d = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  made.push(d);
+  return d;
 }
 
 // A workspace with its config, and a claude that lists no sessions.
@@ -134,13 +158,13 @@ export interface Ran {
   stderr: string;
 }
 
-export function factory(ws: string | undefined, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv; cli?: string } = {}): Ran {
+export function factory(ws: string | undefined, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv; cli?: string; input?: string } = {}): Ran {
   const env: NodeJS.ProcessEnv = { ...process.env, SF_NOTIFY: "0", ...opts.env };
   delete env.FACTORY_WORKSPACE;
   if (opts.env?.FACTORY_WORKSPACE) env.FACTORY_WORKSPACE = opts.env.FACTORY_WORKSPACE;
   if (ws) env.CLAUDE_BIN = join(ws, "bin", "claude");
   const r = spawnSync(process.execPath, [opts.cli ?? CLI, ...(ws ? ["--workspace", ws] : []), ...args], {
-    encoding: "utf8", cwd: opts.cwd ?? tmpdir(), env,
+    encoding: "utf8", cwd: opts.cwd ?? tmpdir(), env, ...(opts.input !== undefined ? { input: opts.input } : {}),
   });
   return { status: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
 }
@@ -160,3 +184,27 @@ export function noCleanup(): string | false {
   const own = ownCgroupProcs();
   return "none" in own && `needs cgroup v2 for the scheduler's own cgroup (${own.none})`;
 }
+
+// Two assistants and the two builders, grouped; rae stays in the role's own roster.
+export const GROUPED = TOML.replace("[tracker]", `[[agents]]
+name = "otto"
+role = "assistant"
+group = " Servers "
+
+[[agents]]
+name = "nap"
+role = "assistant"
+
+[roles.assistant]
+cwd = "assistants"
+model = "opus"
+permission_mode = "auto"
+settings = "readonly"
+
+[tracker]`).replace(`name = "bea"
+role = "builder"`, `name = "bea"
+role = "builder"
+group = "Product"`).replace(`name = "cal"
+role = "builder"`, `name = "cal"
+role = "builder"
+group = "Product"`);

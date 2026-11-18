@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { appendFileSync, closeSync, constants, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { HUMAN_KIND, isHuman, type Message, rowImages } from "../messages.js";
+import { tryLock } from "../tickets/lock.js";
 import type { Workspace } from "../workspace.js";
-import { chars, die, now, pyDumps, run, sleep } from "../util.js";
+import { chars, now, pyDumps, sleep } from "../util.js";
 
 // What the human can type on the page. `factory say` has no limit: the lead's instructions keep it short.
 export const MAX_CHARS = 20_000;
@@ -71,41 +72,7 @@ export const pageText = (ws: Workspace, row: Message): string =>
 // a monitor in the lead's session. The lock dies with its holder, and the next monitor carries on
 // from the cursor, so a message is printed once.
 //
-// Node has no flock(2). macOS's open(2) takes the same lock atomically with O_EXLOCK, and it is
-// released when the descriptor closes, however the process ends. Linux has no such flag and would
-// ignore the bit, a lock that always succeeds.
-const O_EXLOCK = 0x20;
-
-const HELD = 75;
-
-// Linux: util-linux's flock(1) on this descriptor as its fd 3. A flock belongs to the open
-// file description, so it outlives flock(1) and goes when this descriptor closes. flock -n never
-// waits, so the timeout only catches a flock(1) that hangs.
-function tryFlock(path: string): number | null {
-  const fd = openSync(path, constants.O_RDWR | constants.O_CREAT, 0o644);
-  // -E sets "held by someone else" apart from flock's own failures
-  const r = run(process.env.FLOCK_BIN || "flock", ["-n", "-x", "-E", String(HELD), "3"], { stdio: ["ignore", "ignore", "pipe", fd], timeout: 2000 });
-  if (r.status === 0) return fd;
-  closeSync(fd);
-  if (r.status === HELD) return null;
-  return die(`the inbox lock: flock(1) failed (exit ${r.status}: ${r.stderr.trim()}); it needs util-linux's flock`);
-}
-
-export function tryLock(path: string): number | null {
-  if (process.platform === "linux") {
-    mkdirSync(dirname(path), { recursive: true });
-    return tryFlock(path);
-  }
-  if (process.platform !== "darwin") die("the inbox lock is built for macOS and Linux only");
-  mkdirSync(dirname(path), { recursive: true });
-  try {
-    return openSync(path, constants.O_RDWR | constants.O_CREAT | constants.O_NONBLOCK | O_EXLOCK, 0o644);
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === "EAGAIN" || code === "EWOULDBLOCK") return null;
-    throw e;
-  }
-}
+// The lock is src/tickets/lock.ts's tryLock: a flock that goes when its descriptor closes.
 
 // For the lead's Stop hook: is a monitor listening? Taking the lock is the only way to ask, so a
 // free lock is taken and dropped at once. Anything that stops the question being asked counts as
@@ -124,18 +91,24 @@ export function inboxHeld(ws: Workspace): boolean {
 
 // Where the inbox has got to in a log, as the log's inode and a byte offset. The inode is what
 // notices `say` rotating the message log: an offset alone is only caught while the new file is
-// still shorter than it, and the cursor can sit still for days while no monitor is armed.
+// still shorter than it, and the cursor can sit still for days while no monitor is armed. last is
+// the id of the last row printed: a log replaced other than by rotation is read on past it, not
+// printed again from the top.
 export interface Cursor {
   ino: number;
   offset: number;
+  last?: string;
 }
 
 export const sameCursor = (a: Cursor | undefined, b: Cursor): boolean => !!a && a.ino === b.ino && a.offset === b.offset;
 
 function readCursorAt(path: string): Cursor | null {
   try {
-    const [ino, offset] = readFileSync(path, "utf8").trim().split(" ").map(Number);
-    return Number.isInteger(ino) && Number.isInteger(offset) ? { ino: ino as number, offset: offset as number } : null;
+    const [i, o, last] = readFileSync(path, "utf8").trim().split(" ");
+    const ino = Number(i);
+    const offset = Number(o);
+    if (!Number.isInteger(ino) || !Number.isInteger(offset)) return null;
+    return last ? { ino, offset, last } : { ino, offset };
   } catch {
     return null;
   }
@@ -143,7 +116,7 @@ function readCursorAt(path: string): Cursor | null {
 
 function writeCursorAt(path: string, c: Cursor): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path + ".tmp", `${c.ino} ${c.offset}`);
+  writeFileSync(path + ".tmp", `${c.ino} ${c.offset}${c.last ? ` ${c.last}` : ""}`);
   renameSync(path + ".tmp", path);
 }
 
@@ -181,18 +154,32 @@ function* linesOf(path: string, ino: number, offset: number, size: number): Gene
 // Each complete line of the log past the cursor, with the cursor after it. With no cursor it starts
 // at the end. A torn last line is not yielded, and the cursor never moves past it. A log rolled to
 // .1 since the cursor was written is read to its end first: lines can wait there for hours while no
-// monitor is armed.
-function* linesAfter(path: string, cursor: Cursor | null): Generator<{ line: string | null; cursor: Cursor }> {
+// monitor is armed. A log replaced or cut short any other way, a cleanup's rewrite say, is read from
+// past the row whose id is the cursor's last, or from the top if that row is not in it: a line
+// repeated rather than lost.
+function* linesAfter(path: string, cursor: Cursor | null, idOf: (line: string) => string | null): Generator<{ line: string | null; cursor: Cursor }> {
   const { ino, size } = stat(path);
   if (cursor === null) {
     yield { line: null, cursor: { ino, offset: size } };
     return;
   }
+  let rolled = false;
   if (cursor.ino !== ino) {
     const old = stat(path + ".1");
-    if (old.ino === cursor.ino && cursor.ino !== 0 && cursor.offset <= old.size) yield* linesOf(path + ".1", old.ino, cursor.offset, old.size);
+    rolled = old.ino === cursor.ino && cursor.ino !== 0 && cursor.offset <= old.size;
+    if (rolled) yield* linesOf(path + ".1", old.ino, cursor.offset, old.size);
   }
   const offset = cursor.ino === ino && cursor.offset <= size ? cursor.offset : 0;
+  const last = cursor.last;
+  if (offset === 0 && !rolled && last) {
+    const all = [...linesOf(path, ino, 0, size)];
+    const i = all.findLastIndex((l) => l.line !== null && l.line.includes(last) && idOf(l.line) === last);
+    if (i >= 0) {
+      yield { line: null, cursor: all[i]!.cursor };
+      yield* all.slice(i + 1);
+      return;
+    }
+  }
   if (offset === size) {
     if (!sameCursor(cursor, { ino, offset })) yield { line: null, cursor: { ino, offset } };
     return;
@@ -209,12 +196,18 @@ const parse = <T>(line: string | null): T | null => {
   }
 };
 
+const idOf = (r: { id?: unknown } | null): string | null => (r && typeof r.id === "string" && /^[0-9a-f]+$/.test(r.id) ? r.id : null);
+const withLast = (c: Cursor, last: string | undefined): Cursor => (last ? { ...c, last } : c);
+
 // The message log past the cursor; row is set only for the human's messages. History is not news,
 // so with no cursor it starts at the end.
 export function* unsent(ws: Workspace, cursor: Cursor | null): Generator<{ row: Message | null; cursor: Cursor }> {
-  for (const u of linesAfter(ws.messages, cursor)) {
+  let last = cursor?.last;
+  for (const u of linesAfter(ws.messages, cursor, (l) => idOf(parse<Message>(l)))) {
     const r = parse<Message>(u.line);
-    yield { row: r && isHuman(ws, r.kind) && r.id ? r : null, cursor: u.cursor };
+    const row = r && isHuman(ws, r.kind) && r.id ? r : null;
+    if (row) last = idOf(row) ?? last;
+    yield { row, cursor: withLast(u.cursor, last) };
   }
 }
 
@@ -222,9 +215,12 @@ export function* unsent(ws: Workspace, cursor: Cursor | null): Generator<{ row: 
 // left, so with no cursor it starts at the beginning of the log: a note left before the first
 // monitor ever armed is still printed. The tag is what the receipts look for.
 export function* unsentNotes(ws: Workspace, cursor: Cursor | null): Generator<{ text: string | null; cursor: Cursor }> {
-  for (const u of linesAfter(notesLog(ws), cursor ?? { ino: -1, offset: 0 })) {
+  let last = cursor?.last;
+  for (const u of linesAfter(notesLog(ws), cursor ?? { ino: -1, offset: 0 }, (l) => idOf(parse<{ id?: unknown }>(l)))) {
     const n = parse<{ id?: string; text?: string }>(u.line);
-    yield { text: n && typeof n.text === "string" && n.id ? `[m:${n.id}] ${n.text}` : null, cursor: u.cursor };
+    const ok = n && typeof n.text === "string" && n.id;
+    if (ok) last = idOf(n) ?? last;
+    yield { text: ok ? `[m:${n.id}] ${n.text}` : null, cursor: withLast(u.cursor, last) };
   }
 }
 

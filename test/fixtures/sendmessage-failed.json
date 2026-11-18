@@ -1,0 +1,15 @@
+{
+  "_recorded": "Claude Code 2.1.325, 2026-11-15: the hook input of a SendMessage to a known session that was stopped. Session ids and paths dropped; the rest verbatim.",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "SendMessage",
+  "tool_input": {
+    "to": "otto-stopped-probe",
+    "summary": "Probe ping to otto-stopped-probe",
+    "message": "ping"
+  },
+  "tool_response": {
+    "success": false,
+    "message": "No agent named 'otto-stopped-probe' is reachable.\nUse ListAgents to see everyone you can message.",
+    "display": "Not sent — no agent named 'otto-stopped-probe' is reachable."
+  }
+}

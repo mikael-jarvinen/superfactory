@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { agentOrDie, findSession, type Session } from "../src/fleet.js";
 import { claudeEnv, claudeScoped, JOB_ENV, SCOPE } from "../src/scope.js";
 import { procStat } from "../src/stacks/process.js";
-import { agentSessions, local, pick, type Transport } from "../src/transport.js";
+import { agentSessions, daemonAlive, local, pick, sessionAlive, STARTING_MS, type Transport } from "../src/transport.js";
 import { runClaude } from "../src/watchers/job.js";
 import { run } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
-import { tempDir, tempWorkspace } from "./helpers.js";
+import { factory, fakeDaemon, tempDir, tempWorkspace, TOML } from "./helpers.js";
 
 // What a real systemd-run --user --scope said with no user bus: systemd 259 (niilo), 249 (turing).
 const NO_BUS_259 = "Failed to connect to user scope bus via local transport: No such file or directory";
@@ -52,15 +53,49 @@ echo "backgrounded · abc123 · rae"
   after(() => (was === undefined ? delete process.env.CLAUDE_BIN : (process.env.CLAUDE_BIN = was)));
   const ws = openWorkspace(tempWorkspace(), {});
   after(() => rmSync(ws.dir, { recursive: true, force: true }));
-  const req = { agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, env: process.env };
+  const req = { agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, runDir: ws.runDir, env: process.env };
   const args = (p: string | null) => ["--bg", ...(p ? ["--append-system-prompt-file", p] : []), "P"];
+  const named = () => readFileSync(join(dir, "args"), "utf8").split(" ")[2] as string;
 
   assert.equal(local.start({ ...req, appendix: "the brief\n", args }), "abc123");
   assert.equal(readFileSync(join(dir, "appendix"), "utf8"), "the brief\n");
-  rmSync(readFileSync(join(dir, "args"), "utf8").split(" ")[2] as string);
+  // in logs/run/, which a reboot keeps, and left there for a later respawn of that session
+  const first = named();
+  assert.equal(dirname(first), ws.runDir);
+  assert.match(basename(first), /^appendix-bea-[0-9a-f]{16}\.md$/);
+  // the same brief again is the same file; a changed brief is another, and the first is kept as it was
+  local.start({ ...req, appendix: "the brief\n", args });
+  assert.equal(named(), first);
+  local.start({ ...req, appendix: "a new brief\n", args });
+  assert.notEqual(named(), first);
+  assert.equal(readFileSync(first, "utf8"), "the brief\n");
+  assert.equal(readFileSync(named(), "utf8"), "a new brief\n");
+  assert.deepEqual(readdirSync(ws.runDir).filter((n) => n.endsWith(".tmp")), []);
   rmSync(join(dir, "appendix"));
   local.start({ ...req, appendix: null, args });
   assert.equal(readFileSync(join(dir, "args"), "utf8"), "--bg P\n");
+});
+
+// A reviewer here: `factory review` writes its brief to the file named on the command line.
+test("a reviewer started on demand here gets its appendix as the file it starts with", () => {
+  const dir = tempWorkspace(TOML.replace('name = "rae"\nrole = "reviewer"', 'name = "rae"\nrole = "reviewer"\nappendix = ["briefs/rae.md"]'));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "reviewers"));
+  mkdirSync(join(dir, "briefs"));
+  writeFileSync(join(dir, "briefs", "rae.md"), "rae's brief\n");
+  writeFileSync(join(dir, "bin", "claude"), `#!/bin/sh
+if [ "$1" = agents ]; then
+  if [ -f "${dir}/started" ]; then echo '[{"id":"abc123","name":"rae","kind":"background","state":"idle","pid":${process.pid}}]'; else echo '[]'; fi
+  exit 0
+fi
+prev=
+for a in "$@"; do [ "$prev" = --append-system-prompt-file ] && cat "$a" > "${dir}/appendix" && rm "$a"; prev=$a; done
+touch "${dir}/started"
+echo "backgrounded · abc123 · rae"
+`);
+  const r = factory(dir, ["review"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(join(dir, "appendix"), "utf8"), "<!-- briefs/rae.md -->\nrae's brief\n");
 });
 
 test("on Linux every local claude call, each listing included, runs through systemd-run in a scope under agents.slice", { skip: process.platform !== "linux" }, async () => {
@@ -82,7 +117,7 @@ case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; 
 
   assert.deepEqual(local.sessions(true), []);
   assert.deepEqual(await local.sessionsAsync(), []);
-  assert.equal(local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, env: process.env, args: () => ["--bg", "P"] }), "abc123");
+  assert.equal(local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, runDir: ws.runDir, env: process.env, args: () => ["--bg", "P"] }), "abc123");
   assert.deepEqual(local.respawn("bea", "r0"), { ok: true, said: "respawned r0", why: "respawned r0" });
   local.stop("bea", "r1", true);
   assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["agents --json --all", "agents --json", "--bg P", "respawn r0", "stop r1", "rm r1"]);
@@ -94,7 +129,7 @@ case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; 
     writeFileSync(join(dir, "scope-fail"), said);
     assert.throws(() => local.sessions(), { message: `systemd-run made no scope for claude agents: ${said}` });
     assert.throws(() => local.respawn("bea", "r0"), { message: `systemd-run made no scope for claude respawn: ${said}` });
-    assert.throws(() => local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, env: process.env, args: () => ["--bg", "P"] }), /systemd-run made no scope for claude --bg/);
+    assert.throws(() => local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, runDir: ws.runDir, env: process.env, args: () => ["--bg", "P"] }), /systemd-run made no scope for claude --bg/);
   }
   assert.equal(existsSync(calls), false, "a call that could not be scoped never runs claude bare");
 
@@ -138,7 +173,7 @@ case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; 
 
   local.sessions();
   await local.sessionsAsync();
-  local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, env: process.env, args: () => ["--bg", "P"] });
+  local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, runDir: ws.runDir, env: process.env, args: () => ["--bg", "P"] });
   local.respawn("bea", "r0");
   local.stop("bea", "r1", false);
   assert.equal(runClaude(ws, "round", "P", ["Read"], join(dir, "round.log")).status, 0);
@@ -299,4 +334,89 @@ test("an agent's session is its newest live one, else its newest, and only its b
   // findSession goes by the same rule and never returns an interactive session
   const ft = { ...t, sessions: () => [row("i", "running", { kind: "interactive", updatedAt: "2026-11-13T12:00:00Z" }), old, recent] } as Transport;
   assert.equal(findSession(ft, "bea")?.id, "new");
+});
+
+test("the daemon is down, and no session alive, when its supervisor is gone, unnamed, or has no control socket", () => {
+  const was = { cfg: process.env.CLAUDE_CONFIG_DIR, socks: process.env.SF_CC_DAEMON_DIR };
+  const d = tempDir();
+  const cfg = join(d, "config"), socks = join(d, "sockets");
+  const row = { kind: "background", state: "done", name: "bea", pid: process.pid } as Session;
+  process.env.CLAUDE_CONFIG_DIR = cfg;
+  process.env.SF_CC_DAEMON_DIR = socks;
+  try {
+    assert.equal(daemonAlive(), false, "no roster");
+    fakeDaemon(cfg);
+    assert.equal(daemonAlive(), false, "no socket dir");
+    mkdirSync(join(socks, "d1"), { recursive: true });
+    assert.equal(daemonAlive(), false, "a socket dir with no control.sock");
+    writeFileSync(join(socks, "d1", "control.sock"), "");
+    assert.equal(daemonAlive(), true);
+    assert.equal(sessionAlive(row), true);
+    const gone = spawnSync("true").pid as number;
+    fakeDaemon(cfg, gone);
+    assert.equal(daemonAlive(), false, "a supervisor that has exited");
+    assert.equal(sessionAlive(row), false, "a done row behind a dead daemon is not alive");
+    writeFileSync(join(cfg, "daemon", "roster.json"), JSON.stringify({}));
+    assert.equal(daemonAlive(), false, "a roster that names no pid");
+  } finally {
+    process.env.CLAUDE_CONFIG_DIR = was.cfg;
+    process.env.SF_CC_DAEMON_DIR = was.socks;
+  }
+});
+
+test("a row listed working before its pid is starting, and alive for STARTING_MS", () => {
+  const was = { cfg: process.env.CLAUDE_CONFIG_DIR, socks: process.env.SF_CC_DAEMON_DIR };
+  const d = tempDir();
+  const cfg = join(d, "config"), socks = join(d, "sockets");
+  process.env.CLAUDE_CONFIG_DIR = cfg;
+  process.env.SF_CC_DAEMON_DIR = socks;
+  try {
+    fakeDaemon(cfg);
+    mkdirSync(join(socks, "d1"), { recursive: true });
+    writeFileSync(join(socks, "d1", "control.sock"), "");
+    const row = (id: string, extra: Partial<Session>) => ({ id, name: "bea", kind: "background", ...extra }) as Session;
+    assert.equal(sessionAlive(row("s1", { state: "working", startedAt: Date.now() - 1_000 })), true, "no pid, working, 1 s old: starting");
+    assert.equal(sessionAlive(row("s2", { state: "working", startedAt: Date.now() - STARTING_MS - 1_000 })), false, "no pid, working, 31 s old: not a start");
+    assert.equal(sessionAlive(row("s3", { state: "done", startedAt: Date.now() - 1_000 })), false, "no pid, done, 1 s old: not a start");
+    assert.equal(sessionAlive(row("s4", { state: "working" })), false, "no pid, working, no startedAt: its age is unknown");
+  } finally {
+    process.env.CLAUDE_CONFIG_DIR = was.cfg;
+    process.env.SF_CC_DAEMON_DIR = was.socks;
+  }
+});
+
+test("a row is alive while its worker's pid exists, through a supervisor restart; one the listing keeps after its worker is gone is not", () => {
+  const was = { cfg: process.env.CLAUDE_CONFIG_DIR, socks: process.env.SF_CC_DAEMON_DIR };
+  const d = tempDir();
+  const cfg = join(d, "config"), socks = join(d, "sockets");
+  process.env.CLAUDE_CONFIG_DIR = cfg;
+  process.env.SF_CC_DAEMON_DIR = socks;
+  const worker = spawn("sleep", ["60"]);
+  const sup2 = spawn("sleep", ["60"]);
+  try {
+    fakeDaemon(cfg);
+    mkdirSync(join(socks, "d1"), { recursive: true });
+    writeFileSync(join(socks, "d1", "control.sock"), "");
+    const gone = spawnSync("true").pid as number;
+    const live = worker.pid as number;
+    const row = (id: string, extra: Partial<Session>) => ({ id, name: "bea", kind: "background", startedAt: Date.now(), ...extra }) as Session;
+    assert.equal(sessionAlive(row("a1", { state: "done" })), false, "no pid, done: a worker the daemon retired");
+    assert.equal(sessionAlive(row("a2", { state: "blocked" })), false, "no pid, blocked: a worker gone at a reboot");
+    assert.equal(sessionAlive(row("a3", { state: "done", status: "idle", pid: live })), true, "a pid, done and idle: it wakes on a message");
+    assert.equal(sessionAlive(row("a4", { state: "working", status: "busy", pid: live })), true, "a pid, working");
+    assert.equal(sessionAlive(row("a5", { state: "done", pid: gone })), false, "a pid whose process has exited");
+    assert.equal(sessionAlive(row("a6", { state: "done", pid: 0 })), false, "a pid that is not one");
+    assert.equal(sessionAlive(row("a7", { state: "done", pid: 1 })), true, "a pid run by another user (EPERM) exists");
+    // the supervisor restarts, and the worker, started before the new one, keeps running
+    const old = row("a8", { state: "done", pid: live, startedAt: Date.now() - 3_600_000 });
+    fakeDaemon(cfg, sup2.pid as number);
+    assert.equal(daemonAlive(), true);
+    assert.equal(sessionAlive(old), true, "a session started before the supervisor restarted, still running");
+    assert.equal(sessionAlive(row("a9", { state: "done", startedAt: Date.now() - 3_600_000 })), false, "and its pid-less neighbour is still dead");
+  } finally {
+    worker.kill();
+    sup2.kill();
+    process.env.CLAUDE_CONFIG_DIR = was.cfg;
+    process.env.SF_CC_DAEMON_DIR = was.socks;
+  }
 });

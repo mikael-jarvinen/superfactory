@@ -7,6 +7,10 @@ import { chars, die, now, pyDumps, pyRepr, splitlines } from "./util.js";
 
 export const KINDS = ["ready", "decision", "blocked", "answer", "note"] as const;
 export type Kind = (typeof KINDS)[number];
+// Where a row came from when it was not written on the board alone. "telegram": a copy of a text that
+// already reached the human on Telegram, so it is never waiting for them unread.
+export const VIAS = ["telegram"] as const;
+export type Via = (typeof VIAS)[number];
 // Rows the factory writes itself, which `say` cannot.
 export type SystemKind = "watchdog";
 
@@ -24,6 +28,7 @@ export interface Message {
   ticket?: string | null;
   kind?: string;
   link?: string | null;
+  via?: Via;
   // File names (never paths) of the screenshots pasted on the page, in the order pasted, stored
   // under the attachments dir. Rows written before a message could carry several hold one `image`.
   images?: string[];
@@ -37,7 +42,7 @@ export function isHuman(ws: Workspace, kind: string | undefined): boolean {
 }
 
 // Appends a row to the message log, which the page shows.
-export function post(ws: Workspace, r: { text: string; kind: Kind | SystemKind; ticket?: string | null; link?: string | null }) {
+export function post(ws: Workspace, r: { text: string; kind: Kind | SystemKind; ticket?: string | null; link?: string | null; via?: Via }) {
   mkdirSync(ws.stateDir, { recursive: true });
   // The log only grows and nothing else trims it, so it is rolled here. The page reads the tail
   // either way, and .1 keeps the older half recoverable.
@@ -46,16 +51,17 @@ export function post(ws: Workspace, r: { text: string; kind: Kind | SystemKind; 
   } catch {
     // no log yet
   }
-  const row = { t: now(), text: r.text, ticket: r.ticket ?? null, kind: r.kind, link: r.link ?? null };
+  // `via` only on the rows that have one, so every other row keeps its shape.
+  const row = { t: now(), text: r.text, ticket: r.ticket ?? null, kind: r.kind, link: r.link ?? null, ...(r.via ? { via: r.via } : {}) };
   appendFileSync(ws.messages, pyDumps(row) + "\n");
   return row;
 }
 
-export function say(ws: Workspace, words: string[], opts: { ticket?: string; link?: string; kind?: Kind }, out = console.log): void {
+export function say(ws: Workspace, words: string[], opts: { ticket?: string; link?: string; kind?: Kind; via?: Via }, out = console.log): void {
   const text = words.join(" ").trim();
   if (!text) die("nothing to say");
   if (opts.ticket && !validKey(ws, opts.ticket)) die(`${pyRepr(opts.ticket)} is neither a ticket key nor a local key`);
-  const row = post(ws, { text, ticket: opts.ticket, kind: opts.kind ?? "note", link: opts.link });
+  const row = post(ws, { text, ticket: opts.ticket, kind: opts.kind ?? "note", link: opts.link, via: opts.via });
   const head = splitlines(text)[0] ?? "";
   notify("superfactory", row.ticket ?? row.kind, chars(head).slice(0, 160).join(""));
   const { host, port } = ws.config.board;
@@ -68,7 +74,13 @@ export function say(ws: Workspace, words: string[], opts: { ticket?: string; lin
 
 // The tail of the log, never the whole of it: it is append-only and unbounded.
 export function readTail(path: string): Message[] {
-  return tailOf(path).rows;
+  return readChunk(path, TAIL_BYTES)?.rows ?? [];
+}
+
+// readTail, but null when the log cannot be read (missing, or a transient read failure), so a caller
+// can tell that from a log with no matching row. `bytes` is how much of the end to read.
+export function tryReadTail(path: string, bytes = TAIL_BYTES): Message[] | null {
+  return readChunk(path, bytes)?.rows ?? null;
 }
 
 // The newest n rows (n = 0: all the tail holds), continuous across one rollover. `post` renames
@@ -85,11 +97,16 @@ export function readRecent(path: string, n: number): Message[] {
 // whole: the tail is the whole file, so nothing between it and .1 was skipped. A missing file is
 // whole and empty.
 function tailOf(path: string): { rows: Message[]; whole: boolean } {
+  return readChunk(path, TAIL_BYTES) ?? { rows: [], whole: true };
+}
+
+// The last `bytes` of the log as rows, and whether that was the whole file; null when it cannot be read.
+function readChunk(path: string, bytes: number): { rows: Message[]; whole: boolean } | null {
   let buf: Buffer;
   let whole = true;
   try {
     const size = statSync(path).size;
-    const start = size > TAIL_BYTES ? size - TAIL_BYTES : 0;
+    const start = size > bytes ? size - bytes : 0;
     whole = start === 0;
     buf = Buffer.alloc(size - start);
     const fd = openSync(path, "r");
@@ -103,7 +120,7 @@ function tailOf(path: string): { rows: Message[]; whole: boolean } {
       buf = nl < 0 ? Buffer.alloc(0) : buf.subarray(nl + 1);
     }
   } catch {
-    return { rows: [], whole: true };
+    return null;
   }
   const rows: Message[] = [];
   for (const line of buf.toString("utf8").split(/\r?\n/)) {

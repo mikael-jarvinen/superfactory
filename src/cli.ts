@@ -10,12 +10,14 @@ import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owe
 import { Unreachable } from "./remote.js";
 import { agentSessions, transportFor, transports } from "./transport.js";
 import type { Agent } from "./config.js";
-import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleOf } from "./launch.js";
+import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
 import { bringUpLead } from "./lead-up.js";
+import { wake, wakeForRound, wokeLine } from "./wake.js";
 import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
 import { hook as noSideChannelsHook } from "./hooks/no-side-channels.js";
 import { hook as statusHook } from "./hooks/status.js";
+import { hook as wakeHook } from "./hooks/wake.js";
 import { idleWork, idleWorkFor } from "./idle.js";
 import { comment } from "./gate/comment.js";
 import { deltaRange } from "./gate/delta.js";
@@ -26,12 +28,13 @@ import { openForReview } from "./gate/open.js";
 import { ready, report } from "./gate/ready.js";
 import { send } from "./gate/send.js";
 import { ACCEPT_PROSE, waitAndSend } from "./gate/wait.js";
-import { KINDS, type Kind, messages, say } from "./messages.js";
+import { KINDS, type Kind, VIAS, type Via, messages, say } from "./messages.js";
 import { type HookName, type HookResult, HOOKS } from "./settings.js";
 import { schedule } from "./scheduler/index.js";
 import { render } from "./scheduler/launchd.js";
 import { runScheduler } from "./scheduler/run.js";
 import { cmdStack, STACK_USAGE } from "./stacks/command.js";
+import { cmdTicket, cmdWiki, TICKET_USAGE } from "./tickets/cli.js";
 import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/engine.js";
 import {
   allRecs, appendEvent, BUSY, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removePr, removeRec, saveRec, showRec, transition, validKey,
@@ -60,10 +63,14 @@ usage: factory [--workspace <dir>] <command> [options]
   dispatch <agent> <KEY> [--repo <repo>] [--prompt-file <f>] [--force]
                                   fresh building session for one item in a per-item worktree.
                                   Dispatch from queued, building or fixing; anywhere else needs
-                                  --force. A live session already on KEY keeps its context.
+                                  --force. A live session already on KEY keeps its context, and
+                                  so does one that is off, woken unless --force.
                                   For a designer: a design session in the designers' cwd, no
                                   worktree, from queued (records designing) or design-review
                                   (another round).
+  wake <agent>                    bring back an agent whose session is off (stopped idle, or retired
+                                  by Claude's daemon): respawn its newest session, same conversation,
+                                  and wait until it is listed live. Exit 1 when it does not come back.
   stop <agent> [--force] [--remove-worktree]
                                   stop a teammate; refuses on uncommitted or unpushed work. Keeps
                                   the worktree unless --remove-worktree.
@@ -71,7 +78,8 @@ usage: factory [--workspace <dir>] <command> [options]
                                   a fresh reviewer for one review: the first free one
   assistant [name] [--prompt-file <f>] [--force]
                                   start a lead assistant (vega or cruz; first free if unnamed) to
-                                  take the lead's non-code work, then brief it by message
+                                  take the lead's non-code work, then brief it by message. A named
+                                  one that is off is woken on its conversation; --force starts fresh
   state <KEY>                     show one record
   state <KEY> --title "<words>"   what it is about, for the board. No transition.
   state <KEY> --remove-pr owner/repo#N [--note N]
@@ -84,8 +92,9 @@ usage: factory [--workspace <dir>] <command> [options]
   state --list [--all]            every open item
   drop <LOCAL-key>... [--note N] [--force]
                                   delete a LOCAL record; tracker tickets are never droppable
-  say "<text>" [--ticket K] [--link URL] [--kind ${KINDS.join("|")}]
-                                  post to the message page and ring the machine
+  say "<text>" [--ticket K] [--link URL] [--kind ${KINDS.join("|")}] [--via ${VIAS.join("|")}]
+                                  post to the message page and ring the machine. --via telegram
+                                  marks a copy of a text the human already got on Telegram
                                   (SF_NOTIFY=0 mutes it, SF_NOTIFY_SOUND names the sound)
   messages [-n 20]                the last n messages. Never read the log whole: it is
                                   append-only and unbounded.
@@ -147,6 +156,7 @@ usage: factory [--workspace <dir>] <command> [options]
                                   a Claude Code hook, reading the event on stdin. The rendered
                                   settings in logs/run/ call these; nothing else needs to.
 ${STACK_USAGE}
+${TICKET_USAGE}
 
 The workspace is --workspace, else $FACTORY_WORKSPACE, else the nearest factory.toml above the
 current directory. Only this program writes the state store.
@@ -264,13 +274,22 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (!allowed.includes(repoKey)) throw new FactoryError(`${name} works in [${allowed.map(pyRepr).join(", ")}]; --repo ${repoKey} is another stack`);
   const repo = ws.config.repos[repoKey]!;
   const stack = ag.stack ?? repoKey;
+  // The brief and the prompt file, read before any session is stopped or started: a missing one
+  // refuses with the live session kept. The read is lazy, done once at the first stop or the start,
+  // so a fix round on the live session and the "still on" refusal never need either.
+  const promptFile = str(v["prompt-file"]);
+  let read: { appendix: ReturnType<typeof buildAppendix>; given: string | null } | undefined;
+  const inputs = () => (read ??= { appendix: buildAppendix(ws, ag, repo.path), given: promptFile ? readFileSync(promptFile, "utf8") : null });
   // A builder keeps its session across the rounds of one work item and is cleared only when it
   // starts a different one. A fix round on the item the live session is already on keeps that
   // session and its context: the brief goes to it by SendMessage, and this only records the state.
   // A session whose item is in review holds the builder no longer: a new item stops it here, with
   // the checks `factory stop` makes.
   const t = transportFor(ws, ag);
-  const s = findSession(t, name);
+  const onItem = (x: Session) => basename((x.cwd ?? "").replace(/\/+$/, "")) === ticket;
+  let s = findSession(t, name);
+  // A session on KEY that was stopped idle comes back for the fix round.
+  if (!t.alive(s) && !force) s = wakeForRound(ws, ag, t, onItem) ?? s;
   if (t.alive(s)) {
     const on = basename((s.cwd ?? "").replace(/\/+$/, ""));
     if (on === ticket && !force) {
@@ -284,11 +303,13 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
     }
     const onState = on ? loadRec(ws, on)?.state : null;
     if (force) {
+      inputs();
       console.log(`${name} is running (${s.id}); --force given, stopping it`);
       stopSession(t, s);
     } else if (onState && IN_REVIEW.has(onState)) {
       const left = builderLeft(ws, ag, t, s.cwd);
       if (left) throw new FactoryError(`${on} is ${onState}, so ${name} is free for ${ticket}, but ${left}`);
+      inputs();
       stopSession(t, s);
       console.log(`${name}'s item ${on} is ${onState}, so ${name} is free: stopped ${s.id}, worktree kept: ${s.cwd}`);
     } else {
@@ -305,13 +326,12 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (!DISPATCHABLE.has(cur) && !force)
     throw new FactoryError(`${ticket} is ${cur}; a dispatch makes no sense there. Use \`factory state\` first, ` +
       `or --force if you mean it (a verification run on a sent PR, say).`);
+  const { appendix, given } = inputs();
   const { wt, how } = t.worktree({ agent: ag, repo, ticket, toolWritten: ws.config.worktree.toolWritten });
-  const appendix = buildAppendix(ws, ag, repo.path);
-  const promptFile = str(v["prompt-file"]);
   // A hosted builder has no stack, so there is no slot to check.
   const noSlot = ag.host ? null : slotless(ws, stack, ticket, wt);
   if (noSlot) console.log(`  warning: ${noSlot}`);
-  const prompt = (promptFile ? readFileSync(promptFile, "utf8") : buildingPrompt(ws, ag, ticket)) + (noSlot ? `\n\n${noSlot}` : "");
+  const prompt = (given ?? buildingPrompt(ws, ag, ticket)) + (noSlot ? `\n\n${noSlot}` : "");
   const started = launch(ws, ag, wt, prompt, appendix?.text ?? null, "build");
   if (rec === null || cur === "queued") {
     transition(ws, ticket, "building", { agent: name, stack, worktree: wt, evidence: `building session ${started.id}` });
@@ -330,6 +350,14 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   console.log(`  next: SendMessage to ${name}: what to build or fix, the scope, and notify_when_idle`);
 }
 
+// Reads the prompt and the appendix, and refuses on either, before anything is stopped; the launch
+// it returns starts the session in the role's cwd with both.
+function onDemand(ws: Workspace, ag: Agent, prompt: () => string): () => Session {
+  const text = prompt();
+  const appendix = roleAppendix(ws, ag);
+  return () => launch(ws, ag, roleOf(ws, ag).cwd as string, text, appendix);
+}
+
 // A designer reads every repo and writes none, so it has no worktree or stack: one session in the
 // designers' shared cwd per item. Another round on the same item, after the human sent the design
 // back, goes to the live session if it is still the one that drew it, so it keeps its context.
@@ -346,8 +374,12 @@ function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boole
   const human = ws.config.human.name;
   const d = rec?.design;
   const links = d && (d.canvas || d.slides) ? `  the last round: canvas ${d.canvas ?? "-"} slides ${d.slides ?? "-"}` : "";
+  const ready = () => onDemand(ws, ag, () => (promptFile ? readFileSync(promptFile, "utf8") : designerPrompt(ws, ag, ticket)));
+  let go: (() => Session) | undefined;
   const t = transportFor(ws, ag);
-  const s = findSession(t, name);
+  let s = findSession(t, name);
+  // The session that drew the last round, stopped idle since, is woken for this one.
+  if (!t.alive(s) && !force && rec?.agent === name && rec.session) s = wakeForRound(ws, ag, t, (x) => x.id === rec.session) ?? s;
   if (t.alive(s)) {
     const on = allRecs(ws).find((r) => r.agent === name && r.session === s.id);
     if (on?.ticket === ticket && !force) {
@@ -359,11 +391,11 @@ function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boole
     }
     if (on?.state === "designing" && !force)
       throw new FactoryError(`${name} is still designing ${on.ticket} (${s.id}). Use another designer, or --force.`);
+    go = ready();
     stopSession(t, s);
     console.log(`${name} stopped (${s.id})${on ? `: ${on.ticket} is ${on.state}, so ${name} is free` : ""}`);
   }
-  const prompt = promptFile ? readFileSync(promptFile, "utf8") : designerPrompt(ws, ag, ticket);
-  const started = launch(ws, ag, roleOf(ws, ag).cwd as string, prompt);
+  const started = (go ?? ready())();
   if (cur === "designing") {
     const r = rec as Rec;
     r.agent = name;
@@ -379,6 +411,27 @@ function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boole
 }
 
 const via = (ws: Workspace, name: string) => transportFor(ws, agentOrDie(ws, name));
+
+function cmdWake(ws: Workspace, argv: string[]): number {
+  const { p } = args("wake", argv, {}, [1, 1]);
+  const name = p[0] as string;
+  const w = wake(ws, agentOrDie(ws, name));
+  switch (w.is) {
+    case "live":
+      console.log(`${name} is already live (${w.s.id})`);
+      return 0;
+    case "woke":
+      console.log(`${name} woke: ${w.from} respawned, live as ${w.s.id}, same conversation`);
+      return 0;
+    case "none":
+      console.error(`${name} has no session to wake; start it the factory way`);
+      return 1;
+    case "failed":
+    case "unknown":
+      console.error(`${name} did not wake: ${w.why}`);
+      return 1;
+  }
+}
 
 function cmdStop(ws: Workspace, argv: string[]) {
   const { v, p } = args("stop", argv, { force: { type: "boolean" }, "remove-worktree": { type: "boolean" }, "keep-worktree": { type: "boolean" } }, [1, 1]);
@@ -416,11 +469,7 @@ function cmdReview(ws: Workspace, argv: string[]) {
     names = [want];
   }
   const promptFile = str(v["prompt-file"]);
-  const start = (name: string) => {
-    const ag = agentOrDie(ws, name);
-    const prompt = promptFile ? readFileSync(promptFile, "utf8") : reviewerPrompt(ws);
-    return launch(ws, ag, roleOf(ws, ag).cwd as string, prompt);
-  };
+  const ready = (name: string) => onDemand(ws, agentOrDie(ws, name), () => (promptFile ? readFileSync(promptFile, "utf8") : reviewerPrompt(ws)));
   const busy: string[] = [];
   for (const name of names) {
     const t = via(ws, name);
@@ -429,14 +478,15 @@ function cmdReview(ws: Workspace, argv: string[]) {
       busy.push(`${name} (${s.id})`);
       continue;
     }
-    console.log(`${name} started (${start(name).id})`);
+    console.log(`${name} started (${ready(name)().id})`);
     return;
   }
   if (v.force && busy.length) {
     const name = names[0] as string;
+    const go = ready(name);
     const t = via(ws, name);
     stopSession(t, findSession(t, name));
-    console.log(`${name} restarted (${start(name).id})`);
+    console.log(`${name} restarted (${go().id})`);
     return;
   }
   throw new FactoryError(`every reviewer is busy: ${busy.join(", ")}. Stop one, or pass --force to restart the first.`);
@@ -457,11 +507,19 @@ function cmdAssistant(ws: Workspace, argv: string[]) {
     names = [want];
   }
   const promptFile = str(v["prompt-file"]);
-  const start = (name: string) => {
-    const ag = agentOrDie(ws, name);
-    const prompt = promptFile ? readFileSync(promptFile, "utf8") : assistantPrompt(ws);
-    return launch(ws, ag, roleOf(ws, ag).cwd as string, prompt);
-  };
+  // A named assistant that was stopped idle is mid-conversation with the lead, so it is woken. One
+  // that does not wake is not started fresh, which would lose that conversation, unless --force.
+  if (want && !v.force) {
+    const ag = agentOrDie(ws, want);
+    const w = wake(ws, ag);
+    if (w.is === "woke") {
+      console.log(wokeLine(want, w.from));
+      console.log(`  next: send it the task by message, or pass --force for a fresh session`);
+      return;
+    }
+    if (w.is === "failed" || w.is === "unknown") throw new FactoryError(`${want} was off and did not wake: ${w.why}. Nothing was started, so its conversation is kept; \`factory wake ${want}\` tries again, and --force starts a fresh session without it.`);
+  }
+  const ready = (name: string) => onDemand(ws, agentOrDie(ws, name), () => (promptFile ? readFileSync(promptFile, "utf8") : assistantPrompt(ws)));
   const busy: string[] = [];
   for (const name of names) {
     const t = via(ws, name);
@@ -470,14 +528,15 @@ function cmdAssistant(ws: Workspace, argv: string[]) {
       busy.push(`${name} (${s.id})`);
       continue;
     }
-    console.log(`${name} started (${start(name).id})`);
+    console.log(`${name} started (${ready(name)().id})`);
     return;
   }
   if (v.force && busy.length) {
     const name = names[0] as string;
+    const go = ready(name);
     const t = via(ws, name);
     stopSession(t, findSession(t, name));
-    console.log(`${name} restarted (${start(name).id})`);
+    console.log(`${name} restarted (${go().id})`);
     return;
   }
   // A named assistant already running is not an error: the lead just messages the live session.
@@ -577,11 +636,14 @@ function cmdDrop(ws: Workspace, argv: string[]) {
 
 function cmdSay(ws: Workspace, argv: string[]) {
   const s = { type: "string" } as const;
-  const { v, p } = args("say", argv, { ticket: s, link: s, kind: s }, [1, Infinity]);
+  const { v, p } = args("say", argv, { ticket: s, link: s, kind: s, via: s }, [1, Infinity]);
   const kind = str(v.kind) ?? "note";
   if (!(KINDS as readonly string[]).includes(kind))
     throw new UsageError(`say: --kind: invalid choice: ${pyRepr(kind)} (choose from ${KINDS.map(pyRepr).join(", ")})`);
-  say(ws, p, { ticket: str(v.ticket), link: str(v.link), kind: kind as Kind });
+  const via = str(v.via);
+  if (via !== undefined && !(VIAS as readonly string[]).includes(via))
+    throw new UsageError(`say: --via: invalid choice: ${pyRepr(via)} (choose from ${VIAS.map(pyRepr).join(", ")})`);
+  say(ws, p, { ticket: str(v.ticket), link: str(v.link), kind: kind as Kind, via: via as Via | undefined });
 }
 
 function cmdBoard(ws: Workspace, argv: string[]) {
@@ -723,7 +785,7 @@ function cmdDoctor(ws: Workspace, argv: string[]) {
   });
 }
 
-const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void> = {
+const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void | Promise<number>> = {
   "up": cmdUp,
   "down": cmdDown,
   "restart-lead": cmdRestartLead,
@@ -732,6 +794,7 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void>
   "sessions": cmdSessions,
   "dispatch": cmdDispatch,
   "stop": cmdStop,
+  "wake": cmdWake,
   "review": cmdReview,
   "assistant": cmdAssistant,
   "state": cmdState,
@@ -749,6 +812,8 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void>
   "pr-media": cmdPrMedia,
   "demo": cmdDemo,
   "stack": cmdStack,
+  "ticket": cmdTicket,
+  "wiki": cmdWiki,
   "watch": cmdWatch,
   "schedule": cmdSchedule,
   "doctor": cmdDoctor,
@@ -759,6 +824,7 @@ const HOOK_FNS: Record<HookName, (argv: string[], input: string, workspace?: str
   "status": statusHook,
   "no-dialogs": noDialogsHook,
   "no-side-channels": noSideChannelsHook,
+  "wake": wakeHook,
 };
 
 // Runs before the workspace is opened: everything a hook needs is on its command line, and a
@@ -779,7 +845,7 @@ function cmdHook(argv: string[], workspace: string | undefined): number {
   return r.code;
 }
 
-export function main(argv: string[]): number {
+export function main(argv: string[]): number | Promise<number> {
   let workspace: string | undefined;
   let i = 0;
   for (; i < argv.length; i++) {
@@ -819,10 +885,19 @@ process.stdout.on("error", (e: NodeJS.ErrnoException) => {
   process.exit(0);
 });
 
-try {
-  process.exitCode = main(process.argv.slice(2));
-} catch (e) {
+const failed = (e: unknown): number => {
   if (!(e instanceof FactoryError)) throw e;
   console.error(`factory: ${e.message}`);
-  process.exitCode = e.code;
+  return e.code;
+};
+try {
+  const r = main(process.argv.slice(2));
+  if (typeof r === "number") process.exitCode = r;
+  else
+    r.then((code) => (process.exitCode = code), (e: unknown) => (process.exitCode = failed(e))).catch((e: unknown) => {
+      console.error(e);
+      process.exitCode = 1;
+    });
+} catch (e) {
+  process.exitCode = failed(e);
 }

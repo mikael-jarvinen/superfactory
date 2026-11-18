@@ -12,17 +12,26 @@ import { agentSessions, pick, transportFor, transports } from "../transport.js";
 import { isHuman, readRecent, readTail } from "../messages.js";
 import { allRecs, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
+import { roster } from "../config.js";
 import { capitalize, run, sleep } from "../util.js";
+import { report, type Report, TranscriptUsage } from "./analytics.js";
 import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, saveAttachment } from "./inbox.js";
+import { markSeen, readSeen } from "./seen.js";
+import { markHandled, messageId, queue, queueTrouble, WAITING_KINDS } from "./queue.js";
 import { tryFailure } from "../failures.js";
 import { type Fetch, ReviewCache } from "./reviews.js";
 import { isScheduler } from "../scheduler/state.js";
+import { isTrackerApi, trackerApi, trackerSummary } from "../tickets/api.js";
+import { enabled as trackerEnabled } from "../tickets/store.js";
 
-// The board: a read-only picture of the fleet at `/`, and the thread between the human and the lead
-// at `/messages`. `/api` and `/api/messages` are the JSON behind them, and both pages re-fetch every
-// two seconds. Posting to `/api/messages` is the one write, and it only appends to the message log:
-// the text lands in the thread at once, so the page never looks like it swallowed it. Getting it to
-// the lead is the inbox's job. state/ is written by the factory alone, so a board that is wrong is
+// The board: a read-only picture of the fleet at `/`, the thread between the human and the lead
+// at `/messages`, and how long items spend in each state at `/analytics` (analytics.ts). `/api` and
+// `/api/messages` are the JSON behind the first two, and both pages re-fetch every two seconds.
+// Posting to `/api/messages` is the one message write, and it only appends to the message
+// log: the text lands in the thread at once, so the page never looks like it swallowed it. Getting it
+// to the lead is the inbox's job. `/api/messages/seen` only records how far the human has read, and
+// `/api/messages/handled` which waiting questions the human has dealt with, both in logs/ (seen.ts,
+// queue.ts). state/ is written by the factory alone, so a board that is wrong is
 // a board with a bug rather than a store that has been corrupted.
 
 const STATIC = fileURLToPath(new URL("./static/", import.meta.url));
@@ -267,18 +276,29 @@ function reviewKeys(ws: Workspace): string[] {
 // Builders group by their stack, or by their repos when they have none, so an agent added to the
 // config lands in the right group without the board changing.
 function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>, alive: (name: string, s: Session | undefined) => boolean, unknown: (name: string) => string | null = () => null) {
-  const groups = new Map<string, { key: string; title: string; scope: string; members: unknown[] }>();
+  // staff: the ungrouped assistants' roster, drawn beside the lead. A named group is never staff and
+  // sits in the row of teams, whatever its role.
+  const groups = new Map<string, { key: string; title: string; scope: string[]; staff: boolean; members: unknown[] }>();
+  const ranks = new Map<string, number>();
   const reviewerRepos = ws.config.roles.reviewer?.addDirs ?? [];
+  const rank = (k: string) => (k === "lead" ? 0 : k === "assistants" ? 1 : k === "designers" ? 1.5 : k === "reviewers" ? 3 : 2);
   for (const a of ws.config.agents) {
-    const [key, title, scope] =
-      a.role === "lead" ? ["lead", "Lead", ""]
-      : a.role === "assistant" ? ["assistants", "Assistants", ""]
-      : a.role === "reviewer" ? ["reviewers", "Reviewers", reviewerRepos.join(", ")]
-      : a.role === "designer" ? ["designers", "Designers", (ws.config.roles.designer?.addDirs ?? []).join(", ")]
-      : a.stack ? [`stack:${a.stack}`, ws.config.stacks[a.stack]?.label ?? capitalize(a.stack), a.repos.join(", ")]
-      : [`repos:${a.repos.join(",")}`, a.repos.length === 1 ? capitalize(a.repos[0] as string) : "Builders", a.repos.join(", ")];
+    const own = roster(a, ws.config.stacks);
+    const scope = a.role === "lead" || a.role === "assistant" ? []
+      : a.role === "reviewer" ? reviewerRepos
+      : a.role === "designer" ? (ws.config.roles.designer?.addDirs ?? [])
+      : a.repos;
+    // A group takes its rank from its first member's role (see config.ts), except that a group of
+    // assistants ranks with the builders' teams, since only the assistants' roster sits beside the
+    // lead; its scope is every member's.
+    const key = a.group ? `group:${a.group}` : own.key;
+    const title = a.group ?? own.title;
     let g = groups.get(key);
-    if (!g) groups.set(key, (g = { key, title, scope, members: [] }));
+    if (!g) {
+      groups.set(key, (g = { key, title, scope: [], staff: !a.group && a.role === "assistant", members: [] }));
+      ranks.set(key, a.group && a.role === "assistant" ? 2 : rank(own.key));
+    }
+    for (const x of scope) if (!g.scope.includes(x)) g.scope.push(x);
     const s = listed.get(a.name);
     const live = alive(a.name, s);
     const rec = recs.find((r) => r.agent === a.name && owesSession(r));
@@ -294,8 +314,7 @@ function teams(ws: Workspace, recs: Rec[], listed: Map<string, Session>, alive: 
       in_review: a.role === "builder" ? reviewOnly(recs, a.name).map((r) => r.ticket) : [],
     });
   }
-  const rank = (k: string) => (k === "lead" ? 0 : k === "assistants" ? 1 : k === "designers" ? 1.5 : k === "reviewers" ? 3 : 2);
-  return [...groups.values()].sort((a, b) => rank(a.key) - rank(b.key));
+  return [...groups.values()].sort((a, b) => ranks.get(a.key)! - ranks.get(b.key)!).map((g) => ({ ...g, scope: g.scope.join(", ") }));
 }
 
 // Each item's most recent note or evidence, so a card says why it sits where it does.
@@ -381,6 +400,7 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
     tickets,
     plumbing: heartbeats(ws),
     avatars: avatars(ws),
+    tracker: trackerSummary(ws),
   };
 }
 
@@ -391,9 +411,13 @@ function messagesView(ws: Workspace, sessions: SessionCache, receipts: Receipts)
   const status = sessions.alive(leadName, sessions.background().get(leadName)) ? (st.words ?? null) : sessions.unknown(leadName) ? "unknown" : "offline";
   const rows = readRecent(ws.messages, 60).reverse().map((r) => {
     const human = isHuman(ws, r.kind);
-    return { ...r, from: human ? "human" : "lead", age_min: ageMinutes(r.t), receipt: human && r.id ? receipts.receipt(r.id) : null };
+    // qid names a decision or blocked row the way the queue does, so the panel can find it in the thread.
+    const qid = !human && WAITING_KINDS.has(r.kind ?? "") ? { qid: messageId(r) } : {};
+    return { ...r, ...qid, from: human ? "human" : "lead", age_min: ageMinutes(r.t), receipt: human && r.id ? receipts.receipt(r.id) : null };
   });
-  return { at: clock(), human: ws.config.human.name, lead: leadName, lead_avatar: avatars(ws)[leadName] ?? null, status, messages: rows };
+  const shown = new Set(rows.map((r) => r.qid).filter(Boolean));
+  const waiting = queue(ws).map((i) => ({ ...i, age_min: ageMinutes(i.at), in_thread: shown.has(i.id) }));
+  return { at: clock(), human: ws.config.human.name, lead: leadName, lead_avatar: avatars(ws)[leadName] ?? null, status, seen: readSeen(ws), messages: rows, queue: waiting, queue_note: queueTrouble(ws) };
 }
 
 // ---------------------------------------------------------------- HTTP
@@ -410,7 +434,11 @@ const TYPES: Record<string, string> = {
   ".webp": "image/webp",
   ".ico": "image/x-icon",
 };
-const PAGES: Record<string, string> = { "/": "board.html", "/messages": "messages.html" };
+const PAGES: Record<string, string> = { "/": "board.html", "/messages": "messages.html", "/analytics": "analytics.html" };
+// The analytics read every transcript the fleet wrote, so one report serves every request for this long.
+const ANALYTICS_EVERY = 30_000;
+// The local tracker's pages, served only when the workspace has one.
+const TRACKER_PAGES: Record<string, string> = { "/tickets": "tickets.html", "/wiki": "wiki.html" };
 // Large enough for several pasted screenshots; the POST is same-site only, so this is not a public surface.
 const MAX_BODY = 40 * 1024 * 1024;
 
@@ -438,6 +466,30 @@ function sameSite(req: IncomingMessage): boolean {
   }
 }
 
+function readJson(req: IncomingMessage, res: ServerResponse, then: (body: Record<string, unknown>) => void): void {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  req.on("data", (c: Buffer) => {
+    size += c.length;
+    if (size > MAX_BODY) req.destroy();
+    else chunks.push(c);
+  });
+  req.on("end", () => {
+    let body: unknown;
+    try {
+      body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    } catch {
+      return json(res, 400, { ok: false, error: "bad json" });
+    }
+    if (typeof body !== "object" || body === null || Array.isArray(body)) return json(res, 400, { ok: false, error: "bad json" });
+    try {
+      then(body as Record<string, unknown>);
+    } catch (e) {
+      if (!res.headersSent) json(res, 500, { ok: false, error: (e as Error).message });
+    }
+  });
+}
+
 export interface ServeOptions {
   host?: string;
   port?: number;
@@ -462,6 +514,12 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
   const stacks = new StackChecks();
   const receipts = opts.receipts ?? new Receipts();
   const reviews = new ReviewCache(opts.reviews);
+  const usage = new TranscriptUsage();
+  let analytics: { at: number; body: Report & { at: string } } | null = null;
+  const readAnalytics = () => {
+    if (!analytics || Date.now() - analytics.at >= ANALYTICS_EVERY) analytics = { at: Date.now(), body: { at: clock(), ...report(ws, usage) } };
+    return analytics.body;
+  };
   const readReviews = () => {
     try {
       reviews.refresh(reviewKeys(ws)).catch(() => {});
@@ -483,8 +541,40 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
   });
   every(REVIEW_EVERY, readReviews);
 
+  // The tracker's answer, its 404 when the path is not one, or a 500 that says what threw.
+  const replyTracker = (res: ServerResponse, p: ReturnType<typeof trackerApi>) =>
+    p.then(
+      (r) => (r ? json(res, r.code, r.body) : send(res, 404, "not found", "text/plain; charset=utf-8")),
+      (e: unknown) => json(res, 500, { ok: false, error: String((e as Error)?.message ?? e) }),
+    );
+
   const handle = (req: IncomingMessage, res: ServerResponse) => {
     const path = (req.url ?? "/").split("?")[0] as string;
+    if (req.method === "POST" && trackerEnabled(ws) && isTrackerApi(path)) {
+      if (!sameSite(req)) return json(res, 403, { ok: false, error: "refused: not from the board" });
+      readJson(req, res, (body) => {
+        replyTracker(res, trackerApi(ws, "POST", req.url ?? "/", body));
+      });
+      return;
+    }
+    // The page saying how far the human has read the lead's messages; see seen.ts.
+    if (req.method === "POST" && path === "/api/messages/seen") {
+      if (!sameSite(req)) return json(res, 403, { ok: false, error: "refused: not from the message page" });
+      readJson(req, res, (body) => {
+        const r = markSeen(ws, body.t);
+        json(res, r.ok ? 200 : r.retry ? 503 : 400, r);
+      });
+      return;
+    }
+    // The human marking a question on the panel handled; see queue.ts.
+    if (req.method === "POST" && path === "/api/messages/handled") {
+      if (!sameSite(req)) return json(res, 403, { ok: false, error: "refused: not from the message page" });
+      readJson(req, res, (body) => {
+        const r = markHandled(ws, body.id);
+        json(res, r.ok ? 200 : r.retry ? 503 : 400, r);
+      });
+      return;
+    }
     if (req.method === "POST") {
       if (path !== "/api/messages") return send(res, 404, "not found", "text/plain; charset=utf-8");
       if (!sameSite(req)) return json(res, 403, { ok: false, error: "refused: not from the message page" });
@@ -525,6 +615,11 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
       return json(res, 200, snapshot(ws, sessions, stacks, reviews));
     }
     if (path === "/api/messages") return json(res, 200, messagesView(ws, sessions, receipts));
+    if (path === "/api/analytics") return json(res, 200, readAnalytics());
+    if (isTrackerApi(path)) {
+      replyTracker(res, trackerApi(ws, "GET", req.url ?? "/"));
+      return;
+    }
     if (path.startsWith("/attachments/")) {
       // A pasted screenshot, stored beside the message log. The name was minted server-side, so a
       // request for anything but a plain file name in that one directory is refused.
@@ -547,7 +642,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
         return send(res, 404, "not found", "text/plain; charset=utf-8");
       }
     }
-    const name = PAGES[path] ?? (path.startsWith("/static/") ? path.slice("/static/".length) : undefined);
+    const name = PAGES[path] ?? (trackerEnabled(ws) ? TRACKER_PAGES[path] : undefined) ?? (path.startsWith("/static/") ? path.slice("/static/".length) : undefined);
     const body = name !== undefined ? files.get(name) : undefined;
     if (body) return send(res, 200, body, TYPES[extname(name as string)] ?? "application/octet-stream");
     send(res, 404, "not found", "text/plain; charset=utf-8");

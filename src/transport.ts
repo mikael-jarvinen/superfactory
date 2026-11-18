@@ -2,14 +2,14 @@
 // transport; the local one runs claude on this machine, and an agent with a host goes through that
 // host's daemon (remote.ts).
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Agent, Repo } from "./config.js";
 import type { Session } from "./fleet.js";
 import type { Phase } from "./launch.js";
-import { remote, type Unreachable } from "./remote.js";
+import { ListingTimedOut, remote, Unreachable } from "./remote.js";
 import { claudeEnv, claudeScoped, scopeCheck } from "./scope.js";
 import type { Workspace } from "./workspace.js";
 import { die, MAX_OUTPUT, run } from "./util.js";
@@ -23,6 +23,8 @@ export interface StartRequest {
   cwd: string;
   prompt: string;
   appendix: string | null;
+  // The workspace's logs/run/, where a local start writes the appendix file.
+  runDir: string;
   phase: Phase;
   args: (appendixPath: string | null) => string[];
   env: NodeJS.ProcessEnv;
@@ -51,7 +53,8 @@ export interface WorktreeLeft {
 // the same `where` are taken for one.
 export interface Transport {
   readonly where: string;
-  // Throws Unreachable (remote.ts) when a host cannot be asked.
+  // Within LISTING_TIMEOUT_MS. Throws Unreachable (remote.ts) when a host cannot be asked, or a local
+  // listing timed out.
   sessions(includeDone?: boolean): Session[];
   // For the board, which must not block on a listing. Resolves to Unreachable rather than throwing it.
   sessionsAsync(): Promise<Session[] | Unreachable>;
@@ -59,7 +62,8 @@ export interface Transport {
   // The launch id claude printed, or "?".
   start(req: StartRequest): string;
   // said: claude's stdout. why: its stderr (else stdout), read when the session does not come back.
-  respawn(name: string, id: string): { ok: boolean; said: string; why: string };
+  // Within timeoutMs; one too short for a respawn is a failure, not a longer call.
+  respawn(name: string, id: string, timeoutMs?: number): { ok: boolean; said: string; why: string };
   stop(name: string, id: string, remove: boolean): void;
   // The worktree for the item, made or reused (worktree.ts's ensureWorktree); throws when it cannot.
   worktree(q: WorktreeRequest): { wt: string; how: string };
@@ -71,50 +75,104 @@ export interface Transport {
 
 const isDir = (p: string) => existsSync(p) && statSync(p).isDirectory();
 
-const parse = (stdout: string): Session[] => JSON.parse(stdout || "[]") as Session[];
+// When a session last did anything: its transcript's mtime, under claude's projects/ by the cwd with
+// every character but a letter or digit made "-". The listing gives a session only startedAt, and one
+// started earlier may have talked since. Undefined when the transcript is not found.
+export function transcriptAt(s: Session): number | undefined {
+  if (typeof s.sessionId !== "string" || !/^[\w-]+$/.test(s.sessionId) || typeof s.cwd !== "string") return undefined;
+  const dir = claudeConfigDir();
+  try {
+    return statSync(join(dir, "projects", s.cwd.replace(/[^A-Za-z0-9]/g, "-"), `${s.sessionId}.jsonl`)).mtimeMs;
+  } catch {
+    return undefined;
+  }
+}
+
+const withActivity = (rows: Session[]): Session[] =>
+  rows.map((s) => {
+    const at = transcriptAt(s);
+    return at === undefined ? s : { ...s, activeAt: at };
+  });
+
+// Rows that are not a list, `{}` say, are as unreadable as text that is not JSON.
+const parse = (stdout: string): Session[] => {
+  const rows: unknown = JSON.parse(stdout || "[]");
+  if (!Array.isArray(rows)) throw new SyntaxError("not a list");
+  return rows as Session[];
+};
 
 // `claude agents --json` is a registry, not a probe: after the daemon retires an idle worker and
 // exits, the listing keeps the session at its last state. The roster names the supervisor pid; a
 // dead pid or a missing control socket means no background session is alive, whatever the listing
 // says. These are undocumented Claude Code internals, so they stay behind this one function.
-// Probed on every call, never cached.
+// Probed on every call, never cached. The roster is under claude's config dir, as transcripts are;
+// SF_CC_DAEMON_DIR stands in for the socket dir, so a test can give the probe a daemon of its own.
+export const claudeConfigDir = () => process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+export const daemonSocketDir = () => process.env.SF_CC_DAEMON_DIR || join("/tmp", `cc-daemon-${process.getuid?.() ?? ""}`);
 export function daemonAlive(): boolean {
   try {
-    const roster = JSON.parse(readFileSync(join(homedir(), ".claude", "daemon", "roster.json"), "utf8")) as { supervisorPid?: unknown };
+    const roster = JSON.parse(readFileSync(join(claudeConfigDir(), "daemon", "roster.json"), "utf8")) as { supervisorPid?: unknown };
     const pid = Number.parseInt(String(roster.supervisorPid), 10);
     if (!Number.isInteger(pid)) return false;
     process.kill(pid, 0);
-    const base = join("/tmp", `cc-daemon-${process.getuid?.() ?? ""}`);
+    const base = daemonSocketDir();
     return readdirSync(base).some((d) => !d.startsWith(".") && existsSync(join(base, d, "control.sock")));
   } catch {
     return false;
   }
 }
 
-// A background session that has not stopped or failed, behind a daemon that is running. "done"
-// means it finished a turn and is idle; it still wakes on SendMessage, so it counts as alive.
-export function sessionAlive(s: Session | null | undefined): s is Session {
-  return !!s && s.kind === "background" && s.state !== "stopped" && s.state !== "failed" && daemonAlive();
+// Whether a process exists. EPERM means it does, run by someone else.
+export function pidExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
-const scoped = (argv: string[]) => scopeCheck(argv, run(...claudeScoped(argv), { env: claudeEnv() }, `claude ${argv[0]}`));
+// A background session that has not stopped or failed, behind a daemon that is running. "done"
+// means it finished a turn and is idle; it still wakes on SendMessage, so it counts as alive. But
+// the listing keeps a row whose worker is gone, from before a reboot or retired by the daemon, at
+// its last state, done or blocked; such a row has no pid. So a row is live only while its worker's
+// pid exists. Not "started after the supervisor": a worker can outlive a supervisor restart, and
+// one started from a pre-spawned spare predates its row's startedAt, so neither time rules it out.
+// One exception: a worker just launched is listed working before its pid, for about 1.3 s after
+// `claude --bg` returns. A pid-less working row younger than STARTING_MS is that start, and live;
+// a stale row is done or blocked, and far older.
+export const STARTING_MS = 30_000;
+export function sessionAlive(s: Session | null | undefined): s is Session {
+  if (!s || s.kind !== "background" || s.state === "stopped" || s.state === "failed") return false;
+  if (typeof s.pid !== "number" || !Number.isInteger(s.pid) || s.pid <= 0)
+    return s.state === "working" && Date.now() - instant(s.startedAt) < STARTING_MS && daemonAlive();
+  return pidExists(s.pid) && daemonAlive();
+}
+
+// A listing that hangs is cut off here, so a caller with a deadline can count on it.
+export const LISTING_TIMEOUT_MS = 20_000;
+
+const scoped = (argv: string[], timeout?: number) => scopeCheck(argv, run(...claudeScoped(argv), { env: claudeEnv(), ...(timeout ? { timeout } : {}) }, `claude ${argv[0]}`));
 export const local: Transport = {
   where: "local",
   sessions(includeDone = false) {
-    const r = scoped(["agents", "--json", ...(includeDone ? ["--all"] : [])]);
+    const r = scoped(["agents", "--json", ...(includeDone ? ["--all"] : [])], LISTING_TIMEOUT_MS);
+    if (r.status === 124) throw new ListingTimedOut(`\`claude agents --json\` did not answer in ${LISTING_TIMEOUT_MS / 1000} s`);
     if (r.status !== 0) die(`\`claude agents --json\` failed: ${r.stderr.trim()}`);
+    let rows: Session[];
     try {
-      return parse(r.stdout);
+      rows = parse(r.stdout);
     } catch {
-      return die("`claude agents --json` returned something that is not JSON");
+      return die("`claude agents --json` returned something that is not a JSON list");
     }
+    return withActivity(rows);
   },
   // As before, any failure here, a scope's included, is an empty listing.
   sessionsAsync() {
     return new Promise((res) => {
-      execFile(...claudeScoped(["agents", "--json"]), { timeout: 20_000, maxBuffer: MAX_OUTPUT, env: claudeEnv() }, (err, stdout) => {
+      execFile(...claudeScoped(["agents", "--json"]), { timeout: LISTING_TIMEOUT_MS, maxBuffer: MAX_OUTPUT, env: claudeEnv() }, (err, stdout) => {
         try {
-          res(err ? [] : parse(stdout));
+          res(err ? [] : withActivity(parse(stdout)));
         } catch {
           res([]);
         }
@@ -125,16 +183,15 @@ export const local: Transport = {
   start(req) {
     let path: string | null = null;
     if (req.appendix) {
-      path = join(tmpdir(), `sf-${req.agent.name}-${randomBytes(4).toString("hex")}.md`);
-      writeFileSync(path, req.appendix, { flag: "wx" });
+      path = appendixFile(req.runDir, req.agent.name, req.appendix);
     }
     const argv = req.args(path);
     const r = scopeCheck(argv, run(...claudeScoped(argv), { cwd: req.cwd, env: claudeEnv(req.env) }, `claude ${argv[0]}`));
     if (r.status !== 0) die(`claude --bg failed: ${r.stderr.trim() || r.stdout.trim()}`);
     return /backgrounded · (\w+) · /.exec(r.stdout)?.[1] ?? "?";
   },
-  respawn(_name, id) {
-    const r = scoped(["respawn", id]);
+  respawn(_name, id, timeoutMs) {
+    const r = scoped(["respawn", id], timeoutMs);
     return { ok: r.status === 0, said: r.stdout.trim(), why: r.stderr.trim() || r.stdout.trim() };
   },
   stop(_name, id, remove) {
@@ -163,6 +220,22 @@ export const local: Transport = {
     return { top: top.stdout.trim(), origin: git(repo.path, "remote", "get-url", "origin").stdout.trim() };
   },
 };
+
+// A session's appendix file. `claude respawn` reruns the session's old command line, and claude
+// refuses a --append-system-prompt-file that is gone, so the file lives in the workspace's
+// logs/run/, which a reboot keeps as it does not keep /tmp. It is named by its content: a respawn
+// reads the brief its session started with even after the brief changed, and a brief launched again
+// unchanged reuses its file. Written beside it and renamed, so a reader never sees half of one.
+export function appendixFile(runDir: string, name: string, text: string): string {
+  mkdirSync(runDir, { recursive: true });
+  const path = join(runDir, `appendix-${name}-${createHash("sha256").update(text).digest("hex").slice(0, 16)}.md`);
+  if (!existsSync(path) || readFileSync(path, "utf8") !== text) {
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, text);
+    renameSync(tmp, path);
+  }
+  return path;
+}
 
 // One remote transport per host and workspace, so the agents on a host share it.
 const remotes = new WeakMap<Workspace, Map<string, Transport>>();
@@ -195,14 +268,20 @@ export function transports(ws: Workspace): Transport[] {
 
 // A number is epoch milliseconds; Date.parse would read it as text and give NaN.
 const instant = (x: unknown) => (typeof x === "number" ? x : typeof x === "string" ? Date.parse(x) : NaN);
-const stamp = (s: Session) => [s.updatedAt, s.startedAt, s.createdAt].map(instant).find(Number.isFinite) ?? -Infinity;
+const stamp = (s: Session) => [s.activeAt, s.updatedAt, s.startedAt, s.createdAt].map(instant).find(Number.isFinite) ?? -Infinity;
+
+// Newest first: the latest activity, else the latest timestamp the listing carries, as its order is
+// not documented.
+const byNewest = (hits: Session[]) => [...hits].sort((a, b) => (stamp(a) < stamp(b) ? 1 : stamp(a) > stamp(b) ? -1 : 0));
 
 // An agent's session among several by its name: the newest live one, else the newest.
-// The listing's order is not documented, so "newest" is the latest timestamp it carries.
 export function pick(t: Transport, hits: Session[]): Session | null {
-  const newest = [...hits].sort((a, b) => (stamp(a) < stamp(b) ? 1 : stamp(a) > stamp(b) ? -1 : 0));
+  const newest = byNewest(hits);
   return newest.find((s) => t.alive(s)) ?? newest[0] ?? null;
 }
+
+// The newest of them, live or not: the one a wake respawns, the one last active where that is known.
+export const newest = (hits: Session[]): Session | null => byNewest(hits)[0] ?? null;
 
 export const isAgentSession = (name: string) => (s: Session) => s.kind === "background" && s.name === name;
 
