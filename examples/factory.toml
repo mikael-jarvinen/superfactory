@@ -133,6 +133,14 @@ done = "Done"
 #                                         # must say it merged and that it names the ticket, or it
 #                                         # quotes an ok of the human's (`--asked`) no other ticket used
 
+# A wiki beside any other tracker, Jira or none: `factory wiki` and /wiki on the board, with "wiki"
+# in its header and no tickets. A local tracker's projects already carry one, so not with "local".
+# [wiki]
+# dir = "wiki"                            # pages are <dir>/<KEY>/<path>.md; state/wiki by default
+# [[wiki.projects]]
+# key = "NOTES"
+# name = "Team notes"
+
 [board]
 host = "localhost"
 port = 8787

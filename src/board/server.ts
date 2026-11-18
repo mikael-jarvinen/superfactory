@@ -21,8 +21,9 @@ import { markHandled, messageId, queue, queueTrouble, WAITING_KINDS } from "./qu
 import { tryFailure } from "../failures.js";
 import { type Fetch, ReviewCache } from "./reviews.js";
 import { isScheduler } from "../scheduler/state.js";
-import { isTrackerApi, trackerApi, trackerSummary } from "../tickets/api.js";
+import { isTrackerApi, servesTrackerApi, trackerApi, trackerSummary } from "../tickets/api.js";
 import { enabled as trackerEnabled } from "../tickets/store.js";
+import { enabled as wikiEnabled } from "../wiki/store.js";
 
 // The board: a read-only picture of the fleet at `/`, the thread between the human and the lead
 // at `/messages`, and how long items spend in each state at `/analytics` (analytics.ts). `/api` and
@@ -437,8 +438,9 @@ const TYPES: Record<string, string> = {
 const PAGES: Record<string, string> = { "/": "board.html", "/messages": "messages.html", "/analytics": "analytics.html" };
 // The analytics read every transcript the fleet wrote, so one report serves every request for this long.
 const ANALYTICS_EVERY = 30_000;
-// The local tracker's pages, served only when the workspace has one.
-const TRACKER_PAGES: Record<string, string> = { "/tickets": "tickets.html", "/wiki": "wiki.html" };
+// The local tracker's tickets page, served only with one; the wiki page, only with a wiki.
+const trackerPage = (ws: Workspace, path: string): string | undefined =>
+  path === "/tickets" && trackerEnabled(ws) ? "tickets.html" : path === "/wiki" && wikiEnabled(ws) ? "wiki.html" : undefined;
 // Large enough for several pasted screenshots; the POST is same-site only, so this is not a public surface.
 const MAX_BODY = 40 * 1024 * 1024;
 
@@ -550,7 +552,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
 
   const handle = (req: IncomingMessage, res: ServerResponse) => {
     const path = (req.url ?? "/").split("?")[0] as string;
-    if (req.method === "POST" && trackerEnabled(ws) && isTrackerApi(path)) {
+    if (req.method === "POST" && servesTrackerApi(ws, path)) {
       if (!sameSite(req)) return json(res, 403, { ok: false, error: "refused: not from the board" });
       readJson(req, res, (body) => {
         replyTracker(res, trackerApi(ws, "POST", req.url ?? "/", body));
@@ -642,7 +644,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
         return send(res, 404, "not found", "text/plain; charset=utf-8");
       }
     }
-    const name = PAGES[path] ?? (trackerEnabled(ws) ? TRACKER_PAGES[path] : undefined) ?? (path.startsWith("/static/") ? path.slice("/static/".length) : undefined);
+    const name = PAGES[path] ?? trackerPage(ws, path) ?? (path.startsWith("/static/") ? path.slice("/static/".length) : undefined);
     const body = name !== undefined ? files.get(name) : undefined;
     if (body) return send(res, 200, body, TYPES[extname(name as string)] ?? "application/octet-stream");
     send(res, 404, "not found", "text/plain; charset=utf-8");

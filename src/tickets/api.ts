@@ -1,7 +1,7 @@
-// The board's JSON for the local tracker: /api/tickets and /api/wiki. Every write here is the
-// human's, from the board, so the agent guards in guard.ts let it through; a write still goes
-// through the store's own checks (states, labels, sizes, the wiki's sha). None of this is routed
-// unless the workspace has `[tracker] kind = "local"`.
+// The board's JSON for the local tracker and the wiki: /api/tickets and /api/wiki. Every write here
+// is the human's, from the board, so the agent guards in guard.ts let it through; a write still goes
+// through the store's own checks (states, labels, sizes, the wiki's sha). /api/tickets is routed only
+// with `[tracker] kind = "local"`; /api/wiki whenever the workspace has a wiki (see config.ts).
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
 import type { Actor } from "./guard.js";
@@ -21,11 +21,16 @@ const str = (v: unknown, what: string): string => {
   return v;
 };
 
-export const isTrackerApi = (path: string) => path === "/api/tickets" || path.startsWith("/api/tickets/") || path === "/api/wiki" || path.startsWith("/api/wiki/");
+const isTicketsApi = (path: string) => path === "/api/tickets" || path.startsWith("/api/tickets/");
+const isWikiApi = (path: string) => path === "/api/wiki" || path.startsWith("/api/wiki/");
+export const isTrackerApi = (path: string) => isTicketsApi(path) || isWikiApi(path);
+// Whether this workspace answers the path at all: tickets with a local tracker, the wiki with a wiki.
+export const servesTrackerApi = (ws: Workspace, path: string) => (isTicketsApi(path) && T.enabled(ws)) || (isWikiApi(path) && W.enabled(ws));
 
-// The board's header: how many tickets wait in Backlog, or null without a local tracker.
-export function trackerSummary(ws: Workspace): { backlog: number } | null {
-  if (!T.enabled(ws)) return null;
+// The board's header: how many tickets wait in Backlog with a local tracker (whose wiki comes with
+// it), { wiki: true } with only a wiki, or null with neither.
+export function trackerSummary(ws: Workspace): { backlog: number } | { wiki: true } | null {
+  if (!T.enabled(ws)) return W.enabled(ws) ? { wiki: true } : null;
   try {
     return { backlog: T.list(ws).filter((t) => t.state === "Backlog").length };
   } catch {
@@ -120,8 +125,8 @@ function wikiRef(rest: string): { project: string; path: string } {
 function wikiGet(ws: Workspace, rest: string, q: URLSearchParams): Reply {
   if (!rest) {
     const project = q.get("project");
-    const ps = project ? [T.projectOf(ws, project)] : T.projects(ws);
-    return ok({ projects: T.projects(ws), pages: ps.flatMap((p) => W.list(ws, p.key)) });
+    const ps = project ? [W.projectOf(ws, project)] : W.projects(ws);
+    return ok({ projects: W.projects(ws), pages: ps.flatMap((p) => W.list(ws, p.key)) });
   }
   const r = wikiRef(rest);
   if (!W.pageExists(ws, r.project, r.path)) return bad(`no page ${r.project}/${r.path}`, 404);
@@ -142,11 +147,12 @@ function wikiPost(ws: Workspace, rest: string, b: Record<string, unknown>): Repl
 
 // null when the path is not the tracker's, or the workspace has none: the caller answers 404.
 export async function trackerApi(ws: Workspace, method: string, rawUrl: string, body?: Record<string, unknown>): Promise<Reply | null> {
-  if (!T.enabled(ws)) return null;
   const u = new URL(rawUrl, "http://board");
   const path = u.pathname;
-  if (!isTrackerApi(path)) return null;
-  const tickets = path.startsWith("/api/tickets");
+  // Every page's header asks /api/tickets?summary=1 for its links, so a wiki-only workspace answers it.
+  if (method === "GET" && path === "/api/tickets" && u.searchParams.has("summary") && !T.enabled(ws) && W.enabled(ws)) return ok(trackerSummary(ws));
+  if (!servesTrackerApi(ws, path)) return null;
+  const tickets = isTicketsApi(path);
   const rest = path.slice(tickets ? "/api/tickets".length : "/api/wiki".length).replace(/^\//, "");
   try {
     if (method === "POST") return tickets ? await ticketsPost(ws, rest, body ?? {}) : wikiPost(ws, rest, body ?? {});

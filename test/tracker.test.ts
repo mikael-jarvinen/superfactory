@@ -118,13 +118,14 @@ key = "OPS"
 for (const [name, toml] of [["jira", TOML], ["none", NO_TRACKER]] as const)
   test(`off by default: a ${name} workspace has no local tracker anywhere`, async () => {
     const dir = tempWorkspace(toml);
-    for (const args of [["ticket", "list"], ["ticket", "create", "--title", "x"], ["wiki", "list"]]) {
-      const r = factory(dir, args);
+    for (const [args, why] of [[["ticket", "list"], /no local tracker/], [["ticket", "create", "--title", "x"], /no local tracker/], [["wiki", "list"], /no wiki/]] as const) {
+      const r = factory(dir, [...args]);
       assert.notEqual(r.status, 0, args.join(" "));
-      assert.match(r.stderr, /no local tracker/, args.join(" "));
+      assert.match(r.stderr, why, args.join(" "));
     }
     const ws = openWorkspace(dir);
     assert.equal(T.enabled(ws), false);
+    assert.equal(W.enabled(ws), false);
     const board = await serve(ws, { port: 0, host: "127.0.0.1", reviews: async () => "{}" });
     after(() => board.close());
     for (const p of ["/tickets", "/wiki", "/api/tickets", "/api/tickets?summary=1", "/api/tickets/RPE-1", "/api/wiki", "/api/wiki/RPE/x"])
