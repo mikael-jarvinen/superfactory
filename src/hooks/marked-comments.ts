@@ -18,6 +18,6 @@ export function hook(_argv: string[], input: string): HookResult {
   const tin = call.tool_input ?? {};
   const why = tool === "Bash"
     ? commentVerdict(typeof tin.command === "string" ? tin.command : "")
-    : mcpCommentVerdict(tool, tin.body);
+    : mcpCommentVerdict(tool, tin);
   return why ? { code: 2, stderr: `marked-comments: refused. ${why}\n` } : { code: 0 };
 }

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { allowClosePath } from "../src/allow-close.js";
+import { hook as markedHook } from "../src/hooks/marked-comments.js";
 import { commentVerdict, GITHUB_BUDGET_MS, type GuardContext, hook, mcpVerdict, verdict } from "../src/hooks/guard.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, tempWorkspace } from "./helpers.js";
@@ -1254,6 +1255,30 @@ test("the shapes CodeRabbit found in #128 at 5332c327 are read as bash and gh re
     const hook = commentVerdict(cmd);
     if ((hook === null ? OK : NO) !== want) wrong.push(`hook ${want === OK ? "refused" : "allowed"} ${name}: ${cmd}${hook ? ` (${hook})` : ""}`);
     if (want === NO && verdict(cmd, pr) === null) wrong.push(`protect allowed ${name}: ${cmd}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// KJJa: the review tools other GitHub MCP releases name, and a review's inline comments[].body, are
+// comments to both the marked-comments hook and the protect guard (CodeRabbit on #128)
+test("the MCP review tools CodeRabbit found in #128 hold their bodies to the marker", () => {
+  const A = { owner: "acme", repo: "api", pullNumber: 5 };
+  const rows: [string, string, Record<string, unknown>][] = [
+    [NO, "create_pull_request_review", { ...A, event: "COMMENT", body: "lgtm" }],
+    [NO, "add_pull_request_review_comment_to_pending_review", { ...A, path: "a.ts", line: 1, body: "nit" }],
+    [NO, "add_pull_request_review_comment", { ...A, path: "a.ts", line: 1, body: "nit" }],
+    [NO, "create_pull_request_review_comment", { ...A, path: "a.ts", line: 1, body: "nit" }],
+    [NO, "create_pull_request_review", { ...A, event: "COMMENT", body: `${M} ok`, comments: [{ path: "a.ts", line: 1, body: "nit" }] }],
+    [NO, "pull_request_review_write", { ...A, method: "create", event: "COMMENT", body: `${M} ok`, comments: [{ path: "a", line: 1, body: "x" }] }],
+    [OK, "create_pull_request_review", { ...A, event: "COMMENT", body: `${M} ok`, comments: [{ path: "a.ts", line: 1, body: `${M} nit` }] }],
+    [OK, "create_pull_request_review", { ...A, event: "APPROVE" }],
+  ];
+  const wrong: string[] = [];
+  for (const [want, name, tin] of rows) {
+    const tool = `mcp__github__${name}`;
+    const r = markedHook([], JSON.stringify({ tool_name: tool, tool_input: tin }));
+    if ((r.code === 0 ? OK : NO) !== want) wrong.push(`hook ${want === OK ? "refused" : "allowed"} ${name} ${JSON.stringify(tin)}`);
+    if (want === NO && mcpVerdict(tool, tin, pr) === null) wrong.push(`protect allowed ${name} ${JSON.stringify(tin)}`);
   }
   assert.deepEqual(wrong, []);
 });

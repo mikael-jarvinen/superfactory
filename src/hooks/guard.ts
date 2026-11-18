@@ -1364,11 +1364,22 @@ function checkGhProtect(words: string[], ctx: GuardContext): void {
 }
 
 // A GitHub MCP tool that posts a comment, review body or reply: its body is held to the same rule.
-export const MCP_COMMENT_TOOLS = /^mcp__.+?__(add_issue_comment|add_reply_to_pull_request_comment|add_comment_to_pending_review|pull_request_review_write|update_issue_comment|create_pending_pull_request_review|submit_pending_pull_request_review|create_and_submit_pull_request_review)$/i;
+// The GitHub MCP tools that post or edit a comment or review, today's names and the names other
+// releases of the server use (create_pull_request_review, add_pull_request_review_comment...; CodeRabbit on #128).
+export const MCP_COMMENT_TOOLS = /^mcp__.+?__(add_issue_comment|create_issue_comment|update_issue_comment|add_reply_to_pull_request_comment|reply_to_pull_request_comment|add_comment_to_pending_review|add_pull_request_review_comment(_to_pending_review)?|create_pull_request_review_comment|update_pull_request_review_comment|update_pull_request_comment|pull_request_review_write|create_pull_request_review|update_pull_request_review|create_pending_pull_request_review|submit_pending_pull_request_review|create_and_submit_pull_request_review)$/i;
 
-export function mcpCommentVerdict(tool: string, body: unknown): string | null {
-  if (!MCP_COMMENT_TOOLS.test(tool) || typeof body !== "string" || !body.trim()) return null;
-  return markedBody(body) ? null : `this comment would read as the human's own: ${COMMENT_HINT}`;
+// A comment tool's call: its body, and each comments[].body a review carries, must start with the
+// marker. The second argument is the tool input, or (as before) the body alone.
+export function mcpCommentVerdict(tool: string, input: unknown): string | null {
+  if (!MCP_COMMENT_TOOLS.test(tool)) return null;
+  const tin = input !== null && typeof input === "object" ? (input as Record<string, unknown>) : { body: input };
+  const comments = Array.isArray(tin.comments) ? (tin.comments as unknown[]) : [];
+  const bodies = [tin.body, ...comments.map((c) => (c !== null && typeof c === "object" ? (c as Record<string, unknown>).body : c))];
+  for (const body of bodies) {
+    if (typeof body !== "string" || !body.trim()) continue;
+    if (!markedBody(body)) return `this comment would read as the human's own: ${COMMENT_HINT}`;
+  }
+  return null;
 }
 
 // The GitHub MCP server's tools reach the same PRs as gh, so the guard sees them too (Marie and
@@ -1391,7 +1402,7 @@ function checkMcpGithub(tool: string, tin: Record<string, unknown>, ctx: GuardCo
   const repo = `${str("owner")}/${str("repo")}`;
   const n = String(tin.pullNumber ?? "");
   if (MCP_COMMENT_TOOLS.test(tool)) {
-    const why = mcpCommentVerdict(tool, tin.body);
+    const why = mcpCommentVerdict(tool, tin);
     if (why !== null) refuse(why);
   } else if (name === "merge_pull_request") {
     const head = str("expectedHeadSha");
