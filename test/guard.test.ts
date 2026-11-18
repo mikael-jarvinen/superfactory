@@ -1107,7 +1107,26 @@ const COMMENT_SHAPES: [string, string, string][] = [
   // an unquoted heredoc's $(...) runs as the shell reads the body; a quoted one's is text
   [NO, "a heredoc body's substitution", "cat <<EOF\n$(gh pr comment 1 -b hi)\nEOF"],
   [OK, "a quoted heredoc's substitution", "cat <<'EOF'\n$(gh pr comment 1 -b hi)\nEOF"],
+  // a $'...' body is what bash gives gh, decoded (Marie on #128)
+  [OK, "an ANSI-C quoted marked body", "gh pr comment 5 -R acme/api --body $'> Written by agent.'"],
+  [OK, "an ANSI-C quoted body with the CodeRabbit trigger", "gh pr comment 5 -R acme/api --body $'> Written by agent.\\n\\n@coderabbitai review'"],
+  [OK, "an ANSI-C body marked through a hex escape", "gh pr comment 5 -R acme/api --body $'\\x3e Written by agent.'"],
+  [NO, "an ANSI-C body with the mark on its second line", "gh pr comment 5 -R acme/api --body $'hi\\n> Written by agent.'"],
+  [NO, "an escaped $ before a quoted body", "gh pr comment 5 -R acme/api --body \\$'> Written by agent.'"],
+  [NO, "an ANSI-C body with a control character", "gh pr comment 5 -R acme/api --body $'> Written by agent.\\c'"],
+  // command -v and -V look a name up and run nothing; without them, command runs it
+  [OK, "looking gh up", "command -v gh git-gh"],
+  [OK, "describing gh", "command -V gh"],
+  [NO, "an alias run through command", "command gh co 5"],
 ];
+
+// The protect guard refused these two shapes from the merged comment rule (Marie on #128).
+test("protect allows a $'...' marked body and a command -v lookup", () => {
+  for (const cmd of ["gh pr comment 5 -R acme/api --body $'> Written by agent.'", "gh pr comment 5 -R acme/api --body $'> Written by agent.\\n\\n@coderabbitai review'",
+    "command -v gh git-gh", "command -V gh"])
+    assert.equal(verdict(cmd, pr), null, cmd);
+  assert.notEqual(verdict("command gh co 5", pr), null);
+});
 
 test("the comment rule: every shape a gh comment takes, refused or allowed", () => {
   // The file rows run where their files exist and hold only reads, so a refusal is the rule's, not

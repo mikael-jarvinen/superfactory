@@ -192,6 +192,8 @@ export function tokenize(cmd: string): Tok[] {
     let dq = -1;
     const subs: string[] = [];
     let tick = false;
+    // tok's length just after an unquoted, unescaped $: a ' there opens a $'...' (Marie on #128)
+    let bareDollar = -1;
     for (;;) {
       const c = next();
       if (c === "`" && (state === " " || state === "a" || state === '"')) tick = true;
@@ -218,7 +220,7 @@ export function tokenize(cmd: string): Tok[] {
         if (c === "\\") [esc, state] = [" ", "\\"];
         else if (PUNCT.includes(c)) [tok, state, op] = [c, "c", true];
         else if (c === "'" || c === '"') [state, dq] = [c, tok.length];
-        else [tok, state] = [c, "a"];
+        else [tok, state, bareDollar] = [c, "a", c === "$" ? 1 : -1];
         continue;
       }
       if (state === "'" || state === '"') {
@@ -262,9 +264,15 @@ export function tokenize(cmd: string): Tok[] {
         back.push(c);
         break;
       }
-      if (c === "'" || c === '"') [state, dq] = [c, tok.length];
+      if (c === "'" && bareDollar === tok.length) {
+        tok = tok.slice(0, -1) + ansiC(next, (x) => back.push(x));
+        quoted = true;
+      } else if (c === "'" || c === '"') [state, dq] = [c, tok.length];
       else if (c === "\\") [esc, state] = ["a", "\\"];
-      else if (!PUNCT.includes(c)) tok += c;
+      else if (!PUNCT.includes(c)) {
+        tok += c;
+        if (c === "$") bareDollar = tok.length;
+      }
       else {
         back.push(c);
         state = " ";
@@ -273,6 +281,44 @@ export function tokenize(cmd: string): Tok[] {
     }
     if (!tok && !quoted) return out;
     out.push({ t: tok, op, ...(subs.length ? { subs } : {}), ...(tick ? { tick } : {}) });
+  }
+}
+
+// The body of a $'...' after its opening quote, decoded as bash does, so a comment body written
+// $'> Written by agent.\n\n...' reads as what gh is given (Marie on #128). \c, which bash reads as a
+// control character, and an unclosed quote are refused.
+const ANSI_C: Record<string, string> = { a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?" };
+function ansiC(next: () => string, back: (c: string) => void): string {
+  let out = "";
+  for (;;) {
+    let c = next();
+    if (c === "") refuse("cannot parse quoting (No closing quotation)");
+    if (c === "'") return out;
+    if (c !== "\\") {
+      out += c;
+      continue;
+    }
+    c = next();
+    if (c === "") refuse("cannot parse quoting (No closing quotation)");
+    const digits = (re: RegExp, max: number, first = "") => {
+      let d = first;
+      while (d.length < max) {
+        const x = next();
+        if (!re.test(x)) {
+          if (x) back(x);
+          break;
+        }
+        d += x;
+      }
+      return d;
+    };
+    if (c in ANSI_C) out += ANSI_C[c];
+    else if (/[0-7]/.test(c)) out += String.fromCharCode(parseInt(digits(/^[0-7]$/, 3, c), 8) & 0xff);
+    else if (c === "x" || c === "u" || c === "U") {
+      const d = digits(/^[0-9a-fA-F]$/, c === "x" ? 2 : c === "u" ? 4 : 8);
+      out += d ? String.fromCodePoint(parseInt(d, 16)) : "\\" + c;
+    } else if (c === "c") refuse("cannot parse quoting (a \\c control character in $'...')");
+    else out += "\\" + c;
   }
 }
 
@@ -2085,6 +2131,8 @@ function commandWords(words: string[]): string[] {
       const o = words[i] as string;
       i++;
       if (o === "--") break;
+      // `command -v gh` and `command -V gh` look a name up and run nothing (Marie on #128)
+      if (name === "command" && /^-[pvV]*[vV][pvV]*$/.test(o)) return [];
       if (opts.includes(o)) i++;
     }
     if (name === "timeout") i++;
