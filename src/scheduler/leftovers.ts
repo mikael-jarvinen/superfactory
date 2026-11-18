@@ -182,9 +182,11 @@ export function inJobScopes(label: string, pgid: number, slice: string | null): 
 
 // The processes left by run pgid of job label, an ended one: in its group in the scheduler's
 // cgroup, and in its claude calls' scopes. null, to wait for the next check, when one is left that
-// cannot be told from a claude session: there is no claude to tell it by, or its reading is unsure.
+// cannot be told from a claude session: there is no claude to tell it by, or its reading is unsure,
+// which is the unsure process's pid.
 // live holds the pids of runs still recorded as going, whose groups are not to be touched.
-function leftovers(label: string, pgid: number, live: Set<number>, log: (line: string) => void, slice: string | null): Leftover[] | null {
+interface Wait { unsure: number | null }
+function leftovers(label: string, pgid: number, live: Set<number>, log: (line: string) => void, slice: string | null): Leftover[] | Wait {
   if (process.platform !== "linux" || !pgid || procStat(pgid) || live.has(pgid)) return [];
   const inGroup = [...new Set([...inOwnCgroup(pgid, log), ...inJobScopes(label, pgid, slice)])].filter((pid) => pid !== process.pid);
   if (!inGroup.length) return [];
@@ -192,7 +194,7 @@ function leftovers(label: string, pgid: number, live: Set<number>, log: (line: s
   if (!c) {
     if (!noClaudeSaid) log(`no claude at ${claudeBin()}: leftovers are not killed until one is found, since a claude session among them could not be told apart`);
     noClaudeSaid = true;
-    return null;
+    return { unsure: null };
   }
   noClaudeSaid = false;
   const found: Leftover[] = [];
@@ -204,17 +206,18 @@ function leftovers(label: string, pgid: number, live: Set<number>, log: (line: s
     // empty cmdline and so not as a claude, then be one by the time it is signalled. When the reading
     // is unsure (an empty cmdline, or a name that changed under it), the group waits for the next check.
     const after = procStat(pid);
-    if (after && (after.comm !== st.comm || (after.state !== "Z" && !cmdline(pid).length))) return null;
+    if (after && (after.comm !== st.comm || (after.state !== "Z" && !cmdline(pid).length))) return { unsure: pid };
     if (after) found.push({ pid, comm: st.comm, stamp: startStamp(pid) });
   }
   return found;
 }
 
 // SIGTERM, then SIGKILL after graceMs. settled runs once, after this returns if anything was signalled; when
-// deferred, keep the group and call again, otherwise forget it.
+// deferred, keep the group and call again, otherwise forget it. unsure is the pid it deferred on, when
+// one read unsure.
 // slice is where the run's claude calls' scopes are, agentsSlice() unless a test says otherwise.
-export function cleanUp(label: string, pgid: number, live: Set<number>, log: (line: string) => void, settled: (deferred: boolean) => void, graceMs = 10_000, slice?: string | null): void {
-  let found: Leftover[] | null;
+export function cleanUp(label: string, pgid: number, live: Set<number>, log: (line: string) => void, settled: (deferred: boolean, unsure?: number) => void, graceMs = 10_000, slice?: string | null): void {
+  let found: Leftover[] | Wait;
   try {
     found = leftovers(label, pgid, live, log, slice === undefined ? agentsSlice() : slice);
   } catch (e) {
@@ -222,8 +225,9 @@ export function cleanUp(label: string, pgid: number, live: Set<number>, log: (li
     settled(false);
     return;
   }
-  if (!found) {
-    settled(true);
+  if (!Array.isArray(found)) {
+    if (found.unsure === null) settled(true);
+    else settled(true, found.unsure);
     return;
   }
   if (!found.length) {

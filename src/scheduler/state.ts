@@ -18,6 +18,8 @@ export interface JobRun {
   stamp?: string | null;
   // process groups of ended runs whose leftovers are still being killed
   clearing?: number[];
+  // groups in clearing the lead has been told about, a process in them unsure for UNSURE_CHECKS checks
+  unsureTold?: number[];
 }
 
 export interface SchedulerState {

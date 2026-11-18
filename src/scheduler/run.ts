@@ -11,6 +11,7 @@ import { nextDue, runAlive } from "./daemon.js";
 import { type Job, environment, jobs } from "./launchd.js";
 import { JOB_ENV } from "../scope.js";
 import { cleanUp } from "./leftovers.js";
+import { deliver } from "../watchers/relay.js";
 import { watchdog } from "./watchdog.js";
 import { type JobRun, readState, stateFile } from "./state.js";
 
@@ -26,6 +27,10 @@ export interface RunOptions {
 // what it is given. gh reads its keyring over the session bus (DBUS_SESSION_BUS_ADDRESS,
 // XDG_RUNTIME_DIR), and git over SSH needs SSH_AUTH_SOCK.
 const INHERIT = ["HOME", "USER", "TMPDIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK"];
+
+// A process whose reading stays unsure (an argv that stays blank) is never killed, so its group would
+// sit in clearing unseen: after this many checks in a row the lead is told, once, and it is left be.
+export const UNSURE_CHECKS = 10;
 
 export async function runScheduler(ws: Workspace, opts: RunOptions = {}): Promise<void> {
   const checkSeconds = opts.checkSeconds ?? 30;
@@ -104,17 +109,36 @@ export async function runScheduler(ws: Workspace, opts: RunOptions = {}): Promis
   }
 
   const clearingInProcess = new Set<string>(); // label:pgid, a cleanUp under way in this process
+  const unsureChecks = new Map<string, number>(); // label:pgid, checks in a row it deferred on an unsure process
   function clear(label: string, pgid: number) {
     const r = runs[label] as JobRun;
     if (!r.clearing?.includes(pgid)) r.clearing = [...(r.clearing ?? []), pgid];
     const key = `${label}:${pgid}`;
     if (clearingInProcess.has(key)) return;
     clearingInProcess.add(key);
-    cleanUp(label, pgid, live(), log, (deferred) => {
+    cleanUp(label, pgid, live(), log, (deferred, unsure) => {
       clearingInProcess.delete(key);
-      if (deferred) return; // still in clearing, so the next check tries again
+      if (deferred) {
+        // still in clearing, so the next check tries again
+        const n = unsure === undefined ? 0 : (unsureChecks.get(key) ?? 0) + 1;
+        unsureChecks.set(key, n);
+        if (unsure !== undefined && n >= UNSURE_CHECKS && !r.unsureTold?.includes(pgid)) {
+          const text = `[scheduler]\njob ${label}: pid ${unsure} in process group ${pgid} has read unsure (a blank command line, or a name that changes) ` +
+            `for ${n} checks, so it is not killed, and the group stays in clearing. Look at it with \`ps -o pid,pgid,stat,args -g ${pgid}\`, ` +
+            `and kill it yourself if it is a stray. This is said once.`;
+          log(`job ${label}: pid ${unsure} in process group ${pgid} unsure for ${n} checks; the lead is told`);
+          if (deliver(ws, text)) {
+            r.unsureTold = [...(r.unsureTold ?? []), pgid];
+            writeState();
+          }
+        }
+        return;
+      }
+      unsureChecks.delete(key);
       r.clearing = r.clearing?.filter((g) => g !== pgid);
       if (!r.clearing?.length) delete r.clearing;
+      r.unsureTold = r.unsureTold?.filter((g) => g !== pgid);
+      if (!r.unsureTold?.length) delete r.unsureTold;
       writeState();
     });
   }

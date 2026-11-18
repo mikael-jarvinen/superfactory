@@ -5,6 +5,8 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
+import { notesLog } from "../src/board/inbox.js";
+import { UNSURE_CHECKS } from "../src/scheduler/run.js";
 import { openWorkspace } from "../src/workspace.js";
 import { CLI, linuxOnly, noCleanup, runningNotZombie, sleep, tempDir, until } from "./helpers.js";
 
@@ -315,6 +317,20 @@ test("a process whose command line reads empty is not killed, and its group wait
   await sleep(3000); // three checks
   assert.ok(runningNotZombie(stray), "left alone");
   assert.doesNotMatch(d.out, /ended, leaving/, d.out);
+  assert.ok(t.state().jobs[UP].clearing?.includes(pid), "still to be cleared");
+
+  // Niilo on #128: a stray whose argv stays blank sat in clearing forever, unseen. After
+  // UNSURE_CHECKS checks the lead is told once, naming the pid and the group, and it is still left be.
+  const notes = () => {
+    const f = notesLog(openWorkspace(t.ws));
+    return existsSync(f) ? readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l).text as string).filter((x) => x.startsWith("[scheduler]")) : [];
+  };
+  await until("the lead to be told", () => notes().length > 0, 30_000);
+  await sleep(3000); // three more checks
+  assert.equal(notes().length, 1, "told once");
+  assert.match(notes()[0] as string, new RegExp(`^\\[scheduler\\]\\njob ${UP.replace(/\./g, "\\.")}: pid ${stray} in process group ${pid} has read unsure .* for ${UNSURE_CHECKS} checks, so it is not killed`));
+  assert.ok(runningNotZombie(stray), "still left alone");
+  assert.deepEqual(t.state().jobs[UP].unsureTold, [pid], "kept, so a restarted scheduler does not tell again");
   assert.ok(t.state().jobs[UP].clearing?.includes(pid), "still to be cleared");
   d.kill();
 });
