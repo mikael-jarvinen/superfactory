@@ -564,10 +564,16 @@ test("strings a program runs and lines it schedules are checked as commands", ()
     `printf '# c\\nPATH=/usr/bin\\n*/5 * * * * cd /x && ${M}\\n' | crontab -`, `at now <<< '${M}'`, `echo 'true; ${M}' | batch`,
     `echo '0 1 * * * ${M}' | crontab -u bot -`, `echo '${M}' | at -m now`, `printf '%s\\n' '@daily ${M}' | crontab`,
     `crontab <<< '0 1 * * * x; ${M}'`,
+    // escapes and formats printedText cannot read (Marie at c197d465)
+    `printf '* * * * * \\x67h pr merge 1 -R acme/api\\n' | crontab -`, `printf '* * * * * \\147h pr merge 1 -R acme/api\\n' | crontab -`,
+    `echo -e '* * * * * \\x67h pr merge 1 -R acme/api' | crontab -`, `printf '* * * * * %.2s pr merge 1 -R acme/api\\n' ghx | crontab -`,
+    `printf '* * * * * %b pr merge 1 -R acme/api\\n' '\\x67h' | crontab -`, `printf '\\x67h pr merge 1 -R acme/api\\n' | at now`,
     // git's relocating options stay refused
     "git --exec-path=/tmp/x status", "git --git-dir=/x push origin main", "git -C /x --exec-path=/tmp/x log"];
   const allowed = ["tmux new -d 'npm test; echo done'", "docker run img sh -c 'npm test && echo ok'", "tmux new -s w", "tmux attach -t w",
-    "crontab -l", "(crontab -l; echo '30 3 * * 1 ~/agents/bin/agent-compact.sh warren') | crontab -", "crontab /tmp/cron.new",
+    "crontab -l", "(crontab -l; echo '30 3 * * 1 ~/agents/bin/agent-compact.sh warren') | crontab -",
+    "printf '%s\\n' '30 3 * * 1 ~/agents/bin/agent-compact.sh warren' | crontab -", "echo '0 * * * * npm test' | crontab -",
+    "printf '%s\\n' 'a\\x41' | crontab -", "printf '\\x41\\n' | grep A", "crontab /tmp/cron.new",
     "echo 'npm test' | at now + 1 hour", "at -f /tmp/job.sh now", "echo '5 * * * * echo 50% done' | crontab -", "at -l", "crontab -r",
     // prose and code that only look like commands
     `./bin/delegations.sh done drake abc "draft, CLEAN; gh confirms head+base"`, `node -e "x.then(m => { const sh = m.d(1); f(sh) })"`,

@@ -1478,24 +1478,33 @@ function checkSecrets({ words: raw, reads }: Simple): void {
 // The body starts on the line after the one holding <<DELIM, whatever else is on that line.
 const HEREDOC = /<<-?\s*['"]?(\w+)['"]?[^\n]*\n([\s\S]*?)\n\1\s*(\n|$)/;
 
-// What echo or printf prints, with its backslash escapes, or null for any other command
+// What echo or printf prints, or null for any other command. Only \\n, \\t and \\\\ are read, and
+// only %s, %d and %%: any other escape (\\x67, \\147, \\c) in echo's words or printf's format, or any
+// other format (%.2s, %b), is UNREADABLE, which a pipe into crontab, at or batch refuses (Marie on
+// #124 at c197d465).
+const UNREADABLE = "\u0000unreadable";
 function printedText(words: string[]): string | null {
   const name = posix.basename(words[0] ?? "");
-  const esc = (t: string): string => t.replace(/\\(n|t|\\)/g, (_, c: string) => (c === "n" ? "\n" : c === "t" ? "\t" : "\\"));
+  const esc = (t: string): string | null =>
+    /\\[^nt\\]|\\$/.test(t.replace(/\\\\/g, "")) ? null : t.replace(/\\(n|t|\\)/g, (_, c: string) => (c === "n" ? "\n" : c === "t" ? "\t" : "\\"));
   if (name === "echo") {
     let i = 1;
     while (/^-[neE]+$/.test(words[i] ?? "")) i++;
-    return esc(words.slice(i).join(" "));
+    return esc(words.slice(i).join(" ")) ?? UNREADABLE;
   }
   if (name === "printf") {
     const fmt = words[1];
     if (fmt === undefined) return "";
+    if (fmt.replace(/%%|%[sd]/g, "").includes("%")) return UNREADABLE;
+    const lit = fmt.split(/(%%|%[sd])/);
+    if (lit.some((piece, x) => x % 2 === 0 && esc(piece) === null)) return UNREADABLE;
     const args = words.slice(2);
     let out = "";
     do {
-      out += fmt.replace(/%%|%[-+ #0-9.]*[a-zA-Z]/g, (f) => (f === "%%" ? "%" : (args.shift() ?? "")));
-    } while (args.length && /%[^%]/.test(fmt));
-    return esc(out);
+      // an argument is printed as it is: printf reads escapes only in the format and %b
+      out += lit.map((piece, x) => (x % 2 === 0 ? esc(piece) : piece === "%%" ? "%" : (args.shift() ?? ""))).join("");
+    } while (args.length && lit.length > 1 && lit.some((piece, x) => x % 2 === 1 && piece !== "%%"));
+    return out;
   }
   return null;
 }
@@ -1522,6 +1531,7 @@ function checkScheduled(name: string, words: string[], texts: string[], ctx: Gua
   }
   if (file) return;
   for (const text of texts) {
+    if (text === UNREADABLE) refuse("what printf prints here cannot be read: write the line plainly");
     if (name !== "crontab") {
       checkCommand(text, ctx);
       continue;
