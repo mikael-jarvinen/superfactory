@@ -8,7 +8,7 @@ import type { HookResult } from "../settings.js";
 import { commentVerdict, mcpCommentVerdict } from "./guard.js";
 
 export function hook(_argv: string[], input: string): HookResult {
-  let call: { tool_name?: unknown; tool_input?: Record<string, unknown>; cwd?: unknown };
+  let call: { tool_name?: unknown; tool_input?: Record<string, unknown> };
   try {
     call = JSON.parse(input) as typeof call;
   } catch {
@@ -17,7 +17,7 @@ export function hook(_argv: string[], input: string): HookResult {
   const tool = typeof call.tool_name === "string" ? call.tool_name : "";
   const tin = call.tool_input ?? {};
   const why = tool === "Bash"
-    ? commentVerdict(typeof tin.command === "string" ? tin.command : "", typeof call.cwd === "string" ? call.cwd : process.cwd())
+    ? commentVerdict(typeof tin.command === "string" ? tin.command : "")
     : mcpCommentVerdict(tool, tin.body);
   return why ? { code: 2, stderr: `marked-comments: refused. ${why}\n` } : { code: 0 };
 }
