@@ -79,6 +79,23 @@ const table: [GuardContext, number, string[]][] = [
     "gh api -X POST repos/acme/workspace/branches/workspace/rename -f new_name=main", "git push https://github.com/alex/factory.git HEAD:main",
     "git push https://github.com/acme/workspace.git main",
   ]],
+  // A comment goes out under the human's login: the watcher tells the factory's from the human's by
+  // the marker (superfactory#119, L2), so a protected session posts only marked or trigger bodies.
+  [pr, REFUSE, [
+    "gh pr comment 1 --body hi", "gh pr comment 1 -b 'Fixed in abc'", "gh issue comment 1 --body=hi", "gh pr comment 1",
+    'gh pr comment 1 --body "$(cat f)"', "gh pr comment 1 --body-file f", "gh pr comment 1 -F f", "gh pr comment 1 -e",
+    "gh pr review 1 --request-changes -b 'please fix'", "gh pr review 1 --comment --body-file f",
+    "gh api repos/o/r/pulls/1/comments/2/replies -f body='Fixed in abc'", "gh api -X POST repos/o/r/issues/1/comments -f body=hi",
+    "gh api repos/o/r/pulls/1/reviews -f event=COMMENT -f body=hi", "gh api repos/o/r/pulls/1/comments/2/replies -F body=@f",
+    "gh api repos/o/r/issues/1/comments --input f.json", "gh api -X PATCH repos/o/r/issues/comments/5 -f body=hi",
+    "gh api repos/o/r/pulls/1/comments/2/replies -fbody=hi",
+  ]],
+  [pr, ALLOW, [
+    "gh pr comment 1 --body '> Written by agent.\n\nFixed in abc'", 'gh pr comment 1 -b "> Written by agent. Fixed"',
+    "gh pr comment 1 --body '@coderabbitai review'", "gh pr review 1 --approve", "gh pr review 1 --comment -b '> Written by agent. ok'",
+    "gh api repos/o/r/pulls/1/comments/2/replies -f body='> Written by agent.\n\nFixed in abc'", "gh api repos/o/r/pulls/1/comments",
+    "gh api repos/o/r/issues/1/comments -f per_page=100", "gh api repos/o/r/issues/1/labels -f labels[]=x",
+  ]],
   // Beyond the old table. timeout is unwrapped and its command checked rather than refused; a shell's
   // -c script is checked; ");" is two operators; a quoted "|" or ">" is a word; >&1 writes no file.
   [ro, REFUSE, ["(ls); git commit -m x", "timeout 5 git commit -m x", "env GIT_DIR=/x/.git git log"]],

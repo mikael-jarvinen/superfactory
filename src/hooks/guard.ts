@@ -25,6 +25,7 @@
 import { posix } from "node:path";
 import { parseArgs } from "node:util";
 import { allowClosePath, closable } from "../allow-close.js";
+import { MARKER } from "../gate/comment.js";
 import type { HookResult } from "../settings.js";
 import { chars, run } from "../util.js";
 import { openWorkspace, resolveWorkspace } from "../workspace.js";
@@ -549,8 +550,53 @@ function checkLeadMerge(args: string[]): void {
 const HOW_TO_CLOSE = "a product PR closes only once the human has named that exact PR and the lead has recorded it with " +
   "`factory allow-close <repo-key> <n> --words \"<the human's words>\"`";
 
+// A comment the factory's sessions post goes out under the human's token login, so the review
+// watcher tells it from the human's own by the marker it starts with (superfactory#119, L2). A
+// comment write is let through only when its body is in the command and starts with the marker, or
+// is a bot trigger; a body from a file or a $(...) cannot be checked here.
+const COMMENT_HINT = `start the body with "${MARKER}" (or post it with \`factory pr-comment\`), in the command itself, not from a file or $(...)`;
+const markedBody = (b: string) => b.trimStart().startsWith(MARKER) || /^@coderabbitai\b/.test(b.trimStart());
+
+function flagValue(args: string[], short: string[], long: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    if (short.includes(a) || long.includes(a)) return args[i + 1] ?? "";
+    const eq = long.find((l) => a.startsWith(`${l}=`));
+    if (eq) return a.slice(eq.length + 1);
+  }
+  return undefined;
+}
+
+function checkCommentWrite(args: string[]): void {
+  const sub = `${args[0]} ${args[1]}`;
+  if (sub === "pr comment" || sub === "issue comment" || sub === "pr review") {
+    if (flagValue(args, ["-F"], ["--body-file"]) !== undefined || args.includes("-e") || args.includes("--editor"))
+      refuse(`a comment's body must be checkable: ${COMMENT_HINT}`);
+    const body = flagValue(args, ["-b"], ["--body"]);
+    if (body === undefined) {
+      if (sub === "pr review") return; // an approval or a review with no words
+      refuse(`a comment needs --body: ${COMMENT_HINT}`);
+    }
+    if (!markedBody(body as string)) refuse(`this comment would read as the human's own: ${COMMENT_HINT}`);
+    return;
+  }
+  if (args[0] !== "api" || !ghApiWrites(args.slice(1))) return;
+  if (!/(^|\/)(issues|pulls)\/(\d+\/)?(comments|reviews)\b|\/replies\b/.test(args.slice(1).filter((a) => !a.startsWith("-")).join(" "))) return;
+  if (args.some((a) => a === "--input" || a.startsWith("--input="))) refuse(`a comment's body must be checkable: ${COMMENT_HINT}`);
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i] as string;
+    const f = ["-f", "-F", "--field", "--raw-field"].includes(a) ? args[i + 1] ?? ""
+      : /^-(f|F)./.test(a) ? a.slice(2) : a.startsWith("--field=") || a.startsWith("--raw-field=") ? a.slice(a.indexOf("=") + 1) : undefined;
+    if (f === undefined || !f.startsWith("body=")) continue;
+    const body = f.slice(5);
+    if ((a === "-F" || a.startsWith("-F") || a.startsWith("--field")) && body.startsWith("@")) refuse(`a comment's body must be checkable: ${COMMENT_HINT}`);
+    if (!markedBody(body)) refuse(`this comment would read as the human's own: ${COMMENT_HINT}`);
+  }
+}
+
 function checkGhProtect(words: string[], ctx: GuardContext): void {
   const args = words.slice(1);
+  checkCommentWrite(args);
   if (args[0] === "pr" && ["merge", "close", "lock", "unlock"].includes(args[1] ?? "")) {
     const repo = ghPrRepo(args);
     if (repo === null) refuse("merging or closing a PR needs an explicit --repo owner/name (or a PR URL) so the guard can confirm whose repo it is");
