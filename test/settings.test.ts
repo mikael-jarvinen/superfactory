@@ -117,10 +117,11 @@ test("a builder on a stack gets the stack's env, with its directories first on P
   const ws = openWorkspace(dir, {});
 
   assert.deepEqual(sessionEnv(ws, agentOrDie(ws, "bea"), "/usr/bin:/opt/java/bin:/bin", ""),
-    { JAVA_HOME: "/opt/java", PATH: "/opt/java/bin:/usr/bin:/bin", SF_PATH_PREPEND: "/opt/java/bin" });
+    { JAVA_HOME: "/opt/java", PATH: "/opt/java/bin:/usr/bin:/opt/java/bin:/bin", SF_PATH_PREPEND: "/opt/java/bin" });
   const bea = render(dir, "bea");
   assert.equal(bea.env?.JAVA_HOME, "/opt/java");
-  assert.equal(bea.env?.PATH, ["/opt/java/bin", ...(process.env.PATH ?? "").split(":").filter((d) => d && d !== "/opt/java/bin")].join(":"));
+  assert.equal(bea.env?.PATH, sessionEnv(ws, agentOrDie(ws, "bea"))?.PATH);
+  assert.ok(bea.env?.PATH?.startsWith("/opt/java/bin:"));
   assert.equal(bea.env?.SF_PATH_PREPEND, "/opt/java/bin");
   // cal builds without a stack; the lead and the reviewer have none
   for (const name of ["cal", "ada", "rae"]) assert.equal(render(dir, name).env, undefined, name);
@@ -129,20 +130,27 @@ test("a builder on a stack gets the stack's env, with its directories first on P
 // A wake renders the recipient's settings in the sender's hook, whose PATH has the sender's stack
 // first: what the sender's stack prepended comes out of it, and the recipient's own goes first
 // (CodeRabbit on #127). Only that: a directory the sender's stack shares with the system PATH keeps
-// its place there, for every other stack (Marie's gate of #127).
+// its place there, for every other stack (Marie's gate of #127). The sender's PATH is its own render's.
 test("a stack's PATH takes the sender's prepended directories out, and only those", () => {
   const toml = TOML.replace("pin = { bea = 1 }\n", 'pin = { bea = 1 }\npath_prepend = ["/opt/java/bin"]\n')
-    .replace("[roles.lead]", '[repos.tools]\nremote = "acme/tools"\n\n[stacks.tools]\nrepos = ["tools"]\nslots = 1\npath_prepend = ["/usr/local/bin", "/opt/tools/bin"]\n\n[roles.lead]');
+    .replace("[roles.lead]", '[repos.tools]\nremote = "acme/tools"\n\n[stacks.tools]\nrepos = ["tools"]\nslots = 1\npath_prepend = ["/usr/local/bin", "/opt/tools/bin"]\n\n[roles.lead]')
+    .replace("[[agents]]\nname = \"cal\"", '[[agents]]\nname = "tia"\nrole = "builder"\nstack = "tools"\n\n[[agents]]\nname = "cal"');
   const dir = tempWorkspace(toml);
   after(() => rmSync(dir, { recursive: true, force: true }));
   const ws = openWorkspace(dir, {});
   const bea = agentOrDie(ws, "bea");
-  // the sender on tools: its two directories first, and /usr/local/bin in the system PATH too
-  assert.deepEqual(sessionEnv(ws, bea, "/usr/local/bin:/opt/tools/bin:/usr/bin:/usr/local/bin:/bin", "/usr/local/bin:/opt/tools/bin"),
-    { PATH: "/opt/java/bin:/usr/bin:/usr/local/bin:/bin", SF_PATH_PREPEND: "/opt/java/bin" });
-  // a sender with no stack prepended nothing, so nothing comes out but the recipient's own
+  const system = "/usr/local/bin:/usr/bin:/bin";
+  // tia on tools sends: its session's env is its own render's, from the system PATH
+  const tia = sessionEnv(ws, agentOrDie(ws, "tia"), system, "")!;
+  assert.deepEqual(tia, { PATH: "/usr/local/bin:/opt/tools/bin:/usr/local/bin:/usr/bin:/bin", SF_PATH_PREPEND: "/usr/local/bin:/opt/tools/bin" });
+  // bea's render in tia's hook keeps the system's /usr/local/bin
+  const woken = sessionEnv(ws, bea, tia.PATH, tia.SF_PATH_PREPEND)!;
+  assert.deepEqual(woken, { PATH: "/opt/java/bin:/usr/local/bin:/usr/bin:/bin", SF_PATH_PREPEND: "/opt/java/bin" });
+  // and tia woken back from bea's session gets its own PATH again
+  assert.deepEqual(sessionEnv(ws, agentOrDie(ws, "tia"), woken.PATH, woken.SF_PATH_PREPEND), tia);
+  // a sender with no stack prepended nothing, so nothing comes out: the system PATH stays whole behind bea's own
   assert.deepEqual(sessionEnv(ws, bea, "/usr/local/bin:/usr/bin:/opt/java/bin:/bin", ""),
-    { PATH: "/opt/java/bin:/usr/local/bin:/usr/bin:/bin", SF_PATH_PREPEND: "/opt/java/bin" });
+    { PATH: "/opt/java/bin:/usr/local/bin:/usr/bin:/opt/java/bin:/bin", SF_PATH_PREPEND: "/opt/java/bin" });
 });
 
 // The old guard took its mode from the wrapper script's name, so the lead's session ran as a

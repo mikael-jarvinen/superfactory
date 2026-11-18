@@ -36,20 +36,22 @@ export function sessionEnv(ws: Workspace, agent: Agent, path = process.env.PATH 
   if (!stack) return undefined;
   const env = { ...stack.env };
   // path is this process's, and a wake renders a recipient's settings in its sender's hook, whose
-  // PATH starts with what the sender's stack prepended (CodeRabbit on #127). Only that comes out,
-  // once per directory, so a directory another stack shares with the system PATH, /usr/local/bin
-  // say, keeps its own place. The recipient's own directories go first.
+  // PATH starts with what the sender's stack prepended (CodeRabbit on #127). Exactly that run comes
+  // out, and nothing else: a render never dedupes, so a directory a stack shares with the system
+  // PATH, /usr/local/bin say, keeps its system copy and survives the next render (Marie's gate).
   if (stack.pathPrepend.length) {
-    const rest = path.split(":").filter(Boolean);
-    for (const d of sent.split(":").filter(Boolean)) {
-      const i = rest.indexOf(d);
-      if (i >= 0) rest.splice(i, 1);
-    }
-    const own = new Set(stack.pathPrepend);
-    env.PATH = [...stack.pathPrepend, ...rest.filter((d) => !own.has(d))].join(":");
+    env.PATH = [...stack.pathPrepend, ...withoutRun(path.split(":").filter(Boolean), sent.split(":").filter(Boolean))].join(":");
     env[PREPENDED] = stack.pathPrepend.join(":");
   }
   return Object.keys(env).length ? env : undefined;
+}
+
+// dirs without the first place where run appears whole, in order; dirs as they are if it never does.
+function withoutRun(dirs: string[], run: string[]): string[] {
+  if (!run.length) return dirs;
+  for (let i = 0; i + run.length <= dirs.length; i++)
+    if (run.every((d, j) => dirs[i + j] === d)) return [...dirs.slice(0, i), ...dirs.slice(i + run.length)];
+  return dirs;
 }
 
 // Rendered at every launch from the role's template and config, into logs/run/.
