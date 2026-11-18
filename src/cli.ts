@@ -7,6 +7,7 @@ import { followInbox } from "./board/inbox.js";
 import { markHandledMany, queue as waitingQueue, queueTrouble } from "./board/queue.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
+import { noteStopped } from "./stopped.js";
 import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owesSession, lead, listing, type Session, stopSession, stopWorktree, waitForName } from "./fleet.js";
 import { Unreachable } from "./remote.js";
 import { agentSessions, transportFor, transports } from "./transport.js";
@@ -70,11 +71,14 @@ usage: factory [--workspace <dir>] <command> [options]
                                   worktree, from queued (records designing) or design-review
                                   (another round).
   wake <agent>                    bring back an agent whose session is off (stopped idle, or retired
-                                  by Claude's daemon): respawn its newest session, same conversation,
-                                  and wait until it is listed live. Exit 1 when it does not come back.
+                                  by Claude's daemon): respawn the session \`stop\` stopped last, by
+                                  id, else its newest; same conversation, same command line. Wait
+                                  until it is listed live. Exit 1 when it does not come back, or when
+                                  the session stopped last is no longer listed.
   stop <agent> [--force] [--remove-worktree]
                                   stop a teammate; refuses on uncommitted or unpushed work. Keeps
-                                  the worktree unless --remove-worktree.
+                                  its session listed, stopped, for wake, and the worktree unless
+                                  --remove-worktree.
   review [--name <r>] [--prompt-file <f>] [--force]
                                   a fresh reviewer for one review: the first free one
   assistant [name] [--prompt-file <f>] [--force]
@@ -457,7 +461,9 @@ function cmdStop(ws: Workspace, argv: string[]) {
     const left = builderLeft(ws, ag, t, cwd);
     if (left) throw new FactoryError(left);
   }
-  stopSession(t, s);
+  // The row stays, so a wake resumes this conversation by its id (stopped.ts).
+  stopSession(t, s, false);
+  noteStopped(ws, name, s);
   console.log(`stopped ${name} (${s.id})`);
   const remove = !!v["remove-worktree"] && !v["keep-worktree"];
   // The worktree stays unless asked for: a worktree can hold a running stack and its database.
@@ -591,6 +597,7 @@ function cmdDown(ws: Workspace, argv: string[]) {
     for (const s of hits) {
       console.log(`stopping ${s.name} (${s.id})`);
       stopSession(t, s, false);
+      noteStopped(ws, s.name ?? "", s);
     }
   stopBoard(ws, true);
   return code;
@@ -603,6 +610,7 @@ function cmdRestartLead(ws: Workspace, argv: string[]) {
   const s = findSession(t, name);
   if (t.alive(s)) {
     stopSession(t, s, false);
+    noteStopped(ws, name, s);
     // wait for the supervisor to report it stopped, or up sees it as running
     for (let i = 0; i < 20 && t.alive(findSession(t, name)); i++) sleep(1000);
     console.log(`stopped ${name}`);

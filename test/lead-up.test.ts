@@ -6,6 +6,7 @@ import type { Session } from "../src/fleet.js";
 import { lead } from "../src/fleet.js";
 import { leadPrompt, settingsFile } from "../src/launch.js";
 import { bringUpLead, resumePrompt } from "../src/lead-up.js";
+import { forgetStopped, noteStopped } from "../src/stopped.js";
 import type { StartRequest, Transport } from "../src/transport.js";
 import { FactoryError } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
@@ -171,4 +172,27 @@ test("a lead whose brief is missing is refused before anything is resumed, respa
   const r = fake([stopped({ name: a.name })]);
   assert.throws(() => bringUpLead(w, a, r.t, false, () => {}, 1), /appendix file .*ada\.md is missing or empty/);
   assert.deepEqual([r.started, r.respawned, r.removed], [[], [], []]);
+});
+
+// Niilo, 2026-11-18: restart-lead resumes the conversation it just stopped, by its id. The newest
+// row by the listing's clues can be an older thread, here one whose transcript was touched last.
+test("restart-lead resumes the lead it stopped, by id, and refuses when that row is gone", () => {
+  const today = stopped({ id: "5e7a0b12", sessionId: "today-uuid", startedAt: 2000 });
+  const older = stopped({ id: "91c86061", sessionId: "older-uuid", startedAt: 1000, activeAt: 9000 });
+  try {
+    noteStopped(ws, ld.name, today);
+    const { t, started, respawned } = fake([older, today]);
+    bringUpLead(ws, ld, t, false, () => {}, 1);
+    assert.deepEqual(respawned, []);
+    const args = started[0]!.args;
+    assert.equal(args[args.indexOf("--resume") + 1], "today-uuid", "the conversation stopped last, not the older thread");
+
+    noteStopped(ws, ld.name, stopped({ id: "aa11bb22" }));
+    const gone = fake([older]);
+    assert.throws(() => bringUpLead(ws, ld, gone.t, false, () => {}, 1),
+      /ada's last stopped session aa11bb22 is no longer listed, and an older one is another conversation\. `factory up --fresh` starts a new one/);
+    assert.deepEqual([gone.started, gone.respawned], [[], []], "neither the older thread nor a fresh one");
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
 });

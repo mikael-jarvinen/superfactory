@@ -10,7 +10,8 @@ import type { Agent } from "./config.js";
 import { findSession, type Session, waitForName } from "./fleet.js";
 import { armText } from "./hooks/status.js";
 import { GIT_HTTPS_ENV, launch, launchArgs, leadPrompt, refreshSettings, roleAppendix, roleOf } from "./launch.js";
-import type { Transport } from "./transport.js";
+import { forgetStopped, lastStopped, resumable } from "./stopped.js";
+import { isAgentSession, type Transport } from "./transport.js";
 import { FactoryError } from "./util.js";
 import type { Workspace } from "./workspace.js";
 
@@ -32,7 +33,19 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
   }
   // Read before anything starts: a missing brief refuses here, not after a resume and a respawn.
   const appendix = roleAppendix(ws, ld);
-  const old = fresh ? null : findSession(t, ld.name, true);
+  // The session stopped last, by its id (stopped.ts); else the newest, as findSession has it.
+  let old: Session | null = null;
+  if (!fresh) {
+    const st = lastStopped(ws, ld.name);
+    if (!st) old = findSession(t, ld.name, true);
+    else {
+      const which = resumable(ws, ld.name, t.sessions(true).filter(isAgentSession(ld.name)), () => null);
+      if ("gone" in which)
+        throw new FactoryError(`${ld.name}'s last stopped session ${which.gone} is no longer listed, and an older one is another conversation. ` +
+          `\`factory up --fresh\` starts a new one.`);
+      old = which.s;
+    }
+  }
   if (old) {
     const sid = old.id as string;
     if (!ld.host && typeof old.sessionId === "string" && resume(ws, ld, t, old, old.sessionId, waitS, out, appendix)) return;
@@ -61,6 +74,8 @@ function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId:
   const cwd = old.cwd ?? (roleOf(ws, ld).cwd as string);
   try {
     t.start({ agent: ld, cwd, prompt, appendix, runDir: ws.runDir, phase: undefined, args: (p) => resumeArgs(ws, ld, sessionId, prompt, p), env: { ...process.env, ...GIT_HTTPS_ENV } });
+    // the resumed conversation runs under a new id, the one a later stop records
+    forgetStopped(ws, ld.name);
   } catch (e) {
     out(`resuming ${sessionId} failed (${(e as Error).message}); respawning instead`);
     return false;
