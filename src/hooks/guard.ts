@@ -201,21 +201,14 @@ interface Simple {
   reads: string[];
   // what the command reads on stdin that the guard can see: a here-string, a heredoc's body
   stdin?: string[];
-}
-
-// Whether a $( ... ) here stands where the command's name goes, so that its output is the command.
-function atCommand(cur: string[]): boolean {
-  try {
-    return stripPrefixes(cur).length === 0;
-  } catch {
-    return true; // a refused prefix: the command is refused either way
-  }
+  // whether its stdin is the pipe from the command before it
+  piped?: boolean;
 }
 
 // Simple commands with the files their redirects write. `2>` arrives as "2" then ">", and the
 // bare fd is not a word. `>&1` duplicates a descriptor and writes no file. What runs inside a $( ... ),
 // a <( ... ) or a >( ... ), quoted or not, is a simple command of its own, and the word it stood for
-// stays in the command around it: `$(` where it is the command's name, `<(` or `>(` as an argument.
+// stays in the command around it as `$(`, `<(` or `>(`.
 function simpleCommands(toks: Tok[]): Simple[] {
   const flat = toks.flatMap((k) => (k.op ? splitOps(k.t).map((t) => ({ t, op: true })) : [k]));
   const out: Simple[] = [];
@@ -223,10 +216,11 @@ function simpleCommands(toks: Tok[]): Simple[] {
   let writes: string[] = [];
   let reads: string[] = [];
   let stdin: string[] = [];
+  let piped = false;
   const outer: ({ cur: string[]; writes: string[]; reads: string[]; stdin: string[] } | null)[] = [];
   const flush = () => {
-    if (cur.length || writes.length || reads.length) out.push({ words: cur, writes, reads, stdin });
-    [cur, writes, reads, stdin] = [[], [], [], []];
+    if (cur.length || writes.length || reads.length) out.push({ words: cur, writes, reads, stdin, piped });
+    [cur, writes, reads, stdin, piped] = [[], [], [], [], false];
   };
   const open = () => {
     outer.push({ cur, writes, reads, stdin });
@@ -249,6 +243,7 @@ function simpleCommands(toks: Tok[]): Simple[] {
       if (o) ({ cur, writes, reads, stdin } = o);
     } else if (op ? SEPARATORS.has(t) : t === "{" || t === "}") {
       flush();
+      piped = t === "|" || t === "|&";
     } else if (op) {
       const target = flat[i + 1]?.t ?? "";
       if (cur.length && /^\d$/.test(cur[cur.length - 1] as string)) cur.pop();
@@ -257,9 +252,8 @@ function simpleCommands(toks: Tok[]): Simple[] {
       if (t === "<<<") stdin.push(target);
       i++;
     } else if (t.endsWith("$") && paren) {
-      // `$(` or `X=$(`: what is inside is its own simple command
-      if (t !== "$") cur.push(t);
-      else if (atCommand(cur)) cur.push("$(");
+      // `$(` or `X=$(`: what is inside is its own simple command, and a `$(` word stands for its output
+      cur.push(t === "$" ? "$(" : t);
       i++;
       open();
     } else if (t.includes("`")) {
@@ -323,10 +317,19 @@ function stripPrefixes(words: string[]): string[] {
       for (; j < words.length && ((words[j] as string).startsWith("-") || (words[j] as string).includes("=")); j++) {
         const a = words[j] as string;
         if (a === "--") continue;
-        if (["-u", "--unset", "-C", "--chdir"].includes(a)) j++;
-        else if (a === "-S" || a === "--split-string") split = words[++j] ?? "";
-        else if (/^-[a-zA-Z]*S./.test(a) || a.startsWith("--split-string=")) split = a.slice(a.indexOf(a.startsWith("--") ? "=" : "S") + 1);
-        else if (!a.startsWith("-")) checkEnvName(a.split("=", 1)[0] as string);
+        if (a.startsWith("--")) {
+          const [opt, value] = a.includes("=") ? [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)] : [a, undefined];
+          const takes = ["--unset", "--chdir", "--split-string"].includes(opt);
+          const v = takes && value === undefined ? (words[++j] ?? "") : value;
+          if (opt === "--split-string") split = v;
+        } else if (a.startsWith("-")) {
+          // a cluster of short options, -iv0; -u, -C and -S take the rest of it or the next word
+          const k = [...a.slice(1)].findIndex((c) => "uCS".includes(c));
+          if (k >= 0) {
+            const v = a.length > k + 2 ? a.slice(k + 2) : (words[++j] ?? "");
+            if (a[k + 1] === "S") split = v;
+          }
+        } else checkEnvName(a.split("=", 1)[0] as string);
         if (split !== undefined) break;
       }
       // env -S "gh pr merge 1": the string is split into the command's words
@@ -480,6 +483,9 @@ function checkGitProtect(words: string[], ctx: GuardContext): void {
   const pos = posOf(args);
   const isProtected = (p: string) => PROTECTED.has(p.toLowerCase());
   if (sub === "push") {
+    // a ref the guard cannot read could be main (Niilo on #124: `git push origin "$B"`)
+    if (pos.some((p) => /[$`]/.test(p)))
+      refuse("a push whose remote or branch comes from a variable or a substitution cannot be checked: name the branch, git push -u origin <branch>");
     if (!pos.length || (pos.length === 1 && pos[0] === "origin") || ["--all", "--mirror", "--prune", "--tags"].some((f) => flags.includes(f)))
       refuse("push exactly one branch by name: git push -u origin <branch>");
     for (const f of flags) {
@@ -753,7 +759,7 @@ function checkApiProtect(args: string[], ctx: GuardContext): void {
     if (w[3]?.toLowerCase() === "merges") refuse(`merging a branch of ${repo} through the API is not allowed; open a PR`);
     if (w[3]?.toLowerCase() === "transfer") refuse(`transferring ${repo} is the human's call`);
     const branch = a.fields.filter((f) => f.key === "branch").map((f) => f.value);
-    if (a.input || branch.length !== 1 || !branch[0] || branch[0].startsWith("@") || protectedRef(branch[0] as string))
+    if (a.input || branch.length !== 1 || !branch[0] || branch[0].startsWith("@") || /[$`]/.test(branch[0] as string) || protectedRef(branch[0] as string))
       refuse(`a contents write to ${repo} needs -f branch=<a feature branch>: without one it commits to the default branch`);
   }
   const m = API_TARGET.exec(ep);
@@ -970,6 +976,7 @@ function checkReadonly({ words: raw, writes }: Simple, ctx: GuardContext): void 
 
 // The script a shell runs: its -c line, or the script file it names. Neither means it reads its
 // script from stdin. `-s` reads stdin too, its other words being the script's arguments.
+const STDIN_FILES = new Set(["-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"]);
 function shellScript(args: string[]): { code?: string; file?: string } {
   let stdin = false;
   for (let i = 0; i < args.length; i++) {
@@ -977,7 +984,7 @@ function shellScript(args: string[]): { code?: string; file?: string } {
     if (a === "--") return stdin || args[i + 1] === undefined ? {} : { file: args[i + 1] as string };
     if (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(a)) return { code: args[i + 1] ?? "" };
     if (["-o", "+o", "-O", "+O", "--rcfile", "--init-file"].includes(a)) i++;
-    else if (a === "-") return {};
+    else if (STDIN_FILES.has(a)) return {};
     else if (/^[-+]./.test(a)) stdin ||= /^-[a-zA-Z]*s/.test(a);
     else return stdin ? {} : { file: a };
   }
@@ -1000,7 +1007,7 @@ function sshCommand(args: string[]): string {
   return "";
 }
 
-function checkProtect({ words: raw, reads, stdin = [] }: Simple, ctx: GuardContext): void {
+function checkProtect({ words: raw, reads, stdin = [], piped = false }: Simple, ctx: GuardContext): void {
   let words = stripPrefixes(raw);
   // A command by path is read by its basename wherever it lives, so ~/.local/bin/gh is gh and
   // /usr/lib/git-core/git is git, each checked as itself; any other name by path, a project script,
@@ -1020,7 +1027,7 @@ function checkProtect({ words: raw, reads, stdin = [] }: Simple, ctx: GuardConte
     if (code !== undefined) return checkCommand(code, ctx);
     if (file !== undefined && !/^[<>]\($/.test(file)) return;
     if (file === undefined && stdin.length) return stdin.forEach((script) => checkCommand(script, ctx));
-    if (file === undefined && reads.length) return; // bash < script.sh, a script file
+    if (file === undefined && reads.some((r) => !STDIN_FILES.has(r))) return; // bash < script.sh, a script file
     refuse(`${name} reading its script from a pipe or a <( ... ) cannot be checked: run the commands themselves, or ${name} -c '...'`);
   }
   // the command find runs on each file, up to its `;` or `+`
@@ -1033,8 +1040,12 @@ function checkProtect({ words: raw, reads, stdin = [] }: Simple, ctx: GuardConte
       i = j;
     }
   if (name === "ssh") {
+    // with no command, the remote login shell runs what ssh reads on stdin
     const remote = sshCommand(words.slice(1));
     if (remote) checkCommand(remote, ctx);
+    else if (stdin.length) stdin.forEach((script) => checkCommand(script, ctx));
+    else if (piped || reads.some((r) => r !== "/dev/null"))
+      refuse("ssh with no command runs its stdin on the host, which the guard cannot see: give the command, ssh <host> '<command>'");
   }
 }
 
@@ -1154,7 +1165,8 @@ function checkSecrets({ words: raw, reads }: Simple): void {
 
 // ---------------------------------------------------------------- the hook
 
-const HEREDOC = /<<-?\s*['"]?(\w+)['"]?\s*\n([\s\S]*?)\n\1\s*(\n|$)/;
+// The body starts on the line after the one holding <<DELIM, whatever else is on that line.
+const HEREDOC = /<<-?\s*['"]?(\w+)['"]?[^\n]*\n([\s\S]*?)\n\1\s*(\n|$)/;
 
 function checkCommand(cmd: string, ctx: GuardContext): void {
   // heredocs: keep the header, drop the body so its lines are not parsed as commands. The newline

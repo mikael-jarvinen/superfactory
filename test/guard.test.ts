@@ -434,6 +434,47 @@ test("gh api cannot merge, commit to main or transfer on a product repo", () => 
   assert.deepEqual(wrong, []);
 });
 
+// A push to a branch named by a variable or a substitution could be a push to main (Niilo on #124).
+test("a git push whose ref the guard cannot read is refused", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const refused = ["git push origin $B", "git push -u origin \"$B\"", "git push origin ${B}", "git push origin $(echo main)",
+    "git push origin \"$(git branch --show-current)\"", "git push origin HEAD:\"$B\"", "git push origin HEAD:$(echo main)",
+    "git push origin feat $(echo main)", "git push origin `echo main`", "git push \"$R\" feat", "git push --force-with-lease origin \"$B\""];
+  const allowed = ["git push -u origin feat/x", "git push origin HEAD:feat/x", "git commit -m \"$(date)\"", "B=feat/x && git push -u origin feat/x",
+    "echo $(git rev-parse HEAD)"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+  assert.match(verdict("git push -u origin \"$B\"", pr) as string, /name the branch/);
+});
+
+// Marie's third round on #124 at 7453c070: stdin by another name, env's clustered flags, find's second
+// action, ssh fed on stdin, an unresolvable contents branch; and a heredoc header with a redirect
+// after it, whose body was read as commands.
+test("stdin by any name, a clustered env flag, every find action and ssh on stdin are checked", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const M = "gh pr merge 1 -R acme/api";
+  const put = "gh api -X PUT repos/acme/api/contents/a.txt -f message=m -f content=eA==";
+  const refused = [`echo '${M}' | bash -s < /dev/stdin`, `bash /dev/stdin <<< '${M}'`, `echo '${M}' | bash /dev/fd/0`, `echo '${M}' | sh /proc/self/fd/0`,
+    `bash - <<< '${M}'`, `env -vS '${M}'`, `env -iS '${M}'`, `env -iS'${M}'`, `env -i -u X ${M}`,
+    `find . -exec true \\; -exec ${M} \\;`, `find . -name x -exec true {} + -execdir ${M} {} +`,
+    `echo '${M}' | ssh localhost`, `ssh localhost <<< '${M}'`, `ssh localhost < cmds.sh`, `ssh -T localhost <<'E'\n${M}\nE`,
+    `${put} -f branch=$B`, `${put} -f "branch=$(echo main)"`, "bash <<E > out\n" + M + "\nE"];
+  const allowed = ["cat <<'EOF' > notes.md\ngh pr merge is how we ship\nEOF", "cat <<'EOF' >> n.md\ngh pr merge is how we ship\nEOF",
+    "tee n.md <<'EOF' >/dev/null\ngh pr merge is how we ship\nEOF", "cat > notes.md <<'EOF'\ngh pr merge is how we ship\nEOF",
+    "bash scripts/x.sh < /dev/null", "env -i LANG=C npm test", "find . -exec true \\; -exec wc -l {} +", "ssh niilo uptime < /dev/null",
+    "ssh niilo", "ssh -T niilo <<'E'\nuptime\nE"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
 // Wrappers and shells ran gh past every check (Marie on #124 at eb982692): nice, setsid, stdbuf,
 // flock, env -S, find -exec, ssh, a shell reading its script from a pipe, a here-string, a heredoc or
 // a <( ... ), and a substitution inside quotes or a <( ... ). Each is now read through to its command.
