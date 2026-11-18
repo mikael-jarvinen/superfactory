@@ -226,7 +226,8 @@ export function newItems(pr: PrNode, viewer: string, cursor: Cursor | undefined)
     for (const c of cs) {
       const at = c.publishedAt ?? c.createdAt;
       if (!fresh(`c${c.databaseId}`, at)) continue;
-      if (answered || (cursor === undefined && t.isResolved)) continue;
+      // the factory's answer handles the bot's findings above it, not a colleague's or the human's
+      if ((answered && kindOf(c.author, c.body ?? "", viewer) === "bot") || (cursor === undefined && t.isResolved)) continue;
       add(c, at, where, `thread ${t.id}, comment ${c.databaseId}`);
     }
   }
@@ -260,6 +261,8 @@ export interface ReviewRead {
   cursors: Record<string, Cursor>;
   prs: number;
   calls: number;
+  // PRs GitHub did not return, or not every page of: their cursors stay, and the read is not clean
+  unread: string[];
   // GitHub's GraphQL budget after the call, as it reported it
   rate?: { cost: number; remaining: number; resetAt: string };
 }
@@ -272,50 +275,62 @@ export function reviewComments(ws: Workspace, recs: Rec[], log: string): ReviewR
   for (const rec of recs.filter((r) => CONFLICT_WATCHED.has(r.state ?? "")))
     for (const p of recPrs(rec))
       if (p.repo && OWNER_REPO.test(p.repo) && typeof p.number === "number") watched.set(`${p.repo}#${p.number}`, rec);
-  if (!watched.size) return { ok: true, lines: [], cursors: {}, prs: 0, calls: 0 };
+  if (!watched.size) return { ok: true, lines: [], cursors: {}, prs: 0, calls: 0, unread: [] };
   const keys = [...watched.keys()];
   const r = watcherGh(["api", "graphql", "-f", `query=${reviewQuery(keys)}`]);
   let calls = 1;
   let data: Record<string, unknown> | undefined;
+  let errors = "";
   try {
-    data = JSON.parse(r.stdout)?.data;
+    const d = JSON.parse(r.stdout);
+    data = d?.data;
+    errors = graphqlErrors(d);
   } catch {
     // below
   }
   const viewer = (data?.viewer as { login?: string } | undefined)?.login;
   if (!data || !viewer) {
     logTo(log, `reviews: cannot read the review comments${r.stderr.trim() ? `: ${r.stderr.trim()}` : ""}`);
-    return { ok: false, lines: [], cursors: prev, prs: watched.size, calls };
+    return { ok: false, lines: [], cursors: prev, prs: watched.size, calls, unread: keys };
   }
+  if (errors) logTo(log, `reviews: GitHub answered with errors: ${errors}`);
   const repos = [...new Set(keys.map((k) => k.split("#")[0] as string))];
   const more = (q: string) => {
     calls++;
     const m = watcherGh(["api", "graphql", "-f", `query=${q}`]);
     try {
-      return JSON.parse(m.stdout)?.data as Record<string, unknown> | undefined;
+      const d = JSON.parse(m.stdout);
+      const e = graphqlErrors(d);
+      if (e) logTo(log, `reviews: GitHub answered a page with errors: ${e}`);
+      return d?.data as Record<string, unknown> | undefined;
     } catch {
+      logTo(log, `reviews: cannot read a page${m.stderr.trim() ? `: ${m.stderr.trim()}` : ""}`);
       return undefined;
     }
   };
+  const unread: string[] = [];
   const lines: string[] = [];
   const cursors: Record<string, Cursor> = {};
   for (const key of keys) {
     const [repo, n] = key.split("#") as [string, string];
     const node = (data[`r${repos.indexOf(repo)}`] as Record<string, PrNode | null> | undefined)?.[`p${n}`];
-    if (!node) {
+    if (!node || !readRest(key, node, more)) {
+      logTo(log, `reviews: cannot read ${key}${node ? " past its first page" : ""}; it is read again next run`);
+      unread.push(key);
       if (prev[key]) cursors[key] = prev[key];
       continue;
-    }
-    if (!readRest(key, node, more)) {
-      logTo(log, `reviews: cannot read the rest of ${key}`);
-      return { ok: false, lines: [], cursors: prev, prs: watched.size, calls };
     }
     const { items, read } = newItems(node, viewer, prev[key]);
     cursors[key] = read;
     if (items.length) lines.push(...prLines(watched.get(key) as Rec, key, node.url, items, ws.config.human.name));
   }
-  return { ok: true, lines, cursors, prs: watched.size, calls, rate: data.rateLimit as ReviewRead["rate"] };
+  return { ok: true, lines, cursors, prs: watched.size, calls, unread, rate: data.rateLimit as ReviewRead["rate"] };
 }
+
+const graphqlErrors = (d: unknown): string => {
+  const e = (d as { errors?: { message?: string }[] } | null)?.errors;
+  return Array.isArray(e) && e.length ? e.map((x) => x?.message ?? "?").join("; ") : "";
+};
 
 // One run: read, leave the lead a note when something is new, and move the cursors only once the
 // note is left. The heartbeat says GitHub was read; the round reads it.
@@ -325,11 +340,13 @@ export function runReviews(ws: Workspace, out: (line: string) => void = console.
   const r = reviewComments(ws, allRecs(ws), log);
   const delivered = r.lines.length ? deliver(ws, ["[review watcher]", ...r.lines].join("\n")) : true;
   if (r.ok && delivered) saveCursors(ws, r.cursors);
-  if (r.ok) beat(ws, "reviews");
-  const outcome = !r.ok ? "unreadable" : r.lines.length ? "reported" : "quiet";
+  // A PR that was not read is not a clean read: no heartbeat, so the round sees it.
+  const clean = r.ok && !r.unread.length;
+  if (clean) beat(ws, "reviews");
+  const outcome = !r.ok ? "unreadable" : r.unread.length ? "partial" : r.lines.length ? "reported" : "quiet";
   const rate = r.rate ? ` graphql_cost=${r.rate.cost} graphql_remaining=${r.rate.remaining}` : "";
-  logTo(log, `outcome=${outcome} prs=${r.prs} gh_calls=${r.calls}${rate} ms=${Date.now() - t0}${r.lines.length ? ` delivered=${delivered}` : ""}`);
+  logTo(log, `outcome=${outcome} prs=${r.prs} gh_calls=${r.calls}${rate} ms=${Date.now() - t0}${r.unread.length ? ` unread=${r.unread.join(",")}` : ""}${r.lines.length ? ` delivered=${delivered}` : ""}`);
   for (const l of r.lines) out(l);
   out(`reviews: ${outcome}`);
-  return r.ok && delivered ? 0 : 1;
+  return clean && delivered ? 0 : 1;
 }

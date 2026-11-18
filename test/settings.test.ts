@@ -188,7 +188,7 @@ test("a template with marked-comments refuses an unmarked comment and passes a m
   const matches = (tool: string) => new RegExp(`^(${entry.matcher})$`).test(tool);
   for (const t of ["Bash", "mcp__github__add_issue_comment", "mcp__github__add_reply_to_pull_request_comment", "mcp__claude_ai_GitHub__add_issue_comment"])
     assert.ok(matches(t), t);
-  assert.ok(!matches("Read") && !matches("mcp__claude_ai_Slack__send"), "nothing else");
+  assert.ok(!matches("Read"), "not the other tools");
   const cmd = entry.hooks[0]?.command as string;
   const bash = (command: string) => runHook(cmd, { tool_name: "Bash", tool_input: { command } }).status;
   const mcp = (tool: string, body: string) => runHook(cmd, { tool_name: tool, tool_input: { body } }).status;
@@ -207,4 +207,19 @@ test("a template with marked-comments refuses an unmarked comment and passes a m
   assert.equal(mcp("mcp__github__add_issue_comment", "Fixed."), 2, "unmarked is refused");
   assert.equal(mcp("mcp__github__pull_request_review_write", "Looks good to me."), 2, "an unmarked review body is refused");
   assert.equal(mcp("mcp__github__get_file_contents", "anything"), 0, "a read passes");
+
+  // superfactory#119 round 2. N1: the hook refuses only a comment write, never a command the
+  // guard's policy would (xargs, sudo, exec, watch), nor one it cannot parse.
+  for (const c of ["printf x | xargs echo", "find . -name '*.ts' | xargs grep -l x", "sudo ls", "exec ls", "watch ls", "echo 'unbalanced", "/opt/x/bin/tool"])
+    assert.equal(bash(c), 0, c);
+  assert.equal(bash("printf 7 | xargs -I{} gh pr comment {} -b hi"), 2, "a gh behind xargs is still checked");
+  assert.equal(bash("sudo -u x gh pr comment 7 -b hi"), 2, "and behind sudo");
+  assert.equal(bash("/usr/bin/gh pr comment 7 -b hi"), 2, "and by path");
+  assert.equal(bash("gh pr review 7 --comment -bhi"), 2, "N3: an attached value");
+  assert.equal(bash("gh api graphql -f query='mutation { addComment(input: {subjectId: \"X\", body: \"hi\"}) { clientMutationId } }'"), 2, "N4");
+  assert.equal(bash("gh api repos/acme/web/pulls/7/reviews -f 'body=> Written by agent.' -f 'comments[][body]=nit'"), 2, "N5");
+  // N6: every MCP tool reaches the hook, which matches GitHub's comment tools in any case.
+  assert.ok(matches("mcp__claude_ai_github__add_issue_comment") && matches("mcp__claude_ai_Slack__send"));
+  assert.equal(mcp("mcp__claude_ai_github__add_issue_comment", "Fixed."), 2, "lowercase github is held too");
+  assert.equal(mcp("mcp__claude_ai_Slack__send", "hi"), 0, "another server's tool passes");
 });

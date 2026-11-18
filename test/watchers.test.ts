@@ -713,6 +713,51 @@ test("the review watcher reads by id: a late-submitted review, a comment in the 
   assert.equal(notes().length, 4);
 });
 
+// CodeRabbit on superfactory#119, round 2. N2: the factory's reply ends a thread, and a
+// colleague's comment just before it, in the same poll, was skipped with the bot's findings. N7: a
+// reply with errors and no node for a PR beat the heartbeat as if that PR had been read.
+test("the review watcher tells a colleague's comment above the factory's reply, and a PR GitHub did not return is not a clean read", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  assert.equal(factory(ws, ["state", "WEB-2", "queued", "--title", "Fix login"]).status, 0);
+  const file = join(ws, "state", "WEB-2.json");
+  const pr7 = { repo: "acme/web", number: 7 };
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
+  const at = (min: number) => new Date(Date.parse("2026-11-17T10:00:00Z") + min * 60_000).toISOString();
+  const who = (login: string, __typename = "User") => ({ login, __typename });
+  const c = (databaseId: number, min: number, body: string, author: object) => ({ databaseId, createdAt: at(min), publishedAt: at(min), body, author });
+  const page = (nodes: object[]) => ({ pageInfo: { hasNextPage: false, endCursor: null }, nodes });
+  const pr = (comments: object[]) => ({
+    url: "https://github.com/acme/web/pull/7", comments: page([]), reviews: page([]),
+    reviewThreads: page([{ id: "PRRT_1", isResolved: false, path: "src/a.ts", line: 1, originalLine: 1, comments: page(comments) }]),
+  });
+  const answer = (p: object | null, errors?: object[]) => ({ stdout: { data: { viewer: { login: "alex-gh" }, r0: { p7: p } }, ...(errors ? { errors } : {}) } });
+  const routes = (a: object) => ({ "pr list": { stdout: [] }, "api graphql": a });
+  const finding = c(1, 0, "Rename this.", who("coderabbitai", "Bot"));
+  assert.equal(run(["watch", "reviews"], [], routes(answer(pr([finding])))).status, 0);
+  assert.equal(notes().length, 1);
+
+  // In one poll: CodeRabbit's second finding, sam's comment, then the factory's reply to the bot.
+  const reply = c(4, 3, "> Written by agent.\n\nFixed in abc1234.", who("alex-gh"));
+  let r = run(["watch", "reviews"], [], routes(answer(pr([finding, c(2, 1, "Also this.", who("coderabbitai", "Bot")), c(3, 2, "I disagree with the bot.", who("sam")), reply]))));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const told = (notes()[1] ?? "").split("\n").filter((l) => l.startsWith("  - "));
+  assert.equal(told.length, 1, notes()[1]);
+  assert.match(told[0] as string, /colleague sam.*"I disagree with the bot\." \[thread PRRT_1, comment 3\]/);
+
+  // GitHub answers with errors and no node for the PR: nothing is lost, and the read is not clean.
+  const hb = join(openWorkspace(ws).logsDir, "reviews.heartbeat");
+  const state = readFileSync(join(ws, "state", "reviews.state"), "utf8");
+  rmSync(hb, { force: true });
+  r = run(["watch", "reviews"], [], routes(answer(null, [{ message: "Something went wrong while executing your query." }])));
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /reviews: partial/);
+  assert.ok(!existsSync(hb), "no heartbeat");
+  assert.equal(readFileSync(join(ws, "state", "reviews.state"), "utf8"), state, "the cursor is kept");
+  r = run(["watch", "reviews"], [], routes(answer(pr([finding, reply]))));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.ok(existsSync(hb), "a clean read beats it");
+});
+
 // A reviews.state from before the ids holds a time per PR: what came before it is read.
 test("the review watcher reads a time cursor from before the ids as everything up to it", () => {
   const { ws, run, notes } = watcherWorkspace();

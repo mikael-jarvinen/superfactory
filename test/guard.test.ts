@@ -89,12 +89,27 @@ const table: [GuardContext, number, string[]][] = [
     "gh api repos/o/r/pulls/1/reviews -f event=COMMENT -f body=hi", "gh api repos/o/r/pulls/1/comments/2/replies -F body=@f",
     "gh api repos/o/r/issues/1/comments --input f.json", "gh api -X PATCH repos/o/r/issues/comments/5 -f body=hi",
     "gh api repos/o/r/pulls/1/comments/2/replies -fbody=hi",
+    // superfactory#119 round 2: an attached short value (N3), a GraphQL comment mutation (N4) and a
+    // review's nested comment bodies (N5)
+    "gh pr review 1 --comment -bhi", "gh pr comment 1 -bhi", "gh pr review 1 --comment -Ff.md",
+    "gh api graphql -f query='mutation { addComment(input: {subjectId: \"X\", body: \"hi\"}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation($b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \"T\", body: $b}) { clientMutationId } }' -f b=hi",
+    "gh api graphql -f query='mutation($i: AddCommentInput!) { addComment(input: $i) { clientMutationId } }' --input v.json",
+    "gh api graphql -f query='mutation($i: UpdateIssueCommentInput!) { updateIssueComment(input: $i) { clientMutationId } }'",
+    "gh api graphql -F query=@m.graphql",
+    "gh api repos/o/r/pulls/1/reviews -f body='> Written by agent. ok' -f 'comments[][path]=a.ts' -f 'comments[][body]=nit'",
   ]],
   [pr, ALLOW, [
     "gh pr comment 1 --body '> Written by agent.\n\nFixed in abc'", 'gh pr comment 1 -b "> Written by agent. Fixed"',
     "gh pr comment 1 --body '@coderabbitai review'", "gh pr review 1 --approve", "gh pr review 1 --comment -b '> Written by agent. ok'",
     "gh api repos/o/r/pulls/1/comments/2/replies -f body='> Written by agent.\n\nFixed in abc'", "gh api repos/o/r/pulls/1/comments",
     "gh api repos/o/r/issues/1/comments -f per_page=100", "gh api repos/o/r/issues/1/labels -f labels[]=x",
+    "gh pr review 1 --comment '-b> Written by agent. ok'",
+    "gh api graphql -f query='mutation { addComment(input: {subjectId: \"X\", body: \"> Written by agent. ok\"}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation($b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \"T\", body: $b}) { clientMutationId } }' -f 'b=@coderabbitai resolve'",
+    "gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: \"T\"}) { clientMutationId } }'",
+    "gh api graphql -f query='query { viewer { login } }'",
+    "gh api repos/o/r/pulls/1/reviews -f body='> Written by agent. ok' -f 'comments[][path]=a.ts' -f 'comments[][body]=> Written by agent. nit'",
   ]],
   // Beyond the old table. timeout is unwrapped and its command checked rather than refused; a shell's
   // -c script is checked; ");" is two operators; a quoted "|" or ">" is a word; >&1 writes no file.
