@@ -67,7 +67,7 @@ test("transition output and refusal messages", () => {
   const ws = tempWorkspace();
   after(() => rmSync(ws, { recursive: true, force: true }));
   let r = factory(ws, ["state", "TEST-2", "building"]);
-  assert.equal(r.stdout, "TEST-2: (new) -> building  agent=None  jira should read: In Progress\n");
+  assert.equal(r.stdout, "TEST-2: (new) -> building  agent=-  jira should read: In Progress\n");
   r = factory(ws, ["state", "TEST-2", "done"]);
   assert.equal(r.status, 1);
   assert.equal(r.stderr, "factory: TEST-2: building -> done is not a valid transition. From building you can go to: " +
@@ -90,11 +90,11 @@ test("transition output and refusal messages", () => {
   // LOCAL work has no backlog to wait in, so it is recorded off the board, titled (Niilo on #129)
   r = factory(ws, ["state", "LOCAL-gone", "off", "--title", "Retire the old export"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout, "LOCAL-gone: (new) -> off  agent=None  no Jira ticket\n");
+  assert.equal(r.stdout, "LOCAL-gone: (new) -> off  agent=-  no Jira ticket\n");
   assert.equal(factory(ws, ["state", "--off"]).stdout, "  LOCAL-gone   agent=-        Retire the old export\n");
   // Niilo on #129: off the board from building frees the builder; the log still says who it was.
   assert.equal(factory(ws, ["state", "LOCAL-built", "building", "--agent", "bea"]).status, 0);
-  assert.equal(factory(ws, ["state", "LOCAL-built", "off"]).stdout, "LOCAL-built: building -> off  agent=None  no Jira ticket\n");
+  assert.equal(factory(ws, ["state", "LOCAL-built", "off"]).stdout, "LOCAL-built: building -> off  agent=-  no Jira ticket\n");
   assert.equal(JSON.parse(readFileSync(join(ws, "state", "LOCAL-built.json"), "utf8")).agent, null);
   const left = readFileSync(join(ws, "state", "events.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).pop();
   assert.deepEqual([left.from, left.to, left.agent], ["building", "off", "bea"]);

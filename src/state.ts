@@ -290,7 +290,7 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
     ...(rec.design && (c.canvas || c.slides || c.approved) ? { design: rec.design } : {}),
   });
   const kind = ws.config.tracker.kind;
-  const head = `${ticket}: ${was ?? "(new)"} -> ${to}  agent=${pyStr(rec.agent)}`;
+  const head = `${ticket}: ${was ?? "(new)"} -> ${to}  agent=${rec.agent || "-"}`;
   if (untracked(ws, ticket)) {
     out(`${head}  no ${TRACKER_LABEL[kind]} ticket`);
   } else {
