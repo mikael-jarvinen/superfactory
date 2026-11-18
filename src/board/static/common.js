@@ -36,13 +36,15 @@ function poll(url, render){
 }
 
 // The local tracker's links in the header, when the workspace has one: the board passes its
-// snapshot's `tracker`, every other page asks once. A workspace without one answers 404 and the
-// header stays as it is.
+// snapshot's `tracker`, every other page asks once. A local tracker brings the backlog and its wiki;
+// a wiki beside another tracker, { wiki: true }, only the wiki. A workspace with neither answers
+// 404 and the header stays as it is.
 function trackerNav(t){
   const nav = document.querySelector('header nav');
   if(!nav || !t) return;
   const here = location.pathname;
-  for(const [href, label] of [['/tickets', `backlog (${t.backlog})`], ['/wiki', 'wiki']]){
+  const links = t.backlog !== undefined ? [['/tickets', `backlog (${t.backlog})`], ['/wiki', 'wiki']] : t.wiki ? [['/wiki', 'wiki']] : [];
+  for(const [href, label] of links){
     let a = nav.querySelector(`a[href="${href}"]`);
     if(!a){ a = document.createElement('a'); a.href = href; nav.appendChild(a); }
     a.textContent = label;

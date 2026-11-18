@@ -107,6 +107,19 @@ export interface Tracker {
   dir?: string;
 }
 
+// A project of the wiki: its pages sit under its key.
+export interface WikiProject {
+  key: string;
+  name: string;
+}
+
+// The wiki: a local tracker's own (its projects, under its dir), or [wiki] beside any tracker.
+export interface Wiki {
+  projects: WikiProject[];
+  // The pages are <dir>/<KEY>/<path>.md.
+  dir: string;
+}
+
 export interface Config {
   file: string;
   dir: string;
@@ -119,6 +132,8 @@ export interface Config {
   roles: Partial<Record<RoleName, Role>>;
   agents: Agent[];
   tracker: Tracker;
+  // null when the workspace has neither [wiki] nor a local tracker.
+  wiki: Wiki | null;
   board: { host: string; port: number };
   // false lets a session message a session on another machine with nobody approving each send
   peers: { isolateMachines: boolean };
@@ -603,6 +618,36 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   };
   t.done();
 
+  // A local tracker's projects carry its wiki, in <tracker dir>/wiki, as they always have. Any other
+  // tracker, Jira or none, gets one only from its own [wiki] section, which defaults to <state>/wiki.
+  let wiki: Wiki | null = null;
+  const wikiT = top.table("wiki");
+  if (wikiT !== undefined) {
+    const wr = reader(problems, "wiki", wikiT);
+    const wikiDir = path(wr, "dir", wr.str("dir"));
+    const wikiProjects: WikiProject[] = [];
+    const wv = wr.raw("projects");
+    if (wv === undefined) wr.bad("projects", "missing; a wiki needs at least one [[wiki.projects]]");
+    else if (!Array.isArray(wv)) wr.bad("projects", `must be an array of tables ([[wiki.projects]]), got ${show(wv)}`);
+    (Array.isArray(wv) ? wv : []).forEach((v, i) => {
+      const where = `wiki.projects[${i}]`;
+      if (!isTable(v)) return void problems.push(`${where}: must be a table, got ${show(v)}`);
+      const pr = reader(problems, where, v);
+      const key = pr.str("key", true);
+      const name = pr.str("name") ?? key ?? "";
+      pr.done();
+      if (key === undefined) return;
+      if (!PROJECT_KEY_RE.test(key)) return void pr.bad("key", `must be 2 to 10 capital letters or digits, starting with a letter, got ${show(key)}`);
+      if (wikiProjects.some((x) => x.key === key)) return void pr.bad("key", `${show(key)} is already a project`);
+      wikiProjects.push({ key, name });
+    });
+    wr.done();
+    if (kind === "local") problems.push("wiki: a local tracker's projects already have a wiki; drop [wiki], or use [tracker] kind \"jira\" or \"none\"");
+    wiki = { projects: wikiProjects, dir: wikiDir ?? join(paths.state, "wiki") };
+  } else if (kind === "local") {
+    wiki = { projects: projects.map(({ key, name }) => ({ key, name })), dir: join(trackerDir ?? join(paths.state, "tracker"), "wiki") };
+  }
+
   const b = reader(problems, "board", top.table("board") ?? {});
   const board = { host: b.str("host") ?? "localhost", port: b.int("port", false, 1, 65535) ?? 8787 };
   b.done();
@@ -645,6 +690,6 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   return {
     file: resolve(file), dir,
     human: { name: humanName, legacyMessageKind },
-    github, paths, repos, stacks, hosts, roles, agents, tracker, board, peers, gate, watchers, worktree,
+    github, paths, repos, stacks, hosts, roles, agents, tracker, wiki, board, peers, gate, watchers, worktree,
   };
 }

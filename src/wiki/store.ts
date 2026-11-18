@@ -1,14 +1,30 @@
-// The local tracker's wiki: one markdown file a page, <dir>/wiki/<PROJECT>/<path>.md, which cat and
-// grep read. Each save appends the whole page to .history/<path>.jsonl first. A save names the sha
-// it started from and is refused if the page changed since; the check and the write share a lock.
+// The wiki: one markdown file a page, <wiki dir>/<PROJECT>/<path>.md, which cat and grep read. It is
+// a local tracker's own, or [wiki] beside any other tracker; config.ts decides which, and where.
+// Each save appends the whole page to .history/<path>.jsonl first. A save names the sha it started
+// from and is refused if the page changed since; the check and the write share a lock.
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Workspace } from "../workspace.js";
 import { FactoryError, now } from "../util.js";
-import { PROJECT_KEY_RE } from "../config.js";
+import { PROJECT_KEY_RE, type WikiProject } from "../config.js";
 import { withLock } from "../tickets/lock.js";
-import { MAX_BODY, MAX_TITLE, projectOf, trackerDir } from "../tickets/store.js";
+import { MAX_BODY, MAX_TITLE } from "../tickets/store.js";
+
+export const enabled = (ws: Workspace) => ws.config.wiki !== null;
+
+export function requireEnabled(ws: Workspace): void {
+  if (!enabled(ws)) throw new FactoryError("this workspace has no wiki: add [wiki] with at least one [[wiki.projects]], " +
+    `or use [tracker] kind = "local", whose projects carry one`);
+}
+
+export const projects = (ws: Workspace): WikiProject[] => ws.config.wiki?.projects ?? [];
+
+export function projectOf(ws: Workspace, key: string): WikiProject {
+  const p = projects(ws).find((x) => x.key === key);
+  if (!p) throw new FactoryError(`no wiki project ${JSON.stringify(key)}; projects: ${projects(ws).map((x) => x.key).join(", ") || "none"}`);
+  return p;
+}
 
 export interface Page {
   project: string;
@@ -40,7 +56,10 @@ export function slug(title: string): string {
   return s || "page";
 }
 
-export const wikiDir = (ws: Workspace, project: string) => join(trackerDir(ws), "wiki", projectOf(ws, project).key);
+export const wikiDir = (ws: Workspace, project: string) => {
+  requireEnabled(ws);
+  return join((ws.config.wiki as { dir: string }).dir, projectOf(ws, project).key);
+};
 const pageFile = (ws: Workspace, project: string, path: string) => join(wikiDir(ws, project), `${checkPath(path)}.md`);
 const historyFile = (ws: Workspace, project: string, path: string) => join(wikiDir(ws, project), ".history", `${checkPath(path)}.jsonl`);
 

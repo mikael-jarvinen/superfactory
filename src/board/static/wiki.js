@@ -1,4 +1,4 @@
-// The local tracker's wiki: every page by project, one page rendered, and an editor that saves only
+// The wiki: every page by project, one page rendered, and an editor that saves only
 // over the text it opened. Views: ?page=RPE/product-vision, &edit=1; ?new=1&project=RPE.
 const slug = t => t.normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80).replace(/-+$/, '') || 'page';
 const DRAFT = ref => 'sf-wiki-draft:' + ref;

@@ -1,5 +1,5 @@
-// `factory ticket` and `factory wiki`: the local tracker from a shell. Both refuse at once in a
-// workspace without `[tracker] kind = "local"`, which keeps working exactly as before.
+// `factory ticket` and `factory wiki` from a shell. `ticket` refuses at once in a workspace without
+// `[tracker] kind = "local"`; `wiki` refuses without a wiki, which is a local tracker's or [wiki]'s.
 import { readFileSync } from "node:fs";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import type { Workspace } from "../workspace.js";
@@ -32,7 +32,8 @@ export const TICKET_USAGE = `  ticket ...                      the local tracker
     title <ref> <new title> [--as A]
     rank <ref> (--after <ref> | --before <ref>) [--as A]
                                   place it in the order right after or before another ticket
-  wiki ...                        the wiki of the local tracker. <page> is PROJ/path, or path with one project.
+  wiki ...                        the wiki: a local tracker's, or [wiki] beside any tracker; else refused.
+                                  <page> is PROJ/path, or path with one project.
     list [--project P]            every page, by path
     show <page> [--json]          the page as markdown, with its sha
     edit <page> --file F [--title T] [--base <sha>] [--as A]
@@ -206,21 +207,21 @@ export function cmdTicket(ws: Workspace, argv: string[]): number | Promise<numbe
 export function pageRef(ws: Workspace, ref: string): { project: string; path: string } {
   const m = W.PAGE_REF_RE.exec(ref);
   if (m) {
-    T.projectOf(ws, m[1] as string);
+    W.projectOf(ws, m[1] as string);
     return { project: m[1] as string, path: W.checkPath(m[2] as string) };
   }
-  const ps = T.projects(ws);
+  const ps = W.projects(ws);
   if (ps.length !== 1) throw new FactoryError(`${ref}: name the project, as in ${ps[0]?.key ?? "RPE"}/${ref}`);
   return { project: (ps[0] as { key: string }).key, path: W.checkPath(ref) };
 }
 
 export function cmdWiki(ws: Workspace, argv: string[]): number {
-  T.requireEnabled(ws);
+  W.requireEnabled(ws);
   const [sub, ...rest] = argv;
   switch (sub) {
     case "list": {
       const { v } = parse("wiki list", rest, { project: { type: "string" } }, 0, 0);
-      const ps = s(v.project) ? [T.projectOf(ws, s(v.project) as string)] : T.projects(ws);
+      const ps = s(v.project) ? [W.projectOf(ws, s(v.project) as string)] : W.projects(ws);
       let n = 0;
       for (const p of ps)
         for (const e of W.list(ws, p.key)) {
