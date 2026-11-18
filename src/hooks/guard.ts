@@ -1116,6 +1116,24 @@ function commandWords(words: string[]): string[] {
 // Only the comment rule, for a session that runs no guard (an assistant) or whose guard leaves gh
 // alone: the marked-comments hook. A gh run as a command is checked, by name or path, behind any
 // wrapper; a shell's -c script and eval's words are checked as a command line.
+// Whether the line runs a command substitution ($(...), `...`, <(...), >(...)) the shell starts
+// before the command it is in. Only single quotes make it literal; a backslash escapes outside them.
+function substitutes(line: string): boolean {
+  let single = false;
+  let double = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i] as string;
+    const two = line.slice(i, i + 2);
+    if (single) {
+      if (c === "'") single = false;
+    } else if (c === "\\") i++;
+    else if (c === "'" && !double) single = true;
+    else if (c === '"') double = !double;
+    else if (c === "`" || two === "$(" || (!double && (two === "<(" || two === ">("))) return true;
+  }
+  return false;
+}
+
 // A wrapper that runs its command in another directory: env -C dir, sudo -D dir.
 const RUNS_ELSEWHERE = /^(-[A-Za-z]*[CD]|--chdir(=|$))/;
 function movedByWrapper(raw: string[], words: string[]): boolean {
@@ -1128,7 +1146,8 @@ function checkComments(cmd: string, cwd: string, nested = false): void {
   for (let m = HEREDOC.exec(text); m; m = HEREDOC.exec(text))
     text = text.slice(0, m.index) + (m[0].split("\n", 1)[0] as string) + " HEREDOC\n" + text.slice(m.index + m[0].length);
   const simples = simpleCommands(tokenize(text));
-  const alone = !nested && simples.length === 1 && !simples[0]?.writes.length && !simples[0]?.reads.length;
+  // a substitution in any argument runs before gh, so it is another command (Marie, round 4)
+  const alone = !nested && simples.length === 1 && !simples[0]?.writes.length && !simples[0]?.reads.length && !substitutes(text);
   for (const s of simples) {
     const raw = s.words.filter((w) => w !== "HEREDOC");
     const words = commandWords(raw);
