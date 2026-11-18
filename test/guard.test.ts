@@ -413,6 +413,53 @@ test("gh api cannot close, lock, merge or delete on a product repo", () => {
   assert.deepEqual(wrong, []);
 });
 
+// gh api merged a branch into main, committed to it and transferred the repo (Marie on #124 at
+// eb982692). On a product repo those are refused, and a contents write must name a feature branch.
+test("gh api cannot merge, commit to main or transfer on a product repo", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const gql = (q: string) => `gh api graphql -f query='mutation { ${q} { clientMutationId } }'`;
+  const put = "gh api -X PUT repos/acme/api/contents/a.txt -f message=m -f content=eA==";
+  const refused = [put, `${put} -f branch=main`, `${put} -f branch=refs/heads/master`, `${put} --input body.json`,
+    "gh api -X DELETE repos/acme/api/contents/a.txt -f message=m -f sha=abc", "gh api --method PUT /repos/acme/api/contents/src/a.ts -F message=m -F content=@a.b64",
+    "gh api -X POST repos/acme/api/merges -f base=main -f head=feat", "gh api repos/acme/api/merges -f base=feat/x -f head=main",
+    "gh api -X POST repos/acme/api/transfer -f new_owner=x",
+    gql(`enqueuePullRequest(input: {pullRequestId: "x"})`), gql(`createCommitOnBranch(input: {branch: {branchName: "main"}})`)];
+  const allowed = ["gh api -X PUT repos/acme/workspace/contents/a.txt -f message=m -f content=eA==", `${put} -f branch=feat/x`,
+    "gh api repos/acme/api/contents/a.txt", "gh api repos/acme/api/merges"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// Wrappers and shells ran gh past every check (Marie on #124 at eb982692): nice, setsid, stdbuf,
+// flock, env -S, find -exec, ssh, a shell reading its script from a pipe, a here-string, a heredoc or
+// a <( ... ), and a substitution inside quotes or a <( ... ). Each is now read through to its command.
+test("gh run through a wrapper, a substitution or a shell on stdin is checked", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const M = "gh pr merge 1 -R acme/api";
+  const refused = [`nice ${M}`, `nice -n 5 ${M}`, `nice -n5 ${M}`, `setsid ${M}`, `setsid -f ${M}`, `stdbuf -o0 ${M}`, `stdbuf -o 0 -e L ${M}`,
+    `flock /tmp/l ${M}`, `flock -w 5 /tmp/l ${M}`, `flock /tmp/l -c '${M}'`, `env -S "${M}"`, `env --split-string="${M}"`, `env -S"${M}"`,
+    `env -u X ${M}`, `env -C /tmp ${M}`, `nice env timeout 5 setsid ${M}`,
+    `find . -exec ${M} \;`, `find . -execdir ${M} {} +`, `find . -name x -ok ${M} \;`,
+    `echo '${M}' | bash`, `echo '${M}' | sh`, `cat x | bash -s`, `bash <<< '${M}'`, `bash <(echo '${M}')`, `sh -s <<'E'\n${M}\nE`, `bash -l <<E\necho hi\n${M}\nE`,
+    `ssh localhost ${M}`, `ssh -p 22 -o BatchMode=yes localhost '${M}'`, `ssh -tt host -- ${M}`, `ssh host -p 22 ${M}`,
+    `echo "$(${M})"`, `X="$(${M})"`, `cat <(${M})`, `tee >(${M}) < x`, `echo "a $(echo "$(${M})") b"`, `flock /tmp/l $(which gh) pr view 1`];
+  const allowed = ["nice -n 5 npm test", "flock /tmp/l make build", "find . -name '*.ts' -exec wc -l {} +", "bash scripts/x.sh", "bash -e scripts/x.sh a b",
+    "bash < scripts/x.sh", "ssh niilo 'systemctl --user status gh-runner-ci@2'", "echo hi | cat", "bash -c 'npm test'", "setsid -f npm run dev",
+    "stdbuf -oL npm test | tee /tmp/log", `git commit -m "$(cat <<'EOF'\nfix: merge the gh pr merge rows\nEOF\n)"`, "echo \"$((1 + 2))\"",
+    "diff <(git show HEAD:a) <(cat a)", "sh -s <<'E'\nnpm test\nE", `grep "\\$(" src/a.ts`, `echo "$(date) and $(git rev-parse HEAD)"`];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+  assert.match(verdict(`echo '${M}' | bash`, pr) as string, /reading its script from a pipe/);
+});
+
 // Mikko, 2026-11-14: the lead may merge test PRs and bug fixes again. Only on a lead_merges repo, only
 // the lead, and only at the head it names; close, lock and every other role are as before.
 test("the lead merges a product PR on a lead_merges repo at a named head", () => {

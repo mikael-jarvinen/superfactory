@@ -22,6 +22,11 @@
 // newline before the command, `git -c x=y push origin main`, `git push origin CL-1:main`,
 // `--mirror`, `find -delete`, `python3 -c "open(...,'w')"`). An allowlist of shapes can be read and
 // audited; test/guard.test.ts is the contract.
+//
+// Its limit: the guard checks the commands it can parse, through exec wrappers (env, nice, timeout,
+// find -exec, ssh <host> ...) and a shell reading its script from a heredoc or a here-string. Code it
+// cannot read is outside it: python/node/perl/ruby -c or -e, make, npm scripts, a script file. It
+// stops habits and mistakes, not a session set on getting around it.
 import { posix } from "node:path";
 import { parseArgs } from "node:util";
 import { allowClosePath, closable } from "../allow-close.js";
@@ -68,6 +73,8 @@ const refuse = (reason: string): never => {
 interface Tok {
   t: string;
   op: boolean;
+  // the command substitutions inside a double-quoted word, "$(...)", each a command line of its own
+  subs?: string[];
 }
 
 const PUNCT = ";&|<>()";
@@ -82,12 +89,34 @@ export function tokenize(cmd: string): Tok[] {
   const back: string[] = [];
   let pos = 0;
   const next = () => back.pop() ?? text[pos++] ?? "";
+  // the body of a $( ... ) up to its closing parenthesis, with the quoting inside it kept
+  const sub = (): string => {
+    let depth = 1;
+    let q = "";
+    let body = "";
+    for (;;) {
+      const c = next();
+      if (c === "") refuse("cannot parse quoting (No closing parenthesis)");
+      if (c === "\\" && q !== "'") {
+        body += c + next();
+        continue;
+      }
+      if (q) {
+        if (c === q) q = "";
+      } else if (c === "'" || c === '"') q = c;
+      else if (c === "(") depth++;
+      else if (c === ")" && --depth === 0) return body;
+      body += c;
+    }
+  };
   for (;;) {
     let tok = "";
     let quoted = false;
     let op = false;
     let state = " ";
     let esc = "a";
+    let escaped = -1;
+    const subs: string[] = [];
     for (;;) {
       const c = next();
       if (state === " ") {
@@ -107,7 +136,11 @@ export function tokenize(cmd: string): Tok[] {
         if (c === "") refuse("cannot parse quoting (No closing quotation)");
         if (c === state) state = "a";
         else if (c === "\\" && state === '"') [esc, state] = [state, "\\"];
-        else tok += c;
+        else if (c === "(" && state === '"' && tok.endsWith("$") && escaped !== tok.length) {
+          const body = sub();
+          tok += `(${body})`;
+          subs.push(body);
+        } else tok += c;
         continue;
       }
       if (state === "\\") {
@@ -115,6 +148,7 @@ export function tokenize(cmd: string): Tok[] {
         // inside double quotes only the quote and the backslash itself are escaped
         if (esc === '"' && c !== "\\" && c !== esc) tok += "\\";
         tok += c;
+        if (esc === '"') escaped = tok.length;
         state = esc;
         continue;
       }
@@ -142,14 +176,14 @@ export function tokenize(cmd: string): Tok[] {
       }
     }
     if (!tok && !quoted) return out;
-    out.push({ t: tok, op });
+    out.push(subs.length ? { t: tok, op, subs } : { t: tok, op });
   }
 }
 
 const SEPARATORS = new Set([";", "&&", "||", "|", "&", "|&", "(", ")", ";;"]);
 // Longest first. A run such as ");" is two operators, not a word: read as one, `(ls); git commit`
 // would be a single command named ls.
-const OPS = ["&>>", ";;", "&&", "||", "|&", ">>", "<<", ">&", "<&", "<>", ">|", "&>", ";", "&", "|", "(", ")", "<", ">"];
+const OPS = ["<<<", "&>>", ";;", "&&", "||", "|&", ">>", "<<", ">&", "<&", "<>", ">|", "&>", ";", "&", "|", "(", ")", "<", ">"];
 
 function splitOps(run: string): string[] {
   const out: string[] = [];
@@ -165,40 +199,69 @@ interface Simple {
   words: string[];
   writes: string[];
   reads: string[];
+  // what the command reads on stdin that the guard can see: a here-string, a heredoc's body
+  stdin?: string[];
+}
+
+// Whether a $( ... ) here stands where the command's name goes, so that its output is the command.
+function atCommand(cur: string[]): boolean {
+  try {
+    return stripPrefixes(cur).length === 0;
+  } catch {
+    return true; // a refused prefix: the command is refused either way
+  }
 }
 
 // Simple commands with the files their redirects write. `2>` arrives as "2" then ">", and the
-// bare fd is not a word. `>&1` duplicates a descriptor and writes no file.
-// a word that may come before a command's name without being it
-const prefixWord = (w: string) => KEYWORDS.has(w) || /^[A-Za-z_]\w*=/.test(w) || /^-|^\d+[smhd]?$/.test(w) ||
-  ["command", "nohup", "builtin", "env", "timeout"].includes(posix.basename(w.replace(/^\\/, "")));
-
+// bare fd is not a word. `>&1` duplicates a descriptor and writes no file. What runs inside a $( ... ),
+// a <( ... ) or a >( ... ), quoted or not, is a simple command of its own, and the word it stood for
+// stays in the command around it: `$(` where it is the command's name, `<(` or `>(` as an argument.
 function simpleCommands(toks: Tok[]): Simple[] {
   const flat = toks.flatMap((k) => (k.op ? splitOps(k.t).map((t) => ({ t, op: true })) : [k]));
   const out: Simple[] = [];
   let cur: string[] = [];
   let writes: string[] = [];
   let reads: string[] = [];
+  let stdin: string[] = [];
+  const outer: ({ cur: string[]; writes: string[]; reads: string[]; stdin: string[] } | null)[] = [];
   const flush = () => {
-    if (cur.length || writes.length || reads.length) out.push({ words: cur, writes, reads });
-    cur = [];
-    writes = [];
-    reads = [];
+    if (cur.length || writes.length || reads.length) out.push({ words: cur, writes, reads, stdin });
+    [cur, writes, reads, stdin] = [[], [], [], []];
+  };
+  const open = () => {
+    outer.push({ cur, writes, reads, stdin });
+    [cur, writes, reads, stdin] = [[], [], [], []];
   };
   for (let i = 0; i < flat.length; i++) {
-    const { t, op } = flat[i] as Tok;
-    if (op ? SEPARATORS.has(t) : t === "{" || t === "}") {
+    const { t, op, subs } = flat[i] as Tok;
+    const paren = flat[i + 1]?.op === true && flat[i + 1]?.t === "(";
+    for (const body of subs ?? []) if (!/^\(.*\)$/s.test(body)) out.push(...simpleCommands(tokenize(body))); // $((...)) is arithmetic
+    if (op && (t === "<" || t === ">") && paren) {
+      cur.push(`${t}(`);
+      i++;
+      open();
+    } else if (op && t === "(") {
+      flush();
+      outer.push(null); // a subshell
+    } else if (op && t === ")") {
+      flush();
+      const o = outer.pop();
+      if (o) ({ cur, writes, reads, stdin } = o);
+    } else if (op ? SEPARATORS.has(t) : t === "{" || t === "}") {
       flush();
     } else if (op) {
       const target = flat[i + 1]?.t ?? "";
       if (cur.length && /^\d$/.test(cur[cur.length - 1] as string)) cur.pop();
       if (t.includes(">") && !(t === ">&" && /^(\d+|-)$/.test(target))) writes.push(target);
       if (t === "<" || t === "<>") reads.push(target);
+      if (t === "<<<") stdin.push(target);
       i++;
-    } else if (t === "$") {
-      // the $ of $( ... ); what is inside is its own simple command. At a command position its output
-      // is the command, so a `$(` word stands in for it there and the guard sees one it cannot read.
-      if (cur.every(prefixWord)) cur.push("$(");
+    } else if (t.endsWith("$") && paren) {
+      // `$(` or `X=$(`: what is inside is its own simple command
+      if (t !== "$") cur.push(t);
+      else if (atCommand(cur)) cur.push("$(");
+      i++;
+      open();
     } else if (t.includes("`")) {
       refuse("backtick command substitution");
     } else {
@@ -228,8 +291,20 @@ function checkExport(words: string[]) {
   for (const a of args) if (/^[A-Za-z_]\w*=/.test(a)) checkEnvName(a.split("=", 1)[0] as string);
 }
 
+// The index of a wrapper's command: past its options, and the next word too for those in `vals`
+// (`nice -n 5`; an attached value, `-n5` or `--adjustment=5`, is one word).
+function pastOptions(words: string[], vals: string[]): number {
+  let j = 1;
+  for (; j < words.length && (words[j] as string).startsWith("-") && words[j] !== "-"; j++) {
+    if (words[j] === "--") return j + 1;
+    if (vals.includes(words[j] as string)) j++;
+  }
+  return j;
+}
+
 // Drop shell keywords, env assignments and wrappers so the real command name is first. A wrapper
-// whose command cannot be read off the line is refused; timeout's command can, so it is checked.
+// whose command cannot be read off the line is refused; timeout's, nice's, setsid's, stdbuf's,
+// flock's and env -S's can, so theirs is checked.
 function stripPrefixes(words: string[]): string[] {
   if (["for", "select", "case", "function"].includes(words[0] ?? "")) return [];
   while (words.length && KEYWORDS.has(words[0] as string)) words = words.slice(1);
@@ -244,9 +319,26 @@ function stripPrefixes(words: string[]): string[] {
     else if (["command", "nohup", "builtin"].includes(w)) words = words.slice(1);
     else if (w === "env") {
       let j = 1;
-      for (; j < words.length && ((words[j] as string).startsWith("-") || (words[j] as string).includes("=")); j++)
-        if (!(words[j] as string).startsWith("-")) checkEnvName((words[j] as string).split("=", 1)[0] as string);
-      words = words.slice(j);
+      let split: string | undefined;
+      for (; j < words.length && ((words[j] as string).startsWith("-") || (words[j] as string).includes("=")); j++) {
+        const a = words[j] as string;
+        if (a === "--") continue;
+        if (["-u", "--unset", "-C", "--chdir"].includes(a)) j++;
+        else if (a === "-S" || a === "--split-string") split = words[++j] ?? "";
+        else if (/^-[a-zA-Z]*S./.test(a) || a.startsWith("--split-string=")) split = a.slice(a.indexOf(a.startsWith("--") ? "=" : "S") + 1);
+        else if (!a.startsWith("-")) checkEnvName(a.split("=", 1)[0] as string);
+        if (split !== undefined) break;
+      }
+      // env -S "gh pr merge 1": the string is split into the command's words
+      words = split === undefined ? words.slice(j) : ["env", ...tokenize(split).filter((k) => !k.op).map((k) => k.t), ...words.slice(j + 1)];
+    } else if (w === "nice") words = words.slice(pastOptions(words, ["-n", "--adjustment"]));
+    else if (w === "setsid") words = words.slice(pastOptions(words, []));
+    else if (w === "stdbuf") words = words.slice(pastOptions(words, ["-i", "-o", "-e", "--input", "--output", "--error"]));
+    else if (w === "flock") {
+      // flock [options] <lock file> <command>, or <lock file> -c '<command line>'
+      const j = pastOptions(words, ["-w", "--timeout", "-E", "--conflict-exit-code"]) + 1;
+      const c = words[j];
+      words = c === "-c" || c === "--command" ? ["sh", "-c", words[j + 1] ?? ""] : words.slice(j);
     } else if (w === "timeout") {
       let j = 1;
       for (; j < words.length && (words[j] as string).startsWith("-"); j++) if (["-s", "-k", "--signal", "--kill-after"].includes(words[j] as string)) j++;
@@ -635,9 +727,13 @@ function apiCall(args: string[]): ApiCall {
 // What a `gh api` write does to a PR, an issue or a repo (Marie on #124). On a repo that is not the
 // factory's own, setting a PR's or issue's state closes it, a lock is a lock, and a write to the repo
 // itself (DELETE, PATCH) is the human's. A GraphQL mutation that merges, closes, locks or deletes is
-// refused wherever it points, and one the guard cannot read is refused.
+// refused wherever it points, and one the guard cannot read is refused. A merge of one branch into
+// another, a transfer, and a contents write to the default branch or a protected one land on main
+// as surely as a push does; a contents write names its branch, as create_or_update_file does over MCP.
+// createCommitOnBranch's branch cannot be read reliably, and git push is how a builder commits.
+const API_REPO_WRITE = /^repos\/([^/\s?]+)\/([^/\s?]+)\/(merges|transfer|contents)(?:[/?]|$)/i;
 const API_TARGET = /^repos\/([^/\s?]+)\/([^/\s?]+)(?:\/(pulls|issues)\/(\d+)(\/lock)?)?\/?(?:\?.*)?$/;
-const GQL_REFUSED = /\b(mergePullRequest|closePullRequest|reopenPullRequest|enablePullRequestAutoMerge|lockLockable|unlockLockable|deleteRepository|archiveRepository|mergeBranch)\b/i;
+const GQL_REFUSED = /\b(mergePullRequest|closePullRequest|reopenPullRequest|enablePullRequestAutoMerge|lockLockable|unlockLockable|deleteRepository|archiveRepository|mergeBranch|enqueuePullRequest|createCommitOnBranch)\b/i;
 function checkApiProtect(args: string[], ctx: GuardContext): void {
   const a = apiCall(args);
   if (a.method === "GET") return;
@@ -650,10 +746,20 @@ function checkApiProtect(args: string[], ctx: GuardContext): void {
       refuse("merging, closing, locking or deleting through GraphQL is not allowed; use gh pr merge or gh pr close");
     return;
   }
+  const own = (repo: string) => ctx.ownRepos.some((r) => r.toLowerCase() === repo.toLowerCase());
+  const w = API_REPO_WRITE.exec(ep);
+  if (w && !own(`${w[1]}/${w[2]}`)) {
+    const repo = `${w[1]}/${w[2]}`;
+    if (w[3]?.toLowerCase() === "merges") refuse(`merging a branch of ${repo} through the API is not allowed; open a PR`);
+    if (w[3]?.toLowerCase() === "transfer") refuse(`transferring ${repo} is the human's call`);
+    const branch = a.fields.filter((f) => f.key === "branch").map((f) => f.value);
+    if (a.input || branch.length !== 1 || !branch[0] || branch[0].startsWith("@") || protectedRef(branch[0] as string))
+      refuse(`a contents write to ${repo} needs -f branch=<a feature branch>: without one it commits to the default branch`);
+  }
   const m = API_TARGET.exec(ep);
   if (!m) return;
   const repo = `${m[1]}/${m[2]}`;
-  if (ctx.ownRepos.some((r) => r.toLowerCase() === repo.toLowerCase())) return;
+  if (own(repo)) return;
   if (m[5]) refuse(`locking or unlocking ${repo}#${m[4]} through the API is the human's and colleagues' call`);
   if (m[4] && (a.input || a.fields.some((f) => f.key === "state")))
     refuse(`setting the state of ${repo}#${m[4]} through the API is not allowed; close it with gh pr close, and ${HOW_TO_CLOSE}`);
@@ -862,7 +968,39 @@ function checkReadonly({ words: raw, writes }: Simple, ctx: GuardContext): void 
   refuse(`'${chars(words.join(" ")).slice(0, 60).join("")}' is not in the read-only allowlist`);
 }
 
-function checkProtect({ words: raw }: Simple, ctx: GuardContext): void {
+// The script a shell runs: its -c line, or the script file it names. Neither means it reads its
+// script from stdin. `-s` reads stdin too, its other words being the script's arguments.
+function shellScript(args: string[]): { code?: string; file?: string } {
+  let stdin = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    if (a === "--") return stdin || args[i + 1] === undefined ? {} : { file: args[i + 1] as string };
+    if (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(a)) return { code: args[i + 1] ?? "" };
+    if (["-o", "+o", "-O", "+O", "--rcfile", "--init-file"].includes(a)) i++;
+    else if (a === "-") return {};
+    else if (/^[-+]./.test(a)) stdin ||= /^-[a-zA-Z]*s/.test(a);
+    else return stdin ? {} : { file: a };
+  }
+  return {};
+}
+
+// ssh's options that take a value. Its first other word is the host, options may follow the host
+// too, and the rest is the command line it runs there.
+const SSH_VALUES = "BbcDEeFIiJLlmOoPpQRSWw";
+function sshCommand(args: string[]): string {
+  let host = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    if (a === "--") return args.slice(i + 1 + Number(!host)).join(" ");
+    if (/^-./.test(a)) {
+      if ([...a.slice(1)].findIndex((c) => SSH_VALUES.includes(c)) === a.length - 2) i++;
+    } else if (host) return args.slice(i).join(" ");
+    else host = true;
+  }
+  return "";
+}
+
+function checkProtect({ words: raw, reads, stdin = [] }: Simple, ctx: GuardContext): void {
   let words = stripPrefixes(raw);
   // A command by path is read by its basename wherever it lives, so ~/.local/bin/gh is gh and
   // /usr/lib/git-core/git is git, each checked as itself; any other name by path, a project script,
@@ -874,10 +1012,29 @@ function checkProtect({ words: raw }: Simple, ctx: GuardContext): void {
   const name = (words[0] as string).toLowerCase();
   if (name === "git") return checkGitProtect(words, ctx);
   if (name === "gh") return checkGhProtect(words, ctx);
-  // `bash -c '<script>'` is the script, checked like any other command line
+  // `bash -c '<script>'` is the script, checked like any other command line, and so is the heredoc or
+  // here-string a shell reads as its script. A script file is outside the guard (see the header). A
+  // script the guard cannot see, from a pipe or a <( ... ), is refused.
   if (SHELLS.has(name)) {
-    const i = words.findIndex((w, k) => k > 0 && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(w));
-    if (i > 0 && words[i + 1] !== undefined) checkCommand(words[i + 1] as string, ctx);
+    const { code, file } = shellScript(words.slice(1));
+    if (code !== undefined) return checkCommand(code, ctx);
+    if (file !== undefined && !/^[<>]\($/.test(file)) return;
+    if (file === undefined && stdin.length) return stdin.forEach((script) => checkCommand(script, ctx));
+    if (file === undefined && reads.length) return; // bash < script.sh, a script file
+    refuse(`${name} reading its script from a pipe or a <( ... ) cannot be checked: run the commands themselves, or ${name} -c '...'`);
+  }
+  // the command find runs on each file, up to its `;` or `+`
+  if (name === "find")
+    for (let i = 1; i < words.length; i++) {
+      if (!["-exec", "-execdir", "-ok", "-okdir"].includes(words[i] as string)) continue;
+      let j = i + 1;
+      while (j < words.length && words[j] !== ";" && words[j] !== "+") j++;
+      checkProtect({ words: words.slice(i + 1, j), writes: [], reads: [] }, ctx);
+      i = j;
+    }
+  if (name === "ssh") {
+    const remote = sshCommand(words.slice(1));
+    if (remote) checkCommand(remote, ctx);
   }
 }
 
@@ -1002,11 +1159,15 @@ const HEREDOC = /<<-?\s*['"]?(\w+)['"]?\s*\n([\s\S]*?)\n\1\s*(\n|$)/;
 function checkCommand(cmd: string, ctx: GuardContext): void {
   // heredocs: keep the header, drop the body so its lines are not parsed as commands. The newline
   // after the closing delimiter stays: without it the next line was read as the header's arguments.
+  // Each body is kept by its number, for a shell that reads one as its script.
   let text = cmd;
+  const bodies: string[] = [];
   for (let m = HEREDOC.exec(text); m; m = HEREDOC.exec(text))
-    text = text.slice(0, m.index) + (m[0].split("\n", 1)[0] as string) + " HEREDOC\n" + text.slice(m.index + m[0].length);
+    text = text.slice(0, m.index) + (m[0].split("\n", 1)[0] as string) + ` HEREDOC${bodies.push(m[2] as string) - 1}\n` + text.slice(m.index + m[0].length);
+  const heredoc = (w: string) => /^HEREDOC\d+$/.test(w);
   for (const s of simpleCommands(tokenize(text))) {
-    const simple = { ...s, words: s.words.filter((w) => w !== "HEREDOC") };
+    const stdin = [...(s.stdin ?? []), ...s.words.filter(heredoc).map((w) => bodies[Number(w.slice(7))] as string)];
+    const simple = { ...s, words: s.words.filter((w) => !heredoc(w)), stdin };
     checkSecrets({ ...simple, words: stripPrefixes(simple.words) });
     if (ctx.policy === "readonly") checkReadonly(simple, ctx);
     else checkProtect(simple, ctx);
