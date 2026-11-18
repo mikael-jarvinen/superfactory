@@ -130,3 +130,16 @@ test("a fresh launch removes the stopped row it replaces, and a record older tha
   assert.ok(!rows().some((x) => x.id === "5e7a0b12"), "the stopped row is removed");
   assert.equal(lastStopped(w, "rae"), null);
 });
+
+test("down records the row that was live, not a dead duplicate listed after it (CodeRabbit on #130)", () => {
+  const { ws, run } = fleet();
+  // a row the listing still shows but whose pid is gone: listed by default, not alive, and last
+  const db = join(ws, "db.json");
+  const all = JSON.parse(readFileSync(db, "utf8")) as Record<string, unknown>[];
+  all.push({ id: "deadbeef", name: "rae", kind: "background", state: "idle", status: "idle", pid: 2 ** 22 + 7,
+    startedAt: Date.now() - 86_400_000, cwd: "/w/rae", sessionId: "deadbeef-uuid", args: ["--bg", "--name", "rae", "yesterday"] });
+  writeFileSync(db, JSON.stringify(all));
+  const r = run("down");
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(lastStopped(openWorkspace(ws, {}), "rae")?.id, "5e7a0b12", "the live one, which wake should bring back");
+});

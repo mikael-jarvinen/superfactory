@@ -600,8 +600,11 @@ function cmdDown(ws: Workspace, argv: string[]) {
   for (const { t, hits } of agentSessions(ws, (where) => rows.get(where)))
     for (const s of hits) {
       console.log(`stopping ${s.name} (${s.id})`);
+      // only a row live at the stop is the one to bring back: a dead duplicate listed after it
+      // must not replace its record (CodeRabbit on #130)
+      const live = t.alive(s);
       stopSession(t, s, false);
-      noteStopped(ws, s.name ?? "", s);
+      if (live) noteStopped(ws, s.name ?? "", s);
     }
   stopBoard(ws, true);
   return code;

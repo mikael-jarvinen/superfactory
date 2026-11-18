@@ -177,13 +177,14 @@ export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string,
     env: { ...process.env, ...GIT_HTTPS_ENV },
   });
   const s = waitForName(t, agent.name);
-  // a new conversation: the one stopped last is no longer the one to resume, nor kept listed
-  replaceStopped(ws, agent.name, t, s?.id);
   if (!s) {
     const there = agent.host ? ` on host ${t.where}` : "";
     const also = agent.host ? ` there, and \`factory doctor\` for whether ${t.where} answers` : "";
     die(`${agent.name} did not appear in \`claude agents\`${there} within 90s (launch id ${sid}). Check \`claude logs ${sid}\`${also}.`);
   }
+  // a new conversation, up: the one stopped last is no longer the one to resume, nor kept listed.
+  // A launch that never came up keeps both, the only way back (CodeRabbit on #130).
+  replaceStopped(ws, agent.name, t, s.id);
   return s;
 }
 
