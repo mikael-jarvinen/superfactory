@@ -444,6 +444,9 @@ const posOf = (args: string[]) => args.filter((a) => !a.startsWith("-"));
 const GIT_BARE_FLAGS = new Set(["--no-pager", "-p", "--paginate", "--no-replace-objects", "--bare", "--literal-pathspecs",
   "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-optional-locks"]);
 
+// --exec-path with no value prints the path; with =value it relocates git and is refused
+const GIT_INFO_FLAGS = new Set(["--version", "--exec-path", "--html-path", "--man-path", "--info-path"]);
+
 // The subcommand and its arguments after global options. Blocks alias definitions and relocation.
 function gitParts(words: string[], ctx: GuardContext): [string, string[]] {
   for (let i = 1; i < words.length;) {
@@ -452,6 +455,9 @@ function gitParts(words: string[], ctx: GuardContext): [string, string[]] {
       i++;
       continue;
     }
+    // options git answers and exits on, reading nothing after them: --help is `git help` with the rest
+    if (w === "--help") return ["help", words.slice(i + 1)];
+    if (GIT_INFO_FLAGS.has(w)) return ["version", []];
     if (["--git-dir", "--work-tree", "--namespace", "--exec-path"].some((p) => w.startsWith(p))) refuse("git --git-dir/--work-tree is not allowed");
     if (w === "-C") {
       i += 2;
