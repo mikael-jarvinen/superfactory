@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -414,6 +414,27 @@ const COMMENT_SHAPES: [string, string, string][] = [
   [NO, "a query from stdin", "gh api graphql -F query=@-"],
   [NO, "a query from $(...)", "gh api graphql -f query=\"$(cat <<'EOF'\nmutation{addComment(input:{subjectId:\"x\",body:\"hi\"}){clientMutationId}}\nEOF\n)\""],
   [NO, "a query from a variable", 'gh api graphql -f query="$Q"'],
+  // A query file is read only when the gh is the call's only command: anything else in the call can
+  // move or change the file before gh reads it. Here sub/read.graphql is an unmarked comment while
+  // ./read.graphql is a read (Marie and CodeRabbit, round 4).
+  [OK, "a read from a file, behind timeout", "timeout 30 gh api graphql -F query=@read.graphql"],
+  [OK, "a read from an absolute path", "gh api graphql -F query=@DIR/read.graphql"],
+  [NO, "after cd &&", "cd sub && gh api graphql -F query=@read.graphql"],
+  [NO, "after cd in a subshell", "(cd sub; gh api graphql -F query=@read.graphql)"],
+  [NO, "--input after pushd", "pushd sub; gh api graphql --input read.json"],
+  [NO, "in bash -c", "bash -c 'cd sub && gh api graphql -F query=@read.graphql'"],
+  [NO, "alone in bash -c", "bash -c 'gh api graphql -F query=@read.graphql'"],
+  [NO, "in eval", "eval gh api graphql -F query=@read.graphql"],
+  [NO, "after cd, an absolute path", "cd sub && gh api graphql -F query=@DIR/read.graphql"],
+  [NO, "after cp", "cp sub/read.graphql read.graphql && gh api graphql -F query=@read.graphql"],
+  [NO, "a pipe into it", "cat x | gh api graphql -F query=@read.graphql"],
+  [NO, "beside a background job", "cp sub/read.graphql read.graphql & gh api graphql -F query=@read.graphql"],
+  [NO, "a command after it", "gh api graphql -F query=@read.graphql; cd sub"],
+  [NO, "a redirect", "gh api graphql -F query=@read.graphql > read.graphql"],
+  [NO, "env -C", "env -C sub gh api graphql -F query=@read.graphql"],
+  [NO, "env --chdir=", "env --chdir=sub gh api graphql -F query=@read.graphql"],
+  [NO, "sudo -D", "sudo -D sub gh api graphql -F query=@read.graphql"],
+  [OK, "after cd, a marked inline comment", `cd sub && gh pr comment 1 -b '${M} ok'`],
   // where gh runs: behind wrappers, in other commands' bodies, by path
   [NO, "sudo", "sudo gh pr comment 1 -b hi"],
   [NO, "sudo -u", "sudo -u x gh pr comment 1 -b hi"],
@@ -460,13 +481,27 @@ test("the comment rule: every shape a gh comment takes, refused or allowed", () 
   const reply = "mutation($b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \"T\", body: $b}) { clientMutationId } }";
   writeFileSync(join(dir, "unmarked.json"), JSON.stringify({ query: reply, variables: { b: "hi" } }));
   writeFileSync(join(dir, "marked.json"), JSON.stringify({ query: reply, variables: { b: `${M} ok` } }));
+  mkdirSync(join(dir, "sub"));
+  writeFileSync(join(dir, "sub", "read.graphql"), unmarked);
+  writeFileSync(join(dir, "sub", "read.json"), JSON.stringify({ query: reply, variables: { b: "hi" } }));
   const wrong: string[] = [];
-  for (const [want, name, cmd] of COMMENT_SHAPES) {
+  for (const [want, name, row] of COMMENT_SHAPES) {
+    const cmd = row.replace("@DIR/", `@${dir}/`);
     const hook = commentVerdict(cmd, dir);
     if ((hook === null ? OK : NO) !== want) wrong.push(`hook ${want === OK ? "refused" : "allowed"} ${name}: ${cmd}${hook ? ` (${hook})` : ""}`);
     // The protect guard runs the same rule on a gh it runs; its own policy may refuse more, so it is
     // held only to refusing what the rule refuses.
     if (want === NO && /^gh /.test(cmd) && !/@|--input/.test(cmd) && verdict(cmd, pr) === null) wrong.push(`protect allowed ${name}: ${cmd}`);
+  }
+  // The protect guard reads files from its own process's directory: run it from the table's.
+  const here = process.cwd();
+  process.chdir(dir);
+  try {
+    assert.equal(verdict("gh api graphql -F query=@read.graphql", pr), null);
+    for (const c of ["cd sub && gh api graphql -F query=@read.graphql", "env -C sub gh api graphql --input read.json"])
+      if (verdict(c, pr) === null) wrong.push(`protect allowed: ${c}`);
+  } finally {
+    process.chdir(here);
   }
   assert.deepEqual(wrong, []);
 });
