@@ -983,12 +983,14 @@ export function parseGh(cmd: string, args: string[]): GhArgs {
     } else if (a.startsWith("-") && a.length > 1) {
       for (let j = 1; j < a.length; j++) {
         const f = `-${a[j]}`;
+        // -b=hi is "hi" and -w=false is false: pflag drops an = right after the letter when a value
+        // follows it (CodeRabbit on #128); a bare -b= is "="
+        const eqValue = a[j + 1] === "=" && a.length > j + 2;
         if (vals[f]) {
-          out.flags.push([vals[f] as string, j + 1 < a.length ? a.slice(j + 1) : args[++i] ?? ""]);
+          out.flags.push([vals[f] as string, eqValue ? a.slice(j + 2) : j + 1 < a.length ? a.slice(j + 1) : args[++i] ?? ""]);
           break;
         }
-        // -w=false: pflag reads what follows the = as the boolean's value
-        if (a[j + 1] === "=") {
+        if (eqValue) {
           setBool(out.bools, bools[f] ?? f.slice(1), a.slice(j + 2));
           break;
         }

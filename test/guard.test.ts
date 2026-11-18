@@ -1191,6 +1191,13 @@ const ROUND_128: [string, string, string][] = [
   [OK, "--web=true opens the browser", "gh pr comment 5 -R acme/api --web=true --body hi"],
   [OK, "--web=false then --web", "gh pr comment 5 -R acme/api --web=false --web"],
   [OK, "--web=false with a marked body", "gh pr comment 5 -R acme/api --web=false --body '> Written by agent. ok'"],
+  // KJH8: -b=VALUE is VALUE, as pflag reads it; -bVALUE and -b VALUE as before
+  [OK, "-b= with a marked body", "gh pr comment 5 -R acme/api -b='> Written by agent. ok'"],
+  [NO, "-b= with an unmarked body", "gh pr comment 5 -R acme/api -b=hi"],
+  [OK, "-b with a marked body attached", "gh pr comment 5 -R acme/api '-b> Written by agent. ok'"],
+  [OK, "-b then a marked body", "gh issue comment 5 -R acme/api -b '> Written by agent. ok'"],
+  [NO, "gh api -f=body=", "gh api repos/acme/api/issues/5/comments -f=body=hi"],
+  [OK, "gh api -f=body= marked", "gh api repos/acme/api/issues/5/comments '-f=body=> Written by agent. ok'"],
 ];
 
 test("the shapes CodeRabbit found in #128 at 5332c327 are read as bash and gh read them", () => {
