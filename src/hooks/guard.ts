@@ -2266,8 +2266,6 @@ function shownInput(s: Simple, into: string): string[] {
   return out;
 }
 
-// xargs's replace string, from the options commandWords read: -I's value (attached or the next word),
-// -i's or --replace's (else {}); null when there is none, and the input is appended.
 // One xargs short-option word, read as xargs reads it: left to right, the first letter that takes a
 // value ends the cluster and the rest of the word is that value (Marie on #128), so -dI is a
 // delimiter of I and -ri is -r -i. I, d, E, n, L, P, s and a with nothing after them take the next
