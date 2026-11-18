@@ -274,8 +274,11 @@ export function tokenize(cmd: string): Tok[] {
       if (c === "'" && bareDollar === tok.length) {
         tok = tok.slice(0, -1) + ansiC(next, (x) => back.push(x));
         quoted = true;
-      } else if (c === "'" || c === '"') [state, dq] = [c, tok.length];
-      else if (c === "\\") [esc, state] = ["a", "\\"];
+      } else if (c === "'" || c === '"') {
+        // a quote ends the $'s adjacency even when its span adds nothing: bash keeps the $ of $""'x'
+        // (CodeRabbit on #128)
+        [state, dq, bareDollar] = [c, tok.length, -1];
+      } else if (c === "\\") [esc, state] = ["a", "\\"];
       else if (!PUNCT.includes(c)) {
         tok += c;
         if (c === "$") bareDollar = tok.length;

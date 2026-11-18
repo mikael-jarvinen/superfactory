@@ -1172,3 +1172,24 @@ test("the comment rule: every shape a gh comment takes, refused or allowed", () 
   }
   assert.deepEqual(wrong, []);
 });
+
+// CodeRabbit's review of #128 at 5332c327, its threads probed by Marie: each row was a bypass (an
+// unmarked body that got through) or a false refusal there. A NO row is refused by the hook and by
+// protect; an OK row is allowed by the hook.
+const ROUND_128: [string, string, string][] = [
+  // KJHv: an empty "" between the $ and the ' leaves the $ a letter, so the body starts with "$>"
+  [NO, "a $ before an empty quote and a marked '...'", `gh pr comment 5 -R acme/api --body $""'> Written by agent. x'`],
+  [OK, "an empty $'' then a marked \"...\"", `gh pr comment 5 -R acme/api --body $''"> Written by agent. x"`],
+  [OK, "an empty $'' then a marked $'...'", `gh pr comment 5 -R acme/api --body $''$'> Written by agent. x'`],
+  [OK, "a $'...' after a line continuation", "gh pr comment 5 -R acme/api --body $\\\n'> Written by agent. x'"],
+];
+
+test("the shapes CodeRabbit found in #128 at 5332c327 are read as bash and gh read them", () => {
+  const wrong: string[] = [];
+  for (const [want, name, cmd] of ROUND_128) {
+    const hook = commentVerdict(cmd);
+    if ((hook === null ? OK : NO) !== want) wrong.push(`hook ${want === OK ? "refused" : "allowed"} ${name}: ${cmd}${hook ? ` (${hook})` : ""}`);
+    if (want === NO && verdict(cmd, pr) === null) wrong.push(`protect allowed ${name}: ${cmd}`);
+  }
+  assert.deepEqual(wrong, []);
+});
