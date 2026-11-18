@@ -1256,6 +1256,19 @@ const ROUND_128: [string, string, string][] = [
   [OK, "a PATH export before a marked comment", "export PATH=/x:$PATH; gh pr comment 5 -R acme/api --body '> Written by agent. ok'"],
   [NO, "a PATH export before an unmarked comment", "export PATH=/x:$PATH; gh pr comment 5 -R acme/api --body hi"],
   [NO, "an env-prefixed echo piped to bash", "HOME=/h echo 'gh pr comment 5 -R acme/api --body hi' | bash"],
+  // Marie on #128 at a78ae0e8: printed text piped into xargs, which runs gh or a shell with it
+  [NO, "echo into xargs -0 bash -c", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -0 bash -c"],
+  [NO, "echo into xargs gh", "echo 'pr comment 5 -R acme/api --body hi' | xargs gh"],
+  [NO, "printf into xargs -n1 gh pr comment", "printf '5\\n' | xargs -n1 gh pr comment -R acme/api --body hi"],
+  [NO, "unknown input into xargs gh", "cat args | xargs gh"],
+  [NO, "unknown input into xargs sh -c beside gh", "gh pr view 5; cat cmds | xargs -0 sh -c"],
+  [OK, "echo into xargs gh with a marked comment", "echo \"pr comment 5 -R acme/api --body '> Written by agent. ok'\" | xargs gh"],
+  [NO, "unknown input into xargs -I gh pr comment", "cat prs | xargs -I{} gh pr comment {} -R acme/api --body hi"],
+  [NO, "unknown input into xargs -I sh -c with a comment", "ls | xargs -I{} sh -c 'gh pr comment {} -R acme/api --body hi'"],
+  [OK, "unknown input into xargs -I gh api read", "gh run list -q .[0].id | xargs -I{} gh run view {} --log-failed"],
+  [OK, "unknown input into xargs -I sh -c read", "ls -d */ | xargs -I{} sh -c 'git -C {} remote get-url origin'; gh repo view acme/api"],
+  [OK, "gh output into xargs echo", "gh pr list | xargs -n1 echo"],
+  [OK, "xargs kill then a gh read", "ls | xargs -r kill; gh pr view 5"],
 ];
 
 test("the shapes CodeRabbit found in #128 at 5332c327 are read as bash and gh read them", () => {

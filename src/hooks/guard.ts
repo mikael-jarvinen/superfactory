@@ -2212,7 +2212,7 @@ function envSplit(o: string, nextWord: () => string | undefined): string | null 
 
 // The words from the command a simple command runs: past shell keywords, VAR=value words and the
 // wrappers above with their options (timeout's duration too). `echo gh pr comment` runs echo.
-function commandWords(words: string[]): string[] {
+function commandWords(words: string[], via: { name: string; opts: string[] }[] = []): string[] {
   let i = 0;
   const assignment = (w: string | undefined) => w !== undefined && /^[A-Za-z_]\w*=/.test(w);
   while (i < words.length) {
@@ -2224,16 +2224,19 @@ function commandWords(words: string[]): string[] {
     const name = posix.basename(w.replace(/^\\/, "")).toLowerCase();
     const opts = WRAPPER_VALUES[name];
     if (!opts) return words.slice(i);
+    const seen: string[] = [];
+    via.push({ name, opts: seen });
     i++;
     while (i < words.length && (words[i] as string).startsWith("-") && words[i] !== "-") {
       const o = words[i] as string;
+      seen.push(o);
       i++;
       if (o === "--") break;
       // env -S splits its value into the command and its first arguments (CodeRabbit on #128)
       if (name === "env") {
         const split = envSplit(o, () => words[i++]);
         if (split === null) continue;
-        if (split !== undefined) return commandWords([...tokenize(split).map((k) => k.t), ...words.slice(i)]);
+        if (split !== undefined) return commandWords([...tokenize(split).map((k) => k.t), ...words.slice(i)], via);
       }
       // `command -v gh` and `command -V gh` look a name up and run nothing (Marie on #128)
       if (name === "command" && /^-[pvV]*[vV][pvV]*$/.test(o)) return [];
@@ -2269,10 +2272,30 @@ function checkComments(cmd: string): void {
   for (const s of simpleCommands(tokenize(text), bodies, "pass")) {
     // commandWords, not protect's stripPrefixes: this rule holds sessions that run no protect guard,
     // so an env override or a wrapper is no refusal here (Marie on #128)
-    const words = commandWords(s.words);
+    const via: { name: string; opts: string[] }[] = [];
+    const words = commandWords(s.words, via);
     const p = printedText(words);
     if (p !== null) printed.push(p);
     const name = posix.basename((words[0] ?? "").replace(/^\\/, "")).toLowerCase();
+    // xargs runs its command with its input as more arguments (Marie on #128: echo '...' | xargs gh,
+    // and | xargs -0 bash -c). A gh or a shell it runs is checked with each text the line shows that
+    // input can be. Input the line does not show is refused, except under -I, where it only fills the
+    // {} slots of a command the line shows whole: that command is checked as written.
+    const xargs = via.find((v) => v.name === "xargs");
+    if (xargs && (name === "gh" || SHELLS.has(name))) {
+      const inputs = [...(s.stdin ?? []), ...(s.piped && !s.redirected0 ? printed : [])];
+      const replace = xargs.opts.some((o) => /^(-I|-i|--replace)/.test(o));
+      if (!inputs.length && !replace) refuse(`xargs runs ${name} on input this line does not show, so a comment it posts cannot be checked`);
+      const q = (w: string) => `'${w.replace(/'/g, "'\\''")}'`;
+      const script = SHELLS.has(name) ? shellScript(words.slice(1)) : {};
+      for (const input of inputs) {
+        // a shell whose -c has no script yet takes the input as it (xargs -0 passes it whole)
+        if (script.code === "") checkComments(input);
+        checkComments(`${words.map(q).join(" ")} ${input}`);
+      }
+      if (replace) checkComments(words.map(q).join(" "));
+      continue;
+    }
     if (name === "gh") checkCommentWrite(words.slice(1));
     else if (SHELLS.has(name)) {
       const script = shellScript(words.slice(1));
