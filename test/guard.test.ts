@@ -475,6 +475,22 @@ test("stdin by any name, a clustered env flag, every find action and ssh on stdi
   assert.deepEqual(wrong, []);
 });
 
+// A command word's directory from a variable lost its `$` to the basename, and the shell splits it
+// (Marie on #124 at e6b2e171).
+test("a command word from a variable is refused, except a plain path under $HOME", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const refused = ["$G/x", "${G}/x a", "$G/gh pr view 1", "$D/../x", "HOME='/usr/bin/gh pr merge 1 -R acme/api #'; $HOME/x",
+    "export HOME=/x; $HOME/gh pr view 1", "$HOME/.local/bin/gh pr merge 1 -R acme/api", "$HOME/$X/gh pr view 1", "`echo x`/y"];
+  const allowed = ["$HOME/.local/bin/gh pr view 1", '"$HOME/.local/bin/gh" pr list', "${HOME}/agents/bin/pr-send.sh 124 abc",
+    "~/agents/bin/pr-send.sh 124 abc", "$HOME/agents/bin/pr-send.sh 124 abc"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
 // A heredoc's body was tied to the last command on its header line, not to the one whose << it is
 // (Marie on #124 at beb31d9e).
 test("a heredoc is the stdin of the command that opens it", () => {

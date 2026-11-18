@@ -40,6 +40,9 @@ export type Policy = (typeof POLICIES)[number];
 
 export interface GuardContext {
   role: string;
+  // set by checkCommand when the command line names HOME other than as $HOME or ${HOME}: then a
+  // $HOME/... command word may hold anything
+  homeAssigned?: boolean;
   policy: Policy;
   writeDirs: string[];
   org?: string;
@@ -1016,14 +1019,22 @@ function checkProtect({ words: raw, reads, stdin = [], piped = false }: Simple, 
   let words = stripPrefixes(raw);
   // gh, git and the shells by path are read by their basename wherever they live, so ~/.local/bin/gh
   // is gh and /usr/lib/git-core/git is git, each checked as itself. Any other command by path is read
-  // as itself (/usr/bin/env, /usr/bin/nice) from a system bin dir or a dir from a variable, and
+  // as itself (/usr/bin/env, /usr/bin/nice) from a system bin dir, and
   // anywhere else it is a project script, which runs (./scripts/env is not env). A command word from a
   // variable or a substitution could run anything, so it is refused (Marie and Niilo on #124:
   // `~/.local/bin/gh pr merge` and `$G pr merge` skipped every check).
+  // A command word holding a variable is split by the shell, so `$G/x` runs whatever G holds: only
+  // $HOME/ or ${HOME}/ before a plain path is read as that path, while the line leaves HOME alone
+  // (Marie on #124 at e6b2e171: `$G/x` with G='/usr/bin/gh pr merge 1 #' merged).
   while (words.length && (words[0] as string).includes("/")) {
-    const w = words[0] as string;
+    let w = words[0] as string;
+    if (/[$`]/.test(w)) {
+      const home = /^\$(HOME|\{HOME\})(\/[^$`]*)$/.exec(w);
+      if (!home || ctx.homeAssigned) refuse(`the command '${w}' runs whatever its variable holds, which the guard cannot check: run it by its path`);
+      else w = `~${home[2]}`;
+    }
     const b = posix.basename(w);
-    if (!["gh", "git"].includes(b.toLowerCase()) && !SHELLS.has(b) && !TRUSTED_BIN_DIRS.has(posix.dirname(w)) && !/[$`]/.test(w)) return;
+    if (!["gh", "git"].includes(b.toLowerCase()) && !SHELLS.has(b) && !TRUSTED_BIN_DIRS.has(posix.dirname(w))) return;
     words = stripPrefixes([b, ...words.slice(1)]);
   }
   if (!words.length) return;
@@ -1181,6 +1192,7 @@ function checkSecrets({ words: raw, reads }: Simple): void {
 const HEREDOC = /<<-?\s*['"]?(\w+)['"]?[^\n]*\n([\s\S]*?)\n\1\s*(\n|$)/;
 
 function checkCommand(cmd: string, ctx: GuardContext): void {
+  if (!ctx.homeAssigned && /\bHOME\b/.test(cmd.replace(/\$\{?HOME\b/g, ""))) ctx = { ...ctx, homeAssigned: true };
   // heredocs: keep the header, drop the body so its lines are not parsed as commands. The newline
   // after the closing delimiter stays: without it the next line was read as the header's arguments.
   // Each body is kept by its number, which takes the delimiter's place after its own `<<`, so the body
