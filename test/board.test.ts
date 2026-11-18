@@ -9,7 +9,7 @@ import { transition } from "../src/state.js";
 import { readTail } from "../src/messages.js";
 import { pyDumps } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
-import { CLI, tempWorkspace } from "./helpers.js";
+import { CLI, GROUPED, tempWorkspace } from "./helpers.js";
 
 const noInboxLock = process.platform !== "darwin" && process.platform !== "linux" && "the inbox lock is built for macOS and Linux only";
 
@@ -209,4 +209,40 @@ test("the server: a card carries its design's slides and canvas once it has them
   const js = await (await fetch(board.url + "/static/board.js")).text();
   assert.ok(js.includes('href="${esc(t.design.slides)}"') && js.includes('href="${esc(t.design.canvas)}"'), "the card links both");
   assert.ok(!js.includes("t.design.approved"), "no approved mark: on a card in the build it read as the PR's");
+});
+
+async function teamsOf(toml: string) {
+  const dir = tempWorkspace(toml);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  process.env.CLAUDE_BIN = join(dir, "bin", "claude");
+  const board = await serve(openWorkspace(dir), { host: "127.0.0.1", port: 0 });
+  after(() => board.close());
+  return (await (await fetch(board.url + "/api")).json()).teams;
+}
+
+test("teams: a configured group titles its roster and keeps the role's place", { skip: noInboxLock }, async () => {
+  const snap = { teams: await teamsOf(GROUPED) };
+  // Within one place, rosters keep the order of their first member in the config. Only the ungrouped
+  // assistants are staff, beside the lead; a group of assistants sits in the row with the builders.
+  type Group = { key: string; title: string; scope: string; staff: boolean; members: { name: string }[] };
+  assert.deepEqual(snap.teams.map((g: Group) => [g.key, g.title, g.staff, g.members.map((m) => m.name).join(" ")]), [
+    ["lead", "Lead", false, "ada"],
+    ["assistants", "Assistants", true, "nap"],
+    ["group:Product", "Product", false, "bea cal"],
+    ["group:Servers", "Servers", false, "otto"],
+    ["reviewers", "Reviewers", false, "rae"],
+  ]);
+  assert.equal(snap.teams[2].scope, "web, api", "bea's stack, and cal's api already in it");
+
+  // A member's repo that the first lacks is in the scope too, after the first's.
+  const docs = GROUPED.replace("[stacks.app]", '[repos.docs]\nremote = "acme/docs"\n\n[stacks.app]')
+    .replace('repos = ["api"]', 'repos = ["api", "docs"]');
+  const product = (await teamsOf(docs)).find((g: { key: string }) => g.key === "group:Product");
+  assert.equal(product.scope, "web, api, docs");
+
+  // An entry is kept whole: "a, b" and "b" are two repos, and neither swallows the other.
+  const odd = GROUPED.replace("[stacks.app]", '[repos."a, b"]\nremote = "acme/ab"\n\n[repos.b]\nremote = "acme/b"\n\n[stacks.app]')
+    .replace('repos = ["api"]', 'repos = ["a, b", "b"]');
+  const oddProduct = (await teamsOf(odd)).find((g: { key: string }) => g.key === "group:Product");
+  assert.equal(oddProduct.scope, "web, api, a, b, b");
 });

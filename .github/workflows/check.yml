@@ -1,0 +1,26 @@
+# The gate pr-send.sh asks for: one job named exactly `check`, on every PR and every push to linux
+# or main (main is what the laptop runs).
+# A check that never starts posts nothing, so the job name is load-bearing -- don't rename it.
+name: check
+on:
+  pull_request:
+  push:
+    branches: [linux, main]
+permissions:
+  contents: read
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit -p .
+      - run: npm test

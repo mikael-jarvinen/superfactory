@@ -6,10 +6,12 @@ import { allowClosePath } from "./allow-close.js";
 import { isSettingsPath } from "./config.js";
 import { lead } from "./fleet.js";
 import { POLICIES, type Policy, TMP_ROOTS } from "./hooks/guard.js";
+import { WAKE_HOOK_TIMEOUT_S } from "./hooks/wake.js";
 import type { Workspace } from "./workspace.js";
 import { die } from "./util.js";
 
-export const HOOKS = ["guard", "status", "no-dialogs", "no-side-channels"] as const;
+// wake is in every session's settings whatever the template says, so it is never listed in one.
+export const HOOKS = ["guard", "status", "no-dialogs", "no-side-channels", "wake"] as const;
 export type HookName = (typeof HOOKS)[number];
 
 export interface HookResult {
@@ -154,6 +156,7 @@ export interface SessionSettings {
   extraHooks?: string[];
   permissionMode?: string;
   env?: Record<string, string>;
+  host?: string;
 }
 
 // Renders one session's settings into logs/run/settings-<name>.json and returns the path. Every
@@ -200,7 +203,14 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
   const add = (event: string, matcher: string | undefined, args: string[], timeout: number) =>
     (hooks[event] ??= []).push({ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command: `${factoryCommand()} ${args.map(shq).join(" ")}`, timeout }] });
   const leadName = lead(ws).name;
+  // Every role sends messages, and a message to a session that is off is lost, so every role wakes
+  // its recipient first.
+  const wakeArgs = ["--workspace", ws.dir, "hook", "wake", ...(s.host ? ["--from-host", s.host] : [])];
+  add("PreToolUse", "SendMessage", wakeArgs, WAKE_HOOK_TIMEOUT_S);
+  // a failed send from a host, to an agent it cannot wake, is explained
+  if (s.host) for (const ev of ["PostToolUse", "PostToolUseFailure"]) add(ev, "SendMessage", wakeArgs, 10);
   for (const h of names) {
+    if (h === "wake") continue;
     if (h === "guard") {
       const dirs = [...t.writeDirs.map((d) => WRITE_DIRS[d](ws)), ...(work ? [work] : [])].flatMap((d) => ["--write-dir", d]);
       const repos = t.guard === "protect" ? [...(org ? ["--org", org] : []), ...ws.config.github.ownRepos.flatMap((r) => ["--own-repo", r])] : [];

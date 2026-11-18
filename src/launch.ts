@@ -10,13 +10,15 @@ import { capitalize, die } from "./util.js";
 
 export type Phase = "build" | undefined;
 
-// The agent's own cwd, permission_mode and autocompact win over its role's.
+// The agent's own cwd, model, effort, permission_mode and autocompact win over its role's.
 export function roleOf(ws: Workspace, agent: Agent): Role {
   const role = ws.config.roles[agent.role];
   if (!role) return die(`roles.${agent.role} is not configured`);
   return {
     ...role,
     cwd: agent.cwd ?? role.cwd,
+    model: agent.model ?? role.model,
+    effort: agent.effort ?? role.effort,
     permissionMode: agent.permissionMode ?? role.permissionMode,
     autocompact: agent.autocompact ?? role.autocompact,
   };
@@ -40,7 +42,7 @@ export function settingsFile(ws: Workspace, agent: Agent): string {
   const role = roleOf(ws, agent);
   return renderSettings(ws, {
     name: agent.name, role: agent.role, template: role.settings, cwd: role.cwd, extraHooks: role.extraHooks, permissionMode: role.permissionMode,
-    env: sessionEnv(ws, agent),
+    env: sessionEnv(ws, agent), ...(agent.host ? { host: agent.host } : {}),
   });
 }
 
@@ -68,6 +70,9 @@ export function buildAppendix(ws: Workspace, agent: Agent, repoDir: string | und
   }
   return parts.length ? { text: parts.join("\n\n"), labels } : null;
 }
+
+// The appendix of a session that starts in its role's cwd, with no checkout: every role but a builder.
+export const roleAppendix = (ws: Workspace, agent: Agent): string | null => buildAppendix(ws, agent, undefined)?.text ?? null;
 
 const addDirs = (ws: Workspace, agent: Agent) =>
   (agent.addDirs ?? roleOf(ws, agent).addDirs).map((k) => ws.config.repos[k]!.path);
@@ -112,7 +117,7 @@ export const gitEnv = (over: GitOver = "https"): Record<string, string> => (over
 
 export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string, appendix: string | null = null, phase: Phase = undefined, t: Transport = transportFor(ws, agent)): Session {
   const sid = t.start({
-    agent, cwd, prompt, appendix, phase,
+    agent, cwd, prompt, appendix, phase, runDir: ws.runDir,
     args: (appendixPath) => launchArgs(ws, agent, prompt, appendixPath, phase),
     env: { ...process.env, ...GIT_HTTPS_ENV },
   });

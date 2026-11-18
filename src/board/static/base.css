@@ -60,9 +60,13 @@ nav a.on{color:var(--ink)}
         margin:0 3px;animation:beat 1.2s ease-in-out infinite}
 .boot i:nth-child(2){animation-delay:.18s}
 .boot i:nth-child(3){animation-delay:.36s}
+/* A phone puts the links on a row of their own under the brand, scrolling sideways if they outgrow it. */
 @media (max-width:640px){
-  header{padding:11px 14px;gap:10px}
-  .brand{letter-spacing:.08em;font-size:11px}
-  nav{gap:10px;margin-left:0}
+  header{padding:10px 14px 0;gap:0 10px;flex-wrap:wrap}
+  .brand{letter-spacing:.08em;font-size:11px;white-space:nowrap}
+  nav{order:3;flex:1 0 100%;gap:18px;margin:8px -14px 0;padding:0 14px 10px;overflow-x:auto;
+      scrollbar-width:none}
+  nav::-webkit-scrollbar{display:none}
 }
-@media (max-width:400px){.theme{display:none}}
+nav a{white-space:nowrap}
+@media (max-width:480px){.pulse #at{display:none}}

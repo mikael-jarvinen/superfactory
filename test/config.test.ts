@@ -3,8 +3,8 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { ConfigError, loadConfig } from "../src/config.js";
-import { factory, TOML, tempWorkspace } from "./helpers.js";
+import { ConfigError, loadConfig, ROLES, roster } from "../src/config.js";
+import { factory, GROUPED, TOML, tempWorkspace } from "./helpers.js";
 
 const problems = (toml: string): string[] => {
   const ws = tempWorkspace(toml);
@@ -137,22 +137,86 @@ test("the CLI prints every problem at once and exits 1", () => {
   assert.match(factory(ws, ["status"]).stderr, /has 1 problem:\n {2}not valid TOML: /);
 });
 
-test("an agent's own cwd, permission_mode and autocompact; a builder's cwd is refused", () => {
+test("an agent's own cwd, model, effort, permission_mode and autocompact; a builder's cwd is refused", () => {
   const ws = tempWorkspace(TOML.replace(`name = "rae"
 role = "reviewer"`, `name = "rae"
 role = "reviewer"
 cwd = "rae"
+model = "sonnet"
+effort = "low"
 permission_mode = "default"
 autocompact = "400k"`));
   after(() => rmSync(ws, { recursive: true, force: true }));
   const c = loadConfig(join(ws, "factory.toml"), {});
   const rae = c.agents.find((a) => a.name === "rae");
-  assert.deepEqual([rae?.cwd, rae?.permissionMode, rae?.autocompact], [join(ws, "rae"), "default", "400k"]);
+  assert.deepEqual([rae?.cwd, rae?.model, rae?.effort, rae?.permissionMode, rae?.autocompact], [join(ws, "rae"), "sonnet", "low", "default", "400k"]);
   const ada = c.agents.find((a) => a.name === "ada");
-  assert.deepEqual([ada?.cwd, ada?.permissionMode, ada?.autocompact], [undefined, undefined, undefined]);
+  assert.deepEqual([ada?.cwd, ada?.model, ada?.effort, ada?.permissionMode, ada?.autocompact], [undefined, undefined, undefined, undefined, undefined]);
 
   assert.deepEqual(problems(TOML.replace(`name = "cal"
 role = "builder"`, `name = "cal"
 role = "builder"
 cwd = "cal"`)), ["agents[2].cwd: a builder starts in its worktree, so it takes no cwd"]);
+});
+
+test("an agent's group: trimmed, optional, never the lead's, one role to a group", () => {
+  const ws = tempWorkspace(GROUPED);
+  after(() => rmSync(ws, { recursive: true, force: true }));
+  const c = loadConfig(join(ws, "factory.toml"), {});
+  assert.deepEqual(Object.fromEntries(c.agents.map((a) => [a.name, a.group])),
+    { ada: undefined, bea: "Product", cal: "Product", rae: undefined, otto: "Servers", nap: undefined });
+
+  assert.deepEqual(problems(GROUPED.replace('group = " Servers "', 'group = "  "')), ["agents[4].group: must not be empty"]);
+  assert.deepEqual(problems(GROUPED.replace(`name = "ada"
+role = "lead"`, `name = "ada"
+role = "lead"
+group = "Top"`)), ["agents[0].group: the lead has its own place on the board"]);
+  assert.deepEqual(problems(GROUPED.replace('group = " Servers "', 'group = "Product"')),
+    ['agents: group "Product" has "bea" (builder) and "otto" (assistant); a group holds one role']);
+  // A group may not take the title of a roster the board draws for agents without one.
+  for (const [g, who] of [[" Reviewers ", "rae"], ["assistants", "nap"]] as const)
+    assert.deepEqual(problems(GROUPED.replace('group = " Servers "', `group = "${g}"`)),
+      [`agents: group "${g.trim()}" has the title of "${who}"'s roster on the board; pick another`]);
+  const ungroup = (name: string) => GROUPED.replace(`name = "${name}"\nrole = "builder"\ngroup = "Product"`, `name = "${name}"\nrole = "builder"`);
+  assert.deepEqual(problems(ungroup("cal").replace('group = " Servers "', 'group = "API"')),
+    ['agents: group "API" has the title of "cal"\'s roster on the board; pick another']);
+  assert.deepEqual(problems(ungroup("bea").replace('group = " Servers "', 'group = "app"')),
+    ['agents: group "app" has the title of "bea"\'s roster on the board; pick another']);
+  // Only what the board draws: a relabelled stack frees its key, and a repo no ungrouped builder
+  // lists alone is free.
+  const shop = ungroup("bea").replace("[stacks.app]", '[stacks.app]\nlabel = "Shop"');
+  assert.deepEqual(problems(shop.replace('group = " Servers "', 'group = "App"')), []);
+  assert.deepEqual(problems(shop.replace('group = " Servers "', 'group = "shop"')),
+    ['agents: group "shop" has the title of "bea"\'s roster on the board; pick another']);
+  assert.deepEqual(problems(GROUPED.replace('group = " Servers "', 'group = "API"')), []);
+  assert.deepEqual(problems(GROUPED.replace(`name = "cal"
+role = "builder"
+group = "Product"`, `name = "cal"
+role = "builder"
+group = "product"`)), ['agents: group "Product" is also spelled "product"; spell it one way']);
+  assert.deepEqual(problems(GROUPED.replace(/group = "Product"/g, 'group = "Product Team"').replace(`name = "cal"
+role = "builder"
+group = "Product Team"`, `name = "cal"
+role = "builder"
+group = "Product  Team"`)), ['agents: group "Product Team" is also spelled "Product  Team"; spell it one way']);
+});
+
+test("roster: every role but the builder has a roster of its own, and builders split by stack and repos", () => {
+  const of = (role: (typeof ROLES)[number], stack?: string, repos: string[] = []) => roster({ role, stack, repos }, {});
+  assert.deepEqual(ROLES.filter((r) => r !== "builder").map((r) => of(r)),
+    [{ key: "lead", title: "Lead" }, { key: "reviewers", title: "Reviewers" }, { key: "assistants", title: "Assistants" },
+     { key: "designers", title: "Designers" }]);
+  assert.deepEqual(of("builder", "app", ["web"]), { key: "stack:app", title: "App" });
+  assert.deepEqual(of("builder", undefined, ["api"]), { key: "repos:api", title: "Api" });
+  assert.deepEqual(of("builder", undefined, ["api", "web"]), { key: "repos:api,web", title: "Builders" });
+});
+
+test("a repo: appendix item is a builder's only: no other role has a checkout to read it from", () => {
+  assert.deepEqual(problems(TOML.replace('name = "rae"\nrole = "reviewer"', 'name = "rae"\nrole = "reviewer"\nappendix = ["repo:AGENTS.md"]')),
+    ["agents[3].appendix: repo:AGENTS.md is read from the agent's checkout, and only a builder has one"]);
+});
+
+test("an unknown role with a repo: appendix item gets only the role's problem", () => {
+  const got = problems(TOML.replace('name = "rae"\nrole = "reviewer"', 'name = "rae"\nrole = "reviwer"\nappendix = ["repo:AGENTS.md"]'));
+  assert.deepEqual(got.filter((p) => p.startsWith("agents[3]")).map((p) => p.split(":")[0]), ["agents[3].role"]);
 });

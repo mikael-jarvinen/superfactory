@@ -66,10 +66,15 @@ export interface Agent {
   addDirs?: string[];
   remoteControl: boolean;
   cwd?: string;
+  model?: string;
+  effort?: string;
   permissionMode?: string;
   autocompact?: string;
   // A [hosts] key: the agent's sessions run on that machine, through its factory daemon.
   host?: string;
+  // The board's team title for this agent, in place of its role's or stack's. Agents with the same
+  // group share one roster.
+  group?: string;
 }
 
 // Another machine's factory daemon. remote.ts says what a request carries.
@@ -81,12 +86,25 @@ export interface Host {
   gitOver: GitOver;
 }
 
+// A project of the local tracker: its tickets are <KEY>-<n>, and its wiki pages sit under its key.
+export interface TrackerProject {
+  key: string;
+  name: string;
+  // When set, only these labels; otherwise any label of lower-case words, digits, ':' and '-'.
+  labels?: string[];
+  // A [repos] key or owner/repo: where a ticket's PRs merge, which `--merged` asks GitHub about.
+  repo?: string;
+}
+
 export interface Tracker {
-  kind: "jira" | "none";
+  kind: "jira" | "none" | "local";
   site?: string;
   queueJql?: string;
   keyPattern?: RegExp;
   status: Partial<Record<State, string>>;
+  // kind = "local" only: the projects, and where their tickets and wiki live.
+  projects: TrackerProject[];
+  dir?: string;
 }
 
 export interface Config {
@@ -187,6 +205,23 @@ function reader(problems: string[], where: string, t: Table) {
   return { at, bad, raw, str, int, bool, strs, ints, table, done };
 }
 
+export const PROJECT_KEY_RE = /^[A-Z][A-Z0-9]{1,9}$/;
+export const LABEL_RE = /^[a-z0-9][a-z0-9:-]{0,39}$/;
+
+// How the board compares roster titles: case and runs of spaces do not tell two apart.
+const foldTitle = (g: string) => g.toLowerCase().replace(/\s+/g, " ");
+
+// The roster the board lists an agent without a group under (teams() in board/server.ts): its key,
+// which also places it, and its title. One function, so a new role cannot get one and not the other.
+export function roster(a: Pick<Agent, "role" | "stack" | "repos">, stacks: Record<string, Stack>): { key: string; title: string } {
+  return a.role === "lead" ? { key: "lead", title: "Lead" }
+    : a.role === "assistant" ? { key: "assistants", title: "Assistants" }
+    : a.role === "reviewer" ? { key: "reviewers", title: "Reviewers" }
+    : a.role === "designer" ? { key: "designers", title: "Designers" }
+    : a.stack ? { key: `stack:${a.stack}`, title: stacks[a.stack]?.label ?? capitalize(a.stack) }
+    : { key: `repos:${a.repos.join(",")}`, title: a.repos.length === 1 ? capitalize(a.repos[0] as string) : "Builders" };
+}
+
 export function expandPath(value: string, base: string, env: NodeJS.ProcessEnv = process.env): string {
   let p = value.replace(/\$\{(\w+)\}|\$(\w+)/g, (m, a: string | undefined, b: string | undefined) => {
     const name = (a ?? b) as string;
@@ -201,6 +236,9 @@ export function expandPath(value: string, base: string, env: NodeJS.ProcessEnv =
 
 // A settings value is a template name unless it looks like a path.
 export const isSettingsPath = (s: string) => s.includes("/") || s.endsWith(".json");
+
+// Where logs go when [paths] names none, also for a workspace whose config does not load.
+export const defaultLogsDir = (dir: string) => join(dir, "logs");
 
 export function loadConfig(file: string, env: NodeJS.ProcessEnv = process.env): Config {
   let text: string;
@@ -253,7 +291,7 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   const paths = {
     repos: path(p, "repos", p.str("repos")) ?? dir,
     state: path(p, "state", p.str("state")) ?? join(dir, "state"),
-    logs: path(p, "logs", p.str("logs")) ?? join(dir, "logs"),
+    logs: path(p, "logs", p.str("logs")) ?? defaultLogsDir(dir),
   };
   p.done();
 
@@ -415,7 +453,8 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     if (name && names.has(name)) r.bad("name", `${show(name)} is used by another agent`);
     names.add(name);
     const roleV = r.str("role", true);
-    if (roleV && !(ROLES as readonly string[]).includes(roleV)) r.bad("role", `must be one of ${ROLES.join(", ")}, got ${show(roleV)}`);
+    const known = !!roleV && (ROLES as readonly string[]).includes(roleV);
+    if (roleV && !known) r.bad("role", `must be one of ${ROLES.join(", ")}, got ${show(roleV)}`);
     const role = roleV as RoleName;
     const stack = r.str("stack");
     const agentRepos = repoKeys(r, "repos", r.strs("repos"));
@@ -430,6 +469,9 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     }
     const appendix = r.strs("appendix") ?? [];
     const resolved = appendix.map((a) => (a.startsWith("repo:") ? a : (path(r, "appendix", a) ?? a)));
+    if (known && role !== "builder")
+      for (const a of appendix.filter((x) => x.startsWith("repo:")))
+        r.bad("appendix", `${a} is read from the agent's checkout, and only a builder has one`);
     const addDirs = repoKeys(r, "add_dirs", r.strs("add_dirs"));
     const rawCwd = r.str("cwd");
     const host = r.str("host");
@@ -438,6 +480,9 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const there = rawCwd ?? (role ? rolesCwd[role] : undefined);
     if (host && there !== undefined && !(isAbsolute(there) && !/[~$]/.test(there)))
       r.bad(rawCwd ? "cwd" : "host", `${name} runs on host ${host}, so ${rawCwd ? "its cwd" : `roles.${role}.cwd`} must be an absolute path there, with no ~ or $, got ${show(there)}`);
+    const group = r.str("group");
+    if (group !== undefined && !group.trim()) r.bad("group", "must not be empty");
+    if (group !== undefined && role === "lead") r.bad("group", "the lead has its own place on the board");
     if (host && !hosts[host]) r.bad("host", `no host ${show(host)}; hosts: ${Object.keys(hosts).join(", ") || "none"}`);
     const workRepos = stack ? (stacks[stack]?.repos ?? []) : (agentRepos ?? []);
     // A builder runs where its worktrees are, and they are under its repos' checkouts.
@@ -465,15 +510,35 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
       addDirs,
       remoteControl: r.bool("remote_control") ?? false,
       cwd,
+      model: r.str("model"),
+      effort: r.str("effort"),
       permissionMode: r.str("permission_mode"),
       autocompact: r.str("autocompact"),
       host,
+      group: group?.trim() || undefined,
     });
     r.done();
   });
   const leads = agents.filter((a) => a.role === "lead");
   if (leads.length !== 1)
     problems.push(`agents: exactly one agent needs role = "lead", found ${leads.length}${leads.length ? ` (${leads.map((a) => a.name).join(", ")})` : ""}`);
+  // A roster sits on the board where its role does, so one group cannot span two roles; teams() in
+  // board/server.ts takes a group's rank from its first member and relies on this.
+  // Two spellings of one name would look like one roster drawn twice, so a group is spelled one way.
+  const fold = foldTitle;
+  // A group titled like a roster the board draws for ungrouped agents would show that title twice.
+  const drawn = new Map(agents.filter((a) => a.group === undefined).map((a) => [fold(roster(a, stacks).title), a.name]));
+  for (const group of new Set(agents.flatMap((a) => (a.group === undefined ? [] : [fold(a.group)])))) {
+    const members = agents.filter((x) => x.group !== undefined && fold(x.group) === group);
+    const a = members[0]!;
+    const spelled = members.find((b) => b.group !== a.group);
+    const clash = drawn.get(group);
+    if (clash) problems.push(`agents: group ${show(a.group)} has the title of ${show(clash)}'s roster on the board; pick another`);
+    if (spelled) problems.push(`agents: group ${show(a.group)} is also spelled ${show(spelled.group)}; spell it one way`);
+    const other = members.find((b) => b.role !== a.role);
+    if (other)
+      problems.push(`agents: group ${show(a.group)} has ${show(a.name)} (${a.role}) and ${show(other.name)} (${other.role}); a group holds one role`);
+  }
   for (const role of ROLES) {
     const user = agents.find((a) => a.role === role);
     if (user && !roles[role]) problems.push(`roles.${role}: missing, and agent ${show(user.name)} has that role`);
@@ -486,7 +551,7 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
 
   const t = reader(problems, "tracker", top.table("tracker") ?? {});
   const kind = t.str("kind") ?? "none";
-  if (kind !== "jira" && kind !== "none") t.bad("kind", `must be "jira" or "none", got ${show(kind)}`);
+  if (kind !== "jira" && kind !== "none" && kind !== "local") t.bad("kind", `must be "jira", "local" or "none", got ${show(kind)}`);
   const patternS = t.str("key_pattern", kind === "jira");
   let keyPattern: RegExp | undefined;
   if (patternS) {
@@ -506,7 +571,36 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   if (kind === "jira")
     for (const s of ["queued", "building", "colleague-review", "done"] as const)
       if (statusT[s] === undefined) problems.push(`tracker.status.${s}: missing; the tracker needs a status for it`);
-  const tracker: Tracker = { kind: kind as Tracker["kind"], site: t.str("site"), queueJql: t.str("queue_jql"), keyPattern, status };
+  const projects: TrackerProject[] = [];
+  const projectsV = t.raw("projects");
+  if (projectsV !== undefined && kind !== "local") t.bad("projects", `only a local tracker has projects; kind is ${show(kind)}`);
+  else if (projectsV !== undefined && !Array.isArray(projectsV)) t.bad("projects", `must be an array of tables ([[tracker.projects]]), got ${show(projectsV)}`);
+  (Array.isArray(projectsV) ? projectsV : []).forEach((v, i) => {
+    const where = `tracker.projects[${i}]`;
+    if (!isTable(v)) return void problems.push(`${where}: must be a table, got ${show(v)}`);
+    const pr = reader(problems, where, v);
+    const key = pr.str("key", true);
+    const name = pr.str("name") ?? key ?? "";
+    const labels = pr.strs("labels");
+    const repo = pr.str("repo");
+    pr.done();
+    if (repo !== undefined && !repos[repo] && !/^[\w.-]+\/[\w.-]+$/.test(repo)) pr.bad("repo", `must be a [repos] key or owner/repo, got ${show(repo)}`);
+    if (key === undefined) return;
+    if (!PROJECT_KEY_RE.test(key)) return void pr.bad("key", `must be 2 to 10 capital letters or digits, starting with a letter, got ${show(key)}`);
+    if (projects.some((x) => x.key === key)) return void pr.bad("key", `${show(key)} is already a project`);
+    const badLabel = labels?.find((l) => !LABEL_RE.test(l));
+    if (badLabel !== undefined) return void pr.bad("labels", `${show(badLabel)} is not a label: lower-case words, digits, ':' and '-'`);
+    projects.push({ key, name, ...(labels ? { labels } : {}), ...(repo ? { repo } : {}) });
+  });
+  if (kind === "local" && projectsV === undefined) t.bad("projects", "missing; a local tracker needs at least one [[tracker.projects]]");
+  const trackerDir = path(t, "dir", t.str("dir"));
+  if (kind !== "local") {
+    if (trackerDir !== undefined) t.bad("dir", `only a local tracker has a dir; kind is ${show(kind)}`);
+  }
+  const tracker: Tracker = {
+    kind: kind as Tracker["kind"], site: t.str("site"), queueJql: t.str("queue_jql"), keyPattern, status,
+    projects, ...(trackerDir ? { dir: trackerDir } : {}),
+  };
   t.done();
 
   const b = reader(problems, "board", top.table("board") ?? {});

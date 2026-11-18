@@ -34,3 +34,31 @@ function poll(url, render){
   tick(); setInterval(tick, 2000);
   return tick;
 }
+
+// The local tracker's links in the header, when the workspace has one: the board passes its
+// snapshot's `tracker`, every other page asks once. A workspace without one answers 404 and the
+// header stays as it is.
+function trackerNav(t){
+  const nav = document.querySelector('header nav');
+  if(!nav || !t) return;
+  const here = location.pathname;
+  for(const [href, label] of [['/tickets', `backlog (${t.backlog})`], ['/wiki', 'wiki']]){
+    let a = nav.querySelector(`a[href="${href}"]`);
+    if(!a){ a = document.createElement('a'); a.href = href; nav.appendChild(a); }
+    a.textContent = label;
+    a.classList.toggle('on', here === href);
+  }
+}
+// The analytics link, after messages on every page, so a page's own header need not carry it.
+addEventListener('DOMContentLoaded', () => {
+  const nav = document.querySelector('header nav');
+  if(!nav || nav.querySelector('a[href="/analytics"]')) return;
+  const a = document.createElement('a');
+  a.href = '/analytics'; a.textContent = 'analytics';
+  const msgs = nav.querySelector('a[href="/messages"]');
+  msgs ? msgs.after(a) : nav.appendChild(a);
+});
+addEventListener('DOMContentLoaded', () => {
+  if(location.pathname === '/') return;
+  fetch('/api/tickets?summary=1', {cache:'no-store'}).then(r => r.ok ? r.json() : null).then(trackerNav).catch(() => {});
+});
