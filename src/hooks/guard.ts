@@ -22,6 +22,7 @@
 // newline before the command, `git -c x=y push origin main`, `git push origin CL-1:main`,
 // `--mirror`, `find -delete`, `python3 -c "open(...,'w')"`). An allowlist of shapes can be read and
 // audited; test/guard.test.ts is the contract.
+import { readFileSync } from "node:fs";
 import { posix } from "node:path";
 import { parseArgs } from "node:util";
 import { allowClosePath, closable } from "../allow-close.js";
@@ -550,114 +551,229 @@ function checkLeadMerge(args: string[]): void {
 const HOW_TO_CLOSE = "a product PR closes only once the human has named that exact PR and the lead has recorded it with " +
   "`factory allow-close <repo-key> <n> --words \"<the human's words>\"`";
 
-// A comment the factory's sessions post goes out under the human's token login, so the review
-// watcher tells it from the human's own by the marker it starts with (superfactory#119, L2). A
-// comment write is let through only when its body is in the command and starts with the marker, or
-// is a bot trigger; a body from a file or a $(...) cannot be checked here.
+// The comment rule (superfactory#119). A comment the factory's sessions post goes out under the
+// human's token login, so the review watcher tells it from the human's own by the marker it starts
+// with. A comment write passes only when its body is in the command and starts with the marker, or
+// is a bot trigger; a body from a file, a $(...) or a variable cannot be checked here.
 const COMMENT_HINT = `start the body with "${MARKER}" (or post it with \`factory pr-comment\`), in the command itself, not from a file or $(...)`;
 const markedBody = (b: string) => b.trimStart().startsWith(MARKER) || /^@coderabbitai\b/.test(b.trimStart());
+const UNCHECKABLE = `a comment's body must be checkable: ${COMMENT_HINT}`;
+const UNMARKED = `this comment would read as the human's own: ${COMMENT_HINT}`;
 
-// A flag's value: `-b x`, `-bx`, `--body x` or `--body=x`.
-function flagValue(args: string[], short: string[], long: string[]): string | undefined {
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i] as string;
-    if (short.includes(a) || long.includes(a)) return args[i + 1] ?? "";
-    const eq = long.find((l) => a.startsWith(`${l}=`));
-    if (eq) return a.slice(eq.length + 1);
-    const sh = short.find((f) => a.startsWith(f) && a.length > f.length && !a.startsWith("--"));
-    if (sh) return a.slice(sh.length);
-  }
-  return undefined;
+// gh's flags for the commands that can post a comment, read as gh reads them (pflag): a value
+// flag's value may be attached (-bhi) or given with = (--body=hi), the last of a repeated flag wins,
+// short booleans cluster, and -- ends the options. Each flag maps to its long name; a flag not
+// listed is a boolean, and one gh does not know fails the command before it posts.
+const REPO = { "-R": "repo", "--repo": "repo" };
+const BODY = { "-b": "body", "--body": "body", "-F": "body-file", "--body-file": "body-file" };
+const COMMENT = { "-c": "comment", "--comment": "comment" };
+const GH_VALUES: Record<string, Record<string, string>> = {
+  "pr comment": { ...REPO, ...BODY },
+  "issue comment": { ...REPO, ...BODY },
+  "pr review": { ...REPO, ...BODY },
+  "pr close": { ...REPO, ...COMMENT },
+  "pr reopen": { ...REPO, ...COMMENT },
+  "issue close": { ...REPO, ...COMMENT, "-r": "reason", "--reason": "reason", "--duplicate-of": "duplicate-of" },
+  "issue reopen": { ...REPO, ...COMMENT },
+  api: {
+    "-f": "raw-field", "--raw-field": "raw-field", "-F": "field", "--field": "field", "-H": "header", "--header": "header",
+    "-X": "method", "--method": "method", "-q": "jq", "--jq": "jq", "-t": "template", "--template": "template",
+    "--input": "input", "--hostname": "hostname", "--cache": "cache", "-p": "preview", "--preview": "preview",
+  },
+};
+const COMMENT_BOOLS = { "-e": "editor", "--editor": "editor", "-w": "web", "--web": "web", "--delete-last": "delete-last" };
+const GH_BOOLS: Record<string, Record<string, string>> = { "pr comment": COMMENT_BOOLS, "issue comment": COMMENT_BOOLS };
+
+interface GhArgs {
+  pos: string[];
+  flags: [string, string][]; // value flags, in order
+  bools: Set<string>;
 }
 
-// A gh api call's fields: -f/--raw-field are strings, -F/--field typed (an @file is read).
-function apiFields(args: string[]): { typed: boolean; key: string; value: string }[] {
-  const out: { typed: boolean; key: string; value: string }[] = [];
+export function parseGh(cmd: string, args: string[]): GhArgs {
+  const vals = GH_VALUES[cmd] ?? {};
+  const bools = GH_BOOLS[cmd] ?? {};
+  const out: GhArgs = { pos: [], flags: [], bools: new Set() };
   for (let i = 0; i < args.length; i++) {
     const a = args[i] as string;
-    const f = ["-f", "-F", "--field", "--raw-field"].includes(a) ? args[++i] ?? ""
-      : /^-(f|F)./.test(a) ? a.slice(2) : a.startsWith("--field=") || a.startsWith("--raw-field=") ? a.slice(a.indexOf("=") + 1) : undefined;
-    if (f === undefined) continue;
-    const eq = f.indexOf("=");
-    out.push({ typed: a.startsWith("-F") || a.startsWith("--field"), key: eq < 0 ? f : f.slice(0, eq), value: eq < 0 ? "" : f.slice(eq + 1) });
+    if (a === "--") {
+      out.pos.push(...args.slice(i + 1));
+      break;
+    }
+    if (a.startsWith("--")) {
+      const eq = a.indexOf("=");
+      const name = eq < 0 ? a : a.slice(0, eq);
+      if (vals[name]) out.flags.push([vals[name] as string, eq < 0 ? args[++i] ?? "" : a.slice(eq + 1)]);
+      else out.bools.add(bools[name] ?? name.slice(2));
+    } else if (a.startsWith("-") && a.length > 1) {
+      for (let j = 1; j < a.length; j++) {
+        const f = `-${a[j]}`;
+        if (vals[f]) {
+          out.flags.push([vals[f] as string, j + 1 < a.length ? a.slice(j + 1) : args[++i] ?? ""]);
+          break;
+        }
+        out.bools.add(bools[f] ?? f.slice(1));
+      }
+    } else out.pos.push(a);
   }
   return out;
 }
 
-const UNCHECKABLE = `a comment's body must be checkable: ${COMMENT_HINT}`;
-const UNMARKED = `this comment would read as the human's own: ${COMMENT_HINT}`;
+const last = (p: GhArgs, name: string) => p.flags.filter(([n]) => n === name).at(-1)?.[1];
+
+// A field of gh api: -f is a string, -F typed (an @file or @- is read by gh).
+interface Field {
+  typed: boolean;
+  key: string;
+  value: string;
+}
+const fieldsOf = (p: GhArgs): Field[] =>
+  p.flags.filter(([n]) => n === "field" || n === "raw-field").map(([n, f]) => {
+    const eq = f.indexOf("=");
+    return { typed: n === "field", key: eq < 0 ? f : f.slice(0, eq), value: eq < 0 ? "" : f.slice(eq + 1) };
+  });
+const fromFile = (f: Field) => f.typed && f.value.startsWith("@");
+
+// The REST paths that post a comment, a review or a reply.
+const COMMENT_PATHS = /(^|\/)(issues|pulls)\/(\d+\/)?(comments|reviews)\b|\/replies\b|(^|\/)commits\/[^/]+\/comments\b/;
 
 // The GraphQL mutations that post or edit a comment, a review's body or a reply.
-// One list, for spotting them and for their input variables, so the two cannot drift.
 const COMMENT_MUTATIONS = /\b(addComment|addPullRequestReview|addPullRequestReviewComment|addPullRequestReviewThread|addPullRequestReviewThreadReply|updateIssueComment|updatePullRequestReview|updatePullRequestReviewComment|submitPullRequestReview)\s*\(/;
 
-function checkGraphqlComment(args: string[]): void {
-  const fields = apiFields(args);
-  const q = fields.find((f) => f.key === "query");
-  if (args.some((a) => a === "--input" || a.startsWith("--input="))) refuse(UNCHECKABLE);
-  if (!q) return;
-  if (q.typed && q.value.startsWith("@")) {
-    refuse(`a GraphQL query from a file cannot be checked for a comment: put it in the command. ${COMMENT_HINT}`);
-  }
-  if (!/\bmutation\b/.test(q.value) || !COMMENT_MUTATIONS.test(q.value)) return;
-  for (const m of q.value.matchAll(/\bbody\s*:\s*("(?:[^"\\]|\\.)*"|\$\w+|"""[\s\S]*?""")/g)) {
-    const v = m[1] as string;
-    if (v.startsWith("$")) {
-      const f = fields.find((x) => x.key === v.slice(1));
-      if (!f || (f.typed && f.value.startsWith("@"))) refuse(UNCHECKABLE);
-      if (!markedBody((f as { value: string }).value)) refuse(UNMARKED);
-    } else {
-      let text = v.startsWith('"""') ? v.slice(3, -3) : v.slice(1, -1);
-      try {
-        if (!v.startsWith('"""')) text = JSON.parse(v) as string;
-      } catch {
-        // as written
-      }
-      if (!markedBody(text)) refuse(UNMARKED);
-    }
-  }
-  // An input object in a variable: gh builds it from -f 'i[body]=...' fields, so each body in it is
-  // checked; the whole object as one value, or any part of it from a file, cannot be.
-  for (const m of q.value.matchAll(/\binput\s*:\s*\$(\w+)/g)) {
-    const v = m[1] as string;
-    if (!fields.some((f) => f.key.startsWith(`${v}[`))) refuse(UNCHECKABLE);
-    for (const f of fields) {
-      if (f.key === v || (f.key.startsWith(`${v}[`) && f.typed && f.value.startsWith("@"))) refuse(UNCHECKABLE);
-      if (f.key.startsWith(`${v}[`) && /\[body\]$/.test(f.key) && !markedBody(f.value)) refuse(UNMARKED);
-    }
+// What a query's variables say: a string variable's value, and every body inside an input object.
+interface Vars {
+  value(name: string): string | undefined; // undefined: not given, or not checkable
+  bodies(name: string): string[] | null; // null: not given, or not checkable
+}
+
+function readGhFile(ref: string, cwd: string): string {
+  if (ref === "-") refuse(`a GraphQL query from stdin cannot be checked: put it in the command, or in a file named with -F query=@file`);
+  try {
+    return readFileSync(posix.resolve(cwd, ref), "utf8");
+  } catch {
+    return refuse(`cannot read ${ref} to check it for a comment: put the query in the command`);
   }
 }
 
-function checkCommentWrite(args: string[]): void {
-  const sub = `${args[0]} ${args[1]}`;
-  if (sub === "pr comment" || sub === "issue comment" || sub === "pr review") {
-    if (flagValue(args, ["-F"], ["--body-file"]) !== undefined || args.includes("-e") || args.includes("--editor"))
-      refuse(UNCHECKABLE);
-    const body = flagValue(args, ["-b"], ["--body"]);
+function collectBodies(v: unknown, out: string[]): boolean {
+  if (Array.isArray(v)) return v.every((x) => collectBodies(x, out));
+  if (v && typeof v === "object") {
+    for (const [k, x] of Object.entries(v)) {
+      if (k === "body") {
+        if (typeof x !== "string") return false;
+        out.push(x);
+      } else if (!collectBodies(x, out)) return false;
+    }
+  }
+  return true;
+}
+
+function checkQuery(q: string, vars: Vars): void {
+  // a read passes; so does a mutation that posts no comment (resolveReviewThread)
+  if (!/\bmutation\b/.test(q) || !COMMENT_MUTATIONS.test(q)) return;
+  for (const m of q.matchAll(/\bbody\s*:\s*("""[\s\S]*?"""|"(?:[^"\\]|\\.)*"|\$\w+)/g)) {
+    const v = m[1] as string;
+    let text: string;
+    if (v.startsWith("$")) text = vars.value(v.slice(1)) ?? refuse(UNCHECKABLE);
+    else if (v.startsWith('"""')) text = v.slice(3, -3);
+    else {
+      try {
+        text = JSON.parse(v) as string;
+      } catch {
+        text = v.slice(1, -1);
+      }
+    }
+    if (!markedBody(text)) refuse(UNMARKED);
+  }
+  for (const m of q.matchAll(/\binput\s*:\s*\$(\w+)/g)) {
+    const bodies = vars.bodies(m[1] as string) ?? refuse(UNCHECKABLE);
+    for (const b of bodies) if (!markedBody(b)) refuse(UNMARKED);
+  }
+}
+
+function checkGraphql(p: GhArgs, cwd: string): void {
+  const input = last(p, "input");
+  if (input !== undefined) {
+    // the request body, {query, variables}: read as gh will send it
+    let j: { query?: unknown; variables?: Record<string, unknown> };
+    try {
+      j = JSON.parse(readGhFile(input, cwd)) as typeof j;
+    } catch (e) {
+      if (e instanceof Refused) throw e;
+      return refuse(`${input} is not the JSON gh sends: put the query in the command`);
+    }
+    const vs = j.variables ?? {};
+    return checkQuery(typeof j.query === "string" ? j.query : "", {
+      value: (n) => (typeof vs[n] === "string" ? vs[n] as string : undefined),
+      bodies: (n) => {
+        const out: string[] = [];
+        return n in vs && collectBodies(vs[n], out) ? out : null;
+      },
+    });
+  }
+  const fields = fieldsOf(p);
+  const qf = fields.filter((f) => f.key === "query").at(-1);
+  if (!qf) return;
+  let q = qf.value;
+  if (fromFile(qf)) q = readGhFile(q.slice(1), cwd);
+  // a query the shell builds ($(...), `...`, $VAR) is not what this check sees
+  else if (/\$\(|`/.test(q) || /^\s*\$\w/.test(q)) refuse(`a GraphQL query built by the shell cannot be checked: write it out in the command, or in a file named with -F query=@file`);
+  const named = (n: string) => fields.filter((f) => f.key === n || f.key.startsWith(`${n}[`));
+  checkQuery(q, {
+    value: (n) => {
+      const f = fields.filter((x) => x.key === n).at(-1);
+      return f && !fromFile(f) ? f.value : undefined;
+    },
+    bodies: (n) => {
+      const fs = named(n);
+      // gh builds the object from i[...] fields; the whole object as one value, or a part from a file, cannot be read
+      if (!fs.length || fs.some((f) => f.key === n || fromFile(f))) return null;
+      return fs.filter((f) => /\[body\]$/.test(f.key)).map((f) => f.value);
+    },
+  });
+}
+
+function checkCommentWrite(args: string[], cwd: string): void {
+  const [g, sub] = args;
+  if ((g === "pr" || g === "issue") && sub) {
+    const cmd = `${g} ${sub}`;
+    if (!GH_VALUES[cmd]) return;
+    const p = parseGh(cmd, args.slice(2));
+    if (sub === "close" || sub === "reopen") {
+      const c = last(p, "comment");
+      if (c !== undefined && !markedBody(c)) refuse(UNMARKED);
+      return;
+    }
+    // --web opens the browser, where the human writes; --delete-last posts nothing
+    if (p.bools.has("web") || p.bools.has("delete-last")) return;
+    if (last(p, "body-file") !== undefined || p.bools.has("editor")) refuse(UNCHECKABLE);
+    const body = last(p, "body");
     if (body === undefined) {
-      if (sub === "pr review") return; // an approval or a review with no words
+      if (sub === "review") return; // an approval or a review with no words
       refuse(`a comment needs --body: ${COMMENT_HINT}`);
     }
     if (!markedBody(body as string)) refuse(UNMARKED);
     return;
   }
-  if (args[0] !== "api") return;
-  const rest = args.slice(1);
-  if (rest.some((a) => a === "graphql")) return checkGraphqlComment(rest);
-  if (!ghApiWrites(rest)) return;
-  if (!/(^|\/)(issues|pulls)\/(\d+\/)?(comments|reviews)\b|\/replies\b/.test(rest.filter((a) => !a.startsWith("-")).join(" "))) return;
-  if (rest.some((a) => a === "--input" || a.startsWith("--input="))) refuse(UNCHECKABLE);
+  if (g !== "api") return;
+  const p = parseGh("api", args.slice(1));
+  const endpoint = p.pos[0] ?? "";
+  if (endpoint === "graphql") return checkGraphql(p, cwd);
+  const fields = fieldsOf(p);
+  const method = (last(p, "method") ?? (fields.length || last(p, "input") !== undefined ? "POST" : "GET")).toUpperCase();
+  if (method === "GET" || method === "DELETE" || !COMMENT_PATHS.test(endpoint)) return;
+  if (last(p, "input") !== undefined) refuse(UNCHECKABLE);
   // a review's own body and each of its comments' (comments[][body])
-  for (const f of apiFields(rest)) {
+  for (const f of fields) {
     if (f.key !== "body" && !/\[body\]$/.test(f.key)) continue;
-    if (f.typed && f.value.startsWith("@")) refuse(UNCHECKABLE);
+    if (fromFile(f)) refuse(UNCHECKABLE);
     if (!markedBody(f.value)) refuse(UNMARKED);
   }
 }
 
 function checkGhProtect(words: string[], ctx: GuardContext): void {
   const args = words.slice(1);
-  checkCommentWrite(args);
+  checkCommentWrite(args, process.cwd());
   if (args[0] === "pr" && ["merge", "close", "lock", "unlock"].includes(args[1] ?? "")) {
     const repo = ghPrRepo(args);
     if (repo === null) refuse("merging or closing a PR needs an explicit --repo owner/name (or a PR URL) so the guard can confirm whose repo it is");
@@ -952,35 +1068,68 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
   }
 }
 
+// The wrappers a command can run behind, and their options that take a value (`sudo -u x`).
+const WRAPPERS: Record<string, string[]> = {
+  sudo: ["-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T", "--user", "--group", "--host", "--prompt", "--chdir"],
+  xargs: ["-I", "-n", "-L", "-P", "-d", "-E", "-s", "-a", "--max-args", "--max-lines", "--max-procs", "--delimiter", "--eof", "--max-chars", "--arg-file", "--replace"],
+  env: ["-u", "-C", "-S", "--unset", "--chdir", "--split-string"],
+  timeout: ["-s", "-k", "--signal", "--kill-after"],
+  nice: ["-n", "--adjustment"],
+  nohup: [], time: ["-f", "-o", "--format", "--output"], exec: ["-a"], command: [], builtin: [],
+  stdbuf: ["-i", "-o", "-e", "--input", "--output", "--error"],
+};
+
+// The words from the command a simple command runs: past shell keywords, VAR=value words and the
+// wrappers above with their options (timeout's duration too). `echo gh pr comment` runs echo.
+function commandWords(words: string[]): string[] {
+  let i = 0;
+  const assignment = (w: string | undefined) => w !== undefined && /^[A-Za-z_]\w*=/.test(w);
+  while (i < words.length) {
+    const w = words[i] as string;
+    if (KEYWORDS.has(w) || assignment(w)) {
+      i++;
+      continue;
+    }
+    const name = posix.basename(w.replace(/^\\/, "")).toLowerCase();
+    const opts = WRAPPERS[name];
+    if (!opts) return words.slice(i);
+    i++;
+    while (i < words.length && (words[i] as string).startsWith("-") && words[i] !== "-") {
+      const o = words[i] as string;
+      i++;
+      if (o === "--") break;
+      if (opts.includes(o)) i++;
+    }
+    if (name === "timeout") i++;
+    while ((name === "env" || name === "sudo") && assignment(words[i])) i++;
+  }
+  return [];
+}
+
 // Only the comment rule, for a session that runs no guard (an assistant) or whose guard leaves gh
-// alone: the marked-comments hook. The same check checkProtect runs on a gh command.
-function checkComments(cmd: string): void {
+// alone: the marked-comments hook. A gh run as a command is checked, by name or path, behind any
+// wrapper; a shell's -c script and eval's words are checked as a command line.
+function checkComments(cmd: string, cwd: string): void {
   let text = cmd;
   for (let m = HEREDOC.exec(text); m; m = HEREDOC.exec(text))
     text = text.slice(0, m.index) + (m[0].split("\n", 1)[0] as string) + " HEREDOC\n" + text.slice(m.index + m[0].length);
   for (const s of simpleCommands(tokenize(text))) {
-    // Only the comment rule, none of the guard's policy: a gh anywhere in the words (after sudo,
-    // xargs, env, timeout, exec...) is checked, and a shell's -c script or eval's words are checked
-    // as a command line.
-    const words = s.words.filter((w) => w !== "HEREDOC");
-    words.forEach((w, k) => {
-      const name = posix.basename(w.replace(/^\\/, "")).toLowerCase();
-      if (name === "gh" && ["pr", "issue", "api"].includes(words[k + 1] ?? "")) checkCommentWrite(words.slice(k + 1));
-      if (SHELLS.has(name)) {
-        const i = words.findIndex((x, j) => j > k && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x));
-        if (i > k && words[i + 1] !== undefined) checkComments(words[i + 1] as string);
-      }
-      if (name === "eval" && k + 1 < words.length) checkComments(words.slice(k + 1).join(" "));
-    });
+    const words = commandWords(s.words.filter((w) => w !== "HEREDOC"));
+    const name = posix.basename((words[0] ?? "").replace(/^\\/, "")).toLowerCase();
+    if (name === "gh") checkCommentWrite(words.slice(1), cwd);
+    else if (SHELLS.has(name)) {
+      const i = words.findIndex((x, j) => j > 0 && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x));
+      if (i > 0 && words[i + 1] !== undefined) checkComments(words[i + 1] as string, cwd);
+    } else if (name === "eval" && words.length > 1) checkComments(words.slice(1).join(" "), cwd);
   }
 }
 
 // The comment rule alone (superfactory#119, N1): a command that names no gh cannot post through it,
 // and nothing here refuses for any other reason, so the hook never takes a tool away.
-export function commentVerdict(cmd: string): string | null {
+export function commentVerdict(cmd: string, cwd = process.cwd()): string | null {
   if (!/\bgh\b/.test(cmd)) return null;
   try {
-    checkComments(cmd);
+    checkComments(cmd, cwd);
     return null;
   } catch (e) {
     return e instanceof Refused ? e.message : `the comment check failed (${(e as Error).message})`;
