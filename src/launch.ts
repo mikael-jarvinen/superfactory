@@ -32,8 +32,12 @@ export function sessionEnv(ws: Workspace, agent: Agent, path = process.env.PATH 
   const stack = agent.stack ? ws.config.stacks[agent.stack] : undefined;
   if (!stack) return undefined;
   const env = { ...stack.env };
+  // path is this process's, and a wake renders a recipient's settings in its sender's hook: the
+  // directories any stack puts first come out of it, so a sender's stack never reaches the
+  // recipient's PATH (CodeRabbit on #127)
+  const stackDirs = new Set(Object.values(ws.config.stacks).flatMap((s) => s.pathPrepend));
   if (stack.pathPrepend.length)
-    env.PATH = [...stack.pathPrepend, ...path.split(":").filter((d) => d && !stack.pathPrepend.includes(d))].join(":");
+    env.PATH = [...stack.pathPrepend, ...path.split(":").filter((d) => d && !stackDirs.has(d))].join(":");
   return Object.keys(env).length ? env : undefined;
 }
 

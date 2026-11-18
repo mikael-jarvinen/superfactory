@@ -343,18 +343,23 @@ test("the GitHub MCP tools are held to the gh rules", () => {
   allowed.push(["issue_write", { ...api, method: "update", issue_number: 8701, state: "closed" }, lead]);
   // state=open reopens, as gh pr reopen and gh issue reopen do; updating a PR's branch writes to its
   // head, which must be a branch the role may write (CodeRabbit on #127)
-  const heads: Record<string, [string, string]> = { "8701": ["acme/api", "feat/x"], "8702": ["acme/api", "main"], "8703": ["acme/workspace", "main"] };
+  // 8704 is a PR into the factory's own repo from a product repo's default branch (CodeRabbit on #127)
+  const heads: Record<string, [string, string]> = { "8701": ["acme/api", "feat/x"], "8702": ["acme/api", "main"], "8703": ["acme/workspace", "main"], "8704": ["acme/api", "main"] };
   const withHeads: GuardContext = { ...pr, prHead: (_r, n) => heads[n] ?? null };
   refused.push(["update_pull_request", { ...api, pullNumber: 8701, state: "open" }, pr],
     ["update_pull_request", { ...api, pullNumber: 8701, state: "open" }, lead],
     ["issue_write", { ...api, method: "update", issue_number: 8702, state: "open" }, pr],
     ["update_pull_request_branch", { ...api, pullNumber: 8702 }, withHeads],
     ["update_pull_request_branch", { ...api, pullNumber: 8709 }, withHeads], // head unreadable
+    ["update_pull_request_branch", { owner: "acme", repo: "workspace", pullNumber: 8704 }, withHeads],
     ["update_pull_request_branch", { ...api, pullNumber: 8701 }, { ...withHeads, defaultBranch: () => null }]);
   allowed.push(["update_pull_request_branch", { ...api, pullNumber: 8701 }, withHeads],
     ["update_pull_request_branch", { ...api, pullNumber: 8703 }, withHeads],
     ["update_pull_request_branch", { owner: "acme", repo: "workspace", pullNumber: 8709 }, withHeads],
-    ["update_pull_request", { owner: "acme", repo: "workspace", pullNumber: 3, state: "open" }, lead]);
+    ["update_pull_request", { owner: "acme", repo: "workspace", pullNumber: 3, state: "open" }, lead],
+    // a create opens an issue whatever its state says (CodeRabbit on #127)
+    ["issue_write", { ...api, method: "create", title: "t", state: "open" }, pr],
+    ["issue_write", { ...api, method: "create", title: "t", state: "closed" }, pr]);
   const named: [string, Record<string, unknown>, GuardContext][] = [
     ["mcp__gh__merge_pull_request", { ...api, pullNumber: 8701 }, pr], ["mcp__GitHub__merge_pull_request", { ...api, pullNumber: 8701 }, lead],
     ["mcp__github_2__update_pull_request", { ...api, pullNumber: 8701, state: "closed" }, pr],
@@ -463,7 +468,7 @@ test("gh api cannot merge, commit to main or transfer on a product repo", () => 
 // terminator with a trailing space, and the stdin a scheduler really reads.
 test("comments, placeholders, branch updates and a scheduler's stdin are read as bash and gh read them", () => {
   const lead: GuardContext = { ...pr, role: "lead" };
-  const heads: Record<string, [string, string]> = { "8701": ["acme/api", "feat/x"], "8702": ["acme/api", "main"] };
+  const heads: Record<string, [string, string]> = { "8701": ["acme/api", "feat/x"], "8702": ["acme/api", "main"], "8704": ["acme/api", "main"] };
   const M = "gh pr merge 8701 -R acme/api";
   const put = "gh api -X PUT repos/acme/api/contents/a.txt -f message=m -f content=eA==";
   const refused = [`${put} -F branch={branch}`, `${put} -f branch={branch}`, `${put} -F 'branch={owner}-x'`,
@@ -474,6 +479,14 @@ test("comments, placeholders, branch updates and a scheduler's stdin are read as
     "gh api -XPUT https://api.github.com/repos/acme/api/pulls/8702/update-branch", "gh api repos/acme/api/pulls/8702/update-branch -f update_method=rebase",
     "gh api -X PUT repos/{owner}/{repo}/pulls/8701/update-branch", "gh api -X PUT repos/acme/api/pulls/$N/update-branch",
     "R=acme/api; gh api -X PUT repos/$R/pulls/8701/update-branch", "gh api -X PUT repos/acme/api/pulls/8709/update-branch",
+    // and by GraphQL, whose node id the guard cannot read a head from; a PR into the factory's repo
+    // from a product repo's default branch; a URL gh takes over a --repo that names another repo
+    `gh api graphql -f query='mutation { updatePullRequestBranch(input: {pullRequestId: "PR_x"}) { clientMutationId } }'`,
+    "gh pr update-branch 8704 -R acme/workspace", "gh api -X PUT repos/acme/workspace/pulls/8704/update-branch",
+    "gh pr update-branch -R acme/workspace https://github.com/acme/api/pull/8702",
+    "gh pr close -R acme/workspace https://github.com/acme/api/pull/8701", "gh pr merge --repo=acme/workspace https://github.com/acme/api/pull/8701",
+    // a ) in a comment does not end a $( ... ); \<< opens no heredoc; an unquoted heredoc's EO\ and F end it
+    `echo "$(true # )\n${M})"`, `echo x \\<<EOF\n${M}\nEOF`, `cat <<EOF\nEO\\\nF\n${M}\nEOF`,
     `# Merge it\n${M}`, `#!/bin/sh\n${M}`, `ls  # a\n${M}`, `ls \\\n# x\n${M}`, `echo a#b; ${M}`,
     `# see <<EOF\n${M}\nEOF`, `echo x # <<EOF\n${M}\nEOF`,
     `echo '<<EOF'\n${M}\nEOF`, `printf '%s' "cat <<'E'"\n${M}\nE`, `echo "$(echo ')')" '<<EOF'\n${M}\nEOF`,
@@ -483,6 +496,8 @@ test("comments, placeholders, branch updates and a scheduler's stdin are read as
     "gh pr update-branch 8701 -R acme/api", "gh pr update-branch 3 -R acme/workspace",
     "gh api -X PUT repos/acme/api/pulls/8701/update-branch", "gh api -X PUT repos/acme/api/pulls/8701/update-branch -f update_method=rebase",
     "gh api repos/acme/api/pulls/8702/update-branch", "gh api -X PUT repos/acme/workspace/pulls/3/update-branch",
+    "gh pr close 3 -R acme/workspace -c https://github.com/acme/api/pull/8701", `ls \\\n# it's\nls`,
+    `cat <<'EOF'\nEO\\\nF\nit's\nEOF`, `echo "$(true # it's (x\n)"`,
     "# Run the checks\nnpm test", `ls # ; ${M}`, `echo '#'; ls`, `echo "a #b"`, `echo a\\#b`,
     `printf 'cat <<EOF\\n$(date\\nEOF\\n'`, `x="$(cat <<'E'\nit's\nE\n)"; echo "$x"`,
     `cat <<EOF\nEOF \nit's\nEOF`, `echo "#" <<EOF\nit's\nEOF`, `echo "it's" | at now <<< true`, `echo "it's" | at now < job.txt`,
@@ -504,7 +519,8 @@ test("comments, placeholders, branch updates and a scheduler's stdin are read as
 test("a GitHub that does not answer is a refusal inside the hook's timeout", () => {
   const dir = mkdtempSync(join(tmpdir(), "slow-gh-"));
   after(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(join(dir, "gh"), "#!/bin/sh\nexec sleep 30\n", { mode: 0o755 });
+  const started = join(dir, "started");
+  writeFileSync(join(dir, "gh"), `#!/bin/sh\necho x >> ${started}\nexec sleep 30\n`, { mode: 0o755 });
   const argv = ["--role", "builder", "--policy", "protect", "--org", "acme", "--own-repo", "acme/workspace"];
   const path = process.env.PATH;
   process.env.PATH = `${dir}:${path}`;
@@ -514,6 +530,9 @@ test("a GitHub that does not answer is a refusal inside the hook's timeout", () 
       const r = hook(argv, JSON.stringify({ tool_name: "Bash", tool_input: { command } }));
       const took = Date.now() - t0;
       assert.equal(r.code, 2, command);
+      // refused by the budget running out on a gh that started and stalled, not by a gh that failed
+      assert.ok(existsSync(started) && took >= GITHUB_BUDGET_MS - 300, `${command}: refused after ${took} ms, gh ${existsSync(started) ? "" : "never "}started`);
+      rmSync(started, { force: true });
       assert.ok(took < GITHUB_BUDGET_MS + 1_000 && GITHUB_BUDGET_MS + 1_000 < 10_000, `${command}: refused after ${took} ms`);
     }
   } finally {

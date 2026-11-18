@@ -125,6 +125,17 @@ test("a builder on a stack gets the stack's env, with its directories first on P
   for (const name of ["cal", "ada", "rae"]) assert.equal(render(dir, name).env, undefined, name);
 });
 
+// A wake renders the recipient's settings in the sender's hook, whose PATH has the sender's stack
+// first: no stack's directories are taken from it, only the recipient's own (CodeRabbit on #127).
+test("a stack's PATH takes no other stack's directories from the PATH it is rendered in", () => {
+  const toml = TOML.replace("pin = { bea = 1 }\n", 'pin = { bea = 1 }\npath_prepend = ["/opt/java/bin"]\n')
+    .replace("[roles.lead]", '[repos.tools]\nremote = "acme/tools"\n\n[stacks.tools]\nrepos = ["tools"]\nslots = 1\npath_prepend = ["/opt/tools/bin"]\n\n[roles.lead]');
+  const dir = tempWorkspace(toml);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const ws = openWorkspace(dir, {});
+  assert.deepEqual(sessionEnv(ws, agentOrDie(ws, "bea"), "/opt/tools/bin:/usr/bin:/opt/java/bin:/bin"), { PATH: "/opt/java/bin:/usr/bin:/bin" });
+});
+
 // The old guard took its mode from the wrapper script's name, so the lead's session ran as a
 // builder. The role now travels in the rendered command, and a command without one refuses.
 test("the rendered guard runs, labelled with the role it was rendered for", () => {

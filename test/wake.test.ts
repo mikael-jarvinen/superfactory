@@ -423,7 +423,7 @@ test("the respawn's budget is what is left after the settings are rendered", () 
     let w = wake(ws, bea, { t: offBea(given), deadline: clock + 20_000 + 1_200 });
     assert.deepEqual([w, given], [{ is: "failed", why: "out of time before respawning b1" }, []], "1 200 ms less 500 is under the 1 000 a respawn needs");
     w = wake(ws, bea, { t: offBea(given), deadline: clock + 20_000 + 3_000 });
-    assert.ok(given.length === 1 && (given[0] as number) <= 2_500, `respawn given ${given[0]} ms: the 500 the render took comes off`);
+    assert.deepEqual(given, [2_500], "the 500 the render took comes off, and no more"); // CodeRabbit on #127
   } finally {
     Date.now = real;
   }

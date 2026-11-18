@@ -164,6 +164,14 @@ export function tokenize(cmd: string): Tok[] {
         body += c + next();
         continue;
       }
+      // a # at the start of a word comments out the rest of its line, a ) in it included: bash reads
+      // on to the next line for the substitution's end (CodeRabbit on #127)
+      if (!q && c === "#" && (body === "" || /[\s;&|()<>]/.test(body[body.length - 1] as string))) {
+        let d = next();
+        while (d !== "" && d !== "\n") d = next();
+        if (d) back.push(d);
+        continue;
+      }
       if (q) {
         if (c === q) q = "";
       } else if (c === "'" || c === '"') q = c;
@@ -205,7 +213,9 @@ export function tokenize(cmd: string): Tok[] {
           if (tok || quoted) break;
           continue;
         }
-        if (c === "\\") [esc, state] = ["a", "\\"];
+        // a backslash-newline between words leaves it between words, so a # after it still opens a
+        // comment (CodeRabbit on #127); any other escaped character starts a word
+        if (c === "\\") [esc, state] = [" ", "\\"];
         else if (PUNCT.includes(c)) [tok, state, op] = [c, "c", true];
         else if (c === "'" || c === '"') [state, dq] = [c, tok.length];
         else [tok, state] = [c, "a"];
@@ -234,7 +244,7 @@ export function tokenize(cmd: string): Tok[] {
         if (esc === '"' && c !== "\\" && c !== esc) tok += "\\";
         tok += c;
         if (esc === '"') escaped = tok.length;
-        state = esc;
+        state = esc === " " ? "a" : esc;
         continue;
       }
       if (c === "") break;
@@ -713,13 +723,14 @@ const API_RENAME_TO_MAIN = /^(-X|--method)\s*=?\s*POST repos\/([\w.-]+\/[\w.-]+)
 // The GitHub lookups one verdict makes share one budget, well inside the hook's 10 s timeout:
 // Claude Code lets a call through when its hook times out, so a stalled GitHub must end the lookups
 // with time left for the guard to refuse (CodeRabbit on #127). A lookup past the budget has failed.
+// The budget is kept by a monotonic clock, which a change to the system's time does not move.
 export const GITHUB_BUDGET_MS = 6_000;
 let githubDeadline = 0;
 const startLookups = () => {
-  githubDeadline = Date.now() + GITHUB_BUDGET_MS;
+  githubDeadline = performance.now() + GITHUB_BUDGET_MS;
 };
 function ghLookup(args: string[]): string | null {
-  const left = githubDeadline - Date.now();
+  const left = Math.floor(githubDeadline - performance.now());
   if (left < 250) return null;
   const r = run("gh", args, { timeout: left, killSignal: "SIGKILL" });
   return r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null;
@@ -746,12 +757,14 @@ function checkBranchWrite(repo: string, branch: string, ctx: GuardContext, why: 
 
 // Updating a PR's branch merges or rebases its base into its head, a write to the head branch: on a
 // product repo it follows the rule for any branch write, so a PR whose head is the default branch or
-// a protected one is refused, as is one whose head cannot be read (CodeRabbit on #127).
+// a protected one is refused, as is one whose head cannot be read (CodeRabbit on #127). That holds
+// for a PR into the factory's own repo too: its head may be a fork's, a product repo's default branch.
+// There a head that cannot be read stays allowed, as before: it is almost always the factory's own.
 function checkPrHeadWrite(repo: string, n: string, ctx: GuardContext): void {
-  if (ctx.ownRepos.some((r) => r.toLowerCase() === repo.toLowerCase())) return;
-  if (!/^\d+$/.test(n)) refuse(`updating a branch of ${repo} needs the PR's number, so the guard can read its head`);
+  const ownBase = ctx.ownRepos.some((r) => r.toLowerCase() === repo.toLowerCase());
+  if (!/^\d+$/.test(n)) return ownBase ? undefined : refuse(`updating a branch of ${repo} needs the PR's number, so the guard can read its head`);
   const head = (ctx.prHead ?? prHeadOnGitHub)(repo, n);
-  if (head === null) refuse(`the head of ${repo}#${n} cannot be read, so updating its branch cannot be checked`);
+  if (head === null) return ownBase ? undefined : refuse(`the head of ${repo}#${n} cannot be read, so updating its branch cannot be checked`);
   const [headRepo, ref] = head as [string, string];
   if (ctx.ownRepos.some((r) => r.toLowerCase() === headRepo.toLowerCase())) return;
   checkBranchWrite(headRepo, ref, ctx, `${repo}#${n}'s head is ${headRepo}:${ref}, and updating it writes to that branch`);
@@ -764,17 +777,25 @@ function prHeadOnGitHub(repo: string, n: string): [string, string] | null {
 
 // The owner/repo a `gh pr <merge|close|...>` targets, from --repo/-R or a PR URL. null when the
 // command relies on the cwd's remote, which the guard cannot resolve -- the caller then fails safe.
+// gh takes the repo from a PR URL over --repo, so a URL and a --repo that disagree, or two of either,
+// are refused: the guard would check one repo while gh acts on the other (CodeRabbit on #127).
 function ghPrRepo(args: string[]): string | null {
   const slug = /^[\w.-]+\/[\w.-]+$/;
+  const named: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i] as string;
-    if (a === "--repo" || a === "-R") { const v = args[i + 1]; return v !== undefined && slug.test(v) ? v : null; }
-    if (a.startsWith("--repo=")) { const v = a.slice(7); return slug.test(v) ? v : null; }
-    if (a.startsWith("-R") && a.length > 2) { const v = a.slice(2); return slug.test(v) ? v : null; }
-    const m = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/(pull|issues)\/\d+/.exec(a);
-    if (m) return m[1] as string;
+    let v: string | undefined;
+    if (a === "--repo" || a === "-R") v = args[++i] ?? "";
+    else if (a.startsWith("--repo=")) v = a.slice(7);
+    else if (a.startsWith("-R") && a.length > 2) v = a.slice(2);
+    else if (["--body", "-b", "--comment", "-c", "--subject", "-t", "--title"].includes(a)) i++; // text, not a selector
+    else v = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/(pull|issues)\/\d+/.exec(a)?.[1];
+    if (v === undefined) continue;
+    if (!slug.test(v)) return null;
+    named.push(v.toLowerCase());
   }
-  return null;
+  if (new Set(named).size > 1) refuse(`the command names more than one repo (${[...new Set(named)].join(", ")}), and gh acts on a PR URL's over --repo's`);
+  return named[0] ?? null;
 }
 
 // The PR number a `gh pr close` names, by a number or a PR URL of the repo it targets. null for a
@@ -923,9 +944,11 @@ function apiCall(args: string[]): ApiCall {
 // another, a transfer, and a contents write to the default branch or a protected one land on main
 // as surely as a push does; a contents write names its branch, as create_or_update_file does over MCP.
 // createCommitOnBranch's branch cannot be read reliably, and git push is how a builder commits.
+// updatePullRequestBranch names its PR by a node id, whose head the guard cannot read: gh pr
+// update-branch, whose head it reads, is the way (CodeRabbit on #127).
 const API_REPO_WRITE = /^repos\/([^/\s?]+)\/([^/\s?]+)\/(merges|transfer|contents)(?:[/?]|$)/i;
 const API_TARGET = /^repos\/([^/\s?]+)\/([^/\s?]+)(?:\/(pulls|issues)\/(\d+)(\/lock)?)?\/?(?:\?.*)?$/;
-const GQL_REFUSED = /\b(mergePullRequest|closePullRequest|reopenPullRequest|enablePullRequestAutoMerge|lockLockable|unlockLockable|deleteRepository|archiveRepository|mergeBranch|enqueuePullRequest|createCommitOnBranch|closeIssue|reopenIssue)\b/i;
+const GQL_REFUSED = /\b(mergePullRequest|closePullRequest|reopenPullRequest|enablePullRequestAutoMerge|lockLockable|unlockLockable|deleteRepository|archiveRepository|mergeBranch|enqueuePullRequest|createCommitOnBranch|closeIssue|reopenIssue|updatePullRequestBranch)\b/i;
 function checkApiProtect(args: string[], ctx: GuardContext): void {
   const a = apiCall(args);
   if (a.method === "GET" || a.method === "HEAD") return;
@@ -936,7 +959,7 @@ function checkApiProtect(args: string[], ctx: GuardContext): void {
       refuse("a GraphQL call the guard cannot read (query=@file, --input, a $(...) or a variable) is not allowed: put the query inline");
     // only a mutation writes: a query, or the {...} shorthand, may name a mutation and change nothing
     if (queries.some((q) => /\bmutation\b/.test(q) && (GQL_REFUSED.test(q) || (/\bupdate(PullRequest|Issue)\b/i.test(q) && /\bstate\b/i.test(q)))))
-      refuse("merging, closing, locking or deleting through GraphQL is not allowed; use gh pr merge or gh pr close");
+      refuse("merging, closing, locking, deleting or updating a PR's branch through GraphQL is not allowed; use gh pr merge, gh pr close or gh pr update-branch");
     return;
   }
   const own = (repo: string) => ctx.ownRepos.some((r) => r.toLowerCase() === repo.toLowerCase());
@@ -1078,8 +1101,9 @@ function checkMcpGithub(tool: string, tin: Record<string, unknown>, ctx: GuardCo
     if (tin.draft === false) checkGhProtect(["gh", "pr", "ready", n, "-R", repo], ctx);
   }
   // the Issues API closes a PR by its number too, and the guard cannot tell an issue from a PR
-  if (name === "issue_write" && tin.state === "closed") checkGhProtect(["gh", "pr", "close", String(tin.issue_number ?? ""), "-R", repo], ctx);
-  if (name === "issue_write" && tin.state === "open") checkGhProtect(["gh", "pr", "reopen", String(tin.issue_number ?? ""), "-R", repo], ctx);
+  // an issue_write create opens a new issue, whatever its state field says: only an update sets one
+  if (name === "issue_write" && tin.method !== "create" && tin.state === "closed") checkGhProtect(["gh", "pr", "close", String(tin.issue_number ?? ""), "-R", repo], ctx);
+  if (name === "issue_write" && tin.method !== "create" && tin.state === "open") checkGhProtect(["gh", "pr", "reopen", String(tin.issue_number ?? ""), "-R", repo], ctx);
 }
 
 export function mcpVerdict(tool: string, tin: Record<string, unknown>, ctx: GuardContext): string | null {
@@ -1667,6 +1691,8 @@ function isCode(text: string, at: number): boolean {
 function nextHeredoc(text: string, from: number): Heredoc | null {
   HEREDOC_OPEN.lastIndex = from;
   for (let m = HEREDOC_OPEN.exec(text); m; m = HEREDOC_OPEN.exec(text)) {
+    // \<<EOF is a < and a <EOF: an escaped first < opens no heredoc (CodeRabbit on #127)
+    if (/(^|[^\\])(\\\\)*\\$/.test(text.slice(Math.max(0, m.index - 64), m.index))) continue;
     if (!isCode(text, m.index)) continue;
     const word = m[2] as string;
     const delim = word.replace(/\\(.)|'([^']*)'|"((?:[^"\\]|\\.)*)"/g, (_, e?: string, sq?: string, dq?: string) =>
@@ -1674,13 +1700,21 @@ function nextHeredoc(text: string, from: number): Heredoc | null {
     const head = m.index + m[0].length;
     const nl = text.indexOf("\n", head);
     if (nl < 0) return null;
+    const quoted = /['"\\]/.test(word);
     let at = nl + 1;
     while (at <= text.length) {
-      const eol = text.indexOf("\n", at);
-      const line = text.slice(at, eol < 0 ? text.length : eol);
+      let eol = text.indexOf("\n", at);
+      let line = text.slice(at, eol < 0 ? text.length : eol);
+      // with the delimiter unquoted, bash joins a line ending in \ to the next before it compares
+      // (CodeRabbit on #127: EO\ and F end the body at EOF)
+      while (!quoted && eol >= 0 && /(^|[^\\])(\\\\)*\\$/.test(line)) {
+        const next = text.indexOf("\n", eol + 1);
+        line = line.slice(0, -1) + text.slice(eol + 1, next < 0 ? text.length : next);
+        eol = next;
+      }
       // the whole line is the delimiter: `EOF ` with a trailing space is still body (CodeRabbit on #127)
       if ((m[1] ? line.replace(/^\t+/, "") : line) === delim)
-        return { start: m.index, head, rest: text.slice(head, nl), body: text.slice(nl + 1, Math.max(nl + 1, at - 1)), quoted: /['"\\]/.test(word), end: eol < 0 ? text.length : eol + 1 };
+        return { start: m.index, head, rest: text.slice(head, nl), body: text.slice(nl + 1, Math.max(nl + 1, at - 1)), quoted, end: eol < 0 ? text.length : eol + 1 };
       if (eol < 0) break;
       at = eol + 1;
     }
