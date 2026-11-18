@@ -92,7 +92,13 @@ test("transition output and refusal messages", () => {
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, "LOCAL-gone: (new) -> off  agent=None  no Jira ticket\n");
   assert.equal(factory(ws, ["state", "--off"]).stdout, "  LOCAL-gone   agent=-        Retire the old export\n");
-  assert.match(factory(ws, ["state", "--list"]).stdout, /^ {2}TEST-2 .*\n {2}and 1 off the board: factory state --off\n$/);
+  // Niilo on #129: off the board from building frees the builder; the log still says who it was.
+  assert.equal(factory(ws, ["state", "LOCAL-built", "building", "--agent", "bea"]).status, 0);
+  assert.equal(factory(ws, ["state", "LOCAL-built", "off"]).stdout, "LOCAL-built: building -> off  agent=None  no Jira ticket\n");
+  assert.equal(JSON.parse(readFileSync(join(ws, "state", "LOCAL-built.json"), "utf8")).agent, null);
+  const left = readFileSync(join(ws, "state", "events.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).pop();
+  assert.deepEqual([left.from, left.to, left.agent], ["building", "off", "bea"]);
+  assert.match(factory(ws, ["state", "--list"]).stdout, /^ {2}TEST-2 .*\n {2}and 2 off the board: factory state --off\n$/);
   factory(ws, ["state", "LOCAL-gone", "building"]);
   factory(ws, ["state", "LOCAL-gone", "off"]);
   r = factory(ws, ["drop", "LOCAL-gone", "--note", "not asked for"]);

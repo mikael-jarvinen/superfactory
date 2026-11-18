@@ -59,6 +59,7 @@ test("design walk", () => {
   no("state", T, "designing", "--approved", "looks good");
   r = ok("state", T, "off", "--approved", "Approved, build it");
   assert.match(r.stdout, /design-review -> off .* jira should read: To Do/, "off the board, the ticket waits in the backlog");
+  assert.equal(JSON.parse(readFileSync(join(ws, "state", `${T}.json`), "utf8")).agent, "dee", "the designer stays on the record, for the next round");
   r = ok("state", T);
   assert.match(r.stdout, /design: slides https:\/\/claude\.ai\/artifact\/slides2 canvas https:\/\/claude\.ai\/artifact\/canvas1 approved: Approved, build it/);
   ok("state", T, "building", "--agent", "bea");

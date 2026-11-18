@@ -239,6 +239,10 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
     rec.asked_you = null;
   }
   if (c.agent) rec.agent = c.agent;
+  // Off the board from building, the builder is free and the next dispatch picks one. From
+  // design-review the designer stays on the record, for the next round (Niilo on #129).
+  const left = rec.agent ?? null;
+  if (to === OFF && old === "building" && !c.agent) rec.agent = null;
   if (c.stack) rec.stack = c.stack;
   if (c.worktree) rec.worktree = c.worktree;
   if (c.pr || c.head || c.reviewed) {
@@ -281,7 +285,7 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   rec.since = now();
   saveRec(ws, rec);
   appendEvent(ws, {
-    t: now(), ticket, from: was, to, agent: rec.agent ?? null,
+    t: now(), ticket, from: was, to, agent: rec.agent ?? left,
     evidence: c.evidence ?? c.approved ?? null, note: c.note ?? null, pr: rec.pr ?? null,
     ...(rec.design && (c.canvas || c.slides || c.approved) ? { design: rec.design } : {}),
   });

@@ -98,9 +98,10 @@ usage: factory [--workspace <dir>] <command> [options]
                                   the stack, the title) until a dispatch brings it back. A new
                                   item, LOCAL- work with no backlog to wait in, goes off with
                                   --title, and \`state --off\` lists it. From
-                                  design-review it is the approval, from building it unassigns,
-                                  and from a review it ends the slice, for the next slice of a
-                                  multi-PR ticket
+                                  design-review it is the approval and the designer stays on the
+                                  record, for the next round; from building it clears the
+                                  builder; from a review it ends the slice, for the next slice
+                                  of a multi-PR ticket
   state --list [--all]            every item on the board; --all adds done and off-board ones
   state --off                     every item off the board: key, agent and title
   drop <LOCAL-key>... [--note N] [--force]
