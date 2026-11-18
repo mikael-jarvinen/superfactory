@@ -510,6 +510,45 @@ test("a command is named by the file that runs", () => {
   assert.deepEqual(wrong, []);
 });
 
+// A program the guard does not read may run its arguments, so any later word naming gh, git, ssh, a
+// shell or busybox is checked from there; only a program that can never run another, and docker
+// run's image word, are skipped (Marie and Niilo on #124, round 9).
+test("an argument that names a checked program is checked as a command", () => {
+  const M = "gh pr merge 1 -R acme/api";
+  const bin = mkdtempSync(join(tmpdir(), "guard-argv-"));
+  after(() => rmSync(bin, { recursive: true, force: true }));
+  const refused = [`ionice -c3 ${M}`, `taskset -c 0 ${M}`, `prlimit ${M}`, `setpriv ${M}`, `unshare -U ${M}`, `strace -o /dev/null ${M}`,
+    `chrt -o 0 ${M}`, `setarch x86_64 ${M}`, `linux64 ${M}`, `systemd-run --user --pipe -q ${M}`, `docker exec c ${M}`,
+    // the escape forms of the exceptions, and the programs kept scanned
+    "man -P gh git", `man -P gh ${M}`, "rg --pre gh x .", "rg --pre=gh x .", "rg --pre-glob '*' --pre gh x .", `command ${M}`,
+    `less -f ${M}`, `more ${M}`, `vi -c '!${M}' x`, `view -c ':!${M}' x`, `awk 1 ${M}`, `sed -n p ${M}`, `find . -exec ${M} \\;`,
+    `xargs ${M}`, "tar -I gh -cf x.tar .", "tar --to-command=gh -xf x.tar", "rsync -e gh a b:", `make -f x ${M}`,
+    `git -c 'core.pager=${M}' log`, `git -c core.sshCommand='${M}' fetch`, `git -c 'diff.x.textconv=${M}' diff`, `docker run --rm img ${M}`, `docker run --rm --name w img sh -c '${M}'`,
+    `docker run --rm --entrypoint gh img pr merge 1 -R acme/api`, `docker container create img ${M}`, `watch '${M}'`,
+    // a data-only program's arguments are skipped only when it is the command word
+    `ionice -c3 echo ${M}`, `strace -f grep x ${M}`,
+    // the systemd-run and docker exec forms the transcripts hit stay refused
+    'systemd-run --user bash -c "PATH=$P npm test"', 'systemd-run --user --collect bash -c "$SC"',
+    "systemd-run --user bash -c 'exec npm test'", "docker exec c sh -c 'head $f/*'"];
+  const ionice = ["/usr/bin/ionice", "/bin/ionice"].find(existsSync);
+  if (ionice) {
+    symlinkSync(ionice, join(bin, "w"));
+    refused.push(`${bin}/w ${M}`);
+  }
+  const allowed = ["which gh", "which -a gh hub", "ls ~/.local/bin/gh /usr/local/bin/gh", "ls -l /usr/bin/gh /usr/local/bin/gh", "command -v gh",
+    "command -V gh", "type gh", "man git", "grep -rn 'gh pr merge' .", "rg 'gh pr merge' .", "rg -n gh src", "apt-cache show git",
+    "dpkg-query -W git", "timeout 5 git status", "ionice -c3 git status", "systemd-run --user --pipe -q npm test", "echo git push origin main",
+    "printf '%s\\n' gh git", "readlink -f /bin/sh", "realpath /bin/sh", "stat /usr/bin/gh", "file /bin/sh", "ps aux | grep bash",
+    "cat ~/.local/bin/gh | head", "docker run -d --name w busybox sleep 120", "docker create --name w --label x=1 busybox true",
+    "docker run --rm -e A=1 -v /x:/y bash:5 true", "docker exec c npm test", "git -c core.pager=cat log", "git -c 'core.pager=less -R' log"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, { ...pr, role: "lead" }]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
 // The command word is read by its shape, an allowlist; every trick Marie listed at ae2e8d06 goes
 // through the one rule (Marie and Niilo on #124, round 8).
 test("a command word is a bare name, a plain path or refused", () => {

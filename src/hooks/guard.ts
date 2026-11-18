@@ -32,6 +32,13 @@
 // A command word is read by its shape, an allowlist (commandWord): a bare name, an absolute or ~/
 // path, or a relative path with no `..`. Any other word (a glob, a brace, ~+, a variable) is
 // refused. The program is then named by the file that runs: PATH, then realpath, then basename.
+//
+// The argv rule fails closed on programs the guard does not read: any later argument that names gh,
+// git, ssh, a shell or busybox (ionice gh ..., strace -o x bash -c ...), any option value that does
+// (--pre=gh), and any argument holding a line that starts with one (watch 'gh ...', vi -c '!gh ...')
+// is checked as a command. Skipped: the arguments of a program that never runs another (DATA_ONLY:
+// echo, grep, ls, which, cat, ...; rg without --pre; command -v), and docker run's image word. A git
+// -c setting git runs as a command (core.pager, core.sshCommand, *.textconv, ...) is checked too.
 import { accessSync, constants as fsConstants, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { posix } from "node:path";
@@ -330,6 +337,11 @@ function pastOptions(words: string[], vals: string[]): number {
 // Drop shell keywords, env assignments and wrappers so the real command name is first. A wrapper
 // whose command cannot be read off the line is refused; timeout's, nice's, setsid's, stdbuf's,
 // flock's and env -S's can, so theirs is checked.
+const GIT_COMMAND_CONFIG = new RegExp("^(core\\.(pager|sshcommand|editor|askpass|gitproxy)|sequence\\.editor|pager\\.[^=]+|diff\\.external|" +
+  "(diff|difftool|mergetool|man|browser)\\.[^=]+\\.(textconv|command|cmd)|merge\\.[^=]+\\.driver|filter\\.[^=]+\\.(clean|smudge|process)|" +
+  "credential(\\.[^=]+)?\\.helper|gpg(\\.[^=]+)?\\.program|remote\\.[^=]+\\.(uploadpack|receivepack)|uploadpack\\.packobjectshook|" +
+  "sendemail\\.[^=]*cmd|web\\.browser|instaweb\\.httpd)=");
+
 function stripPrefixes(words: string[]): string[] {
   if (["for", "select", "case", "function"].includes(words[0] ?? "")) return [];
   while (words.length && KEYWORDS.has(words[0] as string)) words = words.slice(1);
@@ -441,6 +453,8 @@ function gitParts(words: string[], ctx: GuardContext): [string, string[]] {
       const low = val.toLowerCase();
       const pager = low.startsWith("core.pager") && ctx.policy === "readonly" && val.includes("=") && !["=cat", "=less", "="].some((e) => val.endsWith(e));
       if (low.startsWith("alias.") || low.startsWith("core.hookspath") || low.startsWith("core.fsmonitor") || pager) refuse(`git -c ${val} is not allowed`);
+      // a setting whose value git runs as a command is checked as that command (#124, round 9)
+      if (GIT_COMMAND_CONFIG.test(low) && val.includes("=")) checkCommand(val.slice(val.indexOf("=") + 1).replace(/^!/, ""), ctx);
       i += w === "-c" ? 2 : 1;
       continue;
     }
@@ -1140,11 +1154,77 @@ function commandWord(words: string[], ctx: GuardContext): string[] {
   }
 }
 
+const ARGV_CHECKED = new Set(["gh", "git", "ssh"]);
+// whether an argument word, read as a command word, names gh, git, git-<sub>, ssh, a shell or busybox
+function namesChecked(w: string, ctx: GuardContext): boolean {
+  if (!BARE_WORD.test(w) && !/^(\/|~\/|\.\/|\$\{?HOME\}?\/)[^\s*?[\]{}`]*$/.test(w)) return false;
+  let named: string[];
+  try {
+    named = commandWord([w], ctx);
+  } catch (e) {
+    if (e instanceof Refused && /busybox/.test(e.message)) throw e;
+    return false;
+  }
+  const n = (named[0] ?? "").toLowerCase();
+  return ARGV_CHECKED.has(n) || SHELLS.has(n) || n === "sh";
+}
+
+// Programs that only ever read their arguments as data. Not man (-P, MANPAGER), less, more, vi,
+// awk, sed, find, xargs, tar, rsync, make or docker: each can run a program it is given.
+const DATA_ONLY = new Set(["type", "which", "ls", "readlink", "realpath", "stat", "file", "grep", "cat", "head", "tail", "wc", "echo", "printf", "apt-cache", "dpkg-query"]);
+function dataOnly(words: string[], raw: string[]): boolean {
+  const name = (words[0] as string).toLowerCase();
+  if (DATA_ONLY.has(name)) return true;
+  // rg runs a program with --pre
+  if (name === "rg") return !words.some((w) => /^--pre(-glob)?(=|$)/.test(w));
+  // `command -v gh` names gh; stripPrefixes has dropped `command`, so look for it just before
+  if (/^-[pvV]*[vV][pvV]*$/.test(name) && raw.length > words.length && raw.slice(raw.length - words.length).every((w, k) => w === words[k]))
+    return raw[raw.length - words.length - 1] === "command";
+  return false;
+}
+
+// the index of docker run's or create's image word, or -1. Only options known to take a value skip
+// the next word; any other is read as a flag, so a misread lands on a word that is still scanned.
+const DOCKER_VALUE_OPTS = new Set(["-a", "-c", "-e", "-h", "-l", "-m", "-p", "-u", "-v", "-w", "--add-host", "--attach", "--cap-add", "--cap-drop",
+  "--cgroupns", "--cidfile", "--cpus", "--cpu-shares", "--device", "--dns", "--entrypoint", "--env", "--env-file", "--gpus", "--group-add", "--hostname",
+  "--ipc", "--label", "--label-file", "--log-driver", "--log-opt", "--memory", "--mount", "--name", "--network", "--net", "--pid", "--platform", "--publish",
+  "--pull", "--restart", "--runtime", "--security-opt", "--shm-size", "--stop-signal", "--stop-timeout", "--tmpfs", "--ulimit", "--user", "--volume", "--workdir"]);
+function dockerImage(words: string[]): number {
+  if ((words[0] as string).toLowerCase() !== "docker") return -1;
+  let i = ["run", "create"].includes(words[1] ?? "") ? 2 : words[1] === "container" && ["run", "create"].includes(words[2] ?? "") ? 3 : -1;
+  if (i < 0) return -1;
+  for (; i < words.length; i++) {
+    const w = words[i] as string;
+    if (w === "--") return i + 1;
+    if (!w.startsWith("-")) return i;
+    if (DOCKER_VALUE_OPTS.has(w)) i++;
+  }
+  return -1;
+}
+
 function checkProtect({ words: raw, reads, stdin = [], piped = false }: Simple, ctx: GuardContext): void {
   let words = stripPrefixes(raw);
   words = commandWord(words, ctx);
   if (!words.length) return;
   const name = (words[0] as string).toLowerCase();
+  // Fail closed on argv: a program the guard does not read as gh, git, ssh or a shell may still run
+  // its arguments (ionice, strace, systemd-run, docker exec), so any later word that names one of
+  // those, by commandWord's shape and file rule, is checked as a command from there on, and a word
+  // holding a command line whose first word names one (watch 'gh pr merge 1', vi -c '!gh ...'), or
+  // an option's value that does (--pre=gh), is checked as that line or word. The command word's arguments are skipped only for a program that can never run another
+  // (DATA_ONLY), and for docker run's image word (Marie and Niilo on #124, round 9).
+  if (!ARGV_CHECKED.has(name) && !SHELLS.has(name) && name !== "sh" && !dataOnly(words, raw)) {
+    const image = dockerImage(words);
+    for (let i = 1; i < words.length; i++) {
+      if (i === image) continue;
+      const w = words[i] as string;
+      // an option's value, --pre=gh, and a line an editor runs, vi -c '!gh pr merge 1'
+      const value = /^--?[\w-]+=/.test(w) ? w.slice(w.indexOf("=") + 1) : w;
+      const line = value.trim().replace(/^[:!]+/, "");
+      if (/\s/.test(line) && namesChecked(line.split(/\s+/)[0] as string, ctx)) checkCommand(line, ctx);
+      else if (namesChecked(line, ctx)) checkProtect({ words: [line, ...words.slice(i + 1)], writes: [], reads: [], stdin, piped }, ctx);
+    }
+  }
   if (name === "git") return checkGitProtect(words, ctx);
   if (name === "gh") return checkGhProtect(words, ctx);
   // `bash -c '<script>'` is the script, checked like any other command line, and so is the heredoc or
