@@ -209,7 +209,7 @@ interface Simple {
 // bare fd is not a word. `>&1` duplicates a descriptor and writes no file. What runs inside a $( ... ),
 // a <( ... ) or a >( ... ), quoted or not, is a simple command of its own, and the word it stood for
 // stays in the command around it as `$(`, `<(` or `>(`.
-function simpleCommands(toks: Tok[]): Simple[] {
+function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
   const flat = toks.flatMap((k) => (k.op ? splitOps(k.t).map((t) => ({ t, op: true })) : [k]));
   const out: Simple[] = [];
   let cur: string[] = [];
@@ -229,7 +229,7 @@ function simpleCommands(toks: Tok[]): Simple[] {
   for (let i = 0; i < flat.length; i++) {
     const { t, op, subs } = flat[i] as Tok;
     const paren = flat[i + 1]?.op === true && flat[i + 1]?.t === "(";
-    for (const body of subs ?? []) if (!/^\(.*\)$/s.test(body)) out.push(...simpleCommands(tokenize(body))); // $((...)) is arithmetic
+    for (const body of subs ?? []) if (!/^\(.*\)$/s.test(body)) out.push(...simpleCommands(tokenize(body), bodies)); // $((...)) is arithmetic
     if (op && (t === "<" || t === ">") && paren) {
       cur.push(`${t}(`);
       i++;
@@ -250,6 +250,7 @@ function simpleCommands(toks: Tok[]): Simple[] {
       if (t.includes(">") && !(t === ">&" && /^(\d+|-)$/.test(target))) writes.push(target);
       if (t === "<" || t === "<>") reads.push(target);
       if (t === "<<<") stdin.push(target);
+      if (t === "<<" && /^HEREDOC\d+$/.test(target)) stdin.push(bodies[Number(target.slice(7))] ?? "");
       i++;
     } else if (t.endsWith("$") && paren) {
       // `$(` or `X=$(`: what is inside is its own simple command, and a `$(` word stands for its output
@@ -585,7 +586,7 @@ function ghPrRepo(args: string[]): string | null {
     if (a === "--repo" || a === "-R") { const v = args[i + 1]; return v !== undefined && slug.test(v) ? v : null; }
     if (a.startsWith("--repo=")) { const v = a.slice(7); return slug.test(v) ? v : null; }
     if (a.startsWith("-R") && a.length > 2) { const v = a.slice(2); return slug.test(v) ? v : null; }
-    const m = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+/.exec(a);
+    const m = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/(pull|issues)\/\d+/.exec(a);
     if (m) return m[1] as string;
   }
   return null;
@@ -597,15 +598,15 @@ function ghCloseNumber(args: string[], repo: string): number | null {
   const sel: string[] = [];
   for (let i = 2; i < args.length; i++) {
     const a = args[i] as string;
-    if (["--repo", "-R", "--comment", "-c"].includes(a)) i++;
-    else if (a.startsWith("--repo=") || a.startsWith("--comment=") || /^-[Rc]./.test(a)) continue;
+    if (["--repo", "-R", "--comment", "-c", "--reason", "-r", "--duplicate-of"].includes(a)) i++;
+    else if (/^--(repo|comment|reason|duplicate-of)=/.test(a) || /^-[Rcr]./.test(a)) continue;
     else if (a.startsWith("-")) return null; // --delete-branch among them: a product branch is not the lead's to delete
     else sel.push(a);
   }
   if (sel.length !== 1) return null;
   const s = sel[0] as string;
   if (/^[1-9]\d*$/.test(s)) return Number(s);
-  const m = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/([1-9]\d*)(\/.*)?$/.exec(s);
+  const m = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/(?:pull|issues)\/([1-9]\d*)(\/.*)?$/.exec(s);
   return m && (m[1] as string).toLowerCase() === repo.toLowerCase() ? Number(m[2]) : null;
 }
 
@@ -739,16 +740,17 @@ function apiCall(args: string[]): ApiCall {
 // createCommitOnBranch's branch cannot be read reliably, and git push is how a builder commits.
 const API_REPO_WRITE = /^repos\/([^/\s?]+)\/([^/\s?]+)\/(merges|transfer|contents)(?:[/?]|$)/i;
 const API_TARGET = /^repos\/([^/\s?]+)\/([^/\s?]+)(?:\/(pulls|issues)\/(\d+)(\/lock)?)?\/?(?:\?.*)?$/;
-const GQL_REFUSED = /\b(mergePullRequest|closePullRequest|reopenPullRequest|enablePullRequestAutoMerge|lockLockable|unlockLockable|deleteRepository|archiveRepository|mergeBranch|enqueuePullRequest|createCommitOnBranch)\b/i;
+const GQL_REFUSED = /\b(mergePullRequest|closePullRequest|reopenPullRequest|enablePullRequestAutoMerge|lockLockable|unlockLockable|deleteRepository|archiveRepository|mergeBranch|enqueuePullRequest|createCommitOnBranch|closeIssue|reopenIssue)\b/i;
 function checkApiProtect(args: string[], ctx: GuardContext): void {
   const a = apiCall(args);
-  if (a.method === "GET") return;
+  if (a.method === "GET" || a.method === "HEAD") return;
   const ep = a.endpoint.replace(/^https?:\/\/[^/]+/, "").replace(/^\/+/, "");
   if (ep === "graphql") {
     const queries = a.fields.filter((f) => f.key === "query").map((f) => f.value);
     if (a.input || queries.some((q) => q.startsWith("@") || /\$\(|`/.test(q) || /^\s*\$\w/.test(q)))
       refuse("a GraphQL call the guard cannot read (query=@file, --input, a $(...) or a variable) is not allowed: put the query inline");
-    if (queries.some((q) => GQL_REFUSED.test(q) || (/\bupdatePullRequest\b/i.test(q) && /\bstate\b/i.test(q))))
+    // only a mutation writes: a query, or the {...} shorthand, may name a mutation and change nothing
+    if (queries.some((q) => /\bmutation\b/.test(q) && (GQL_REFUSED.test(q) || (/\bupdate(PullRequest|Issue)\b/i.test(q) && /\bstate\b/i.test(q)))))
       refuse("merging, closing, locking or deleting through GraphQL is not allowed; use gh pr merge or gh pr close");
     return;
   }
@@ -773,10 +775,13 @@ function checkApiProtect(args: string[], ctx: GuardContext): void {
 }
 
 function checkGhProtect(words: string[], ctx: GuardContext): void {
-  const args = ghPath(words.slice(1));
+  let args = ghPath(words.slice(1));
   checkGhCommand(args);
+  // gh issue close, reopen, lock and unlock act on a PR given its number (gh's issue/close.go closes
+  // it as a PR), and offline an issue's number cannot be told from a PR's: checked as gh pr (Marie on #124)
+  if (args[0] === "issue" && ["close", "reopen", "lock", "unlock"].includes(args[1] ?? "")) args = ["pr", ...args.slice(1)];
   if (args[0] === "api") checkApiProtect(args.slice(1), ctx);
-  if (args[0] === "pr" && ["merge", "close", "lock", "unlock"].includes(args[1] ?? "")) {
+  if (args[0] === "pr" && ["merge", "close", "reopen", "lock", "unlock"].includes(args[1] ?? "")) {
     const repo = ghPrRepo(args);
     if (repo === null) refuse("merging or closing a PR needs an explicit --repo owner/name (or a PR URL) so the guard can confirm whose repo it is");
     const target = (repo as string).toLowerCase();
@@ -1009,11 +1014,18 @@ function sshCommand(args: string[]): string {
 
 function checkProtect({ words: raw, reads, stdin = [], piped = false }: Simple, ctx: GuardContext): void {
   let words = stripPrefixes(raw);
-  // A command by path is read by its basename wherever it lives, so ~/.local/bin/gh is gh and
-  // /usr/lib/git-core/git is git, each checked as itself; any other name by path, a project script,
-  // runs. A command word from a variable or a substitution could run anything, so it is refused
-  // (Marie and Niilo on #124: `~/.local/bin/gh pr merge` and `$G pr merge` skipped every check).
-  while (words.length && (words[0] as string).includes("/")) words = stripPrefixes([posix.basename(words[0] as string), ...words.slice(1)]);
+  // gh, git and the shells by path are read by their basename wherever they live, so ~/.local/bin/gh
+  // is gh and /usr/lib/git-core/git is git, each checked as itself. Any other command by path is read
+  // as itself (/usr/bin/env, /usr/bin/nice) from a system bin dir or a dir from a variable, and
+  // anywhere else it is a project script, which runs (./scripts/env is not env). A command word from a
+  // variable or a substitution could run anything, so it is refused (Marie and Niilo on #124:
+  // `~/.local/bin/gh pr merge` and `$G pr merge` skipped every check).
+  while (words.length && (words[0] as string).includes("/")) {
+    const w = words[0] as string;
+    const b = posix.basename(w);
+    if (!["gh", "git"].includes(b.toLowerCase()) && !SHELLS.has(b) && !TRUSTED_BIN_DIRS.has(posix.dirname(w)) && !/[$`]/.test(w)) return;
+    words = stripPrefixes([b, ...words.slice(1)]);
+  }
   if (!words.length) return;
   if (/[$`]/.test(words[0] as string)) refuse(`the command '${words[0]}' runs whatever it holds, which the guard cannot check: run gh/git by name`);
   const name = (words[0] as string).toLowerCase();
@@ -1171,15 +1183,15 @@ const HEREDOC = /<<-?\s*['"]?(\w+)['"]?[^\n]*\n([\s\S]*?)\n\1\s*(\n|$)/;
 function checkCommand(cmd: string, ctx: GuardContext): void {
   // heredocs: keep the header, drop the body so its lines are not parsed as commands. The newline
   // after the closing delimiter stays: without it the next line was read as the header's arguments.
-  // Each body is kept by its number, for a shell that reads one as its script.
+  // Each body is kept by its number, which takes the delimiter's place after its own `<<`, so the body
+  // is the stdin of the command that opens it (Marie on #124: `bash < x.sh <<'E' | cat`).
   let text = cmd;
   const bodies: string[] = [];
-  for (let m = HEREDOC.exec(text); m; m = HEREDOC.exec(text))
-    text = text.slice(0, m.index) + (m[0].split("\n", 1)[0] as string) + ` HEREDOC${bodies.push(m[2] as string) - 1}\n` + text.slice(m.index + m[0].length);
-  const heredoc = (w: string) => /^HEREDOC\d+$/.test(w);
-  for (const s of simpleCommands(tokenize(text))) {
-    const stdin = [...(s.stdin ?? []), ...s.words.filter(heredoc).map((w) => bodies[Number(w.slice(7))] as string)];
-    const simple = { ...s, words: s.words.filter((w) => !heredoc(w)), stdin };
+  for (let m = HEREDOC.exec(text); m; m = HEREDOC.exec(text)) {
+    const header = (m[0].split("\n", 1)[0] as string).replace(/^<<-?\s*['"]?\w+['"]?/, `<< HEREDOC${bodies.push(m[2] as string) - 1}`);
+    text = text.slice(0, m.index) + header + "\n" + text.slice(m.index + m[0].length);
+  }
+  for (const simple of simpleCommands(tokenize(text), bodies)) {
     checkSecrets({ ...simple, words: stripPrefixes(simple.words) });
     if (ctx.policy === "readonly") checkReadonly(simple, ctx);
     else checkProtect(simple, ctx);

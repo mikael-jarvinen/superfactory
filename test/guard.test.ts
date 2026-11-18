@@ -475,6 +475,53 @@ test("stdin by any name, a clustered env flag, every find action and ssh on stdi
   assert.deepEqual(wrong, []);
 });
 
+// A heredoc's body was tied to the last command on its header line, not to the one whose << it is
+// (Marie on #124 at beb31d9e).
+test("a heredoc is the stdin of the command that opens it", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const M = "gh pr merge 1 -R acme/api";
+  const refused = [`bash < x.sh <<'E' | cat\n${M}\nE`, `ssh niilo <<'E' | cat\n${M}\nE`, `cat <<'A' | bash <<'B'\nx\nA\n${M}\nB`,
+    `bash <<'E' >out 2>&1 | cat\n${M}\nE`];
+  const allowed = ["bash <<'E' | tee log\nnpm test\nE", "bash <<'E' && echo ok\nnpm test\nE", "cat <<'E' | grep x\ngh pr merge\nE",
+    "bash < x.sh | cat", `cat <<'A' | bash <<'B'\n${M}\nA\nnpm test\nB`];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// Marie on #124 at beb31d9e, and CodeRabbit's review of eb982692: gh issue close/reopen/lock/unlock
+// act on a PR; GraphQL closes issues; HEAD is a read; a query cannot mutate; a wrapper's name on a
+// project script is not the wrapper.
+test("gh issue state changes are checked as gh pr, and the review's false refusals pass", () => {
+  const lead: GuardContext = { ...pr, role: "lead" };
+  const dir = tempWorkspace();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const r = factory(dir, ["allow-close", "api", "8701", "--words", "I allow you to close the PR"]);
+  assert.equal(r.status, 0, r.stderr);
+  const recorded: GuardContext = { ...lead, allowClose: allowClosePath(openWorkspace(dir).stateDir) };
+  const gql = (q: string) => `gh api graphql -f query='mutation { ${q} { clientMutationId } }'`;
+  const refused = ["gh issue close 8702 -R acme/api", "gh issue reopen 8701 -R acme/api", "gh issue lock 8701 -R acme/api", "gh issue unlock 8701 -R acme/api",
+    "gh issue close https://github.com/acme/api/issues/8702", "gh pr reopen 8701 -R acme/api", "gh issue close 8702", gql(`closeIssue(input: {issueId: "x"})`),
+    gql(`reopenIssue(input: {issueId: "x"})`), gql(`updateIssue(input: {id: "x", state: CLOSED})`),
+    "gh api graphql -f query='mutation M { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'",
+    "/usr/bin/env PATH=x ls", "/usr/bin/env gh pr merge 1 -R acme/api", "/usr/bin/nice gh pr merge 1 -R acme/api", "$D/env gh pr merge 1 -R acme/api"];
+  const allowed = ["gh issue close 3 -R acme/workspace", "gh issue lock 3 -R acme/workspace", "gh issue comment 8701 -R acme/api -b '> Written by agent. x'",
+    "gh issue view 8701 -R acme/api", "gh issue create -R acme/api -t x -b y", "gh api -X HEAD repos/acme/api", "gh api -X HEAD repos/acme/api/contents/a.txt",
+    "gh api graphql -f query='query closePullRequest { viewer { login } }'", "gh api graphql -f query='{ repository(owner: \"acme\", name: \"api\") { mergeCommitAllowed } }'",
+    "./scripts/env PATH=report", "./bin/nice report"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  for (const c of ["gh issue close 8701 -R acme/api", "gh issue close 8701 -R acme/api -r 'not planned'"]) if (verdict(c, recorded) !== null) wrong.push(`recorded lead refused: ${c} (${verdict(c, recorded)})`);
+  for (const c of ["gh issue close 8701 -R acme/api"]) if (verdict(c, pr) === null) wrong.push(`builder allowed: ${c}`);
+  assert.deepEqual(wrong, []);
+});
+
 // Wrappers and shells ran gh past every check (Marie on #124 at eb982692): nice, setsid, stdbuf,
 // flock, env -S, find -exec, ssh, a shell reading its script from a pipe, a here-string, a heredoc or
 // a <( ... ), and a substitution inside quotes or a <( ... ). Each is now read through to its command.

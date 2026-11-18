@@ -21,7 +21,9 @@ npm install -g .
 ```
 
 `npm install -g .` links the `factory` command to this clone. To upgrade, pull and run
-`npm run build` again.
+`npm run build` again. Then relaunch every session: `factory restart-lead`, and every open worker or
+agent session. A session reads its hooks when it starts, so one opened before the upgrade keeps the
+old guard matcher, and the GitHub MCP tools go unguarded there.
 
 ## Make a workspace
 
