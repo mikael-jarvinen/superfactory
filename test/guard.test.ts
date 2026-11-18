@@ -1205,6 +1205,13 @@ const ROUND_128: [string, string, string][] = [
   [NO, "a comma after body:", `gh api graphql -f query='mutation{addComment(input:{subjectId:"X",body:,"hi"}){clientMutationId}}'`],
   [OK, "a body: in a # comment is no input", `gh api graphql -f query='mutation{addComment(input:{subjectId:"X",body:"> Written by agent. ok"}){clientMutationId}} # body: "hi"'`],
   [OK, "a # inside a marked body is a letter", `gh api graphql -f query='mutation{addComment(input:{subjectId:"X",body:"> Written by agent. #1, done"}){clientMutationId}}'`],
+  // KJIQ: GitHub's GraphQL endpoint by its URL or a path is GraphQL too
+  [NO, "the GraphQL URL", `gh api https://api.github.com/graphql -f query='mutation{addComment(input:{subjectId:"X",body:"hi"}){clientMutationId}}'`],
+  [NO, "a GHE's GraphQL URL", `gh api https://ghe.acme.dev/api/graphql -f query='mutation{addComment(input:{subjectId:"X",body:"hi"}){clientMutationId}}'`],
+  [NO, "/graphql", `gh api /graphql -f query='mutation{addComment(input:{subjectId:"X",body:"hi"}){clientMutationId}}'`],
+  [NO, "the GraphQL URL with --input", "gh api https://api.github.com/graphql --input q.json"],
+  [OK, "the GraphQL URL with a marked body", `gh api https://api.github.com/graphql -f query='mutation{addComment(input:{subjectId:"X",body:"> Written by agent. ok"}){clientMutationId}}'`],
+  [OK, "a read by the GraphQL URL", `gh api https://api.github.com/graphql -f query='query{viewer{login}}'`],
 ];
 
 test("the shapes CodeRabbit found in #128 at 5332c327 are read as bash and gh read them", () => {

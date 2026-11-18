@@ -1168,7 +1168,9 @@ function checkCommentWrite(raw: string[]): void {
   if (g !== "api") return;
   const p = parseGh("api", args.slice(1));
   const endpoint = p.pos[0] ?? "";
-  if (endpoint === "graphql") return checkGraphql(p);
+  // gh posts to an absolute URL as given, and /graphql is GitHub's GraphQL endpoint by any host
+  // (api.github.com, or a GHE's /api/graphql): read as checkApiProtect reads it (CodeRabbit on #128)
+  if (/^(api\/)?graphql\/?(\?.*)?$/i.test(endpoint.replace(/^https?:\/\/[^/]+/i, "").replace(/^\/+/, ""))) return checkGraphql(p);
   const fields = fieldsOf(p);
   const method = (last(p, "method") ?? (fields.length || last(p, "input") !== undefined ? "POST" : "GET")).toUpperCase();
   if (method === "GET" || method === "DELETE" || !COMMENT_PATHS.test(endpoint)) return;
