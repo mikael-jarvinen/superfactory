@@ -157,16 +157,22 @@ export function tokenize(cmd: string): Tok[] {
     let depth = 1;
     let q = "";
     let body = "";
+    // whether the next character starts a word: after an unquoted, unescaped blank or operator. An
+    // escaped one never ends a word, so `\ #` is no comment (Marie and CodeRabbit on #127)
+    let wordStart = true;
     for (;;) {
       const c = next();
       if (c === "") refuse("cannot parse quoting (No closing parenthesis)");
       if (c === "\\" && q !== "'") {
-        body += c + next();
+        const e = next();
+        body += c + e;
+        // a backslash-newline is removed by bash, so it leaves wordStart as it was
+        if (e !== "\n") wordStart = false;
         continue;
       }
       // a # at the start of a word comments out the rest of its line, a ) in it included: bash reads
       // on to the next line for the substitution's end (CodeRabbit on #127)
-      if (!q && c === "#" && (body === "" || /[\s;&|()<>]/.test(body[body.length - 1] as string))) {
+      if (!q && c === "#" && wordStart) {
         let d = next();
         while (d !== "" && d !== "\n") d = next();
         if (d) back.push(d);
@@ -178,6 +184,7 @@ export function tokenize(cmd: string): Tok[] {
       else if (c === "(") depth++;
       else if (c === ")" && --depth === 0) return body;
       body += c;
+      wordStart = !q && /[\s;&|()<>]/.test(c);
     }
   };
   for (;;) {
