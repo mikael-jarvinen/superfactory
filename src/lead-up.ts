@@ -10,7 +10,7 @@ import type { Agent } from "./config.js";
 import { findSession, type Session, waitForName } from "./fleet.js";
 import { armText } from "./hooks/status.js";
 import { GIT_HTTPS_ENV, launch, launchArgs, leadPrompt, refreshSettings, roleAppendix, roleOf } from "./launch.js";
-import { forgetStopped, lastStopped, resumable } from "./stopped.js";
+import { forgetStopped, freshCommand, lastStopped, resumable } from "./stopped.js";
 import { isAgentSession, type Transport } from "./transport.js";
 import { FactoryError } from "./util.js";
 import type { Workspace } from "./workspace.js";
@@ -39,10 +39,10 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
     const st = lastStopped(ws, ld.name);
     if (!st) old = findSession(t, ld.name, true);
     else {
-      const which = resumable(ws, ld.name, t.sessions(true).filter(isAgentSession(ld.name)), () => null);
+      const which = resumable(ws, ld.name, t.sessions(true).filter(isAgentSession(ld.name)), () => findSession(t, ld.name, true));
       if ("gone" in which)
         throw new FactoryError(`${ld.name}'s last stopped session ${which.gone} is no longer listed, and an older one is another conversation. ` +
-          `\`factory up --fresh\` starts a new one.`);
+          `\`${freshCommand(ld)}\` starts a new one.`);
       old = which.s;
     }
   }
@@ -74,7 +74,8 @@ function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId:
   const cwd = old.cwd ?? (roleOf(ws, ld).cwd as string);
   try {
     t.start({ agent: ld, cwd, prompt, appendix, runDir: ws.runDir, phase: undefined, args: (p) => resumeArgs(ws, ld, sessionId, prompt, p), env: { ...process.env, ...GIT_HTTPS_ENV } });
-    // the resumed conversation runs under a new id, the one a later stop records
+    // the resumed conversation runs under a new id, the one a later stop records (the row it
+    // replaced is removed below)
     forgetStopped(ws, ld.name);
   } catch (e) {
     out(`resuming ${sessionId} failed (${(e as Error).message}); respawning instead`);

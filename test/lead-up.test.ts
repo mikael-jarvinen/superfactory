@@ -6,7 +6,7 @@ import type { Session } from "../src/fleet.js";
 import { lead } from "../src/fleet.js";
 import { leadPrompt, settingsFile } from "../src/launch.js";
 import { bringUpLead, resumePrompt } from "../src/lead-up.js";
-import { forgetStopped, noteStopped } from "../src/stopped.js";
+import { forgetStopped, lastStopped, noteStopped } from "../src/stopped.js";
 import type { StartRequest, Transport } from "../src/transport.js";
 import { FactoryError } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
@@ -181,17 +181,28 @@ test("restart-lead resumes the lead it stopped, by id, and refuses when that row
   const older = stopped({ id: "91c86061", sessionId: "older-uuid", startedAt: 1000, activeAt: 9000 });
   try {
     noteStopped(ws, ld.name, today);
-    const { t, started, respawned } = fake([older, today]);
+    const { t, started, respawned, removed } = fake([older, today]);
     bringUpLead(ws, ld, t, false, () => {}, 1);
     assert.deepEqual(respawned, []);
     const args = started[0]!.args;
     assert.equal(args[args.indexOf("--resume") + 1], "today-uuid", "the conversation stopped last, not the older thread");
+    assert.deepEqual(removed, ["5e7a0b12"], "the row the resume replaced goes, so stopped rows do not build up (Marie on #130)");
+    assert.equal(lastStopped(ws, ld.name), null);
 
     noteStopped(ws, ld.name, stopped({ id: "aa11bb22" }));
     const gone = fake([older]);
     assert.throws(() => bringUpLead(ws, ld, gone.t, false, () => {}, 1),
       /ada's last stopped session aa11bb22 is no longer listed, and an older one is another conversation\. `factory up --fresh` starts a new one/);
     assert.deepEqual([gone.started, gone.respawned], [[], []], "neither the older thread nor a fresh one");
+
+    // a lead launched since the stop, from another box whose run dir has no record: the record is
+    // stale, and the newest row is the conversation (Marie on #130)
+    noteStopped(ws, ld.name, stopped({ id: "aa11bb22", startedAt: 1000 }));
+    const later = stopped({ id: "c0ffee00", sessionId: "later-uuid", startedAt: Date.now() + 60_000 });
+    const other = fake([stopped({ id: "aa11bb22", sessionId: "stale-uuid", startedAt: 1000 }), later]);
+    bringUpLead(ws, ld, other.t, false, () => {}, 1);
+    const a2 = other.started[0]!.args;
+    assert.equal(a2[a2.indexOf("--resume") + 1], "later-uuid", "the conversation launched since, not the stale record's");
   } finally {
     forgetStopped(ws, ld.name);
   }

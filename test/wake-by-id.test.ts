@@ -3,9 +3,11 @@
 // just stopped, so wake respawned the newest row left: an older conversation, on its older command
 // line. A stop now keeps the row and records its id, and wake resumes that one or none.
 import assert from "node:assert/strict";
-import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { freshCommand, lastStopped, noteStopped, replaceStopped, resumable } from "../src/stopped.js";
+import { openWorkspace } from "../src/workspace.js";
 import { factory, fakeDaemon, TOML, tempWorkspace } from "./helpers.js";
 
 // A claude whose sessions live in db.json and keep the command line they were launched with: a
@@ -54,7 +56,9 @@ function fleet() {
   const run = (...a: string[]) => factory(ws, a, { env });
   const calls = () => readFileSync(join(ws, "calls"), "utf8").trim().split("\n");
   const rows = () => JSON.parse(readFileSync(join(ws, "db.json"), "utf8")) as { id: string; state: string }[];
-  return { ws, run, calls, rows };
+  const hook = (to: string) => factory(undefined, ["--workspace", ws, "hook", "wake"],
+    { env: { ...env, CLAUDE_BIN: claude }, input: JSON.stringify({ tool_name: "SendMessage", tool_input: { to, message: "hi" } }) });
+  return { ws, run, calls, rows, hook };
 }
 
 test("stop then wake resumes the session just stopped, by id, on its own command line", () => {
@@ -74,7 +78,7 @@ test("stop then wake resumes the session just stopped, by id, on its own command
 });
 
 test("a wake whose stopped session is gone says so, and respawns no older one", () => {
-  const { ws, run, calls } = fleet();
+  const { ws, run, calls, hook } = fleet();
   assert.equal(run("stop", "rae").status, 0);
   // the row goes some other way: a hand-run `claude rm`, say
   const db = join(ws, "db.json");
@@ -83,4 +87,46 @@ test("a wake whose stopped session is gone says so, and respawns no older one", 
   assert.equal(r.status, 1);
   assert.match(r.stderr, /rae did not wake: 5e7a0b12, the session stopped last, is no longer listed, and an older one is another conversation/);
   assert.deepEqual(calls().filter((c) => c.startsWith("respawn") || c.startsWith("--bg")), [], "neither 91c86061 nor a fresh one");
+  // the way out is named, and the hook does not send people back to the wake that failed (Marie on #130)
+  assert.match(r.stderr, /`factory review --name rae --force` starts it fresh/);
+  const h = hook("rae");
+  assert.equal(h.status, 2);
+  assert.match(h.stderr, /rae is off and cannot wake: .*Tell the lead, who starts it fresh with `factory review --name rae --force`/);
+  assert.doesNotMatch(h.stderr, /Try `factory wake/);
+});
+
+test("each role's way to start fresh is the command that starts it", () => {
+  const cmd = (name: string, role: string) => freshCommand({ name, role } as Parameters<typeof freshCommand>[0]);
+  assert.equal(cmd("ada", "lead"), "factory up --fresh");
+  assert.equal(cmd("rae", "reviewer"), "factory review --name rae --force");
+  assert.equal(cmd("winston", "assistant"), "factory assistant winston --force");
+  assert.equal(cmd("bea", "builder"), "factory dispatch bea <KEY> --force");
+  assert.equal(cmd("dora", "designer"), "factory dispatch dora <KEY> --force");
+});
+
+test("a stopped row with no name records nothing", () => {
+  const { ws } = fleet();
+  const w = openWorkspace(ws, {});
+  noteStopped(w, "", { id: "x1", name: undefined });
+  assert.ok(!existsSync(join(w.runDir, "stopped-.json")), "down wrote stopped-.json for a nameless row (Marie on #130)");
+});
+
+test("a fresh launch removes the stopped row it replaces, and a record older than a launch elsewhere is not resumed", () => {
+  const { ws, run, rows } = fleet();
+  assert.equal(run("stop", "rae").status, 0);
+  const w = openWorkspace(ws, {});
+  // another box launched rae since: a newer row that this box's record knows nothing of
+  const db = join(ws, "db.json");
+  const all = JSON.parse(readFileSync(db, "utf8")) as Record<string, unknown>[];
+  all.push({ id: "c0ffee00", name: "rae", kind: "background", state: "stopped", status: "idle", pid: null,
+    startedAt: Date.now() + 60_000, cwd: "/w/rae", sessionId: "c0ffee00-uuid", args: ["--bg", "--name", "rae", "launched elsewhere"] });
+  writeFileSync(db, JSON.stringify(all));
+  const which = resumable(w, "rae", rows() as never, (r) => r.reduce((a, b) => ((b.startedAt as number) > (a.startedAt as number) ? b : a)));
+  assert.ok("s" in which && which.s?.id === "c0ffee00", JSON.stringify(which));
+
+  // a fresh launch here: the stopped row it replaces goes, and the record with it
+  const t = { sessions: () => rows() as never, alive: (s: unknown): s is never => (s as { state?: string } | null)?.state !== "stopped" && !!s, stop: (_n: string, id: string, remove: boolean) => { if (remove) writeFileSync(db, JSON.stringify((JSON.parse(readFileSync(db, "utf8")) as { id: string }[]).filter((x) => x.id !== id))); } };
+  replaceStopped(w, "rae", t as never, "new1");
+  assert.ok(!rows().some((x) => x.id === "5e7a0b12"), "the stopped row is removed");
+  assert.equal(lastStopped(w, "rae"), null);
 });

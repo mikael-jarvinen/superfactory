@@ -7,7 +7,7 @@
 import type { Agent } from "./config.js";
 import { findSession, pollForName, type Session } from "./fleet.js";
 import { refreshSettings } from "./launch.js";
-import { resumable } from "./stopped.js";
+import { freshCommand, resumable } from "./stopped.js";
 import { ask, Unreachable } from "./remote.js";
 import { isAgentSession, LISTING_TIMEOUT_MS, newest, type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
@@ -19,7 +19,8 @@ export type Woken =
   | { is: "woke"; s: Session; from: string }
   // no session under the name, or the newest is not the one the caller would wake
   | { is: "none" }
-  | { is: "failed"; why: string }
+  // fresh: the command that starts it fresh, when its conversation cannot come back
+  | { is: "failed"; why: string; fresh?: string }
   // the sessions could not be listed
   | { is: "unknown"; why: string };
 
@@ -51,7 +52,8 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   // resumed by its id, and never an older row in its place (stopped.ts).
   const which = resumable(ws, agent.name, all.filter(isAgentSession(agent.name)), newest);
   if ("gone" in which)
-    return { is: "failed", why: `${which.gone}, the session stopped last, is no longer listed, and an older one is another conversation` };
+    return { is: "failed", fresh: freshCommand(agent),
+      why: `${which.gone}, the session stopped last, is no longer listed, and an older one is another conversation; \`${freshCommand(agent)}\` starts it fresh` };
   const old = which.s;
   if (!old?.id || (o.match && !o.match(old))) return { is: "none" };
   if (left() - LISTING_TIMEOUT_MS < 1000) return late(`respawning ${old.id}`);

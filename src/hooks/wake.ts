@@ -114,6 +114,8 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
     case "none":
       return { code: 2, stderr: `${to} is off and has no session to wake. Start it the factory way (dispatch, review or assistant), then send.\n` };
     case "failed":
+      // a conversation that cannot come back: another wake fails the same way (Marie on #130)
+      if (w.fresh) return { code: 2, stderr: `${to} is off and cannot wake: ${w.why}. Tell the lead, who starts it fresh with \`${w.fresh}\`; then send.\n` };
       return { code: 2, stderr: `${to} is off and did not wake: ${w.why}. Try \`factory wake ${to}\`, or tell the lead.\n` };
   }
 }

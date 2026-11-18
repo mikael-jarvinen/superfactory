@@ -4,7 +4,7 @@ import type { Agent, GitOver, Role } from "./config.js";
 import { lead, type Session, waitForName } from "./fleet.js";
 import { renderSettings } from "./settings.js";
 import { branchFor, isLocal } from "./state.js";
-import { forgetStopped } from "./stopped.js";
+import { replaceStopped } from "./stopped.js";
 import { type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
 import { capitalize, die } from "./util.js";
@@ -148,9 +148,9 @@ export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string,
     args: (appendixPath) => launchArgs(ws, agent, prompt, appendixPath, phase),
     env: { ...process.env, ...GIT_HTTPS_ENV },
   });
-  // a new conversation: the one stopped last is no longer the one to resume
-  forgetStopped(ws, agent.name);
   const s = waitForName(t, agent.name);
+  // a new conversation: the one stopped last is no longer the one to resume, nor kept listed
+  replaceStopped(ws, agent.name, t, s?.id);
   if (!s) {
     const there = agent.host ? ` on host ${t.where}` : "";
     const also = agent.host ? ` there, and \`factory doctor\` for whether ${t.where} answers` : "";
