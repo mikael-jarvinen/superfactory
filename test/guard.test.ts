@@ -9,7 +9,7 @@ import { openWorkspace } from "../src/workspace.js";
 import { factory, tempWorkspace } from "./helpers.js";
 
 const ro: GuardContext = { role: "reviewer", policy: "readonly", writeDirs: [], ownRepos: [] };
-const pr: GuardContext = { role: "builder", policy: "protect", writeDirs: [], org: "acme", ownRepos: ["acme/workspace", "alex/factory"] };
+const pr: GuardContext = { role: "builder", policy: "protect", writeDirs: [], org: "acme", ownRepos: ["acme/workspace", "alex/factory"], defaultBranch: (r) => (r === "acme/trunk-repo" ? "trunk" : r === "acme/offline" ? null : "main") };
 
 const REFUSE = 2;
 const ALLOW = 0;
@@ -309,6 +309,10 @@ test("the GitHub MCP tools are held to the gh rules", () => {
     ["push_files", { ...api, branch: "main", files: [], message: "x" }, pr],
     ["create_or_update_file", { ...api, branch: "master", path: "a", content: "", message: "x" }, lead],
     ["delete_file", { ...api, branch: "main", path: "a", message: "x" }, pr],
+    // a product repo's own default branch, no branch at all, or a default the guard cannot read
+    ["push_files", { owner: "acme", repo: "trunk-repo", branch: "trunk", files: [], message: "x" }, pr],
+    ["create_or_update_file", { ...api, path: "a", content: "", message: "x" }, pr],
+    ["delete_file", { owner: "acme", repo: "offline", branch: "fix-x", path: "a", message: "x" }, lead],
     ["create_repository", { name: "x" }, lead],
     ["delete_repository", { ...api }, lead],
     ["fork_repository", { ...api }, pr],
@@ -329,6 +333,7 @@ test("the GitHub MCP tools are held to the gh rules", () => {
     ["pull_request_review_write", { ...api, pullNumber: 1, method: "resolve_thread", threadId: "PRRT_x" }, pr],
     ["create_pull_request", { ...api, title: "t", head: "x", base: "main", draft: true }, pr],
     ["push_files", { ...api, branch: "fix-x", files: [], message: "x" }, pr],
+    ["push_files", { owner: "acme", repo: "trunk-repo", branch: "fix-x", files: [], message: "x" }, pr],
     ["create_or_update_file", { owner: "acme", repo: "workspace", branch: "main", path: "a", content: "", message: "x" }, pr],
     ["issue_write", { ...api, method: "create", title: "t" }, pr],
   ];
@@ -426,8 +431,12 @@ test("gh api cannot merge, commit to main or transfer on a product repo", () => 
     "gh api -X POST repos/acme/api/merges -f base=main -f head=feat", "gh api repos/acme/api/merges -f base=feat/x -f head=main",
     "gh api -X POST repos/acme/api/transfer -f new_owner=x",
     gql(`enqueuePullRequest(input: {pullRequestId: "x"})`), gql(`createCommitOnBranch(input: {branch: {branchName: "main"}})`)];
+  // the repo's own default branch, whatever it is called, and one the guard cannot read (CodeRabbit on #124)
+  const trunk = "gh api -X PUT repos/acme/trunk-repo/contents/a.txt -f message=m -f content=eA==";
+  refused.push(`${trunk} -f branch=trunk`, `${trunk} -f branch=refs/heads/Trunk`,
+    "gh api -X PUT repos/acme/offline/contents/a.txt -f message=m -f content=eA== -f branch=feat/x");
   const allowed = ["gh api -X PUT repos/acme/workspace/contents/a.txt -f message=m -f content=eA==", `${put} -f branch=feat/x`,
-    "gh api repos/acme/api/contents/a.txt", "gh api repos/acme/api/merges"];
+    "gh api repos/acme/api/contents/a.txt", "gh api repos/acme/api/merges", `${trunk} -f branch=feat/x`];
   const wrong: string[] = [];
   for (const ctx of [pr, lead]) {
     for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
@@ -493,15 +502,21 @@ test("a command is named by the file that runs", () => {
   symlinkSync("git", join(bin, "git-core", "git-push"));
   writeFileSync(join(bin, "busybox"), "", { mode: 0o755 });
   symlinkSync("busybox", join(bin, "static-sh"));
-  const refused = [`${bin}/e ${M}`, `PATH=${bin}:$PATH e ${M}`, `${bin}/r -c '${M}'`, `${bin}/git-core/git-push origin main`,
-    `${bin}/git-core/git-push origin --delete x`, `${bin}/static-sh -c '${M}'`, `${bin}/busybox env ${M}`, `busybox sh -c '${M}'`,
-    `nice ${bin}/e ${M}`, `ksh93 -c '${M}'`, `tcsh -c '${M}'`, `mksh-static -c '${M}'`, "git-push origin main", `env ${bin}/r -c '${M}'`];
+  // link/.. is the link target's parent, as the kernel walks it, not bin (CodeRabbit on #124)
+  mkdirSync(join(bin, "real", "child"), { recursive: true });
+  symlinkSync(join(bin, "real", "child"), join(bin, "link"));
+  symlinkSync(env, join(bin, "real", "e2"));
+  writeFileSync(join(bin, "e2"), "", { mode: 0o755 });
+  const refused = [`'${bin}/e' ${M}`, `PATH='${bin}':$PATH e ${M}`, `'${bin}/r' -c '${M}'`, `'${bin}/git-core/git-push' origin main`,
+    `'${bin}/git-core/git-push' origin --delete x`, `'${bin}/static-sh' -c '${M}'`, `'${bin}/busybox' env ${M}`, `busybox sh -c '${M}'`,
+    `nice '${bin}/e' ${M}`, `ksh93 -c '${M}'`, `tcsh -c '${M}'`, `mksh-static -c '${M}'`, "git-push origin main", `env '${bin}/r' -c '${M}'`,
+    `'${bin}/link/../e2' ${M}`];
   for (const [name, row] of [["/usr/bin/rsh", `rsh niilo '${M}'`], ["/usr/bin/rsh", `/usr/bin/rsh niilo '${M}'`], ["/usr/bin/slogin", `slogin niilo '${M}'`],
     ["/usr/bin/rbash", `rbash -c '${M}'`], ["/usr/bin/static-sh", `static-sh -c '${M}'`], ["/usr/bin/busybox", `busybox env ${M}`],
     ["/usr/lib/git-core/git-push", "/usr/lib/git-core/git-push origin main"], ["/usr/lib/git-core/git-push", "/usr/lib/git-core/git-push origin --delete x"]] as const)
     if (existsSync(name)) refused.push(row);
   const allowed = ["git status", "/usr/bin/git status", "ssh niilo uptime", "npm test", "./scripts/report", "~/agents/bin/pr-send.sh 124 abc",
-    `${bin}/e npm test`, `${bin}/git-core/git-push origin feature/x`, "sh -c 'npm test'", "awk 1 x.txt", "python3 -V"];
+    `'${bin}/e' npm test`, `'${bin}/git-core/git-push' origin feature/x`, "sh -c 'npm test'", "awk 1 x.txt", "python3 -V"];
   const wrong: string[] = [];
   for (const ctx of [pr, { ...pr, role: "lead" }]) {
     for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
@@ -533,7 +548,7 @@ test("an argument that names a checked program is checked as a command", () => {
   const ionice = ["/usr/bin/ionice", "/bin/ionice"].find(existsSync);
   if (ionice) {
     symlinkSync(ionice, join(bin, "w"));
-    refused.push(`${bin}/w ${M}`);
+    refused.push(`'${bin}/w' ${M}`);
   }
   const allowed = ["which gh", "which -a gh hub", "ls ~/.local/bin/gh /usr/local/bin/gh", "ls -l /usr/bin/gh /usr/local/bin/gh", "command -v gh",
     "command -V gh", "type gh", "man git", "grep -rn 'gh pr merge' .", "rg 'gh pr merge' .", "rg -n gh src", "apt-cache show git",
@@ -569,7 +584,15 @@ test("strings a program runs and lines it schedules are checked as commands", ()
     `echo -e '* * * * * \\x67h pr merge 1 -R acme/api' | crontab -`, `printf '* * * * * %.2s pr merge 1 -R acme/api\\n' ghx | crontab -`,
     `printf '* * * * * %b pr merge 1 -R acme/api\\n' '\\x67h' | crontab -`, `printf '\\x67h pr merge 1 -R acme/api\\n' | at now`,
     // git's relocating options stay refused
-    "git --exec-path=/tmp/x status", "git --git-dir=/x push origin main", "git -C /x --exec-path=/tmp/x log"];
+    "git --exec-path=/tmp/x status", "git --git-dir=/x push origin main", "git -C /x --exec-path=/tmp/x log",
+    // round 11 (Marie and CodeRabbit at aaf79c48): printf's --, a substitution in any word the line
+    // consumes (a redirect target, a here-string), an unquoted heredoc's body, the last input on fd 0,
+    // and what a group or a compound command prints into the pipe after it
+    `printf -- '* * * * * ${M}\\n' | crontab -`, `printf -- '%s\\n' '${M}' | at now`,
+    `echo x > "$(${M})"`, `cat < "$(${M})"`, `echo x 2> "\`${M}\`"`, `echo x >> "$(${M})"`, `cat <<< "$(${M})"`, `cat 0< "$(${M})"`,
+    `cat <<E\n$(${M})\nE`, `cat <<E\n\`${M}\`\nE`, `cat <<E > out.md\nrun $(true) then $(${M})\nE`, `bash <<'A' <<'B'\ntrue\nA\n${M}\nB`,
+    `bash <<'END-DATA'\n${M}\nEND-DATA`, `bash 3<<'A' <<'B'\ntrue\nA\n${M}\nB`,
+    `{ echo '${M}'; echo true; } | at now`, `if true; then echo '${M}'; fi | at now`, `while true; do echo '${M}'; done | at now`];
   const allowed = ["tmux new -d 'npm test; echo done'", "docker run img sh -c 'npm test && echo ok'", "tmux new -s w", "tmux attach -t w",
     "crontab -l", "(crontab -l; echo '30 3 * * 1 ~/agents/bin/agent-compact.sh warren') | crontab -",
     "printf '%s\\n' '30 3 * * 1 ~/agents/bin/agent-compact.sh warren' | crontab -", "echo '0 * * * * npm test' | crontab -",
@@ -581,7 +604,13 @@ test("strings a program runs and lines it schedules are checked as commands", ()
     `tg-notify.sh "run sudo usermod -aG docker bot; then watch the trial"`, `until [ "$(ssh h 'pgrep -fc x || true')" = "" ]; do sleep 2; done`,
     // git's global options that only print (Niilo, round 10)
     "git --version", "git --help", "git --help push", "git --exec-path", "git --html-path", "git --man-path", "git --info-path",
-    "bash -c 'git --version'", "git --no-pager --version", "git --exec-path /tmp/x status"];
+    "bash -c 'git --version'", "git --no-pager --version", "git --exec-path /tmp/x status",
+    // round 11: a literal $ before a quoted (, a quoted heredoc's body, an input fd 0 no longer reads,
+    // a hyphenated delimiter, and what an earlier pipeline printed
+    `echo '$'"(USD"`, `echo '$'"(USD)"`, `echo x > "$(true)"`, "echo x > out.txt", `cat <<'E'\n$(${M})\nE`, `cat <<E\n\\$(${M})\nE`,
+    "cat <<E > README.md\nrun `npm test`, then $(date)\nE", `cat <<'END-DATA'\na "b\nEND-DATA`, `bash <<'A' <<'B'\necho "x\nA\ntrue\nB`,
+    `bash <<'A' < /dev/null\n${M}\nA`, `echo 'unmatched " quote'; echo true | at now`, `echo '${M}' && echo true | at now`,
+    `(echo '${M}'); echo true | at now`];
   const wrong: string[] = [];
   for (const ctx of [pr, { ...pr, role: "lead" }]) {
     for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);

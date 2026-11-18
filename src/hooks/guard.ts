@@ -80,6 +80,8 @@ export interface GuardContext {
   leadMerges?: string[];
   // Whether a branch of owner/repo is merged into the default branch. Tests stub it; the hook asks GitHub.
   isMerged?: (repo: string, branch: string) => boolean;
+  // owner/repo's default branch, or null when it cannot be read. Tests stub it; the hook asks GitHub.
+  defaultBranch?: (repo: string) => string | null;
   // state/allow-close.jsonl: the product PRs the human has named for the lead to close. Without it the
   // lead's guard finds the file through its workspace, so a lead launched before the flag existed
   // needs no restart.
@@ -97,12 +99,17 @@ const TRUSTED_BIN_DIRS = new Set(["/usr/bin", "/bin", "/opt/homebrew/bin", "/usr
 // /usr/bin/X11 (a link to .) and /proc/self/root/usr/bin are all /usr/bin. One that does not exist
 // runs nothing, so its normal form is kept. ~ is the home directory; a relative one is from cwd.
 function resolveDir(dir: string): string {
-  const abs = posix.resolve(process.cwd(), dir === "~" || dir.startsWith("~/") ? homedir() + dir.slice(1) : dir);
+  const abs = unresolved(dir === "~" || dir.startsWith("~/") ? homedir() + dir.slice(1) : dir);
   try {
-    return realpathSync(abs);
+    return realpathSync.native(abs);
   } catch {
     return posix.normalize(abs);
   }
+}
+// A path from cwd with its `..` left in: the kernel takes link/.. as the link target's parent, where
+// posix.resolve (and realpathSync, which calls it) drops both (CodeRabbit on #124: link/../tool).
+function unresolved(p: string): string {
+  return p.startsWith("/") ? p : `${process.cwd()}/${p}`;
 }
 let trustedReal: Set<string> | undefined;
 function trustedDir(dir: string): boolean {
@@ -164,6 +171,9 @@ export function tokenize(cmd: string): Tok[] {
     let state = " ";
     let esc = "a";
     let escaped = -1;
+    // where the current double-quoted span began: only a `$` inside it opens a "$(...)", so the `$`
+    // of '$'"(USD" is a letter (CodeRabbit on #124)
+    let dq = -1;
     const subs: string[] = [];
     for (;;) {
       const c = next();
@@ -175,7 +185,7 @@ export function tokenize(cmd: string): Tok[] {
         }
         if (c === "\\") [esc, state] = ["a", "\\"];
         else if (PUNCT.includes(c)) [tok, state, op] = [c, "c", true];
-        else if (c === "'" || c === '"') state = c;
+        else if (c === "'" || c === '"') [state, dq] = [c, tok.length];
         else [tok, state] = [c, "a"];
         continue;
       }
@@ -184,7 +194,7 @@ export function tokenize(cmd: string): Tok[] {
         if (c === "") refuse("cannot parse quoting (No closing quotation)");
         if (c === state) state = "a";
         else if (c === "\\" && state === '"') [esc, state] = [state, "\\"];
-        else if (c === "(" && state === '"' && tok.endsWith("$") && escaped !== tok.length) {
+        else if (c === "(" && state === '"' && tok.endsWith("$") && tok.length > dq && escaped !== tok.length) {
           const body = sub();
           tok += `(${body})`;
           subs.push(body);
@@ -214,7 +224,7 @@ export function tokenize(cmd: string): Tok[] {
         back.push(c);
         break;
       }
-      if (c === "'" || c === '"') state = c;
+      if (c === "'" || c === '"') [state, dq] = [c, tok.length];
       else if (c === "\\") [esc, state] = ["a", "\\"];
       else if (!PUNCT.includes(c)) tok += c;
       else {
@@ -253,6 +263,9 @@ interface Simple {
   piped?: boolean;
   // what echo and printf earlier in the line print, which a pipe may carry to it
   upstream?: string[];
+  // the first command of a pipeline outside any group, loop or subshell: nothing printed before it
+  // reaches a pipe after it (CodeRabbit on #124: `echo 'a " b'; echo true | at now`)
+  fresh?: boolean;
 }
 
 // Simple commands with the files their redirects write. `2>` arrives as "2" then ">", and the
@@ -266,20 +279,34 @@ function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
   let writes: string[] = [];
   let reads: string[] = [];
   let stdin: string[] = [];
+  // fd 0's input: the last <, <<, <<< or <> on it is the one the command reads
+  let in0: string | null = null;
   let piped = false;
-  const outer: ({ cur: string[]; writes: string[]; reads: string[]; stdin: string[] } | null)[] = [];
+  let fresh = true;
+  // open groups and compound commands ({ }, if/while/until/for/case/select), for `fresh`
+  let depth = 0;
+  const outer: ({ cur: string[]; writes: string[]; reads: string[]; stdin: string[]; in0: string | null } | null)[] = [];
   const flush = () => {
-    if (cur.length || writes.length || reads.length) out.push({ words: cur, writes, reads, stdin, piped });
-    [cur, writes, reads, stdin, piped] = [[], [], [], [], false];
+    if (in0 !== null) stdin.push(in0);
+    if (cur.length || writes.length || reads.length || stdin.length) {
+      out.push({ words: cur, writes, reads, stdin, piped, fresh });
+      fresh = false;
+    }
+    [cur, writes, reads, stdin, in0, piped] = [[], [], [], [], null, false];
+  };
+  // what runs inside a substitution in a word: a quoted "$(...)" here, a backtick is refused
+  const inner = (k: Tok | undefined) => {
+    for (const body of k?.subs ?? []) if (!/^\(.*\)$/s.test(body)) out.push(...simpleCommands(tokenize(body), bodies)); // $((...)) is arithmetic
+    if (k && !k.op && k.t.includes("`")) refuse("backtick command substitution");
   };
   const open = () => {
-    outer.push({ cur, writes, reads, stdin });
-    [cur, writes, reads, stdin] = [[], [], [], []];
+    outer.push({ cur, writes, reads, stdin, in0 });
+    [cur, writes, reads, stdin, in0] = [[], [], [], [], null];
   };
   for (let i = 0; i < flat.length; i++) {
     const { t, op, subs } = flat[i] as Tok;
     const paren = flat[i + 1]?.op === true && flat[i + 1]?.t === "(";
-    for (const body of subs ?? []) if (!/^\(.*\)$/s.test(body)) out.push(...simpleCommands(tokenize(body), bodies)); // $((...)) is arithmetic
+    inner(flat[i]);
     if (op && (t === "<" || t === ">") && paren) {
       cur.push(`${t}(`);
       i++;
@@ -290,26 +317,35 @@ function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
     } else if (op && t === ")") {
       flush();
       const o = outer.pop();
-      if (o) ({ cur, writes, reads, stdin } = o);
+      if (o) ({ cur, writes, reads, stdin, in0 } = o);
     } else if (op ? SEPARATORS.has(t) : t === "{" || t === "}") {
       flush();
+      if (!op) depth += t === "{" ? 1 : -1;
       piped = t === "|" || t === "|&";
+      if (!piped && op && t !== "(" && t !== ")" && depth === 0 && outer.length === 0) fresh = true;
     } else if (op) {
-      const target = flat[i + 1]?.t ?? "";
-      if (cur.length && /^\d$/.test(cur[cur.length - 1] as string)) cur.pop();
+      // the target is a word too, and a substitution in it runs: `echo x > "$(gh ...)"` (Marie on #124)
+      const next = flat[i + 1];
+      inner(next);
+      const target = next?.t ?? "";
+      const fd = cur.length && /^\d$/.test(cur[cur.length - 1] as string) ? (cur.pop() as string) : null;
       if (t.includes(">") && !(t === ">&" && /^(\d+|-)$/.test(target))) writes.push(target);
       if (t === "<" || t === "<>") reads.push(target);
-      if (t === "<<<") stdin.push(target);
-      if (t === "<<" && /^HEREDOC\d+$/.test(target)) stdin.push(bodies[Number(target.slice(7))] ?? "");
+      const input = t === "<<<" ? target : t === "<<" && /^HEREDOC\d+$/.test(target) ? (bodies[Number(target.slice(7))] ?? "") : null;
+      // on fd 0 a later input replaces an earlier one, and a file (in reads) leaves no text; on another
+      // fd a text is kept, which over-checks (CodeRabbit on #124: `bash <<'A' <<'B'` runs only B)
+      const onZero = (fd ?? "0") === "0";
+      if (onZero && (input !== null || t === "<" || t === "<>")) in0 = input;
+      else if (input !== null) stdin.push(input);
       i++;
     } else if (t.endsWith("$") && paren) {
       // `$(` or `X=$(`: what is inside is its own simple command, and a `$(` word stands for its output
       cur.push(t === "$" ? "$(" : t);
       i++;
       open();
-    } else if (t.includes("`")) {
-      refuse("backtick command substitution");
     } else {
+      if (!cur.length && /^(if|while|until|for|case|select)$/.test(t)) depth++;
+      if (!cur.length && /^(fi|done|esac)$/.test(t)) depth--;
       cur.push(t);
     }
   }
@@ -640,6 +676,21 @@ function mergedOnGitHub(repo: string, branch: string): boolean {
   return cmp.status === 0 && cmp.stdout.trim() === "0";
 }
 
+function defaultBranchOnGitHub(repo: string): string | null {
+  const r = run("gh", ["api", `repos/${repo}`, "--jq", ".default_branch"], { timeout: 15_000 });
+  return r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null;
+}
+
+// A write to a branch of a product repo: refused on a protected name, and on the repo's own default
+// branch, which may be trunk or nextjs (CodeRabbit on #124). When the default cannot be read, refused.
+function checkBranchWrite(repo: string, branch: string, ctx: GuardContext, why: string): void {
+  // no branch is the default branch: create_or_update_file and delete_file commit there without one
+  if (!branch || protectedRef(branch)) refuse(why);
+  const d = (ctx.defaultBranch ?? defaultBranchOnGitHub)(repo);
+  if (d === null) return refuse(`the default branch of ${repo} cannot be read, so a write to ${branch} cannot be checked`);
+  if (d.toLowerCase() === branch.replace(/^\+/, "").replace(/^refs\/heads\//, "").toLowerCase()) refuse(why);
+}
+
 // The owner/repo a `gh pr <merge|close|...>` targets, from --repo/-R or a PR URL. null when the
 // command relies on the cwd's remote, which the guard cannot resolve -- the caller then fails safe.
 function ghPrRepo(args: string[]): string | null {
@@ -824,8 +875,9 @@ function checkApiProtect(args: string[], ctx: GuardContext): void {
     if (w[3]?.toLowerCase() === "merges") refuse(`merging a branch of ${repo} through the API is not allowed; open a PR`);
     if (w[3]?.toLowerCase() === "transfer") refuse(`transferring ${repo} is the human's call`);
     const branch = a.fields.filter((f) => f.key === "branch").map((f) => f.value);
-    if (a.input || branch.length !== 1 || !branch[0] || branch[0].startsWith("@") || /[$`]/.test(branch[0] as string) || protectedRef(branch[0] as string))
-      refuse(`a contents write to ${repo} needs -f branch=<a feature branch>: without one it commits to the default branch`);
+    const why = `a contents write to ${repo} needs -f branch=<a feature branch>: without one it commits to the default branch`;
+    if (a.input || branch.length !== 1 || !branch[0] || branch[0].startsWith("@") || /[$`]/.test(branch[0] as string)) refuse(why);
+    checkBranchWrite(repo, branch[0] as string, ctx, why);
   }
   const m = API_TARGET.exec(ep);
   if (!m) return;
@@ -928,7 +980,7 @@ function checkMcpGithub(tool: string, tin: Record<string, unknown>, ctx: GuardCo
     checkGhProtect(["gh", "pr", "merge", n, "-R", repo, ...(head ? ["--match-head-commit", head] : []), ...(method ? [`--${method}`] : [])], ctx);
   } else if (MCP_GITHUB_BRANCH_WRITES.has(name)) {
     const own = ctx.ownRepos.some((r) => r.toLowerCase() === repo.toLowerCase());
-    if (protectedRef(str("branch")) && !own) refuse(`pushing to a protected branch (${str("branch")}) is not allowed`);
+    if (!own) checkBranchWrite(repo, str("branch"), ctx, `pushing to a protected branch (${str("branch")}) is not allowed`);
   } else if (!MCP_GITHUB_WRITES.has(name)) refuse(`${name} is a GitHub MCP write the guard does not know, so it is refused; use gh`);
   if (name === "update_pull_request") {
     if (tin.state === "closed") checkGhProtect(["gh", "pr", "close", n, "-R", repo], ctx);
@@ -1112,7 +1164,7 @@ function onPath(name: string): string | null {
 }
 function realFile(p: string): string | null {
   try {
-    return realpathSync(p);
+    return realpathSync.native(p);
   } catch {
     return null;
   }
@@ -1154,7 +1206,7 @@ function commandWord(words: string[], ctx: GuardContext): string[] {
       if (relative && w.split("/").includes("..")) cannot("climbs out of the project with ..");
       if (relative && ctx.cwdChanged) trusted = true;
       else {
-        file = realFile(posix.resolve(process.cwd(), w.startsWith("~") ? homedir() + w.slice(1) : w));
+        file = realFile(unresolved(w.startsWith("~") ? homedir() + w.slice(1) : w));
         trusted = file === null && trustedDir(posix.dirname(w));
       }
     }
@@ -1476,7 +1528,10 @@ function checkSecrets({ words: raw, reads }: Simple): void {
 // ---------------------------------------------------------------- the hook
 
 // The body starts on the line after the one holding <<DELIM, whatever else is on that line.
-const HEREDOC = /<<-?\s*['"]?(\w+)['"]?[^\n]*\n([\s\S]*?)\n\1\s*(\n|$)/;
+// The delimiter is any word, END-DATA as well as EOF (CodeRabbit on #124); quoted, the body is text,
+// and unquoted, bash runs each $(...) and `...` in it.
+const HEREDOC = /<<-?\s*(['"]?)([^\s'"<>;&|()]+)\1[^\n]*\n([\s\S]*?)\n\2\s*(\n|$)/;
+const HEREDOC_HEAD = /^<<-?\s*(['"]?)[^\s'"<>;&|()]+\1/;
 
 // What echo or printf prints, or null for any other command. Only \\n, \\t and \\\\ are read, and
 // only %s, %d and %%: any other escape (\\x67, \\147, \\c) in echo's words or printf's format, or any
@@ -1493,6 +1548,8 @@ function printedText(words: string[]): string | null {
     return esc(words.slice(i).join(" ")) ?? UNREADABLE;
   }
   if (name === "printf") {
+    // `printf -- FORMAT`: the -- ends the options and is not the format (Marie on #124)
+    if (words[1] === "--") words = [words[0] as string, ...words.slice(2)];
     const fmt = words[1];
     if (fmt === undefined) return "";
     if (fmt.replace(/%%|%[sd]/g, "").includes("%")) return UNREADABLE;
@@ -1546,6 +1603,41 @@ function checkScheduled(name: string, words: string[], texts: string[], ctx: Gua
   }
 }
 
+// The command lines of the $(...) and `...` in an unquoted heredoc's body, which bash runs as it reads
+// it; $((...)) is arithmetic.
+function bodySubstitutions(body: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === "\\") i++;
+    else if (c === "`") {
+      let j = i + 1;
+      while (j < body.length && body[j] !== "`") j += body[j] === "\\" ? 2 : 1;
+      if (j >= body.length) refuse("cannot parse quoting (No closing backtick)");
+      out.push(body.slice(i + 1, j).replace(/\\([`$\\])/g, "$1"));
+      i = j;
+    }
+    else if (c === "$" && body[i + 1] === "(") {
+      let depth = 0;
+      let q = "";
+      let j = i + 1;
+      for (; j < body.length; j++) {
+        const d = body[j] as string;
+        if (d === "\\" && q !== "'") j++;
+        else if (q) { if (d === q) q = ""; }
+        else if (d === "'" || d === '"') q = d;
+        else if (d === "(") depth++;
+        else if (d === ")" && --depth === 0) break;
+      }
+      if (j >= body.length) refuse("cannot parse quoting (No closing parenthesis)");
+      const inner = body.slice(i + 2, j);
+      if (!/^\(.*\)$/s.test(inner)) out.push(inner);
+      i = j;
+    }
+  }
+  return out;
+}
+
 function checkCommand(cmd: string, ctx: GuardContext): void {
   if (!ctx.homeAssigned && /\bHOME\b/.test(cmd.replace(/\$\{?HOME\b/g, ""))) ctx = { ...ctx, homeAssigned: true };
   if (!ctx.cwdChanged && /(^|[^\w.-])(cd|pushd|popd)\b|\s-(execdir|okdir)\b|\s--chdir\b|\benv\b[^;&|\n]*\s-[A-Za-z]*C/.test(cmd)) ctx = { ...ctx, cwdChanged: true };
@@ -1556,11 +1648,13 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
   let text = cmd;
   const bodies: string[] = [];
   for (let m = HEREDOC.exec(text); m; m = HEREDOC.exec(text)) {
-    const header = (m[0].split("\n", 1)[0] as string).replace(/^<<-?\s*['"]?\w+['"]?/, `<< HEREDOC${bodies.push(m[2] as string) - 1}`);
+    const header = (m[0].split("\n", 1)[0] as string).replace(HEREDOC_HEAD, `<< HEREDOC${bodies.push(m[3] as string) - 1}`);
+    if (!m[1]) for (const body of bodySubstitutions(m[3] as string)) checkCommand(body, ctx);
     text = text.slice(0, m.index) + header + "\n" + text.slice(m.index + m[0].length);
   }
   const said: string[] = [];
   for (const simple of simpleCommands(tokenize(text), bodies)) {
+    if (simple.fresh) said.length = 0;
     if (simple.piped) simple.upstream = [...said];
     const printed = printedText(stripPrefixes(simple.words));
     if (printed !== null) said.push(printed);

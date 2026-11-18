@@ -46,6 +46,13 @@ export function settingsFile(ws: Workspace, agent: Agent): string {
   });
 }
 
+// A respawn reruns a session's old command line, whose --settings names this same file, so the file
+// is rendered again first: a session stopped before an upgrade comes back with the current hooks, the
+// guard's matcher among them (CodeRabbit on #124). A hosted agent's file is its host daemon's.
+export function refreshSettings(ws: Workspace, agent: Agent): void {
+  if (!agent.host) settingsFile(ws, agent);
+}
+
 export function buildAppendix(ws: Workspace, agent: Agent, repoDir: string | undefined): { text: string; labels: string[] } | null {
   const parts: string[] = [];
   const labels: string[] = [];
