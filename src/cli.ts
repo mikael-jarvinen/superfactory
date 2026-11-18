@@ -334,6 +334,8 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
       const noSlot = ag.host ? null : slotless(ws, stack, ticket, s.cwd ?? "");
       if (noSlot) console.log(`  warning: ${noSlot}\n  Put that in the fix brief.`);
       console.log(`  next: SendMessage the fix brief to ${name}; no new session was started`);
+      // the session kept is no reason to drop a --title (CodeRabbit on #129)
+      titled(ws, ticket, str(v.title));
       return;
     }
     const onState = on ? loadRec(ws, on)?.state : null;

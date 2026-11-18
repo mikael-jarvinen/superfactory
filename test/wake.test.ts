@@ -468,7 +468,7 @@ test("only a hosted agent's settings explain a failed send", () => {
 // Niilo on #129: waiting work has no record, so the dispatch that makes one titles it, and no card
 // shows a bare key. --title wins; else the summary the queue watcher last read; else it says how.
 test("a dispatch titles a new record: --title, else the queue's last read of the tracker", () => {
-  const { ws } = fakeFleet(TOML + `
+  const { ws, put } = fakeFleet(TOML + `
 [roles.designer]
 cwd = "designers"
 model = "opus"
@@ -500,6 +500,16 @@ role = "designer"
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual([rec("TEST-30").state, rec("TEST-30").title], ["building", "Rename the export"], "the builder's record has the tracker's title");
   assert.doesNotMatch(r.stdout, /no title/);
+  // a fix round on the live session keeps it, and takes --title all the same (CodeRabbit on #129)
+  const wt = (JSON.parse(readFileSync(join(ws, "state", "TEST-30.json"), "utf8")) as { worktree: string }).worktree;
+  put("live.json", [sess("new1", "bea", { state: "idle", cwd: wt })]);
+  for (const args of [["pr-open", "--pr", "acme/web#1", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "2 high"]])
+    assert.equal(factory(ws, ["state", "TEST-30", ...args]).status, 0);
+  r = factory(ws, ["dispatch", "bea", "TEST-30", "--title", "Rename the export, round two"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /bea is still on TEST-30 .*so it keeps its context/);
+  assert.equal(rec("TEST-30").title, "Rename the export, round two", "--title on the live session's round");
+  assert.equal(factory(ws, ["state", "TEST-30", "blocked", "--evidence", "parked for the next case"]).status, 0);
 
   r = factory(ws, ["dispatch", "dee", "TEST-31"]);
   assert.equal(r.status, 0, r.stderr);
