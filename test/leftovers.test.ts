@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { accessSync, chmodSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -176,6 +177,73 @@ test("what a run's claude calls left in their scopes is cleaned up, but a superv
         if (p) process.kill(p, "SIGKILL");
       } catch {}
     }
+  }
+});
+
+// CodeRabbit on superfactory#128 (KJJs): the command line was read after the last stat, so a wrapper
+// that exec'd claude between the two read as the wrapper by its name and as a process by its
+// claude command line, and was killed. exec keeps the pid and start time, so nothing after caught it.
+// The exec is staged through /proc reads: once its command line has been read (telling it from a
+// claude), the stray's stat is read for the hop to its parent and then for the last look; right
+// after that look, its name, stat and command line are claude's.
+test("a stray that execs claude between the reads is not killed, the group waits", { skip: noCleanup() }, async () => {
+  const bin = process.env.CLAUDE_BIN;
+  const at = join(dir, "exec-race");
+  mkdirSync(join(at, "bin"), { recursive: true });
+  const claude = join(at, "bin", "claude");
+  writeFileSync(claude, "#!/bin/sh\nexec sleep 600\n");
+  chmodSync(claude, 0o755);
+  const sh = spawn("sh", ["-c", "setsid sleep 600 >/dev/null 2>&1 & echo $!"], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  sh.stdout.on("data", (b) => (out += b));
+  await new Promise((r) => sh.once("close", r));
+  const pgid = sh.pid as number;
+  const stray = Number(out.trim());
+  const fs = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
+  const orig = fs.readFileSync;
+  try {
+    const t0 = Date.now();
+    while (!(procStat(stray)?.pgid === stray && readFileSync(`/proc/${stray}/comm`, "utf8").trim() === "sleep") && Date.now() - t0 < 5000) await settle(20);
+    const slice = join(at, "agents.slice");
+    mkdirSync(join(slice, `factory-job-t-${pgid}-1-1.scope`), { recursive: true });
+    writeFileSync(join(slice, `factory-job-t-${pgid}-1-1.scope`, "cgroup.procs"), `${stray}\n`);
+    process.env.CLAUDE_BIN = claude;
+    let argvRead = false;
+    let stats = 0; // reads of its stat since its command line was first read
+    const execd = () => stats >= 2;
+    (fs as { readFileSync: unknown }).readFileSync = function (this: unknown, ...a: Parameters<typeof orig>) {
+      const p = String(a[0]);
+      if (p === `/proc/${stray}/stat`) {
+        const real = orig.apply(this, a) as string;
+        const was = execd();
+        if (argvRead) stats++;
+        return was ? real.replace("(sleep)", "(claude)") : real;
+      }
+      if (execd() && p === `/proc/${stray}/comm`) return "claude\n";
+      if (p === `/proc/${stray}/cmdline`) {
+        argvRead = true;
+        if (execd()) return `${claude}\0`;
+      }
+      return orig.apply(this, a);
+    };
+    syncBuiltinESMExports();
+    const lines: string[] = [];
+    const outcome = await new Promise<[boolean, number | undefined]>((r) => cleanUp("t", pgid, new Set(), (l) => lines.push(l), (d, u) => r([d, u]), 200, slice));
+    fs.readFileSync = orig;
+    syncBuiltinESMExports();
+    assert.ok(execd(), `the stray's stat was read ${stats} times after its command line`);
+    assert.deepEqual(lines, [], "nothing signalled");
+    assert.deepEqual(outcome, [true, stray], "deferred on the stray");
+    await settle(300);
+    assert.ok(runningNotZombie(stray), "left alone");
+  } finally {
+    fs.readFileSync = orig;
+    syncBuiltinESMExports();
+    if (bin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = bin;
+    try {
+      process.kill(stray, "SIGKILL");
+    } catch {}
   }
 });
 

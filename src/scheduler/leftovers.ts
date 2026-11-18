@@ -205,9 +205,15 @@ function leftovers(label: string, pgid: number, live: Set<number>, log: (line: s
     // A process caught in exec, such as a systemd-run becoming the claude it runs, can read with an
     // empty cmdline and so not as a claude, then be one by the time it is signalled. When the reading
     // is unsure (an empty cmdline, or a name that changed under it), the group waits for the next check.
+    // The command line is read before the last stat, so an exec after it shows there as a new name
+    // (CodeRabbit on superfactory#128: read after it, an exec between the two read as the wrapper's
+    // name with claude's command line). And it is told from a claude again after that stat: an exec
+    // that keeps the name, as a node wrapper running claude's cli.js does, is a claude by then.
+    const argv = cmdline(pid);
     const after = procStat(pid);
-    if (after && (after.comm !== st.comm || (after.state !== "Z" && !cmdline(pid).length))) return { unsure: pid };
-    if (after) found.push({ pid, comm: st.comm, stamp: startStamp(pid) });
+    if (!after) continue; // gone
+    if (after.comm !== st.comm || (after.state !== "Z" && !argv.length) || underClaude(pid, c)) return { unsure: pid };
+    found.push({ pid, comm: st.comm, stamp: startStamp(pid) });
   }
   return found;
 }
