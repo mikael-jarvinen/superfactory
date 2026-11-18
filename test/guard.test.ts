@@ -1234,6 +1234,18 @@ const ROUND_128: [string, string, string][] = [
   [NO, "env -iS after -u", `env -u X -iS 'gh pr comment 5 -R acme/api --body hi'`],
   [OK, "env -S with a marked body", `env -S 'gh pr comment 5 -R acme/api --body "> Written by agent. ok"'`],
   [OK, "env -u then a command", `env -u X gh pr comment 5 -R acme/api --body '> Written by agent. ok'`],
+  // KJI8: a backtick's command is checked, not refused, in the comment-only path
+  [OK, "a status line with a backtick date", "echo \"gh: `date`\""],
+  [OK, "a marked comment with a backtick date", "gh pr comment 5 -R acme/api --body \"> Written by agent. at `date`\""],
+  [NO, "a gh comment inside backticks", "echo `gh pr comment 5 -R acme/api --body hi`"],
+  [NO, "a gh comment in backticks in double quotes", "echo \"x `gh pr comment 5 -R acme/api --body hi`\""],
+  // KJJM: a shell runs its stdin, a quoted heredoc's too
+  [NO, "a quoted heredoc to bash", "bash <<'EOF'\ngh pr comment 5 -R acme/api --body hi\nEOF"],
+  [NO, "a heredoc to sh -s", "sh -s <<EOF\ngh pr comment 5 -R acme/api --body hi\nEOF"],
+  [NO, "a here-string to bash", "bash <<< 'gh pr comment 5 -R acme/api --body hi'"],
+  [NO, "an echo piped to bash", "echo 'gh pr comment 5 -R acme/api --body hi' | bash"],
+  [OK, "a quoted heredoc to cat is data", "cat <<'EOF'\ngh pr comment 5 -R acme/api --body hi\nEOF"],
+  [OK, "a heredoc to bash with a marked body", "bash <<'EOF'\ngh pr comment 5 -R acme/api --body '> Written by agent. ok'\nEOF"],
 ];
 
 test("the shapes CodeRabbit found in #128 at 5332c327 are read as bash and gh read them", () => {

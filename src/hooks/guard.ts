@@ -370,7 +370,7 @@ interface Simple {
 // bare fd is not a word. `>&1` duplicates a descriptor and writes no file. What runs inside a $( ... ),
 // a <( ... ) or a >( ... ), quoted or not, is a simple command of its own, and the word it stood for
 // stays in the command around it as `$(`, `<(` or `>(`.
-function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
+function simpleCommands(toks: Tok[], bodies: string[] = [], ticks: "refuse" | "pass" = "refuse"): Simple[] {
   const flat = toks.flatMap((k) => (k.op ? splitOps(k.t).map((t) => ({ t, op: true })) : [k]));
   const out: Simple[] = [];
   let cur: string[] = [];
@@ -397,8 +397,8 @@ function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
   };
   // what runs inside a substitution in a word: a quoted "$(...)" here, a backtick is refused
   const inner = (k: Tok | undefined) => {
-    for (const body of k?.subs ?? []) if (!/^\(.*\)$/s.test(body)) out.push(...simpleCommands(tokenize(body), bodies)); // $((...)) is arithmetic
-    if (k?.tick) refuse("backtick command substitution");
+    for (const body of k?.subs ?? []) if (!/^\(.*\)$/s.test(body)) out.push(...simpleCommands(tokenize(body), bodies, ticks)); // $((...)) is arithmetic
+    if (k?.tick && ticks === "refuse") refuse("backtick command substitution");
   };
   const open = () => {
     substitutions++;
@@ -2245,19 +2245,58 @@ export const namesGh = (cmd: string): boolean => /(?:\b|-[A-Za-z]*S)gh\b/i.test(
 function checkComments(cmd: string): void {
   // heredocs as checkCommand reads them: a body is not commands, but an unquoted one's $(...) runs
   let text = cmd;
+  const bodies: string[] = [];
   for (let h = nextHeredoc(text, 0); h; h = nextHeredoc(text, h.start + 1)) {
     if (!h.quoted) for (const body of bodySubstitutions(h.body)) checkComments(body);
-    text = text.slice(0, h.start) + `<< HEREDOC${h.rest}` + "\n" + text.slice(h.end);
+    text = text.slice(0, h.start) + `<< HEREDOC${bodies.push(h.body) - 1}${h.rest}` + "\n" + text.slice(h.end);
   }
-  for (const s of simpleCommands(tokenize(text))) {
+  // a backtick runs its command line: that line is checked here, and the protect policy refuses
+  // backticks on its own, so a status line that prints `date` is no refusal here (CodeRabbit on #128)
+  for (const body of backtickBodies(text)) if (namesGh(body)) checkComments(body);
+  // what echo and printf print earlier in the line, which a pipe may carry to a shell (over-checks)
+  const printed: string[] = [];
+  for (const s of simpleCommands(tokenize(text), bodies, "pass")) {
+    const p = printedText(stripPrefixes(s.words));
+    if (p !== null) printed.push(p);
     const words = commandWords(s.words);
     const name = posix.basename((words[0] ?? "").replace(/^\\/, "")).toLowerCase();
     if (name === "gh") checkCommentWrite(words.slice(1));
     else if (SHELLS.has(name)) {
-      const i = words.findIndex((x, j) => j > 0 && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x));
-      if (i > 0 && words[i + 1] !== undefined) checkComments(words[i + 1] as string);
+      const script = shellScript(words.slice(1));
+      if (script.code !== undefined) checkComments(script.code);
+      // no -c and no script file: the shell runs its stdin, a heredoc or here-string included, which
+      // a quoted heredoc's delimiter does not keep from running (CodeRabbit on #128)
+      else if (script.file === undefined)
+        for (const input of [...(s.stdin ?? []), ...(s.piped && !s.redirected0 ? printed : [])]) if (namesGh(input)) checkComments(input);
     } else if (name === "eval" && words.length > 1) checkComments(words.slice(1).join(" "));
   }
+}
+
+// The command lines inside a line's backticks, outside single quotes; \` and \\ inside one are the
+// letters bash makes of them. An unclosed backtick is refused.
+function backtickBodies(text: string): string[] {
+  const out: string[] = [];
+  let q = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i] as string;
+    if (q === "'") {
+      if (c === "'") q = "";
+    } else if (c === "\\") i++;
+    else if (c === "'" && !q) q = c;
+    else if (c === '"') q = q ? "" : c;
+    else if (c === "`") {
+      let body = "";
+      let j = i + 1;
+      for (; j < text.length && text[j] !== "`"; j++) {
+        if (text[j] === "\\" && /[`\\$]/.test(text[j + 1] ?? "")) j++;
+        body += text[j];
+      }
+      if (j >= text.length) refuse("cannot parse quoting (No closing backtick)");
+      out.push(body);
+      i = j;
+    }
+  }
+  return out;
 }
 
 // The comment rule alone (superfactory#119, N1): a command that names no gh cannot post through it,
