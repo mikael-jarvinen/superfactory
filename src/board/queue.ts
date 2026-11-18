@@ -13,10 +13,12 @@ import type { Workspace } from "../workspace.js";
 // An item leaves the queue when:
 // - the human marks it handled on the panel, or sends a reply from it (the page marks it once the
 //   reply is posted);
+// - the lead marks it, with `factory handled` or `factory say --answers`, once an answer settles it;
 // - it is a `blocked` row or a blocked record, and the ticket has left `blocked` since (the state
 //   events log says when): the lead moved the ticket on, so the question was answered.
 // Reading it never does, and neither does a message typed in the thread: a message has no reply-to,
-// so nothing can tell which question it answers. Questions asked before the queue was first read in
+// so nothing here can tell which question it answers; the lead, who reads it, marks what it settles.
+// Questions asked before the queue was first read in
 // a workspace are left out unless their ticket is blocked now (see queue()).
 
 export const WAITING_KINDS: ReadonlySet<string> = new Set(["decision", "blocked"]);
@@ -232,6 +234,34 @@ export function queue(ws: Workspace): QueueItem[] {
   const from = start === null ? -Infinity : Math.floor(time(start) / 1000) * 1000;
   const done = (i: QueueItem) => i.id in handled || (covers.get(i.id) ?? "") in handled;
   return items.filter((i) => !done(i) && (time(i.at) >= from || blockedNow(i)));
+}
+
+// Mark several items handled in one write to the file the page writes, for the lead's `factory
+// handled` and `say --answers`: Mikael, 2026-11-18, "I need to always manually mark them as handled.
+// Can't you?" Every id must be one the queue holds now; one that is not refuses the whole call by
+// name, so nothing is half marked. `check` validates without writing, so say can refuse before it
+// posts. An id already handled is a success that changes nothing.
+export function markHandledMany(ws: Workspace, ids: string[], check = false):
+  { ok: true; marked: string[]; already: string[] } | { ok: false; error: string; retry?: true } {
+  const bad = ids.filter((id) => !/^[mr][0-9a-f]{12}$/.test(id));
+  if (bad.length) return { ok: false, error: `not queue ids: ${bad.join(", ")}` };
+  const h = readHandledFile(ws);
+  if (h === "unreadable") return { ok: false, error: brokenNote(ws) };
+  const cur: Handled = h === "missing" ? fresh() : h;
+  const already = ids.filter((id) => id in cur.handled);
+  const todo = [...new Set(ids.filter((id) => !(id in cur.handled)))];
+  if (!todo.length) return { ok: true, marked: [], already };
+  const { items, read } = open(ws);
+  const unknown = todo.filter((id) => !items.some((i) => i.id === id));
+  if (unknown.length) {
+    if (!read && unknown.some((id) => id.startsWith("m"))) return { ok: false, error: "the message log could not be read", retry: true };
+    return { ok: false, error: `nothing in the queue has ${unknown.length === 1 ? "the id" : "the ids"} ${unknown.join(", ")}` };
+  }
+  if (check) return { ok: true, marked: todo, already };
+  const at = new Date().toISOString();
+  for (const id of todo) cur.handled[id] = at;
+  writeHandled(ws, cur);
+  return { ok: true, marked: todo, already };
 }
 
 // Mark an item handled. It must be one the queue holds now, so a post can only name a real question.

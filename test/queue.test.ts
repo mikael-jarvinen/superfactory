@@ -10,7 +10,7 @@ import { say } from "../src/messages.js";
 import { transition } from "../src/state.js";
 import { pyDumps } from "../src/util.js";
 import { openWorkspace, type Workspace } from "../src/workspace.js";
-import { tempDir, tempWorkspace } from "./helpers.js";
+import { factory, tempDir, tempWorkspace } from "./helpers.js";
 
 const noInboxLock = process.platform !== "darwin" && process.platform !== "linux" && "the inbox lock is built for macOS and Linux only";
 
@@ -382,4 +382,77 @@ test("the message page: a reply marks the question it quoted, even if another re
   assert.deepEqual(s.posts.map(([u, b]) => [u, b.id ?? b.text]), [["/api/messages", "> first?\n\nyes"], ["/api/messages/handled", "maaaaaaaaaaaa"]]);
   assert.equal(doc.getElementById("replying")!.hidden, false, "the second reply is still being written");
   assert.equal(t.value, "> second?\n\n");
+});
+
+// Mikael, 2026-11-18: "I need to always manually mark them as handled. Can't you?" The lead reads the
+// queue and marks what an answer settles, through the same file the page writes.
+test("queue from the CLI: the lead lists the open items and marks them handled, by id or by ticket", () => {
+  const ws = workspace();
+  const long = "should the event website keep the old design when the organiser picks a new one, or ask first every time it happens?";
+  row(ws, T(1), "decision", "use the classic route?", "LOCAL-a");
+  row(ws, T(2), "decision", long, "LOCAL-b");
+  row(ws, T(3), "blocked", "which db?", "LOCAL-a");
+  const [a1, b, a2] = queue(ws).map((i) => i.id);
+
+  let r = factory(ws.dir, ["queue"]);
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split("\n");
+  assert.equal(lines.length, 3);
+  assert.match(lines[0]!, new RegExp(`^${a1}  \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d  LOCAL-a  decision  use the classic route\\?$`));
+  assert.ok(lines[1]!.startsWith(`${b}  `) && lines[1]!.endsWith("…"), lines[1]);
+  assert.ok(lines[1]!.includes(long.slice(0, 100)) && !lines[1]!.includes(long.slice(0, 101)), "the first 100 characters");
+  assert.ok(lines[2]!.startsWith(`${a2}  `) && lines[2]!.includes("LOCAL-a  blocked  which db?"));
+
+  // an id the queue does not hold refuses the call by name, and nothing is marked
+  r = factory(ws.dir, ["handled", a1!, "mdeadbeef0000"]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stderr, /nothing in the queue has the id mdeadbeef0000; nothing marked/);
+  assert.equal(queue(ws).length, 3);
+  assert.equal(factory(ws.dir, ["handled", "not-an-id"]).status, 1);
+  assert.equal(factory(ws.dir, ["handled"]).status, 2, "ids or --ticket");
+
+  r = factory(ws.dir, ["handled", b!]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, new RegExp(`handled ${b}`));
+  assert.deepEqual(queue(ws).map((i) => i.id), [a1, a2]);
+  assert.match(factory(ws.dir, ["handled", b!]).stdout, new RegExp(`${b} was already handled`));
+
+  // the mark is the page's: the same file and format
+  const file = JSON.parse(readFileSync(handledFile(ws), "utf8")) as { start: string; handled: Record<string, string> };
+  assert.equal(file.start, "2000-01-01T00:00:00Z");
+  assert.ok(Number.isFinite(Date.parse(file.handled[b!]!)));
+
+  assert.match(factory(ws.dir, ["handled", "--ticket", "LOCAL-zzz"]).stdout, /nothing open on LOCAL-zzz/);
+  r = factory(ws.dir, ["handled", "--ticket", "LOCAL-a"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(queue(ws), []);
+  assert.match(factory(ws.dir, ["queue"]).stdout, /^nothing waiting on the human$/m);
+});
+
+test("say --answers posts the message and marks what it answers, and a wrong id posts nothing", () => {
+  const ws = workspace();
+  row(ws, T(1), "decision", "a?", "LOCAL-a");
+  row(ws, T(2), "decision", "b?", "LOCAL-b");
+  row(ws, T(3), "decision", "c?", "LOCAL-c");
+  const [a, b, c] = queue(ws).map((i) => i.id);
+  const posted = () => readFileSync(ws.messages, "utf8").trim().split("\n").length;
+  const before = posted();
+
+  let r = factory(ws.dir, ["say", "yes to a", "--kind", "answer", "--answers", `${a},mdeadbeef0000`]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stderr, /--answers: nothing in the queue has the id mdeadbeef0000; nothing posted/);
+  assert.equal(posted(), before, "nothing posted");
+  assert.equal(queue(ws).length, 3);
+
+  r = factory(ws.dir, ["say", "yes to a and b", "--kind", "answer", "--answers", `${a},${b}`]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(posted(), before + 1);
+  assert.match(r.stdout, new RegExp(`handled ${a}[\\s\\S]*handled ${b}`));
+  assert.deepEqual(queue(ws).map((i) => i.id), [c]);
+
+  // repeated --answers works as well as a comma list
+  r = factory(ws.dir, ["say", "and c", "--answers", c!, "--answers", a!]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, new RegExp(`handled ${c}[\\s\\S]*${a} was already handled`));
+  assert.deepEqual(queue(ws), []);
 });
