@@ -210,7 +210,7 @@ test("queue: a fresh workspace with only the config it must have, its own names 
   // The lead's real writers: `factory say` and `factory state`.
   say(ws, ["pick a colour?"], { kind: "decision", ticket: "LOCAL-colour" }, quiet);
   say(ws, ["just news"], { kind: "note" }, quiet);
-  transition(ws, "LOCAL-key", "queued", {}, quiet);
+  transition(ws, "LOCAL-key", "designing", {}, quiet);
   transition(ws, "LOCAL-key", "blocked", { note: "need the key" }, quiet);
   const d = await get();
   assert.deepEqual([d.human, d.lead], ["Robin", "kai"]);

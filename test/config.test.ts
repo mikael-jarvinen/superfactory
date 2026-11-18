@@ -117,7 +117,6 @@ port = 99999
     "stacks.app.pin.zed: no builder \"zed\" on stack \"app\"",
     "tracker.key_pattern: not a valid regular expression: Invalid regular expression: /([/: Unterminated character class",
     "tracker.status.shipping: unknown state; states: queued, designing, design-review, building, pr-open, agent-review, fixing, gate, your-review, colleague-review, done, blocked",
-    "tracker.status.queued: missing; the tracker needs a status for it",
     "tracker.status.colleague-review: missing; the tracker needs a status for it",
     "tracker.status.done: missing; the tracker needs a status for it",
     "board.port: must be a whole number from 1 to 65535, got 99999",

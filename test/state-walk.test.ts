@@ -19,10 +19,11 @@ test("state walk", () => {
     if (r.status === 0) failures.push(`expected refusal: ${args.join(" ")}`);
   };
 
-  ok("state", T, "queued", "--stack", "app");
+  no("state", T, "off");
   no("state", T, "fixing");
-  ok("state", T, "building", "--agent", "bea");
-  ok("state", T, "queued", "--evidence", "sent back");
+  ok("state", T, "building", "--agent", "bea", "--stack", "app");
+  ok("state", T, "off", "--evidence", "sent back");
+  no("state", T, "fixing");
   ok("state", T, "building", "--agent", "bea");
   no("state", T, "pr-open");
   no("state", T, "pr-open", "--pr", "bad", "--head", "abc1234");
@@ -37,7 +38,7 @@ test("state walk", () => {
   ok("state", T, "blocked", "--note", "asked Alex about X");
   ok("state", T, "your-review");
   ok("state", T, "colleague-review", "--evidence", "Alex asked the team");
-  ok("state", T, "queued", "--note", "next slice");
+  ok("state", T, "off", "--note", "next slice");
   ok("state", T, "building", "--agent", "bea");
   ok("state", T, "pr-open", "--pr", "acme/web#2", "--head", "def5678def5678");
   ok("state", T, "gate", "--force");
@@ -70,18 +71,25 @@ test("transition output and refusal messages", () => {
   r = factory(ws, ["state", "TEST-2", "done"]);
   assert.equal(r.status, 1);
   assert.equal(r.stderr, "factory: TEST-2: building -> done is not a valid transition. From building you can go to: " +
-    "blocked, pr-open, queued. Use --force if you mean it.\n");
+    "blocked, off, pr-open. Use --force if you mean it.\n");
   r = factory(ws, ["state", "TEST-2", "blocked"]);
   assert.match(r.stdout, /warning: blocked without --note: record the question you asked Alex/);
-  r = factory(ws, ["state", "nope", "queued"]);
+  r = factory(ws, ["state", "nope", "building"]);
   assert.equal(r.stderr, "factory: 'nope' is neither a ticket key nor a local key like LOCAL-fix-flaky-login\n");
   r = factory(ws, ["drop", "TEST-2"]);
   assert.match(r.stderr, /TEST-2 is not a LOCAL key/);
-  factory(ws, ["state", "LOCAL-gone", "queued"]);
+  r = factory(ws, ["state", "LOCAL-gone", "queued"]);
+  assert.equal(r.stderr, "factory: unknown state 'queued'; states: designing, design-review, building, pr-open, agent-review, " +
+    "fixing, gate, your-review, colleague-review, done, blocked, or off to take it off the board\n");
+  r = factory(ws, ["state", "LOCAL-gone", "off"]);
+  assert.equal(r.stderr, "factory: LOCAL-gone has no record; the first state must be designing or building. " +
+    "Work nobody is doing yet waits in the backlog.\n");
+  factory(ws, ["state", "LOCAL-gone", "building"]);
+  factory(ws, ["state", "LOCAL-gone", "off"]);
   r = factory(ws, ["drop", "LOCAL-gone", "--note", "not asked for"]);
-  assert.equal(r.stdout, "  dropped LOCAL-gone (was queued)\n");
+  assert.equal(r.stdout, "  dropped LOCAL-gone (was off)\n");
   const last = readFileSync(join(ws, "state", "events.jsonl"), "utf8").trim().split("\n").pop() as string;
-  assert.match(last, /^\{"at": "[^"]+", "event": "dropped", "from_state": "queued", "note": "not asked for", "ticket": "LOCAL-gone"\}$/);
+  assert.match(last, /^\{"at": "[^"]+", "event": "dropped", "from_state": "off", "note": "not asked for", "ticket": "LOCAL-gone"\}$/);
 });
 
 // Mikael split lyyti-classic#8754 off LOCAL-reports-petes-design, and the PR stayed on both cards.

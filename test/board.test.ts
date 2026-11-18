@@ -98,7 +98,7 @@ test("the server: pages, the snapshot, posting, and only the tail of the log", {
   const snap = await (await get("/api")).json();
   assert.deepEqual(snap.tickets.map((t: { ticket: string; state: string; column: string }) => `${t.ticket} ${t.state} ${t.column}`),
     ["WEB-1 building building", "API-2 pr-open agent-review", "API-1 your-review your-review", "WEB-2 blocked blocked"]);
-  assert.deepEqual(snap.columns, ["queued", "designing", "design-review", "building", "agent-review", "fixing", "gate", "your-review", "colleague-review", "blocked"],
+  assert.deepEqual(snap.columns, ["designing", "design-review", "building", "agent-review", "fixing", "gate", "your-review", "colleague-review", "blocked"],
     "no pr-open column: a pr-open item shows in agent-review");
   assert.equal(snap.descriptions["pr-open"], undefined);
   assert.equal(snap.tickets[3].question, "asked about the header row");
@@ -196,7 +196,7 @@ test("the server: a card carries its design's slides and canvas once it has them
   transition(ws, "WEB-6", "design-review", { canvas, slides }, quiet);
   transition(ws, "WEB-7", "designing", { agent: "bea" }, quiet);
   transition(ws, "WEB-7", "design-review", { canvas, slides }, quiet);
-  transition(ws, "WEB-7", "queued", { approved: "looks right" }, quiet);
+  transition(ws, "WEB-7", "off", { approved: "looks right" }, quiet);
   transition(ws, "WEB-7", "building", { agent: "cal" }, quiet);
 
   const board = await serve(ws, { host: "127.0.0.1", port: 0 });

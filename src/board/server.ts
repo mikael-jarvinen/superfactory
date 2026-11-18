@@ -10,7 +10,7 @@ import { leadStatus } from "../hooks/status.js";
 import { Unreachable } from "../remote.js";
 import { agentSessions, pick, transportFor, transports } from "../transport.js";
 import { isHuman, readRecent, readTail } from "../messages.js";
-import { allRecs, IN_REVIEW, isLocal, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
+import { allRecs, IN_REVIEW, isLocal, onBoard, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { roster } from "../config.js";
 import { capitalize, run, sleep } from "../util.js";
@@ -49,8 +49,6 @@ const url = (ws: Workspace) => `http://${ws.config.board.host}:${ws.config.board
 // One short paragraph per column, sent with the data so the page never carries its own copy. They
 // describe what is true of a work item sitting there, not what somebody should do about it.
 const DESCRIPTIONS: Record<string, string> = {
-  "queued": "Ready to start and waiting for a free teammate: a ticket assigned to {human}, or an " +
-    "ad-hoc task {human} asked for that has no ticket at all.",
   "designing": "The ticket changes the UI and had no design, so a designer is drawing one: a canvas of " +
     "the screens it changes, then a slideset that walks {human} through them.",
   "design-review": "{human}'s. The slideset and its canvas are sent and frozen. Nothing is built until " +
@@ -363,7 +361,9 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
   const lines = latestLines(ws);
   const human = ws.config.human.name;
   const leadName = capitalize(lead(ws).name);
-  const tickets = recs.filter((r) => r.state !== "done").map((r) => ({
+  // Only work someone is doing: waiting work lives in the backlog, and an item off the board keeps
+  // its record until a dispatch brings it back.
+  const tickets = recs.filter(onBoard).map((r) => ({
     ticket: r.ticket,
     title: r.title ?? null,
     state: r.state,

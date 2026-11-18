@@ -38,7 +38,7 @@ import { cmdStack, STACK_USAGE } from "./stacks/command.js";
 import { cmdTicket, cmdWiki, TICKET_USAGE } from "./tickets/cli.js";
 import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/engine.js";
 import {
-  allRecs, appendEvent, BUSY, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removePr, removeRec, saveRec, showRec, transition, validKey,
+  allRecs, appendEvent, BUSY, OFF, onBoard, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removePr, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
 import { chars, FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.js";
 import { failure } from "./failures.js";
@@ -63,11 +63,11 @@ usage: factory [--workspace <dir>] <command> [options]
   sessions [--all] [--fleet]      raw \`claude agents --json\`, or one line per fleet member
   dispatch <agent> <KEY> [--repo <repo>] [--prompt-file <f>] [--force]
                                   fresh building session for one item in a per-item worktree.
-                                  Dispatch from queued, building or fixing; anywhere else needs
+                                  Dispatch from the backlog, off the board, building or fixing; anywhere else needs
                                   --force. A live session already on KEY keeps its context, and
                                   so does one that is off, woken unless --force.
                                   For a designer: a design session in the designers' cwd, no
-                                  worktree, from queued (records designing) or design-review
+                                  worktree, from the backlog or off the board (records designing) or design-review
                                   (another round).
   wake <agent>                    bring back an agent whose session is off (stopped idle, or retired
                                   by Claude's daemon): respawn its newest session, same conversation,
@@ -89,8 +89,17 @@ usage: factory [--workspace <dir>] <command> [options]
         [--pr owner/repo#N] [--head SHA] [--reviewed SHA] [--jira STATUS] [--force]
         [--canvas URL] [--slides URL] [--approved "<the human's words>"]
                                   transition. design-review needs the canvas and slides links;
-                                  design-review -> queued is the approval and needs --approved
-  state --list [--all]            every open item
+                                  design-review -> off is the approval and needs --approved.
+                                  The first state is designing or building: work nobody is doing
+                                  waits in the backlog, not on the board.
+  state <KEY> off [--approved "<words>"] [--note N]
+                                  take it off the board and keep the record (an approved design,
+                                  the stack, the title) until a dispatch brings it back. From
+                                  design-review it is the approval, from building it unassigns,
+                                  and from a review it ends the slice, for the next slice of a
+                                  multi-PR ticket
+  state --list [--all]            every item on the board; --all adds done and off-board ones
+  state --off                     every item off the board: key, agent and title
   drop <LOCAL-key>... [--note N] [--force]
                                   delete a LOCAL record; tracker tickets are never droppable
   say "<text>" [--ticket K] [--link URL] [--kind ${KINDS.join("|")}] [--via ${VIAS.join("|")}]
@@ -144,8 +153,9 @@ usage: factory [--workspace <dir>] <command> [options]
                                   the same with main's code checked out; media in /tmp/demo/<KEY>-before
   demo --before --base-ref <branch> <KEY> <spec.ts> [base-url]
                                   a PR stacked on <branch>: the same with origin/<branch> checked out
-  watch queue                     read the tracker's queue once, and tell the lead about new queued
-                                  tickets and fresh merges. What the scheduler runs; prompts/queue.md.
+  watch queue                     read the tracker's queue once, and tell the lead about new tickets
+                                  waiting there and fresh merges. It makes no records: waiting work
+                                  lives in the backlog. What the scheduler runs; prompts/queue.md.
   watch reviews                   read the review comments on the PRs in review once, and tell the
                                   lead about new ones. No model; every 5 minutes by default.
   watch round [--facts]           the round once: facts gathered here, and a note to the lead with
@@ -169,7 +179,8 @@ ${TICKET_USAGE}
 The workspace is --workspace, else $FACTORY_WORKSPACE, else the nearest factory.toml above the
 current directory. Only this program writes the state store.
 
-states: queued designing design-review building pr-open agent-review fixing gate your-review colleague-review done blocked`;
+states: designing design-review building pr-open agent-review fixing gate your-review colleague-review done blocked
+Waiting work lives in the backlog. off takes an item off the board and keeps its record.`;
 
 class UsageError extends FactoryError {
   constructor(message: string) {
@@ -205,7 +216,7 @@ function cmdStatus(ws: Workspace, argv: string[]) {
   console.log(lines.join("\n"));
   console.log(boardLine(ws));
   console.log("-- tickets (state/) --");
-  const recs = v.all ? allRecs(ws) : allRecs(ws).filter((r) => r.state !== "done");
+  const recs = v.all ? allRecs(ws) : allRecs(ws).filter(onBoard);
   if (!recs.length) console.log("  none");
   for (const r of recs) {
     for (const l of showRec(ws, r)) console.log(l);
@@ -228,15 +239,25 @@ function cmdIdleWork(ws: Workspace, argv: string[]) {
 function cmdState(ws: Workspace, argv: string[]) {
   const s = { type: "string" } as const;
   const { v, p } = args("state", argv, {
-    list: { type: "boolean" }, all: { type: "boolean" }, force: { type: "boolean" },
+    list: { type: "boolean" }, all: { type: "boolean" }, off: { type: "boolean" }, force: { type: "boolean" },
     agent: s, stack: s, evidence: s, note: s, title: s, pr: s, head: s, reviewed: s, jira: s, canvas: s, slides: s, approved: s,
     "remove-pr": s,
   }, [0, 2]);
   const [ticket, next] = p;
+  if (v.off) {
+    // Items taken off the board: waiting work with no ticket to wait in, LOCAL- above all, is found here.
+    const recs = allRecs(ws).filter((r) => r.state === null);
+    for (const r of recs) console.log(`  ${r.ticket.padEnd(12)} agent=${(r.agent || "-").padEnd(8)} ${r.title ?? "(no title)"}`);
+    if (!recs.length) console.log("  nothing off the board");
+    return;
+  }
   if (v.list) {
-    const recs = v.all ? allRecs(ws) : allRecs(ws).filter((r) => r.state !== "done");
+    const all = allRecs(ws);
+    const recs = v.all ? all : all.filter(onBoard);
     for (const r of recs) for (const l of showRec(ws, r)) console.log(l);
     if (!recs.length) console.log("  no open tickets");
+    const off = all.filter((r) => r.state === null).length;
+    if (off && !v.all) console.log(`  and ${off} off the board: factory state --off`);
     return;
   }
   if (!ticket) throw new FactoryError("state needs a ticket, or --list");
@@ -341,7 +362,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (noSlot) console.log(`  warning: ${noSlot}`);
   const prompt = (given ?? buildingPrompt(ws, ag, ticket)) + (noSlot ? `\n\n${noSlot}` : "");
   const started = launch(ws, ag, wt, prompt, appendix?.text ?? null, "build");
-  if (rec === null || cur === "queued") {
+  if (rec === null || cur === null) {
     transition(ws, ticket, "building", { agent: name, stack, worktree: wt, evidence: `building session ${started.id}` });
   } else {
     rec.agent = name;
@@ -374,7 +395,7 @@ function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boole
   const rec = loadRec(ws, ticket);
   const cur = rec?.state ?? null;
   if (!DESIGN_DISPATCHABLE.has(cur) && !force)
-    throw new FactoryError(`${ticket} is ${cur}; a design starts from queued, or goes another round from design-review. ` +
+    throw new FactoryError(`${ticket} is ${cur}; a design starts from the backlog or off the board, or goes another round from design-review. ` +
       `Use \`factory state\` first, or --force if you mean it.`);
   for (const r of allRecs(ws))
     if (r.agent === name && r.state === "designing" && r.ticket !== ticket)
@@ -636,9 +657,9 @@ function cmdDrop(ws: Workspace, argv: string[]) {
     }
     if (rec.state && BUSY.has(rec.state) && !v.force)
       throw new FactoryError(`${ticket} is ${rec.state} with agent=${rec.agent ?? "None"}. Stop the teammate first, or pass --force.`);
-    appendEvent(ws, { ticket, at: now(), event: "dropped", from_state: rec.state, note: str(v.note) ?? null });
+    appendEvent(ws, { ticket, at: now(), event: "dropped", from_state: rec.state ?? OFF, note: str(v.note) ?? null });
     removeRec(ws, ticket);
-    console.log(`  dropped ${ticket} (was ${rec.state})`);
+    console.log(`  dropped ${ticket} (was ${rec.state ?? OFF})`);
   }
 }
 

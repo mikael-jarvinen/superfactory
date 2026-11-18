@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -178,7 +179,7 @@ test("every role's settings wake the recipient before SendMessage, inside the ho
 
 test("a fix round on an item whose session was stopped idle wakes that session instead of starting one", () => {
   const { ws, put, calls } = fakeFleet();
-  for (const args of [["queued", "--stack", "app"], ["building", "--agent", "bea"], ["pr-open", "--pr", "acme/web#1", "--head", "abc1234abc1234"],
+  for (const args of [["building", "--stack", "app", "--agent", "bea"], ["pr-open", "--pr", "acme/web#1", "--head", "abc1234abc1234"],
     ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "2 high"]]) {
     const st = factory(ws, ["state", "TEST-3", ...args]);
     assert.equal(st.status, 0, st.stderr);
@@ -459,4 +460,60 @@ test("only a hosted agent's settings explain a failed send", () => {
     assert.match(post("rae")[0]!, / hook wake --from-host far$/, ev);
     assert.deepEqual(post("bea"), [], ev);
   }
+});
+
+// Mikael, 2026-11-18: queued is no longer a state. A record written while it was one is off the board,
+// and the approval it carries is kept: a builder dispatched on it gets the approved design, and a
+// designer dispatched on it gets the last round's links.
+test("a queued record with an approval loads as off, approval intact, and a dispatch reads it back", () => {
+  const { ws } = fakeFleet(TOML + `
+[roles.designer]
+cwd = "designers"
+model = "opus"
+settings = "designer"
+add_dirs = ["web"]
+
+[[agents]]
+name = "dee"
+role = "designer"
+`);
+  mkdirSync(join(ws, "designers"), { recursive: true });
+  mkdirSync(join(ws, "briefs"), { recursive: true });
+  writeFileSync(join(ws, "briefs", "app.md"), "the app stack's brief");
+  // the builder's checkout, for its worktree: a repo with one commit and its brief
+  const web = join(ws, "repos", "web");
+  mkdirSync(web, { recursive: true });
+  writeFileSync(join(web, "AGENTS.md"), "the repo's brief");
+  const origin = join(ws, "web-origin.git");
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+  for (const a of [["init", "-q", "-b", "main"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
+    ["remote", "add", "origin", origin], ["push", "-q", "origin", "main"]])
+    execFileSync("git", ["-C", web, ...a]);
+  const design = { approved: "Approved, build it", approved_at: "2026-11-17T10:00:00+00:00", canvas: "https://claude.ai/artifact/c1", slides: "https://claude.ai/artifact/s1" };
+  const old = (ticket: string) => writeFileSync(join(ws, "state", `${ticket}.json`), JSON.stringify({
+    agent: "dee", asked_you: null, blocked_from: null, created: "2026-11-16T09:00:00+00:00", design, jira: "To Do",
+    pr: null, since: "2026-11-17T10:00:00+00:00", stack: "app", state: "queued", ticket, title: "Export the report", worktree: null,
+  }));
+  mkdirSync(join(ws, "state"), { recursive: true });
+  old("TEST-20");
+  old("TEST-21");
+
+  let r = factory(ws, ["state", "--off"]);
+  assert.equal(r.stdout, "  TEST-20      agent=dee      Export the report\n  TEST-21      agent=dee      Export the report\n");
+  r = factory(ws, ["state", "--list"]);
+  assert.equal(r.stdout, "  no open tickets\n  and 2 off the board: factory state --off\n");
+  r = factory(ws, ["state", "TEST-20"]);
+  assert.match(r.stdout, /^ {2}TEST-20 +off .*waiting on: the backlog\n.*design: slides https:\/\/claude\.ai\/artifact\/s1 canvas https:\/\/claude\.ai\/artifact\/c1 approved: Approved, build it/);
+
+  r = factory(ws, ["dispatch", "bea", "TEST-20"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /design approved by Alex \(2026-11-17T10:00:00\+00:00\): slides https:\/\/claude\.ai\/artifact\/s1 canvas https:\/\/claude\.ai\/artifact\/c1\. The brief carries it\./);
+  const built = JSON.parse(readFileSync(join(ws, "state", "TEST-20.json"), "utf8"));
+  assert.equal(built.state, "building");
+  assert.deepEqual(built.design, design, "building keeps the approved design");
+
+  r = factory(ws, ["dispatch", "dee", "TEST-21"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /the last round: canvas https:\/\/claude\.ai\/artifact\/c1 slides https:\/\/claude\.ai\/artifact\/s1/);
+  assert.equal(JSON.parse(readFileSync(join(ws, "state", "TEST-21.json"), "utf8")).state, "designing");
 });
