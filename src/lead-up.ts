@@ -42,7 +42,7 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
     try {
       refreshSettings(ws, ld);
     } catch (e) {
-      out(`WARNING: ${ld.name}'s settings could not be rendered (${(e as Error).message}); respawning on the last rendered settings. Fix the template and run \`factory up\` again.`);
+      out(`WARNING: ${ld.name}'s settings could not be rendered (${(e as Error).message}); respawning on the last rendered settings. Fix the template, then \`factory stop ${ld.name}\` and \`factory up\`: up leaves a running lead as it is.`);
     }
     const r = t.respawn(ld.name, sid);
     if (r.ok && waitForName(t, ld.name, waitS)) {
