@@ -135,6 +135,8 @@ interface Tok {
   op: boolean;
   // the command substitutions inside a double-quoted word, "$(...)", each a command line of its own
   subs?: string[];
+  // whether a backtick in it runs, unquoted or in double quotes; in single quotes it is a letter
+  tick?: boolean;
 }
 
 const PUNCT = ";&|<>()";
@@ -181,8 +183,10 @@ export function tokenize(cmd: string): Tok[] {
     // of '$'"(USD" is a letter (CodeRabbit on #124)
     let dq = -1;
     const subs: string[] = [];
+    let tick = false;
     for (;;) {
       const c = next();
+      if (c === "`" && (state === " " || state === "a" || state === '"')) tick = true;
       if (state === " ") {
         if (c === "") break;
         if (c === "\n") {
@@ -258,7 +262,7 @@ export function tokenize(cmd: string): Tok[] {
       }
     }
     if (!tok && !quoted) return out;
-    out.push(subs.length ? { t: tok, op, subs } : { t: tok, op });
+    out.push({ t: tok, op, ...(subs.length ? { subs } : {}), ...(tick ? { tick } : {}) });
   }
 }
 
@@ -328,7 +332,7 @@ function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
   // what runs inside a substitution in a word: a quoted "$(...)" here, a backtick is refused
   const inner = (k: Tok | undefined) => {
     for (const body of k?.subs ?? []) if (!/^\(.*\)$/s.test(body)) out.push(...simpleCommands(tokenize(body), bodies)); // $((...)) is arithmetic
-    if (k && !k.op && k.t.includes("`")) refuse("backtick command substitution");
+    if (k?.tick) refuse("backtick command substitution");
   };
   const open = () => {
     substitutions++;
@@ -1624,27 +1628,39 @@ function checkSecrets({ words: raw, reads }: Simple): void {
 // quoted the body is text; unquoted, bash runs each $(...) and `...` in it.
 const HEREDOC_OPEN = /(?<!<)<<(-?)[ \t]*((?:[^\s'"<>;&|()\\]|\\.|'[^']*'|"(?:[^"\\]|\\.)*")+)/g;
 interface Heredoc { start: number; head: number; rest: string; body: string; quoted: boolean; end: number }
-// Whether text[at] lies in a comment: an unquoted # at the start of a word runs to the end of its
-// line, so a `<<EOF` there opens no heredoc and the next line is a command (Marie on #127).
-function inComment(text: string, at: number): boolean {
-  let q = "";
+// Whether text[at] is shell code: not in a comment, where an unquoted # at the start of a word runs
+// to the end of its line (Marie on #127), nor inside quotes, where `<<EOF` is text (CodeRabbit on
+// #127: `echo '<<EOF'` opened no heredoc, and the lines after it are commands). A $( inside double
+// quotes is code again, as in --body "$(cat <<'EOF' ... EOF)", until its ).
+function isCode(text: string, at: number): boolean {
+  // what each open level is: a quote, a $( or ( of code, or the line
+  const stack: string[] = [""];
   let comment = false;
   for (let i = 0; i < at; i++) {
     const c = text[i] as string;
+    const top = stack[stack.length - 1] as string;
     if (comment) {
       if (c === "\n") comment = false;
-    } else if (c === "\\" && q !== "'") i++;
-    else if (q) {
-      if (c === q) q = "";
-    } else if (c === "'" || c === '"') q = c;
+    } else if (top === "'") {
+      if (c === "'") stack.pop();
+    } else if (c === "\\") i++;
+    else if (top === '"') {
+      if (c === '"') stack.pop();
+      else if (c === "$" && text[i + 1] === "(") {
+        stack.push("(");
+        i++;
+      }
+    } else if (c === "'" || c === '"') stack.push(c);
+    else if (c === "(") stack.push("(");
+    else if (c === ")" && stack.length > 1) stack.pop();
     else if (c === "#" && (i === 0 || /[\s;&|()<>]/.test(text[i - 1] as string))) comment = true;
   }
-  return comment;
+  return !comment && !["'", '"'].includes(stack[stack.length - 1] as string);
 }
 function nextHeredoc(text: string, from: number): Heredoc | null {
   HEREDOC_OPEN.lastIndex = from;
   for (let m = HEREDOC_OPEN.exec(text); m; m = HEREDOC_OPEN.exec(text)) {
-    if (inComment(text, m.index)) continue;
+    if (!isCode(text, m.index)) continue;
     const word = m[2] as string;
     const delim = word.replace(/\\(.)|'([^']*)'|"((?:[^"\\]|\\.)*)"/g, (_, e?: string, sq?: string, dq?: string) =>
       e ?? sq ?? (dq ?? "").replace(/\\([$`"\\\n])/g, "$1"));

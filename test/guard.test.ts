@@ -471,11 +471,16 @@ test("comments, placeholders, branch updates and a scheduler's stdin are read as
     "gh pr update-branch 8709 -R acme/api", "gh pr update-branch 8701", "gh pr update-branch -R acme/api",
     `# Merge it\n${M}`, `#!/bin/sh\n${M}`, `ls  # a\n${M}`, `ls \\\n# x\n${M}`, `echo a#b; ${M}`,
     `# see <<EOF\n${M}\nEOF`, `echo x # <<EOF\n${M}\nEOF`,
-    `cat <<EOF\nEOF \n${M}\nEOF\n${M}`, `echo '${M}' | at now`, `at now <<< true <<< '${M}'`];
+    `echo '<<EOF'\n${M}\nEOF`, `printf '%s' "cat <<'E'"\n${M}\nE`, `echo "$(echo ')')" '<<EOF'\n${M}\nEOF`,
+    `cat <<EOF\nEOF \n${M}\nEOF\n${M}`, `echo '${M}' | at now`, `at now <<< true <<< '${M}'`,
+    'echo "`date`"', "echo a`date`", "ssh h 'echo `date`'"];
   const allowed = [`${put} -F branch=feat/x`, `at now <<< true < /dev/null`,
     "gh pr update-branch 8701 -R acme/api", "gh pr update-branch 3 -R acme/workspace",
     "# Run the checks\nnpm test", `ls # ; ${M}`, `echo '#'; ls`, `echo "a #b"`, `echo a\\#b`,
-    `cat <<EOF\nEOF \nit's\nEOF`, `echo "#" <<EOF\nit's\nEOF`, `echo "it's" | at now <<< true`, `echo "it's" | at now < job.txt`];
+    `printf 'cat <<EOF\\n$(date\\nEOF\\n'`, `x="$(cat <<'E'\nit's\nE\n)"; echo "$x"`,
+    `cat <<EOF\nEOF \nit's\nEOF`, `echo "#" <<EOF\nit's\nEOF`, `echo "it's" | at now <<< true`, `echo "it's" | at now < job.txt`,
+    // a backtick in single quotes is a letter (CodeRabbit on #127)
+    "echo '`date`'", "echo \\`date\\`", `ssh h 'python3 - <<"E"\nprint("\`x\`")\nE'`];
   const wrong: string[] = [];
   for (const base of [pr, lead]) {
     const ctx = { ...base, prHead: (_r: string, n: string) => heads[n] ?? null };
