@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { after, test } from "node:test";
 import { allowClosePath } from "../src/allow-close.js";
 import { type GuardContext, hook, mcpVerdict, verdict } from "../src/hooks/guard.js";
@@ -469,6 +469,25 @@ test("stdin by any name, a clustered env flag, every find action and ssh on stdi
     "ssh niilo", "ssh -T niilo <<'E'\nuptime\nE"];
   const wrong: string[] = [];
   for (const ctx of [pr, lead]) {
+    for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
+    for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// The trusted-dir check compared how a directory was written, not where it resolves (Marie on #124
+// at 4cf72e6e).
+test("a wrapper by any path that resolves to a system bin dir is the wrapper", () => {
+  const M = "gh pr merge 1 -R acme/api";
+  const refused = [`/usr/bin/../bin/env ${M}`, `/usr//bin/env ${M}`, `/bin/./nice ${M}`, `/usr/bin/../bin/timeout 5 ${M}`,
+    `/proc/self/root/usr/bin/env ${M}`, `~/../../../../../../usr/bin/env ${M}`, `$HOME/../../../../../../usr/bin/env ${M}`,
+    `cd /usr && bin/env ${M}`, `cd /; usr/bin/nice ${M}`];
+  // /usr/bin/X11 is a link to . on Ubuntu
+  if (existsSync("/usr/bin/X11")) refused.push(`/usr/bin/X11/env ${M}`, `/usr/bin/X11/X11/nice ${M}`);
+  const allowed = ["./scripts/env PATH=report", "./node_modules/.bin/tsc -p .", "/usr/bin/env npm test", "~/agents/bin/pr-send.sh 124 abc",
+    "/usr/bin/../bin/env npm test", "cd sub && ./scripts/report"];
+  const wrong: string[] = [];
+  for (const ctx of [pr, { ...pr, role: "lead" }]) {
     for (const c of refused) if (verdict(c, ctx) === null) wrong.push(`${ctx.role} allowed: ${c}`);
     for (const c of allowed) if (verdict(c, ctx) !== null) wrong.push(`${ctx.role} refused: ${c} (${verdict(c, ctx)})`);
   }

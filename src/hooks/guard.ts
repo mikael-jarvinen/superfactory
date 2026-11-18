@@ -27,6 +27,8 @@
 // find -exec, ssh <host> ...) and a shell reading its script from a heredoc or a here-string. Code it
 // cannot read is outside it: python/node/perl/ruby -c or -e, make, npm scripts, a script file. It
 // stops habits and mistakes, not a session set on getting around it.
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { posix } from "node:path";
 import { parseArgs } from "node:util";
 import { allowClosePath, closable } from "../allow-close.js";
@@ -43,6 +45,8 @@ export interface GuardContext {
   // set by checkCommand when the command line names HOME other than as $HOME or ${HOME}: then a
   // $HOME/... command word may hold anything
   homeAssigned?: boolean;
+  // set by checkCommand when the line changes directory, so a relative path cannot be resolved
+  cwdChanged?: boolean;
   policy: Policy;
   writeDirs: string[];
   org?: string;
@@ -64,6 +68,25 @@ export const PROTECTED = new Set(["main", "master", "staging", "production", "de
 // Platform paths, not anyone's: macOS first, as the design says.
 export const TMP_ROOTS = ["/tmp", "/private/tmp"];
 const TRUSTED_BIN_DIRS = new Set(["/usr/bin", "/bin", "/opt/homebrew/bin", "/usr/local/bin", "/opt/homebrew/opt/coreutils/libexec/gnubin"]);
+
+// Where a directory resolves on this box, the one the command runs on: /usr/bin/../bin,
+// /usr/bin/X11 (a link to .) and /proc/self/root/usr/bin are all /usr/bin. One that does not exist
+// runs nothing, so its normal form is kept. ~ is the home directory; a relative one is from cwd.
+function resolveDir(dir: string): string {
+  const abs = posix.resolve(process.cwd(), dir === "~" || dir.startsWith("~/") ? homedir() + dir.slice(1) : dir);
+  try {
+    return realpathSync(abs);
+  } catch {
+    return posix.normalize(abs);
+  }
+}
+let trustedReal: Set<string> | undefined;
+function trustedDir(dir: string): boolean {
+  trustedReal ??= new Set([...TRUSTED_BIN_DIRS].map(resolveDir));
+  return trustedReal.has(resolveDir(dir));
+}
+// the commands stripPrefixes reads as wrappers, and the ones it refuses
+const WRAPPER_NAMES = new Set(["env", "nice", "setsid", "stdbuf", "flock", "timeout", "nohup"]);
 
 class Refused extends Error {}
 
@@ -1019,7 +1042,7 @@ function checkProtect({ words: raw, reads, stdin = [], piped = false }: Simple, 
   let words = stripPrefixes(raw);
   // gh, git and the shells by path are read by their basename wherever they live, so ~/.local/bin/gh
   // is gh and /usr/lib/git-core/git is git, each checked as itself. Any other command by path is read
-  // as itself (/usr/bin/env, /usr/bin/nice) from a system bin dir, and
+  // as itself (/usr/bin/env, /usr/bin/nice) from a dir that resolves to a system bin dir, and
   // anywhere else it is a project script, which runs (./scripts/env is not env). A command word from a
   // variable or a substitution could run anything, so it is refused (Marie and Niilo on #124:
   // `~/.local/bin/gh pr merge` and `$G pr merge` skipped every check).
@@ -1034,7 +1057,10 @@ function checkProtect({ words: raw, reads, stdin = [], piped = false }: Simple, 
       else w = `~${home[2]}`;
     }
     const b = posix.basename(w);
-    if (!["gh", "git"].includes(b.toLowerCase()) && !SHELLS.has(b) && !TRUSTED_BIN_DIRS.has(posix.dirname(w))) return;
+    const dir = posix.dirname(w);
+    // a wrapper by a relative path after a cd may be the system one, so it is read as the wrapper
+    const unknown = ctx.cwdChanged && !dir.startsWith("/") && !dir.startsWith("~") && (WRAPPER_NAMES.has(b) || REFUSED_WRAPPERS.has(b));
+    if (!["gh", "git"].includes(b.toLowerCase()) && !SHELLS.has(b) && !unknown && !trustedDir(dir)) return;
     words = stripPrefixes([b, ...words.slice(1)]);
   }
   if (!words.length) return;
@@ -1193,6 +1219,7 @@ const HEREDOC = /<<-?\s*['"]?(\w+)['"]?[^\n]*\n([\s\S]*?)\n\1\s*(\n|$)/;
 
 function checkCommand(cmd: string, ctx: GuardContext): void {
   if (!ctx.homeAssigned && /\bHOME\b/.test(cmd.replace(/\$\{?HOME\b/g, ""))) ctx = { ...ctx, homeAssigned: true };
+  if (!ctx.cwdChanged && /(^|[^\w.-])(cd|pushd|popd)\b/.test(cmd)) ctx = { ...ctx, cwdChanged: true };
   // heredocs: keep the header, drop the body so its lines are not parsed as commands. The newline
   // after the closing delimiter stays: without it the next line was read as the header's arguments.
   // Each body is kept by its number, which takes the delimiter's place after its own `<<`, so the body
