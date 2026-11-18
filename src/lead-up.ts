@@ -36,7 +36,14 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
   if (old) {
     const sid = old.id as string;
     if (!ld.host && typeof old.sessionId === "string" && resume(ws, ld, t, old, old.sessionId, waitS, out, appendix)) return;
-    refreshSettings(ws, ld);
+    // A respawn reruns the old command line, which still names the settings file: a render that
+    // fails (a role's template gone) leaves the last render there, so the lead comes back on it
+    // rather than staying down, and the failure is said loudly (CodeRabbit on #127).
+    try {
+      refreshSettings(ws, ld);
+    } catch (e) {
+      out(`WARNING: ${ld.name}'s settings could not be rendered (${(e as Error).message}); respawning on the last rendered settings. Fix the template and run \`factory up\` again.`);
+    }
     const r = t.respawn(ld.name, sid);
     if (r.ok && waitForName(t, ld.name, waitS)) {
       out(`${ld.name} respawned from ${sid}: ${r.said}`);

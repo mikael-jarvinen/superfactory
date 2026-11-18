@@ -106,6 +106,19 @@ test("a lead respawned here comes back with its settings rendered again", () => 
   assert.ok(JSON.parse(readFileSync(file, "utf8")).hooks?.PreToolUse?.length, "the stale file was rendered again");
 });
 
+// A role whose template is gone must not keep the lead down: it comes back on the settings last
+// rendered, and the failure is said (CodeRabbit on #127).
+test("a lead whose settings cannot be rendered is respawned anyway, and the failure said loudly", () => {
+  const w = openWorkspace(dir, {});
+  const role = w.config.roles[lead(w).role] as { settings: string };
+  role.settings = join(dir, "gone.json");
+  const { t, respawned } = fake([stopped()], { startFails: true });
+  const said: string[] = [];
+  bringUpLead(w, lead(w), t, false, (l) => said.push(l), 1);
+  assert.deepEqual(respawned, ["d1079ed1"]);
+  assert.ok(said.some((l) => /^WARNING: .*settings could not be rendered .*gone\.json/.test(l)), said.join("\n"));
+});
+
 test("a listing with no session id, or a lead on another host, is respawned", () => {
   const a = fake([stopped({ sessionId: undefined })]);
   bringUpLead(ws, ld, a.t, false, () => {}, 1);

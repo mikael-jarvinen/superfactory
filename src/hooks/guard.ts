@@ -84,6 +84,8 @@ export interface GuardContext {
   isMerged?: (repo: string, branch: string) => boolean;
   // owner/repo's default branch, or null when it cannot be read. Tests stub it; the hook asks GitHub.
   defaultBranch?: (repo: string) => string | null;
+  // tests only: a PR's head repo and branch, in place of GitHub's
+  prHead?: (repo: string, n: string) => [string, string] | null;
   // state/allow-close.jsonl: the product PRs the human has named for the lead to close. Without it the
   // lead's guard finds the file through its workspace, so a lead launched before the flag existed
   // needs no restart.
@@ -142,7 +144,8 @@ const SPACE = " \t\r\n";
 // this guard was written against. A token made of punctuation is marked op, so a quoted "|" or ";"
 // stays a word.
 export function tokenize(cmd: string): Tok[] {
-  const text = cmd.replace(/\r/g, "\n").replace(/\n/g, " ; ");
+  // a newline ends a command as ";" does, and ends a comment: it is kept until a token reads it
+  const text = cmd.replace(/\r/g, "\n");
   const out: Tok[] = [];
   const back: string[] = [];
   let pos = 0;
@@ -182,6 +185,18 @@ export function tokenize(cmd: string): Tok[] {
       const c = next();
       if (state === " ") {
         if (c === "") break;
+        if (c === "\n") {
+          [tok, state, op] = [";", "c", true];
+          continue;
+        }
+        // an unquoted # at the start of a word starts a comment, to the end of the line (bash's
+        // interactive_comments, on in a non-interactive shell); a # inside a word is a letter
+        if (c === "#") {
+          let d = next();
+          while (d !== "" && d !== "\n") d = next();
+          if (d) back.push(d);
+          continue;
+        }
         if (SPACE.includes(c)) {
           if (tok || quoted) break;
           continue;
@@ -206,6 +221,11 @@ export function tokenize(cmd: string): Tok[] {
       }
       if (state === "\\") {
         if (c === "") refuse("cannot parse quoting (No escaped character)");
+        // a backslash-newline outside single quotes joins the lines
+        if (c === "\n") {
+          state = esc;
+          continue;
+        }
         // inside double quotes only the quote and the backslash itself are escaped
         if (esc === '"' && c !== "\\" && c !== esc) tok += "\\";
         tok += c;
@@ -216,6 +236,7 @@ export function tokenize(cmd: string): Tok[] {
       if (c === "") break;
       if (SPACE.includes(c)) {
         state = " ";
+        if (c === "\n") back.push(c);
         if (tok || quoted) break;
         continue;
       }
@@ -264,6 +285,8 @@ interface Simple {
   stdin?: string[];
   // whether its stdin is the pipe from the command before it
   piped?: boolean;
+  // whether a <, <<, <<< or <> on fd 0 replaces that pipe as its stdin
+  redirected0?: boolean;
   // what echo and printf earlier in the line print, which a pipe may carry to it
   upstream?: string[];
   // the groups, loops, ifs and subshells it is inside, outermost first, each by its own number; 0 is the line
@@ -286,20 +309,21 @@ function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
   let stdin: string[] = [];
   // fd 0's input: the last <, <<, <<< or <> on it is the one the command reads
   let in0: string | null = null;
+  let redirected0 = false;
   let piped = false;
   // open groups, compound commands ({ }, if/while/until/for/case/select) and subshells, for `cuts`
   const scope: number[] = [0];
   let scopes = 0;
   let cuts: number[] = [];
   let substitutions = 0;
-  const outer: ({ cur: string[]; writes: string[]; reads: string[]; stdin: string[]; in0: string | null } | null)[] = [];
+  const outer: ({ cur: string[]; writes: string[]; reads: string[]; stdin: string[]; in0: string | null; redirected0: boolean } | null)[] = [];
   const flush = () => {
     if (in0 !== null) stdin.push(in0);
     if (cur.length || writes.length || reads.length || stdin.length) {
-      out.push({ words: cur, writes, reads, stdin, piped, scope: [...scope], cuts });
+      out.push({ words: cur, writes, reads, stdin, piped, redirected0, scope: [...scope], cuts });
       cuts = [];
     }
-    [cur, writes, reads, stdin, in0, piped] = [[], [], [], [], null, false];
+    [cur, writes, reads, stdin, in0, piped, redirected0] = [[], [], [], [], null, false, false];
   };
   // what runs inside a substitution in a word: a quoted "$(...)" here, a backtick is refused
   const inner = (k: Tok | undefined) => {
@@ -308,8 +332,8 @@ function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
   };
   const open = () => {
     substitutions++;
-    outer.push({ cur, writes, reads, stdin, in0 });
-    [cur, writes, reads, stdin, in0] = [[], [], [], [], null];
+    outer.push({ cur, writes, reads, stdin, in0, redirected0 });
+    [cur, writes, reads, stdin, in0, redirected0] = [[], [], [], [], null, false];
   };
   for (let i = 0; i < flat.length; i++) {
     const { t, op, subs } = flat[i] as Tok;
@@ -327,7 +351,7 @@ function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
       flush();
       const o = outer.pop();
       if (o) {
-        ({ cur, writes, reads, stdin, in0 } = o);
+        ({ cur, writes, reads, stdin, in0, redirected0 } = o);
         substitutions--;
       } else if (o === null && scope.length > 1) scope.pop();
     } else if (op ? SEPARATORS.has(t) : t === "{" || t === "}") {
@@ -349,7 +373,7 @@ function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
       // on fd 0 a later input replaces an earlier one, and a file (in reads) leaves no text; on another
       // fd a text is kept, which over-checks (CodeRabbit on #124: `bash <<'A' <<'B'` runs only B)
       const onZero = (fd ?? "0") === "0";
-      if (onZero && (input !== null || t === "<" || t === "<>")) in0 = input;
+      if (onZero && (input !== null || t === "<" || t === "<>")) [in0, redirected0] = [input, true];
       else if (input !== null) stdin.push(input);
       i++;
     } else if (t.endsWith("$") && paren) {
@@ -682,17 +706,28 @@ const API_RENAME_TO_MAIN = /^(-X|--method)\s*=?\s*POST repos\/([\w.-]+\/[\w.-]+)
 // Merged means GitHub's compare of the default branch with the branch finds nothing ahead: every
 // commit on the branch is already in the default branch, so deleting it loses nothing. A squash
 // merge leaves the branch ahead and reads as unmerged. Any failure reads as unmerged.
+// The GitHub lookups one verdict makes share one budget, well inside the hook's 10 s timeout:
+// Claude Code lets a call through when its hook times out, so a stalled GitHub must end the lookups
+// with time left for the guard to refuse (CodeRabbit on #127). A lookup past the budget has failed.
+export const GITHUB_BUDGET_MS = 6_000;
+let githubDeadline = 0;
+const startLookups = () => {
+  githubDeadline = Date.now() + GITHUB_BUDGET_MS;
+};
+function ghLookup(args: string[]): string | null {
+  const left = githubDeadline - Date.now();
+  if (left < 250) return null;
+  const r = run("gh", args, { timeout: left, killSignal: "SIGKILL" });
+  return r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null;
+}
+
 function mergedOnGitHub(repo: string, branch: string): boolean {
-  const opts = { timeout: 15_000 };
-  const base = run("gh", ["api", `repos/${repo}`, "--jq", ".default_branch"], opts);
-  if (base.status !== 0 || !base.stdout.trim()) return false;
-  const cmp = run("gh", ["api", `repos/${repo}/compare/${base.stdout.trim()}...${branch}`, "--jq", ".ahead_by"], opts);
-  return cmp.status === 0 && cmp.stdout.trim() === "0";
+  const base = ghLookup(["api", `repos/${repo}`, "--jq", ".default_branch"]);
+  return base !== null && ghLookup(["api", `repos/${repo}/compare/${base}...${branch}`, "--jq", ".ahead_by"]) === "0";
 }
 
 function defaultBranchOnGitHub(repo: string): string | null {
-  const r = run("gh", ["api", `repos/${repo}`, "--jq", ".default_branch"], { timeout: 15_000 });
-  return r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null;
+  return ghLookup(["api", `repos/${repo}`, "--jq", ".default_branch"]);
 }
 
 // A write to a branch of a product repo: refused on a protected name, and on the repo's own default
@@ -703,6 +738,24 @@ function checkBranchWrite(repo: string, branch: string, ctx: GuardContext, why: 
   const d = (ctx.defaultBranch ?? defaultBranchOnGitHub)(repo);
   if (d === null) return refuse(`the default branch of ${repo} cannot be read, so a write to ${branch} cannot be checked`);
   if (d.toLowerCase() === branch.replace(/^\+/, "").replace(/^refs\/heads\//, "").toLowerCase()) refuse(why);
+}
+
+// Updating a PR's branch merges or rebases its base into its head, a write to the head branch: on a
+// product repo it follows the rule for any branch write, so a PR whose head is the default branch or
+// a protected one is refused, as is one whose head cannot be read (CodeRabbit on #127).
+function checkPrHeadWrite(repo: string, n: string, ctx: GuardContext): void {
+  if (ctx.ownRepos.some((r) => r.toLowerCase() === repo.toLowerCase())) return;
+  if (!/^\d+$/.test(n)) refuse(`updating a branch of ${repo} needs the PR's number, so the guard can read its head`);
+  const head = (ctx.prHead ?? prHeadOnGitHub)(repo, n);
+  if (head === null) refuse(`the head of ${repo}#${n} cannot be read, so updating its branch cannot be checked`);
+  const [headRepo, ref] = head as [string, string];
+  if (ctx.ownRepos.some((r) => r.toLowerCase() === headRepo.toLowerCase())) return;
+  checkBranchWrite(headRepo, ref, ctx, `${repo}#${n}'s head is ${headRepo}:${ref}, and updating it writes to that branch`);
+}
+function prHeadOnGitHub(repo: string, n: string): [string, string] | null {
+  const out = ghLookup(["api", `repos/${repo}/pulls/${n}`, "--jq", '.head.repo.full_name + " " + .head.ref']);
+  const m = out === null ? null : /^(\S+\/\S+) (\S+)$/.exec(out);
+  return m ? [m[1] as string, m[2] as string] : null;
 }
 
 // The owner/repo a `gh pr <merge|close|...>` targets, from --repo/-R or a PR URL. null when the
@@ -891,6 +944,9 @@ function checkApiProtect(args: string[], ctx: GuardContext): void {
     const branch = a.fields.filter((f) => f.key === "branch").map((f) => f.value);
     const why = `a contents write to ${repo} needs -f branch=<a feature branch>: without one it commits to the default branch`;
     if (a.input || branch.length !== 1 || !branch[0] || branch[0].startsWith("@") || /[$`]/.test(branch[0] as string)) refuse(why);
+    // gh fills {owner}, {repo} and {branch} in a typed field from the cwd's repo and checkout, which
+    // the guard cannot read: -F branch={branch} on the default branch writes there (CodeRabbit on #127)
+    if (/\{(owner|repo|branch)\}/.test(branch[0] as string)) refuse(`${why}; gh fills a {placeholder} from the checkout, which the guard cannot read`);
     checkBranchWrite(repo, branch[0] as string, ctx, why);
   }
   const m = API_TARGET.exec(ep);
@@ -910,6 +966,13 @@ function checkGhProtect(words: string[], ctx: GuardContext): void {
   // it as a PR), and offline an issue's number cannot be told from a PR's: checked as gh pr (Marie on #124)
   if (args[0] === "issue" && ["close", "reopen", "lock", "unlock"].includes(args[1] ?? "")) args = ["pr", ...args.slice(1)];
   if (args[0] === "api") checkApiProtect(args.slice(1), ctx);
+  if (args[0] === "pr" && args[1] === "update-branch") {
+    const repo = ghPrRepo(args);
+    if (repo === null) refuse("updating a PR's branch needs an explicit --repo owner/name (or a PR URL) so the guard can confirm whose repo it is");
+    const sel = args.slice(2).filter((a, i, all) => !a.startsWith("-") && !["-R", "--repo"].includes(all[i - 1] ?? ""));
+    const url = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+)/.exec(sel[0] ?? "");
+    checkPrHeadWrite(repo as string, sel.length === 1 ? (url?.[1] ?? (sel[0] as string)) : "", ctx);
+  }
   if (args[0] === "pr" && ["merge", "close", "reopen", "lock", "unlock"].includes(args[1] ?? "")) {
     const repo = ghPrRepo(args);
     if (repo === null) refuse("merging or closing a PR needs an explicit --repo owner/name (or a PR URL) so the guard can confirm whose repo it is");
@@ -996,15 +1059,20 @@ function checkMcpGithub(tool: string, tin: Record<string, unknown>, ctx: GuardCo
     const own = ctx.ownRepos.some((r) => r.toLowerCase() === repo.toLowerCase());
     if (!own) checkBranchWrite(repo, str("branch"), ctx, `pushing to a protected branch (${str("branch")}) is not allowed`);
   } else if (!MCP_GITHUB_WRITES.has(name)) refuse(`${name} is a GitHub MCP write the guard does not know, so it is refused; use gh`);
+  if (name === "update_pull_request_branch") checkPrHeadWrite(repo, n, ctx);
   if (name === "update_pull_request") {
     if (tin.state === "closed") checkGhProtect(["gh", "pr", "close", n, "-R", repo], ctx);
+    // the PR edit API reopens a closed PR given state=open, as gh pr reopen does (CodeRabbit on #127)
+    if (tin.state === "open") checkGhProtect(["gh", "pr", "reopen", n, "-R", repo], ctx);
     if (tin.draft === false) checkGhProtect(["gh", "pr", "ready", n, "-R", repo], ctx);
   }
   // the Issues API closes a PR by its number too, and the guard cannot tell an issue from a PR
   if (name === "issue_write" && tin.state === "closed") checkGhProtect(["gh", "pr", "close", String(tin.issue_number ?? ""), "-R", repo], ctx);
+  if (name === "issue_write" && tin.state === "open") checkGhProtect(["gh", "pr", "reopen", String(tin.issue_number ?? ""), "-R", repo], ctx);
 }
 
 export function mcpVerdict(tool: string, tin: Record<string, unknown>, ctx: GuardContext): string | null {
+  startLookups();
   try {
     checkMcpGithub(tool, tin, ctx);
     return null;
@@ -1373,12 +1441,12 @@ function dockerImage(words: string[]): number {
   return -1;
 }
 
-function checkProtect({ words: raw, reads, stdin = [], piped = false, upstream = [] }: Simple, ctx: GuardContext): void {
+function checkProtect({ words: raw, reads, stdin = [], piped = false, redirected0 = false, upstream = [] }: Simple, ctx: GuardContext): void {
   let words = stripPrefixes(raw);
   words = commandWord(words, ctx);
   if (!words.length) return;
   const name = (words[0] as string).toLowerCase();
-  if (name === "crontab" || name === "at" || name === "batch") checkScheduled(name, words, [...stdin, ...(piped ? upstream : [])], ctx);
+  if (name === "crontab" || name === "at" || name === "batch") checkScheduled(name, words, [...stdin, ...(piped && !redirected0 ? upstream : [])], ctx);
   // Fail closed on argv: a program the guard does not read as gh, git, ssh or a shell may still run
   // its arguments (ionice, strace, systemd-run, docker exec), so any later word that names one of
   // those, by commandWord's shape and file rule, is checked as a command from there on, and a word
@@ -1556,9 +1624,27 @@ function checkSecrets({ words: raw, reads }: Simple): void {
 // quoted the body is text; unquoted, bash runs each $(...) and `...` in it.
 const HEREDOC_OPEN = /(?<!<)<<(-?)[ \t]*((?:[^\s'"<>;&|()\\]|\\.|'[^']*'|"(?:[^"\\]|\\.)*")+)/g;
 interface Heredoc { start: number; head: number; rest: string; body: string; quoted: boolean; end: number }
+// Whether text[at] lies in a comment: an unquoted # at the start of a word runs to the end of its
+// line, so a `<<EOF` there opens no heredoc and the next line is a command (Marie on #127).
+function inComment(text: string, at: number): boolean {
+  let q = "";
+  let comment = false;
+  for (let i = 0; i < at; i++) {
+    const c = text[i] as string;
+    if (comment) {
+      if (c === "\n") comment = false;
+    } else if (c === "\\" && q !== "'") i++;
+    else if (q) {
+      if (c === q) q = "";
+    } else if (c === "'" || c === '"') q = c;
+    else if (c === "#" && (i === 0 || /[\s;&|()<>]/.test(text[i - 1] as string))) comment = true;
+  }
+  return comment;
+}
 function nextHeredoc(text: string, from: number): Heredoc | null {
   HEREDOC_OPEN.lastIndex = from;
   for (let m = HEREDOC_OPEN.exec(text); m; m = HEREDOC_OPEN.exec(text)) {
+    if (inComment(text, m.index)) continue;
     const word = m[2] as string;
     const delim = word.replace(/\\(.)|'([^']*)'|"((?:[^"\\]|\\.)*)"/g, (_, e?: string, sq?: string, dq?: string) =>
       e ?? sq ?? (dq ?? "").replace(/\\([$`"\\\n])/g, "$1"));
@@ -1569,7 +1655,8 @@ function nextHeredoc(text: string, from: number): Heredoc | null {
     while (at <= text.length) {
       const eol = text.indexOf("\n", at);
       const line = text.slice(at, eol < 0 ? text.length : eol);
-      if ((m[1] ? line.replace(/^\t+/, "") : line).trimEnd() === delim)
+      // the whole line is the delimiter: `EOF ` with a trailing space is still body (CodeRabbit on #127)
+      if ((m[1] ? line.replace(/^\t+/, "") : line) === delim)
         return { start: m.index, head, rest: text.slice(head, nl), body: text.slice(nl + 1, Math.max(nl + 1, at - 1)), quoted: /['"\\]/.test(word), end: eol < 0 ? text.length : eol + 1 };
       if (eol < 0) break;
       at = eol + 1;
@@ -1718,6 +1805,7 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
 
 // The reason a command is refused, or null when it may run. Anything unexpected refuses.
 export function verdict(cmd: string, ctx: GuardContext): string | null {
+  startLookups();
   try {
     checkCommand(cmd, ctx);
     return null;

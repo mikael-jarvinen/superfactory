@@ -399,6 +399,48 @@ test("a respawn leaves room for one listing after it", () => {
   assert.ok(given !== undefined && given <= 40_000 && given > 39_000, `respawn given ${given} ms of 60 000: 20 000 for a listing comes off`);
 });
 
+// The render runs between the budget check and the respawn: the respawn is given what is left after
+// it, and a render that leaves too little fails the wake rather than run past it (CodeRabbit on #127).
+const offBea = (respawned: (number | undefined)[]) => ({
+  where: "here",
+  sessions: (all = false) => (all ? [sess("b1", "bea")] : []),
+  alive: () => false,
+  respawn: (_n: string, _id: string, ms?: number) => (respawned.push(ms), { ok: false, said: "", why: "stop here" }),
+}) as unknown as Transport;
+
+test("the respawn's budget is what is left after the settings are rendered", () => {
+  const ws = openWorkspace(fakeFleet().ws, {});
+  const bea = agentOrDie(ws, "bea");
+  const role = ws.config.roles[bea.role] as { settings: string };
+  const tmpl = role.settings;
+  const real = Date.now;
+  let clock = real();
+  Date.now = () => clock;
+  try {
+    // reading the template for the render takes 500 ms
+    Object.defineProperty(role, "settings", { get: () => ((clock += 500), tmpl), configurable: true });
+    const given: (number | undefined)[] = [];
+    let w = wake(ws, bea, { t: offBea(given), deadline: clock + 20_000 + 1_200 });
+    assert.deepEqual([w, given], [{ is: "failed", why: "out of time before respawning b1" }, []], "1 200 ms less 500 is under the 1 000 a respawn needs");
+    w = wake(ws, bea, { t: offBea(given), deadline: clock + 20_000 + 3_000 });
+    assert.ok(given.length === 1 && (given[0] as number) <= 2_500, `respawn given ${given[0]} ms: the 500 the render took comes off`);
+  } finally {
+    Date.now = real;
+  }
+});
+
+test("a woken session whose settings cannot be rendered fails the wake, saying why", () => {
+  const dir = fakeFleet().ws;
+  const ws = openWorkspace(dir, {});
+  const bea = agentOrDie(ws, "bea");
+  (ws.config.roles[bea.role] as { settings: string }).settings = join(dir, "gone.json");
+  const given: (number | undefined)[] = [];
+  const w = wake(ws, bea, { t: offBea(given) });
+  assert.equal(w.is, "failed");
+  assert.match((w as { why: string }).why, /bea's settings could not be rendered: .*gone\.json/);
+  assert.deepEqual(given, [], "nothing respawned");
+});
+
 test("a listing that breaks, rather than cannot be had, is thrown on and not taken for unknown", () => {
   const dir = tempWorkspace(HOSTED_TOML);
   after(() => rmSync(dir, { recursive: true, force: true }));
