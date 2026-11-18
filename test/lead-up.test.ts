@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { after, mock, test } from "node:test";
 import type { Session } from "../src/fleet.js";
 import { lead } from "../src/fleet.js";
-import { leadPrompt, settingsFile } from "../src/launch.js";
+import { launch, leadPrompt, settingsFile } from "../src/launch.js";
 import { bringUpLead, resumePrompt } from "../src/lead-up.js";
 import { forgetStopped, lastStopped, noteStopped } from "../src/stopped.js";
 import type { StartRequest, Transport } from "../src/transport.js";
@@ -19,7 +19,7 @@ const ws = openWorkspace(dir, {});
 const ld = lead(ws);
 
 // A transport whose listing is `sessions`; whatever it starts or respawns comes up alive.
-function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boolean; stopBug?: boolean } = {}) {
+function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boolean; stopBug?: boolean; neverUp?: boolean } = {}) {
   const started: { cwd: string; prompt: string; args: string[]; appendix: string | null; runDir: string }[] = [];
   const respawned: string[] = [];
   const removed: string[] = [];
@@ -31,7 +31,7 @@ function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boo
     start(req: StartRequest) {
       if (opts.startFails) throw new Error("claude --bg failed: no such session");
       started.push({ cwd: req.cwd, prompt: req.prompt, args: req.args(req.appendix ? "/run/appendix.md" : null), appendix: req.appendix, runDir: req.runDir });
-      sessions.push({ id: "new1", name: ld.name, kind: "background", alive: true });
+      if (!opts.neverUp) sessions.push({ id: "new1", name: ld.name, kind: "background", alive: true });
       return "new1";
     },
     respawn(_name, id) {
@@ -203,6 +203,39 @@ test("restart-lead resumes the lead it stopped, by id, and refuses when that row
     bringUpLead(ws, ld, other.t, false, () => {}, 1);
     const a2 = other.started[0]!.args;
     assert.equal(a2[a2.indexOf("--resume") + 1], "later-uuid", "the conversation launched since, not the stale record's");
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
+});
+
+test("a resume that never comes back keeps the stop record for the next try (CodeRabbit on #130)", () => {
+  const today = stopped({ id: "5e7a0b12", sessionId: "today-uuid", startedAt: 2000 });
+  try {
+    noteStopped(ws, ld.name, today);
+    const f = fake([today], { neverUp: true });
+    bringUpLead(ws, ld, f.t, false, () => {}, 0.01);
+    assert.deepEqual(f.respawned, ["5e7a0b12"], "fell back to respawning it");
+    assert.equal(lastStopped(ws, ld.name)?.id, "5e7a0b12");
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
+});
+
+test("a launch that never comes up keeps the stopped row and its record (CodeRabbit on #130)", () => {
+  const today = stopped({ id: "5e7a0b12", sessionId: "today-uuid" });
+  try {
+    noteStopped(ws, ld.name, today);
+    const f = fake([today], { neverUp: true });
+    // waitForName's 90s pass at once
+    let now = Date.now();
+    const m = mock.method(Date, "now", () => (now += 100_000));
+    try {
+      assert.throws(() => launch(ws, ld, join(dir, "lead"), "hi", null, undefined, f.t), /did not appear in `claude agents`/);
+    } finally {
+      m.mock.restore();
+    }
+    assert.deepEqual(f.removed, [], "the stopped row stays, the only way back");
+    assert.equal(lastStopped(ws, ld.name)?.id, "5e7a0b12");
   } finally {
     forgetStopped(ws, ld.name);
   }

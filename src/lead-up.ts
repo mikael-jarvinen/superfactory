@@ -74,9 +74,6 @@ function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId:
   const cwd = old.cwd ?? (roleOf(ws, ld).cwd as string);
   try {
     t.start({ agent: ld, cwd, prompt, appendix, runDir: ws.runDir, phase: undefined, args: (p) => resumeArgs(ws, ld, sessionId, prompt, p), env: { ...process.env, ...GIT_HTTPS_ENV } });
-    // the resumed conversation runs under a new id, the one a later stop records (the row it
-    // replaced is removed below)
-    forgetStopped(ws, ld.name);
   } catch (e) {
     out(`resuming ${sessionId} failed (${(e as Error).message}); respawning instead`);
     return false;
@@ -86,6 +83,10 @@ function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId:
     out(`resumed ${sessionId} did not come back; respawning instead`);
     return false;
   }
+  // Up under a new id, the one a later stop records; until now the record stays, so a resume that
+  // fails leaves the next try aimed at the same conversation (CodeRabbit on #130). The row it
+  // replaced is removed below.
+  forgetStopped(ws, ld.name);
   // A resume that comes back under a new id leaves the old one listed, stopped; take it off the list.
   // The lead is up by now, so a stop that dies (a scope systemd-run cannot make) only leaves the
   // old entry listed; it is no reason to fail the bring-up. Any other error is a bug, and throws.
