@@ -1247,6 +1247,15 @@ const ROUND_128: [string, string, string][] = [
   [NO, "an echo piped to bash", "echo 'gh pr comment 5 -R acme/api --body hi' | bash"],
   [OK, "a quoted heredoc to cat is data", "cat <<'EOF'\ngh pr comment 5 -R acme/api --body hi\nEOF"],
   [OK, "a heredoc to bash with a marked body", "bash <<'EOF'\ngh pr comment 5 -R acme/api --body '> Written by agent. ok'\nEOF"],
+  // Marie on #128 at e7d13a5e: the comment rule applies no protect policy to the rest of the line
+  [OK, "a PATH export before a read", "export PATH=/x:$PATH; gh pr view 5"],
+  [OK, "a HOME override on a read", "HOME=/h gh pr view 5"],
+  [OK, "a GIT_SSH_COMMAND override on a read", "GIT_SSH_COMMAND='ssh -i k' gh pr view 5"],
+  [OK, "xargs after gh", "gh pr list | xargs -n1 echo"],
+  [OK, "xargs kill then gh", "ls | xargs -r kill; gh pr view 5"],
+  [OK, "a PATH export before a marked comment", "export PATH=/x:$PATH; gh pr comment 5 -R acme/api --body '> Written by agent. ok'"],
+  [NO, "a PATH export before an unmarked comment", "export PATH=/x:$PATH; gh pr comment 5 -R acme/api --body hi"],
+  [NO, "an env-prefixed echo piped to bash", "HOME=/h echo 'gh pr comment 5 -R acme/api --body hi' | bash"],
 ];
 
 test("the shapes CodeRabbit found in #128 at 5332c327 are read as bash and gh read them", () => {

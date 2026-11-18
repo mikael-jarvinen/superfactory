@@ -2267,9 +2267,11 @@ function checkComments(cmd: string): void {
   // what echo and printf print earlier in the line, which a pipe may carry to a shell (over-checks)
   const printed: string[] = [];
   for (const s of simpleCommands(tokenize(text), bodies, "pass")) {
-    const p = printedText(stripPrefixes(s.words));
-    if (p !== null) printed.push(p);
+    // commandWords, not protect's stripPrefixes: this rule holds sessions that run no protect guard,
+    // so an env override or a wrapper is no refusal here (Marie on #128)
     const words = commandWords(s.words);
+    const p = printedText(words);
+    if (p !== null) printed.push(p);
     const name = posix.basename((words[0] ?? "").replace(/^\\/, "")).toLowerCase();
     if (name === "gh") checkCommentWrite(words.slice(1));
     else if (SHELLS.has(name)) {
