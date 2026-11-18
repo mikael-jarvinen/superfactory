@@ -65,6 +65,8 @@ export type Policy = (typeof POLICIES)[number];
 
 export interface GuardContext {
   role: string;
+  // the system bin dirs, for tests only: a fixture's links stand for a box's (never set from argv)
+  binDirs?: readonly string[];
   // set by checkCommand when the command line names HOME other than as $HOME or ${HOME}: then a
   // $HOME/... command word may hold anything
   homeAssigned?: boolean;
@@ -111,10 +113,11 @@ function resolveDir(dir: string): string {
 function unresolved(p: string): string {
   return p.startsWith("/") ? p : `${process.cwd()}/${p}`;
 }
-let trustedReal: Set<string> | undefined;
-function trustedDir(dir: string): boolean {
-  trustedReal ??= new Set([...TRUSTED_BIN_DIRS].map(resolveDir));
-  return trustedReal.has(resolveDir(dir));
+const trustedReal = new Map<readonly string[] | Set<string>, Set<string>>();
+function trustedDir(dir: string, dirs: readonly string[] | Set<string> = TRUSTED_BIN_DIRS): boolean {
+  let real = trustedReal.get(dirs);
+  if (!real) trustedReal.set(dirs, (real = new Set([...dirs].map(resolveDir))));
+  return real.has(resolveDir(dir));
 }
 
 class Refused extends Error {}
@@ -1195,11 +1198,14 @@ function commandWord(words: string[], ctx: GuardContext): string[] {
     let w = words[0];
     if (w === undefined) return words;
     let file: string | null = null;
+    // the path as the shell finds it, before any link in its last part is followed
+    let where: string | null = null;
     let trusted: boolean;
+    const dirs = ctx.binDirs ?? TRUSTED_BIN_DIRS;
     const bare = BARE_WORD.test(w);
     if (bare) {
-      const found = onPath(w);
-      file = found && realFile(found);
+      where = onPath(w);
+      file = where && realFile(where);
       // not on PATH: a builtin, or a program that is not there, named by its spelling
       trusted = file === null;
     } else {
@@ -1217,17 +1223,23 @@ function commandWord(words: string[], ctx: GuardContext): string[] {
       if (relative && w.split("/").includes("..")) cannot("climbs out of the project with ..");
       if (relative && ctx.cwdChanged) trusted = true;
       else {
-        file = realFile(unresolved(w.startsWith("~") ? homedir() + w.slice(1) : w));
-        trusted = file === null && trustedDir(posix.dirname(w));
+        where = unresolved(w.startsWith("~") ? homedir() + w.slice(1) : w);
+        file = realFile(where);
+        trusted = file === null && trustedDir(posix.dirname(w), dirs);
       }
     }
     const spelled = posix.basename(w);
-    if (file !== null) trusted = trustedDir(posix.dirname(file));
     const real = file === null ? spelled : posix.basename(file);
+    // A system program is named by where its directory resolves plus its name as written: on
+    // ubuntu-26.04 /usr/bin/env is a link to /usr/lib/cargo/bin/coreutils/env (Marie on #124). A file
+    // outside the bin dirs is a system program too when a bin dir's name of it resolves to it (a link
+    // to that env is env); any other file there is named by what it is, or not at all.
+    const system = file !== null && (trustedDir(posix.dirname(file), dirs) || [...dirs].some((d) => realFile(`${d}/${real}`) === file));
+    if (file !== null) trusted = system || (where !== null && trustedDir(posix.dirname(where), dirs));
     // a system program keeps its spelling unless its file is a wrapper (/tmp/e linked to env is env)
     // git runs the subcommand its argv[0] names, so a git-push linked to git is git push
     const sub = real.toLowerCase() === "git" && /^git-[\w-]+$/i.test(spelled);
-    const named = (sub ? anywhere(spelled) : anywhere(real)) ?? anywhere(spelled) ?? (trusted ? [WRAPPERS.has(real) ? real : spelled] : null);
+    const named = (sub ? anywhere(spelled) : anywhere(real)) ?? anywhere(spelled) ?? (trusted ? [system && WRAPPERS.has(real) ? real : spelled] : null);
     if (named === null) return bare ? words : [];
     const next = stripPrefixes([...named, ...words.slice(1)]);
     // stripPrefixes took nothing off, so this is the command; otherwise read the one after the wrapper

@@ -665,6 +665,35 @@ test("a wrapper by any path that resolves to a system bin dir is the wrapper", (
   assert.deepEqual(wrong, []);
 });
 
+// On ubuntu-26.04 /usr/bin/env, nice, timeout and nohup are links to Rust coreutils' files in
+// /usr/lib/cargo/bin/coreutils, outside the bin dirs, and a path to one was no wrapper, so what came
+// after it ran unchecked (Marie on #124, CI on 26.04). Here a bin dir of the fixture's own holds the
+// same links: a name in it is the program it is written as, and a link to its file is that program.
+test("a system program whose file lies outside the bin dirs is still that program", () => {
+  const M = "gh pr merge 1 -R acme/api";
+  const root = mkdtempSync(join(tmpdir(), "guard-cargo-"));
+  after(() => rmSync(root, { recursive: true, force: true }));
+  const [bin, cargo, other] = ["bin", "cargo", "other"].map((d) => join(root, d)) as [string, string, string];
+  for (const d of [bin, cargo, other]) mkdirSync(d);
+  for (const n of ["env", "nice", "timeout", "nohup", "ls"]) {
+    writeFileSync(join(cargo, n), "", { mode: 0o755 });
+    symlinkSync(join(cargo, n), join(bin, n));
+  }
+  symlinkSync(join(cargo, "env"), join(other, "e"));
+  symlinkSync(join(bin, "env"), join(other, "e2"));
+  const ctx: GuardContext = { ...pr, binDirs: [bin] };
+  const refused = [`'${bin}/env' ${M}`, `'${bin}/env' git push origin main`, `'${bin}/nice' ${M}`, `'${bin}/timeout' 5 ${M}`,
+    `'${bin}/nohup' git push origin main`, `'${bin}/../bin/env' ${M}`, `'${other}/e' ${M}`, `'${other}/e2' ${M}`,
+    `PATH='${bin}' env ${M}`, `PATH='${other}':$PATH e ${M}`, `'${bin}/env' '${bin}/nice' ${M}`];
+  const allowed = [`'${bin}/env' npm test`, `'${bin}/ls' -la`, `'${other}/e' npm test`, `'${bin}/timeout' 5 npm test`];
+  const wrong: string[] = [];
+  for (const c of [ctx, { ...ctx, role: "lead" }]) {
+    for (const r of refused) if (verdict(r, c) === null) wrong.push(`${c.role} allowed: ${r}`);
+    for (const r of allowed) if (verdict(r, c) !== null) wrong.push(`${c.role} refused: ${r} (${verdict(r, c)})`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
 // A command word's directory from a variable lost its `$` to the basename, and the shell splits it
 // (Marie on #124 at e6b2e171).
 test("a command word from a variable is refused, except a plain path under $HOME", () => {
