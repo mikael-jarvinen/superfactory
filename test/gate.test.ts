@@ -316,15 +316,14 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
   assert.equal(r.status, 1, r.stdout);
   assert.match(r.stdout, /CodeRabbit has not reviewed aaaaaaa: its status here says "Review skipped: draft pull request" -- comment "@coderabbitai review" on the PR, then run this again/);
 
-  // reviewed an earlier head, by a review, by an inline comment of its own, or by its status there
+  // reviewed an earlier head, by a review, by an inline comment of its own, or by its finished
+  // check-run there, which GitHub ties to this PR: a rebase it had already reviewed
+  const ours = { pull_requests: [{ number: N }] };
   const evidence: Routes[] = [
     { [rv]: { stdout: [{ user: { login: "coderabbitai[bot]" }, commit_id: OLD, state: "COMMENTED", body: REVIEW_BODY }] } },
     { [cm]: { stdout: [{ user: { login: "coderabbitai[bot]" }, original_commit_id: OLD, in_reply_to_id: null }] } },
-    { [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, ...onlyThisPr,
-      [oldStatus]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review completed" }] } } },
-    // its finished check-run there, with no status: a rebase it had already reviewed
     { [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, ...onlyThisPr, [oldStatus]: { stdout: { statuses: [] } },
-      [oldRuns]: checkRuns(check("test"), rabbitRun("Review completed", { conclusion: "success" })) },
+      [oldRuns]: checkRuns(check("test"), rabbitRun("Review completed", { conclusion: "success", ...ours })) },
   ];
   for (const over of evidence) {
     r = ready(over);
@@ -333,16 +332,32 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
     assert.match(r.stdout, /^SENDABLE/m);
   }
 
-  // a status or check-run on a commit another PR also has is that PR's review: a stacked PR carries
-  // its lower PR's commits (CodeRabbit on superfactory#119)
-  for (const over of evidence.slice(2)) {
-    r = ready({ ...over, [oldPulls]: { stdout: [{ number: N - 1 }, { number: N }] } });
-    assert.equal(r.status, 1, r.stdout);
-    assert.doesNotMatch(r.stdout, /earlier head/);
+  // a check-run on a commit another PR also has is that PR's review: a stacked PR carries its lower
+  // PR's commits (CodeRabbit on superfactory#119)
+  r = ready({ ...evidence[2], [oldPulls]: { stdout: [{ number: N - 1 }, { number: N }] } });
+  assert.equal(r.status, 1, r.stdout);
+  assert.doesNotMatch(r.stdout, /earlier head/);
+  // CodeRabbit on superfactory#128: a closed, unmerged PR's review stays on its commits, and GitHub
+  // lists only open and merged PRs for a commit, so a commit of this PR's that only this PR is listed
+  // for may carry that one's review. Its status names no PR, and its check-run names the closed PR,
+  // or none: neither is this PR's review.
+  const closed = { pull_requests: [{ number: N - 5 }] };
+  const retained: [string, Routes][] = [
+    ["a status", { ...evidence[2], [oldRuns]: checkRuns(check("test")),
+      [oldStatus]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review completed" }] } } }],
+    ["a check-run tied to the closed PR", { ...evidence[2], [oldRuns]: checkRuns(rabbitRun("Review completed", { conclusion: "success", ...closed })) }],
+    ["a check-run tied to no PR", { ...evidence[2], [oldRuns]: checkRuns(rabbitRun("Review completed", { conclusion: "success", pull_requests: [] })) }],
+    ["a check-run with no PRs read", { ...evidence[2], [oldRuns]: checkRuns(rabbitRun("Review completed", { conclusion: "success" })) }],
+  ];
+  for (const [name, over] of retained) {
+    r = ready(over);
+    assert.equal(r.status, 1, `${name}: ${r.stdout}`);
+    assert.doesNotMatch(r.stdout, /earlier head/, name);
+    assert.match(r.stdout, /CodeRabbit has not reviewed aaaaaaa/, name);
   }
   // a skipped or unfinished check-run there is no review
-  for (const run of [rabbitRun("Review skipped", { conclusion: "skipped" }), rabbitRun("Review completed", { status: "in_progress", conclusion: null }), rabbitRun("Review completed")]) {
-    r = ready({ ...evidence[3], [oldRuns]: checkRuns(run) });
+  for (const run of [rabbitRun("Review skipped", { conclusion: "skipped", ...ours }), rabbitRun("Review completed", { status: "in_progress", conclusion: null, ...ours }), rabbitRun("Review completed", ours)]) {
+    r = ready({ ...evidence[2], [oldRuns]: checkRuns(run) });
     assert.equal(r.status, 1, r.stdout);
   }
   // the PRs of the commit unreadable: not a pass

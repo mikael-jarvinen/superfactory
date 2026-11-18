@@ -237,7 +237,7 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
           // The rate-limit waiver needs no history, so it goes first: a history read that fails
           // does not hold back a PR the waiver lets go.
           const limited = (st && RATE_LIMITED.test(desc)) || (latestRun && rateLimitedRun(latestRun));
-          const earlier: Earlier = limited ? {} : earlierReview(repo, n, botLogin, sha, rs, isBot, isBotRun);
+          const earlier: Earlier = limited ? {} : earlierReview(repo, n, botLogin, sha, rs, isBotRun);
           if (limited) remarks.push(`${bot.status} is rate limited and has not reviewed ${short}; sent without its review`);
           else if (earlier.unreadable) fail(`COULD NOT READ ${earlier.unreadable} -- cannot say whether ${bot.status} reviewed an earlier head of #${n}`, "unreadable");
           else if (earlier.sha) remarks.push(`${bot.status} reviewed an earlier head, ${earlier.sha.slice(0, 7)}, not ${short}; later versions go without its review`);
@@ -296,18 +296,21 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
 }
 
 // The latest earlier head of PR #n that the review bot reviewed: a review with a body, an inline
-// comment of its own (not a reply), or, at a commit of the PR's, its own status or check-run saying
-// it finished, on any sha but the head. Read in that order, so a PR it reviewed costs no reads beyond
-// the reviews already in hand. Reviews and comments are this PR's own. A status or check-run belongs
-// to a commit, not a PR, so it counts only at a commit no other PR has: a stacked PR carries its lower
-// PR's commits and the reviews the bot did there (CodeRabbit on superfactory#119).
+// comment of its own (not a reply), or, at a commit of the PR's, its own check-run saying it
+// finished, on any sha but the head. Read in that order, so a PR it reviewed costs no reads beyond
+// the reviews already in hand. Reviews and comments are this PR's own. A check-run belongs to a
+// commit, so it counts only when GitHub tied it to this PR, and at a commit no other PR has: a
+// stacked PR carries its lower PR's commits and the reviews the bot did there (CodeRabbit on
+// superfactory#119). The commit's PRs alone do not say whose review it was: GitHub lists only the
+// open and merged ones, so a closed PR's review on a commit another PR now carries read as that
+// one's (CodeRabbit on superfactory#128). A status names no PR, so at an earlier commit it counts
+// for nothing.
 interface Earlier {
   sha?: string;
   unreadable?: string;
 }
 
-function earlierReview(repo: Repo, n: number, botLogin: string, head: string, rs: Review[],
-  isBotStatus: (s: CommitStatus) => boolean, isBotRun: (c: CheckRun) => boolean): Earlier {
+function earlierReview(repo: Repo, n: number, botLogin: string, head: string, rs: Review[], isBotRun: (c: CheckRun) => boolean): Earlier {
   const mine = (login: string | undefined) => (login ?? "").replace(/\[bot\]$/, "") === botLogin;
   const review = rs.filter((r) => mine(r.user?.login) && !!r.body?.trim() && !!r.commit_id && r.commit_id !== head).at(-1);
   if (review?.commit_id) return { sha: review.commit_id };
@@ -320,14 +323,10 @@ function earlierReview(repo: Repo, n: number, botLogin: string, head: string, rs
   for (const { sha } of [...commits].reverse()) {
     if (sha === head) continue;
     const short = sha.slice(0, 7);
-    const sts = statuses(repo, sha);
-    if (sts === undefined) return { unreadable: `the commit statuses at ${short}` };
-    let reviewed = sts.some((s) => isBotStatus(s) && s.state === "success" && !NOT_A_REVIEW.test(s.description ?? ""));
-    if (!reviewed) {
-      const runs = checkRuns(repo, sha);
-      if (runs === undefined) return { unreadable: `the check-runs at ${short}` };
-      reviewed = runs.some((c) => isBotRun(c) && c.status === "completed" && c.conclusion === "success" && REVIEWED_RUN.test(c.output?.title ?? ""));
-    }
+    const runs = checkRuns(repo, sha);
+    if (runs === undefined) return { unreadable: `the check-runs at ${short}` };
+    const reviewed = runs.some((c) => isBotRun(c) && c.status === "completed" && c.conclusion === "success" &&
+      REVIEWED_RUN.test(c.output?.title ?? "") && (c.pull_requests ?? []).some((p) => p.number === n));
     if (!reviewed) continue;
     const prs = commitPulls(repo, sha);
     if (prs === undefined) return { unreadable: `the PRs of commit ${short}` };
