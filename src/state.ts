@@ -177,8 +177,13 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   let rec = loadRec(ws, ticket);
   const isNew = rec === null;
   if (rec === null) {
-    if (!FIRST.has(to))
-      die(`${ticket} has no record; the first state must be designing or building. Work nobody is doing yet waits in the backlog.`);
+    // Work that waits with no tracker backlog to wait in, LOCAL- work above all, is recorded off the
+    // board, with a title so `state --off` says what it is (Niilo on #129).
+    if (to === OFF && !c.title)
+      die(`${ticket} has no record; a new item goes off the board only with --title "<what it is>", so \`state --off\` can show it`);
+    if (to !== OFF && !FIRST.has(to))
+      die(`${ticket} has no record; the first state must be designing or building, or off with --title for work ` +
+        `that waits with no backlog to wait in. A ticket nobody is doing yet waits in the backlog.`);
     rec = {
       ticket, state: null, stack: c.stack ?? null, agent: c.agent ?? null, jira: null,
       worktree: null, pr: null, asked_you: null, since: null, created: now(), blocked_from: null,

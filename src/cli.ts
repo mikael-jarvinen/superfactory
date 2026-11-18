@@ -90,11 +90,13 @@ usage: factory [--workspace <dir>] <command> [options]
         [--canvas URL] [--slides URL] [--approved "<the human's words>"]
                                   transition. design-review needs the canvas and slides links;
                                   design-review -> off is the approval and needs --approved.
-                                  The first state is designing or building: work nobody is doing
-                                  waits in the backlog, not on the board.
-  state <KEY> off [--approved "<words>"] [--note N]
+                                  The first state is designing or building: a ticket nobody is
+                                  doing waits in the backlog, not on the board.
+  state <KEY> off [--approved "<words>"] [--note N] [--title T]
                                   take it off the board and keep the record (an approved design,
-                                  the stack, the title) until a dispatch brings it back. From
+                                  the stack, the title) until a dispatch brings it back. A new
+                                  item, LOCAL- work with no backlog to wait in, goes off with
+                                  --title, and \`state --off\` lists it. From
                                   design-review it is the approval, from building it unassigns,
                                   and from a review it ends the slice, for the next slice of a
                                   multi-PR ticket

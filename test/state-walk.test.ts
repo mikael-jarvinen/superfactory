@@ -81,9 +81,18 @@ test("transition output and refusal messages", () => {
   r = factory(ws, ["state", "LOCAL-gone", "queued"]);
   assert.equal(r.stderr, "factory: unknown state 'queued'; states: designing, design-review, building, pr-open, agent-review, " +
     "fixing, gate, your-review, colleague-review, done, blocked, or off to take it off the board\n");
+  r = factory(ws, ["state", "LOCAL-gone", "done"]);
+  assert.equal(r.stderr, "factory: LOCAL-gone has no record; the first state must be designing or building, or off with --title " +
+    "for work that waits with no backlog to wait in. A ticket nobody is doing yet waits in the backlog.\n");
   r = factory(ws, ["state", "LOCAL-gone", "off"]);
-  assert.equal(r.stderr, "factory: LOCAL-gone has no record; the first state must be designing or building. " +
-    "Work nobody is doing yet waits in the backlog.\n");
+  assert.equal(r.stderr, "factory: LOCAL-gone has no record; a new item goes off the board only with --title \"<what it is>\", " +
+    "so `state --off` can show it\n");
+  // LOCAL work has no backlog to wait in, so it is recorded off the board, titled (Niilo on #129)
+  r = factory(ws, ["state", "LOCAL-gone", "off", "--title", "Retire the old export"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, "LOCAL-gone: (new) -> off  agent=None  no Jira ticket\n");
+  assert.equal(factory(ws, ["state", "--off"]).stdout, "  LOCAL-gone   agent=-        Retire the old export\n");
+  assert.match(factory(ws, ["state", "--list"]).stdout, /^ {2}TEST-2 .*\n {2}and 1 off the board: factory state --off\n$/);
   factory(ws, ["state", "LOCAL-gone", "building"]);
   factory(ws, ["state", "LOCAL-gone", "off"]);
   r = factory(ws, ["drop", "LOCAL-gone", "--note", "not asked for"]);
