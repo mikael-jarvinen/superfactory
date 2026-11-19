@@ -1377,6 +1377,10 @@ const ROUND_128: [string, string, string][] = [
   [NO, "a variable set to gh and then to ls", "G=gh; G=ls; $G pr comment 5 -R acme/api --body hi"],
   [NO, "a variable from a substitution, on a comment", "G=$(echo gh); $G pr comment 5 -R acme/api --body hi"],
   [NO, "a variable from a default, on a reply", "GH=${GH_BIN:-gh}; $GH api -X POST repos/a/b/pulls/5/comments/1/replies -f body=hi; gh pr view 5"],
+  [NO, "a variable set to a read and then to a comment", "G=\"gh pr view\"; G=\"gh pr comment\"; $G 5 -R a/b --body hi"],
+  [NO, "a variable set to a read and then to an issue comment", "G=\"gh issue view\"; G=\"gh issue comment\"; $G 5 -R a/b --body hi"],
+  [NO, "a variable set to a read and then to an api reply", "G=\"gh api repos/a/b/pulls/5/comments\"; G=\"gh api -X POST repos/a/b/pulls/5/comments/1/replies\"; $G -f body=hi"],
+  [NO, "a substitution on a GraphQL query from a file", "G=$(command -v gh); $G api graphql -F query=@m.graphql"],
   [NO, "a variable from a default, on a close with a comment", "GH=${GH_BIN:-gh}; $GH pr close 5 -R acme/api -c hi"],
   [NO, "xargs -d with a delimiter this cannot read", "echo 5 | xargs -d ab gh pr comment -R acme/api --body '> Written by agent. ok'"],
 ];

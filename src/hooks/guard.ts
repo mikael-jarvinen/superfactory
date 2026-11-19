@@ -2246,6 +2246,9 @@ function looksLikeWrite(rest: string[]): boolean {
     // that adds or edits a comment or a review; a query, a commit message or a label is no comment
     if (after.some((f) => /^(-[fF]|--(raw-)?field=)?(\w*\[\]\[)?body\]?=/.test(f) || /^--input(=|$)/.test(f))) return true;
     if (after.some((f) => /(add|update)\w*(Comment|Review)|submitPullRequestReview/i.test(f))) return true;
+    // a GraphQL query read from a file is not seen, so it may be a mutation (Marie on #128)
+    if (after.includes("graphql") && after.some((f, i) => /^(-F|--field=)query=@/.test(f) || (/^query=@/.test(f) && /^(-F|--field)$/.test(after[i - 1] ?? ""))))
+      return true;
     const m = after.findIndex((f) => /^(-X|--method)(=|$)/.test(f) || /^-X./.test(f));
     if (m < 0) return false;
     const f = after[m] as string;
@@ -2265,8 +2268,9 @@ function looksLikeWrite(rest: string[]): boolean {
 // (no HOME=, export HOME, read HOME, for HOME in). A value with a blank or a glob bash would split
 // or expand, and a name set twice or set any other way, stays unread (Marie on #128).
 const ENV_DIRS = ["HOME", "PWD", "OLDPWD", "TMPDIR", "CLAUDE_JOB_DIR", "CLAUDE_PROJECT_DIR", "XDG_RUNTIME_DIR"];
-// A name the line sets twice is read when each value starts with the same program, which is all a
-// command word needs (G=~/.local/bin/gh; [ -x $G ] || G=~/agents/bin/gh). A value with blanks is
+// A name the line sets twice is read only when its values are the same but for the first word's
+// directory, one program by its basename (G=~/.local/bin/gh; [ -x $G ] || G=~/agents/bin/gh), as
+// which one bash runs depends on the path taken (Marie on #128: G="gh pr view"; G="gh pr comment"). A value with blanks is
 // read as the words bash splits it into (P="node $CLAUDE_JOB_DIR/tmp/p.mjs"; $P ...). `named` is
 // whether the line names a variable this could not read, bare (G=$(...), read G, for G in).
 function lineValues(text: string, sims: Simple[]): { vals: Map<string, string>; named: (n: string) => boolean } {
@@ -2275,15 +2279,19 @@ function lineValues(text: string, sims: Simple[]): { vals: Map<string, string>; 
   for (const n of ENV_DIRS) if (bare(n) === 0) vals.set(n, `/${n}`);
   const isSet = (sim: Simple) => sim.words.length > 0 && sim.words.every((w) => /^[A-Za-z_]\w*=/.test(w));
   const seen = new Map<string, string[]>();
-  const first = (v: string) => posix.basename(v.trim().split(/\s+/)[0] ?? "");
+  const same = (a: string, b: string) => {
+    const [x = "", ...xs] = a.trim().split(/\s+/);
+    const [y = "", ...ys] = b.trim().split(/\s+/);
+    return posix.basename(x) === posix.basename(y) && xs.join(" ") === ys.join(" ");
+  };
   for (const sim of sims) {
     if (!isSet(sim)) continue;
     for (const w of sim.words) {
       const n = w.slice(0, w.indexOf("="));
       const vs = [...(seen.get(n) ?? []), resolveWord(w.slice(n.length + 1), vals)];
       seen.set(n, vs);
-      if (!ENV_DIRS.includes(n) && bare(n) === vs.length && vs.every((v) => /^[\w@%+=:,./~ \t-]*$/.test(v) && first(v) === first(vs[0] as string)))
-        vals.set(n, vs[0] as string);
+      if (!ENV_DIRS.includes(n) && bare(n) === vs.length && vs.every((v) => /^[\w@%+=:,./~ \t-]*$/.test(v) && same(v, vs[0] as string)))
+        vals.set(n, vs[vs.length - 1] as string);
       else vals.delete(n);
     }
   }
