@@ -112,16 +112,25 @@ const startMs = (r: Session): number =>
 // A recorded row that is gone is said, never replaced by an older one. The record lives on the box
 // that stopped it, so a launch from another box does not forget it; a row started after the stop
 // (another conversation, launched since) makes it stale, and the newest is the one (Marie on #130).
-export function resumable(ws: Workspace, name: string, rows: Session[], newest: (r: Session[]) => Session | null):
-  { s: Session | null } | { gone: string } {
+export function resumable(ws: Workspace, name: string, rows: Session[], newest: (r: Session[]) => Session | null,
+  t: Pick<Transport, "sessions" | "alive" | "stop">): { s: Session | null } | { gone: string } {
   const st = lastStopped(ws, name);
   if (!st) return { s: newest(rows) };
   const at = Date.parse(st.at);
   // a noted launch holds its mark until its row shows it ran: a state only a session that came up
   // reaches (done, blocked, stopped), or a worker's pid. A row still "working" with no pid after the
   // launch gave up, or one with no state, has shown nothing and stays marked (Marie on #130).
-  const failed = new Set((st.failed ?? []).filter((id) => !rows.some((r) => r.id === id && ran(r))));
-  if (rows.some((r) => r.id !== st.id && !failed.has(r.id ?? "") && startMs(r) > at)) return { s: newest(rows.filter((r) => !failed.has(r.id ?? ""))) };
+  const marked = new Set(st.failed ?? []);
+  const failed = new Set([...marked].filter((id) => !rows.some((r) => r.id === id && ran(r))));
+  // A marked launch that has run since came up after the stop, whatever its host's clock says of
+  // its start. It replaces the record, as cameUp does for one seen live, so a later wake does not
+  // read the mark again once the row is back to "working" (CodeRabbit on #130 at 43510c94).
+  const since = rows.some((r) => !!r.id && marked.has(r.id) && !failed.has(r.id));
+  if (since || rows.some((r) => r.id !== st.id && !marked.has(r.id ?? "") && startMs(r) > at)) {
+    const s = newest(rows.filter((r) => !failed.has(r.id ?? "")));
+    if (since) replaceStopped(ws, name, t, s?.id);
+    return { s };
+  }
   const s = rows.find((r) => r.id === st.id);
   return s ? { s } : { gone: st.id };
 }

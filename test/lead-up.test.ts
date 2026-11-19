@@ -259,11 +259,11 @@ test("a launch that never comes up does not make its row the one a wake resumes 
     }
     assert.ok(rows.some((r) => r.id === "new1"), "the failed launch's row is listed, started after the stop");
     const newest = (r: Session[]) => r.reduce<Session | null>((a, b) => (!a || Number(b.startedAt) > Number(a.startedAt) ? b : a), null);
-    const which = resumable(ws, ld.name, rows, newest);
+    const which = resumable(ws, ld.name, rows, newest, fake(rows).t);
     assert.ok("s" in which && which.s?.id === "5e7a0b12", `a wake resumes the session stopped last, not the launch that failed: ${JSON.stringify(which)}`);
     // a conversation that did come up since still supersedes the record
     rows.push({ id: "c0ffee00", name: ld.name, kind: "background", state: "stopped", startedAt: Date.now() + 5000 });
-    const later = resumable(ws, ld.name, rows, newest);
+    const later = resumable(ws, ld.name, rows, newest, fake(rows).t);
     assert.ok("s" in later && later.s?.id === "c0ffee00", JSON.stringify(later));
   } finally {
     forgetStopped(ws, ld.name);
@@ -390,5 +390,45 @@ test("a failed launch's row that has shown nothing keeps its mark (Marie on #130
     } finally {
       forgetStopped(ws, ld.name);
     }
+  }
+});
+
+test("a marked launch that ran is the newer conversation, whatever its host's clock (CodeRabbit on #130 at 43510c94)", () => {
+  const today = stopped({ id: "5e7a0b12", sessionId: undefined, startedAt: Date.now() - 7_200_000 });
+  try {
+    noteStopped(ws, ld.name, today);
+    const rows: Session[] = [today];
+    // the host's clock is behind: the row's startedAt is before the stop recorded here
+    failNow(rows, Date.parse(lastStopped(ws, ld.name)?.at as string) - 60_000);
+    assert.deepEqual(lastStopped(ws, ld.name)?.failed, ["new1"]);
+    Object.assign(rows.find((r) => r.id === "new1") as Session, { state: "done" });
+    const f = fake(rows);
+    const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+    assert.deepEqual(f.respawned, ["new1"], JSON.stringify(w));
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
+});
+
+test("a marked launch that ran is not marked again on a later wake (CodeRabbit on #130 at 43510c94)", () => {
+  const today = stopped({ id: "5e7a0b12", sessionId: undefined, startedAt: Date.now() - 3_600_000 });
+  try {
+    noteStopped(ws, ld.name, today);
+    const rows: Session[] = [today];
+    failNow(rows, Date.now() + 1000);
+    const row = rows.find((r) => r.id === "new1") as Session;
+    Object.assign(row, { state: "done" });
+    const f = fake(rows);
+    wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+    assert.deepEqual(f.respawned, ["new1"]);
+    assert.equal(lastStopped(ws, ld.name), null, "the record is replaced, as for a launch seen live");
+    assert.deepEqual(f.removed, ["5e7a0b12"], "the stopped row it superseded goes");
+    // the respawn ends, and the row is listed "working" with no pid again
+    rows.splice(rows.findIndex((r) => r.id === "new1" && r.alive), 1);
+    Object.assign(row, { state: "working", pid: null });
+    const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+    assert.deepEqual(f.respawned, ["new1", "new1"], JSON.stringify(w));
+  } finally {
+    forgetStopped(ws, ld.name);
   }
 });

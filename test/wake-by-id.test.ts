@@ -121,7 +121,7 @@ test("a fresh launch removes the stopped row it replaces, and a record older tha
   all.push({ id: "c0ffee00", name: "rae", kind: "background", state: "stopped", status: "idle", pid: null,
     startedAt: Date.now() + 60_000, cwd: "/w/rae", sessionId: "c0ffee00-uuid", args: ["--bg", "--name", "rae", "launched elsewhere"] });
   writeFileSync(db, JSON.stringify(all));
-  const which = resumable(w, "rae", rows() as never, (r) => r.reduce((a, b) => ((b.startedAt as number) > (a.startedAt as number) ? b : a)));
+  const which = resumable(w, "rae", rows() as never, (r) => r.reduce((a, b) => ((b.startedAt as number) > (a.startedAt as number) ? b : a)), { sessions: () => [], alive: () => false, stop: () => {} } as never);
   assert.ok("s" in which && which.s?.id === "c0ffee00", JSON.stringify(which));
 
   // a fresh launch here: the stopped row it replaces goes, and the record with it

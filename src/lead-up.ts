@@ -40,7 +40,7 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
     const st = lastStopped(ws, ld.name);
     if (!st) old = findSession(t, ld.name, true);
     else {
-      const which = resumable(ws, ld.name, t.sessions(true).filter(isAgentSession(ld.name)), (rows) => pick(t, rows));
+      const which = resumable(ws, ld.name, t.sessions(true).filter(isAgentSession(ld.name)), (rows) => pick(t, rows), t);
       if ("gone" in which)
         throw new FactoryError(`${ld.name}'s last stopped session ${which.gone} is no longer listed, and an older one is another conversation. ` +
           `\`${freshCommand(ld)}\` starts a new one.`);
