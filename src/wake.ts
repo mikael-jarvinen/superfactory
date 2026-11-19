@@ -80,11 +80,12 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   if (!s) return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };
   // the id that came back, which can differ from the one respawned (Marie on #130 at 2e89a7a4)
   // A respawn that came back under a new id leaves the old row stopped; it goes (Marie at f62a6b10).
-  // No listing or stop starts that could run past the deadline: short of time for both, the record
-  // still moves, on the listing had before the respawn, and the old row is left for a later step
-  // (CodeRabbit on #130 at d1c64cc6).
+  // No listing or stop starts that could run past the deadline. A stop has no bound of its own (a
+  // remote one runs to 35 s, a local one has none) and up to two rows can go, so with a deadline
+  // no cleanup starts at all: the record still moves, on the listing had before the respawn, and
+  // the old rows are left for a later step (CodeRabbit on #130 at d1c64cc6 and b77aae5c).
   if (which.failed || (s.id && s.id !== old.id))
-    replaceStopped(ws, agent.name, t, s.id ?? old.id, old.id, left() < 2 * LISTING_TIMEOUT_MS ? all : undefined);
+    replaceStopped(ws, agent.name, t, s.id ?? old.id, old.id, o.deadline !== undefined ? all : undefined);
   return { is: "woke", s, from: old.id };
 }
 
