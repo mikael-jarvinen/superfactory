@@ -1297,6 +1297,19 @@ const ROUND_128: [string, string, string][] = [
   [OK, "a marked comment through a slot", "echo \"gh pr comment 5 -R acme/api --body '> Written by agent. ok'\" | xargs -I{} sh -c '{}'"],
   [OK, "gh output into xargs echo", "gh pr list | xargs -n1 echo"],
   [OK, "xargs kill then a gh read", "ls | xargs -r kill; gh pr view 5"],
+  // CodeRabbit on #128 at c023ab97: a filter between printf and a shell, xargs batches, -d items
+  [NO, "printf through sed into sh", "printf '%s\\n' \"gh pr comment 5 -R acme/api --body '> Written by agent. hi'\" | sed 's/Written by agent/posted/' | sh"],
+  [NO, "echo through tr into bash", "echo \"gh pr comment 5 -R acme/api --body '> Written by agent. hi'\" | tr W w | bash"],
+  [OK, "printf straight into sh with a marked comment", "printf '%s\\n' \"gh pr comment 5 -R acme/api --body '> Written by agent. hi'\" | sh"],
+  [NO, "xargs -n1 runs gh on 5 alone", "printf '%s\\n' \"5 --body '> Written by agent. ok'\" | xargs -n1 gh pr comment -R acme/api --body hi"],
+  [NO, "xargs --max-args=1 runs gh on 5 alone", "echo \"5 --body '> Written by agent. ok'\" | xargs --max-args=1 gh pr comment -R acme/api --body hi"],
+  [NO, "xargs -L1 runs gh on its first line alone", "printf \"5\\n--body '> Written by agent. ok'\\n\" | xargs -L1 gh pr comment -R acme/api --body hi"],
+  [OK, "xargs -n3 with a marked body in each run", "echo \"5 --body '> Written by agent. ok'\" | xargs -n3 gh pr comment -R acme/api"],
+  [NO, "xargs -s cuts runs where this cannot tell", "echo \"5 --body '> Written by agent. ok'\" | xargs -s 40 gh pr comment -R acme/api"],
+  [NO, "xargs -d keeps an item's quotes", "printf '%s\\n' \"--body='> Written by agent. ok'\" | xargs -d '\\n' gh pr comment 5 -R acme/api --body hi"],
+  [NO, "xargs --delimiter=, keeps an item's quotes", "echo \"--body='> Written by agent. ok'\" | xargs --delimiter=, gh pr comment 5 -R acme/api --body hi"],
+  [OK, "xargs -d with a marked item", "printf '%s\\n' '--body=> Written by agent. ok' | xargs -d '\\n' gh pr comment 5 -R acme/api"],
+  [NO, "xargs -d with a delimiter this cannot read", "echo 5 | xargs -d ab gh pr comment -R acme/api --body '> Written by agent. ok'"],
 ];
 
 test("the shapes CodeRabbit found in #128 at 5332c327 are read as bash and gh read them", () => {

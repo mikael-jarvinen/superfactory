@@ -2253,7 +2253,10 @@ function pipeTracker(): (simple: Simple, printed: string | null) => void {
     for (const id of simple.cuts ?? []) cut.set(id, said.length);
     for (const id of path) if (!opened.has(id)) [opened, cut].forEach((m) => m.set(id, said.length));
     if (simple.piped) simple.upstream = path.flatMap((id, k) => said.slice(cut.get(id) ?? 0, k + 1 < path.length ? opened.get(path[k + 1] as number) : said.length));
+    // a command piped text it does not print, sed or tr, passes on what this cannot read, not that
+    // text (CodeRabbit on #128: printf '...' | sed 's/Written by agent/x/' | sh)
     if (printed !== null) said.push(printed);
+    else if (simple.piped && simple.upstream?.length) said.push(UNREADABLE);
   };
 }
 
@@ -2282,6 +2285,99 @@ function xargsShort(o: string): { next: boolean; slot?: string | "next" } {
     return { next };
   }
   return { next: false };
+}
+
+// How xargs splits its input and runs its command, from the options commandWords recorded: the
+// delimiter -d or -0 sets (its items are taken as they are, quotes and all), and the batch -n or -L
+// sets (each batch is its own run), the last of the two winning. -s cuts batches where this cannot
+// tell. A -d value is a letter or a C escape (\n, \t, \\, \0, an octal or hex code).
+function xargsSplit(opts: string[]): { delim: string | null; args?: number; lines?: number; sized: boolean } {
+  const out: { delim: string | null; args?: number; lines?: number; sized: boolean } = { delim: null, sized: false };
+  const delim = (v: string): string => {
+    const m = /^(?:(.)|\\([ntrabfv\\])|\\([0-7]{1,3})|\\x([0-9a-fA-F]{1,2}))$/s.exec(v);
+    if (!m) return refuse(`xargs -d ${v}: a delimiter this cannot read, so a comment it posts cannot be checked`);
+    if (m[1] !== undefined) return m[1];
+    if (m[2] !== undefined) return ({ n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", f: "\f", v: "\v", "\\": "\\" } as Record<string, string>)[m[2]] as string;
+    return String.fromCharCode(parseInt((m[3] ?? m[4]) as string, m[3] !== undefined ? 8 : 16));
+  };
+  const count = (v: string | undefined): number => {
+    const n = Number(v);
+    return Number.isInteger(n) && n > 0 ? n : 1;
+  };
+  const set = (c: string, v: string | undefined): void => {
+    if (c === "0") out.delim = "\0";
+    else if (c === "d") out.delim = delim(v ?? "");
+    else if (c === "n") [out.args, out.lines] = [count(v), undefined];
+    else if (c === "L" || c === "l") [out.args, out.lines] = [undefined, v ? count(v) : 1];
+    else if (c === "s") out.sized = true;
+  };
+  for (let i = 0; i < opts.length; i++) {
+    const o = opts[i] as string;
+    if (o.startsWith("--")) {
+      const [k, eq] = o.includes("=") ? [o.slice(0, o.indexOf("=")), o.slice(o.indexOf("=") + 1)] : [o, undefined];
+      const v = eq ?? (WRAPPER_VALUES.xargs?.includes(o) ? opts[++i] : undefined);
+      const c = ({ "--null": "0", "--delimiter": "d", "--max-args": "n", "--max-lines": "L", "--max-chars": "s" } as Record<string, string>)[k];
+      if (c) set(c, v);
+      continue;
+    }
+    for (let j = 1; j < o.length; j++) {
+      const c = o[j] as string;
+      if (!XARGS_VALUE.includes(c)) {
+        set(c, undefined);
+        continue;
+      }
+      const rest = o.slice(j + 1);
+      set(c, rest === "" && !"iel".includes(c) ? opts[++i] : rest);
+      break;
+    }
+  }
+  return out;
+}
+
+// xargs' items in its default mode, line by line: words split at blanks, with '...', "..." and \
+// quoting as xargs reads them (no quote spans a line). An unclosed quote is refused.
+function xargsWords(text: string): string[][] {
+  const lines: string[][] = [];
+  for (const line of text.split("\n")) {
+    const words: string[] = [];
+    let w: string | null = null;
+    let q = "";
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i] as string;
+      if (q) {
+        if (c === q) q = "";
+        else w += c;
+      } else if (c === "'" || c === '"') [q, w] = [c, w ?? ""];
+      else if (c === "\\" && i + 1 < line.length) w = (w ?? "") + line[++i];
+      else if (c === " " || c === "\t") {
+        if (w !== null) words.push(w);
+        w = null;
+      } else w = (w ?? "") + c;
+    }
+    if (q) refuse("xargs input with an unclosed quote: a comment it posts cannot be checked");
+    if (w !== null) words.push(w);
+    if (words.length) lines.push(words);
+  }
+  return lines;
+}
+
+// The runs xargs makes of one input: its items, cut into batches as its options say.
+function xargsBatches(input: string, how: ReturnType<typeof xargsSplit>): string[][] {
+  if (how.delim !== null) {
+    const items = input.split(how.delim);
+    if (items[items.length - 1] === "") items.pop();
+    const n = how.args ?? how.lines;
+    if (!n) return [items];
+    const out: string[][] = [];
+    for (let i = 0; i < items.length; i += n) out.push(items.slice(i, i + n));
+    return out;
+  }
+  const lines = xargsWords(input);
+  const out: string[][] = [];
+  if (how.lines) for (let i = 0; i < lines.length; i += how.lines) out.push(lines.slice(i, i + how.lines).flat());
+  else if (how.args) for (let i = 0, all = lines.flat(); i < all.length; i += how.args) out.push(all.slice(i, i + how.args));
+  else out.push(lines.flat());
+  return out;
 }
 
 // xargs' replace string, from the options commandWords recorded (each value after its option).
@@ -2350,15 +2446,22 @@ function checkComments(cmd: string): void {
       if (!inputs.length && slot === null) refuse(`xargs runs ${name} on input this line does not show, so a comment it posts cannot be checked`);
       const q = (w: string) => `'${w.replace(/'/g, "'\\''")}'`;
       const script = SHELLS.has(name) ? shellScript(words.slice(1)) : {};
+      // each run xargs makes is checked as its own command, with its items as xargs passes them
+      // (CodeRabbit on #128: -n1 runs gh on 5 alone, and -d '\n' keeps an item's quotes)
+      const how = xargsSplit(xargs.opts);
+      if (how.sized && slot === null) refuse(`xargs -s cuts ${name}'s runs where this cannot tell, so a comment it posts cannot be checked`);
       for (const input of inputs) {
         if (slot !== null) {
-          for (const line of new Set([input, ...input.split(/\n|\\n/)]))
-            checkComments(words.map((w) => q(slot ? w.split(slot).join(line.replace(/^[ \t]+/, "")) : w)).join(" "));
+          const items = how.delim !== null ? input.split(how.delim) : input.split(/\n|\\n/);
+          for (const line of new Set([input, ...items]))
+            checkComments(words.map((w) => q(slot ? w.split(slot).join(how.delim !== null ? line : line.replace(/^[ \t]+/, "")) : w)).join(" "));
           continue;
         }
-        // a shell whose -c has no script yet takes the input as it (xargs -0 passes it whole)
-        if (script.code === "") checkComments(input);
-        checkComments(`${words.map(q).join(" ")} ${input}`);
+        for (const batch of xargsBatches(input, how)) {
+          // a shell whose -c has no script yet takes the batch's first item as it
+          if (script.code === "") checkComments(batch[0] ?? "");
+          checkComments([...words, ...batch].map(q).join(" "));
+        }
       }
       if (slot !== null) checkComments(words.map(q).join(" "));
       continue;
