@@ -63,11 +63,14 @@ export function noteFailedLaunch(ws: Workspace, name: string, t: Pick<Transport,
   if (/^\w+$/.test(launchId) && !was.has(launchId)) ids.add(launchId);
   if (before) {
     try {
-      for (const r of t.sessions(true)) if (r.name === name && r.id && !was.has(r.id)) ids.add(r.id);
+      for (const r of t.sessions(true)) if (r.name === name && r.kind === "background" && r.id && !was.has(r.id)) ids.add(r.id);
     } catch {
       // the listing failed: the launch id alone
     }
   }
+  // With no record, one is written here, so it is also what the next launch that comes up replaces:
+  // replaceStopped then removes that older row from the listing, as it removes any stopped row a
+  // new conversation supersedes. That is intended; the older row was the way back only until then.
   const st = lastStopped(ws, name) ?? (() => {
     const old = newest((before ?? []).filter((r) => r.id && !ids.has(r.id)));
     return old?.id ? ({ id: old.id, at: new Date().toISOString() } as Stopped) : null;
@@ -98,6 +101,9 @@ export const freshCommand = (a: Pick<Agent, "name" | "role">): string =>
     : a.role === "assistant" ? `factory assistant ${a.name} --force`
     : `factory dispatch ${a.name} <KEY> --force`;
 
+// Whether a row shows its session came up at some point.
+const ran = (r: Session): boolean => ["done", "blocked", "stopped"].includes(String(r.state)) || typeof r.pid === "number";
+
 // When a row started, in epoch ms, or NaN.
 const startMs = (r: Session): number =>
   typeof r.startedAt === "number" ? r.startedAt : Date.parse(String(r.startedAt ?? r.createdAt ?? ""));
@@ -111,9 +117,10 @@ export function resumable(ws: Workspace, name: string, rows: Session[], newest: 
   const st = lastStopped(ws, name);
   if (!st) return { s: newest(rows) };
   const at = Date.parse(st.at);
-  // a noted launch holds its mark while its row is failed or gone; one that came up later and
-  // ended on its own (done, stopped) is the newer conversation it is (Marie on #130)
-  const failed = new Set((st.failed ?? []).filter((id) => !rows.some((r) => r.id === id && r.state !== "failed")));
+  // a noted launch holds its mark until its row shows it ran: a state only a session that came up
+  // reaches (done, blocked, stopped), or a worker's pid. A row still "working" with no pid after the
+  // launch gave up, or one with no state, has shown nothing and stays marked (Marie on #130).
+  const failed = new Set((st.failed ?? []).filter((id) => !rows.some((r) => r.id === id && ran(r))));
   if (rows.some((r) => r.id !== st.id && !failed.has(r.id ?? "") && startMs(r) > at)) return { s: newest(rows.filter((r) => !failed.has(r.id ?? ""))) };
   const s = rows.find((r) => r.id === st.id);
   return s ? { s } : { gone: st.id };

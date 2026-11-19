@@ -372,3 +372,23 @@ test("a note that cannot be written leaves die's launch id message (Marie on #13
     rmSync(f, { recursive: true, force: true });
   }
 });
+
+test("a failed launch's row that has shown nothing keeps its mark (Marie on #130 at 24691398)", () => {
+  for (const shown of [{ state: "working" }, {}] as Partial<Session>[]) {
+    const today = stopped({ id: "5e7a0b12", sessionId: undefined, startedAt: Date.now() - 3_600_000 });
+    try {
+      noteStopped(ws, ld.name, today);
+      const rows: Session[] = [today];
+      failNow(rows, Date.now() + 1000);
+      const row = rows.find((r) => r.id === "new1") as Session;
+      // still listed "working" with no pid after the launch gave up, or with no state at all
+      delete row.state;
+      Object.assign(row, shown, { pid: null });
+      const f = fake(rows);
+      const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+      assert.deepEqual(f.respawned, ["5e7a0b12"], `${JSON.stringify(shown)}: ${JSON.stringify(w)}`);
+    } finally {
+      forgetStopped(ws, ld.name);
+    }
+  }
+});
