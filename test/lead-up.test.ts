@@ -586,3 +586,38 @@ for (const via of ["wake", "up"] as const)
       forgetStopped(ws, ld.name);
     }
   });
+
+// CodeRabbit on #130 at d1c64cc6: the cleanup after a wake's respawn listed and stopped with no
+// regard for the deadline. Short of time for both, the record still moves; the old row waits.
+test("a wake short of time after its respawn starts no listing or stop, and still moves the record", () => {
+  const t0 = Date.now();
+  try {
+    record({ id: "runA", at: new Date(t0 - 3_600_000).toISOString(), failed: ["deadB"] });
+    const rows: Session[] = [
+      { id: "runA", name: ld.name, kind: "background", state: "stopped", startedAt: t0 - 7_200_000 },
+      { id: "deadB", name: ld.name, kind: "background", state: "failed", startedAt: t0 + 7_200_000 },
+    ];
+    const f = fake(rows);
+    let after = 0;
+    let respawnedYet = false;
+    const list = f.t.sessions;
+    f.t.sessions = (all) => {
+      if (respawnedYet && all) after++;
+      return list(all);
+    };
+    f.t.respawn = (_name, id) => {
+      f.respawned.push(id);
+      respawnedYet = true;
+      rows.push({ id: `${id}2`, name: ld.name, kind: "background", alive: true, startedAt: t0 });
+      return { ok: true, said: "respawned", why: "" };
+    };
+    // time for the listing and the respawn, not for a listing and a stop after it
+    const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10, deadline: Date.now() + 30_000 });
+    assert.equal(w.is, "woke", JSON.stringify(w));
+    assert.equal(after, 0, "no full listing after the respawn");
+    assert.deepEqual(f.removed, [], "no stop: the old row waits for a later step");
+    assert.deepEqual(lastStopped(ws, ld.name), { id: "runA2", at: lastStopped(ws, ld.name)?.at, failed: ["deadB"] });
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
+});

@@ -153,7 +153,7 @@ export const freshCommand = (a: Pick<Agent, "name" | "role">): string =>
 
 // Whether a row shows its session came up at some point. A row down stopped before it showed
 // anything is "stopped" by the factory, which says nothing of whether it ran.
-const ran = (r: Session, st?: Stopped | null): boolean =>
+export const ran = (r: Session, st?: Stopped | null): boolean =>
   ["done", "blocked"].includes(String(r.state)) || typeof r.pid === "number" ||
   (r.state === "stopped" && !st?.unrun?.includes(r.id ?? ""));
 
@@ -200,17 +200,21 @@ export function resumable(ws: Workspace, name: string, rows: Session[], newest: 
 // session a wake resumes, rather than no record and the newest row, which can be a launch that never
 // came up (CodeRabbit and Marie on #130 at 85389fcf; a fresh launch, CodeRabbit at 2e89a7a4).
 // stale: the row a respawn came back from under another id, which goes too (Marie on #130 at
-// f62a6b10: rows pile up otherwise).
-export function replaceStopped(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, newId?: string, stale?: string): void {
-  let rows: Session[] | undefined;
-  try {
-    rows = t.sessions(true);
-  } catch {
-    // the listing failed: every mark is carried (held), and the rows stay
-  }
+// f62a6b10: rows pile up otherwise); it came up, so it keeps no mark. listed: a listing already
+// had, for a caller with no time for another; none is made then, and no row is removed (CodeRabbit
+// on #130 at d1c64cc6: wake's deadline), so the stale rows wait for a later step.
+export function replaceStopped(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, newId?: string, stale?: string, listed?: Session[]): void {
+  let rows: Session[] | undefined = listed;
+  if (!listed)
+    try {
+      rows = t.sessions(true);
+    } catch {
+      // the listing failed: every mark is carried (held), and the rows stay
+    }
   const st = seen(ws, name, lastStopped(ws, name), rows);
-  if (newId && st) moveRecord(ws, name, newId, held(st, rows, newId));
+  if (newId && st) moveRecord(ws, name, newId, held(st, rows, newId).filter((id) => id !== stale));
   else forgetStopped(ws, name);
+  if (listed) return;
   for (const id of new Set([st?.id, stale]))
     if (id && id !== newId)
       try {

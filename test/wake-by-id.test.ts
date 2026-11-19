@@ -210,3 +210,26 @@ test("a launch down stopped unrun that shows a pid later reads as having run", (
   const which = resumable(w, "rae", [old1, { id: "A", name: "rae", kind: "background", state: "stopped", startedAt: t0 - 10_000_000 }] as never, newest as never);
   assert.equal("s" in which ? which.s?.id : "gone", "A");
 });
+
+// CodeRabbit on #130 at d1c64cc6: down marked a launch unrun though its row showed a pid, the
+// evidence it ran; the stop cleared the pid, and the wake resumed the recorded session instead.
+test("a down leaves a marked launch that showed a pid read as having run", () => {
+  const { ws, run, calls } = fleet();
+  const w = openWorkspace(ws, {});
+  mkdirSync(w.runDir, { recursive: true });
+  writeFileSync(join(w.runDir, "stopped-rae.json"), JSON.stringify({ id: "5e7a0b12", at: new Date(Date.now() - 1_800_000).toISOString(), failed: ["runA"] }));
+  const db = join(ws, "db.json");
+  const all = JSON.parse(readFileSync(db, "utf8")) as Record<string, unknown>[];
+  // the recorded session is already stopped, so no live row rewrites the record at the down
+  Object.assign(all.find((r) => r.id === "5e7a0b12") as object, { state: "stopped", pid: null });
+  // runA came up (a pid, beyond pid_max so surely gone now) and has not been seen since
+  all.push({ id: "runA", name: "rae", kind: "background", state: "idle", status: "idle", pid: 4_194_305,
+    startedAt: Date.now() - 600_000, cwd: "/w/rae", sessionId: "runA-uuid", args: ["--bg", "--name", "rae", "ran"] });
+  writeFileSync(db, JSON.stringify(all));
+  const r = run("down");
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(calls().includes("stop runA"), calls().join("\n"));
+  assert.equal(lastStopped(w, "rae")?.unrun, undefined);
+  assert.equal(run("wake", "rae").status, 0);
+  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn runA"], "the conversation since the stop");
+});
