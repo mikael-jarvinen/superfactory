@@ -7,7 +7,7 @@ import { followInbox } from "./board/inbox.js";
 import { markHandledMany, queue as waitingQueue, queueTrouble } from "./board/queue.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
-import { lastStopped, noteStopped, noteUnrun, ran, staleIds, sweepStale } from "./stopped.js";
+import { lastStopped, noteRan, noteStopped, noteUnrun, ran, staleIds, sweepStale } from "./stopped.js";
 import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owesSession, lead, listing, type Session, stopSession, stopWorktree, waitForName } from "./fleet.js";
 import { Unreachable } from "./remote.js";
 import { agentSessions, type Transport, transportFor, transports } from "./transport.js";
@@ -620,6 +620,9 @@ function cmdDown(ws: Workspace, argv: string[]) {
       // and keeps its mark: its "stopped" is ours, no evidence that it ran (Marie on #130 at f62a6b10).
       // One that had shown it ran (a pid, though dead) is not unrun: its stop is read as it is.
       if (marked && !live && !showed) noteUnrun(ws, sname, sid);
+      // and one a down before marked unrun that has shown it ran since leaves unrun before the stop
+      // clears its pid (CodeRabbit on #130 at 2f878288)
+      if (marked && showed && st?.unrun?.includes(sid)) noteRan(ws, sname, [s]);
       stopSession(t, s, false);
       if (live) noteStopped(ws, s.name ?? "", s, hits);
     }

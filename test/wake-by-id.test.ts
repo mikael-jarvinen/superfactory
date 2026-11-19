@@ -235,6 +235,25 @@ test("a down leaves a marked launch that showed a pid read as having run", () =>
   assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn runA"], "the conversation since the stop");
 });
 
+// CodeRabbit on #130 at 2f878288: a launch an earlier down marked unrun that has run since, its pid
+// seen by this down, stayed unrun; the stop cleared the pid, and the wake took it as never run.
+test("a down clears the unrun mark of a launch that has shown a pid since", () => {
+  const { ws, run, calls } = fleet();
+  const w = openWorkspace(ws, {});
+  mkdirSync(w.runDir, { recursive: true });
+  writeFileSync(join(w.runDir, "stopped-rae.json"), JSON.stringify({ id: "5e7a0b12", at: new Date(Date.now() - 1_800_000).toISOString(), failed: ["runA"], unrun: ["runA"] }));
+  const db = join(ws, "db.json");
+  const all = JSON.parse(readFileSync(db, "utf8")) as Record<string, unknown>[];
+  Object.assign(all.find((r) => r.id === "5e7a0b12") as object, { state: "stopped", pid: null });
+  all.push({ id: "runA", name: "rae", kind: "background", state: "idle", status: "idle", pid: 4_194_305,
+    startedAt: Date.now() - 600_000, cwd: "/w/rae", sessionId: "runA-uuid", args: ["--bg", "--name", "rae", "ran"] });
+  writeFileSync(db, JSON.stringify(all));
+  assert.equal(run("down").status, 0);
+  assert.equal(lastStopped(w, "rae")?.unrun, undefined);
+  assert.equal(run("wake", "rae").status, 0);
+  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn runA"], "the conversation since the stop");
+});
+
 // CodeRabbit on #130 at 2f878288: down's stale sweep listed each host once per agent.
 test("down lists a host once to remove the rows a hook's wake left", () => {
   const { ws, run, calls } = fleet();

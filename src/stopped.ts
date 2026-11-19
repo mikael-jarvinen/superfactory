@@ -70,6 +70,12 @@ function seen(ws: Workspace, name: string, st: Stopped | null, rows: Session[] |
 
 // `factory down` stops a marked launch that has shown nothing, so one that comes up late does not
 // outlive the down; the mark stays, and its stopped state is not read as having run.
+// For a caller about to clear a row's evidence (down's stop clears its pid): the launches the rows
+// show ran leave unrun first (CodeRabbit on #130 at 2f878288).
+export function noteRan(ws: Workspace, name: string, rows: Session[]): void {
+  seen(ws, name, lastStopped(ws, name), rows);
+}
+
 export function noteUnrun(ws: Workspace, name: string, id: string): void {
   const st = lastStopped(ws, name);
   if (st?.failed?.includes(id)) save(ws, name, { ...st, unrun: [...new Set([...(st.unrun ?? []), id])] });
