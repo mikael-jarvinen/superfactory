@@ -5,7 +5,8 @@ import { lead, type Session, waitForName } from "./fleet.js";
 import { renderSettings } from "./settings.js";
 import { branchFor, isLocal } from "./state.js";
 import { noteFailedLaunch, replaceStopped, rowsBefore } from "./stopped.js";
-import { type Transport, transportFor } from "./transport.js";
+import { type Transport, transportFor, writeCurrentAppendix } from "./transport.js";
+import { worktreesDir } from "./worktree.js";
 import type { Workspace } from "./workspace.js";
 import { capitalize, die } from "./util.js";
 
@@ -66,11 +67,43 @@ export function settingsFile(ws: Workspace, agent: Agent): string {
   });
 }
 
-// A respawn reruns a session's old command line, whose --settings names this same file, so the file
-// is rendered again first: a session stopped before an upgrade comes back with the current hooks, the
-// guard's matcher among them (CodeRabbit on #124). A hosted agent's file is its host daemon's.
-export function refreshSettings(ws: Workspace, agent: Agent): void {
-  if (!agent.host) settingsFile(ws, agent);
+// Before a session is resumed or respawned. A respawn reruns a session's old command line, whose
+// --settings names the file settingsFile renders, so the file is rendered again first: a session
+// stopped before an upgrade comes back with the current hooks, the guard's matcher among them
+// (CodeRabbit on #124). And its current appendix is written, which the SessionStart hook hands the resumed session (hooks/appendix.ts), since claude
+// keeps the system prompt a session started with and reads no new appendix then (Otto on Claude
+// Code 2.1.327). A hosted agent's are written on its host, from the respawn request (refreshHosted).
+// An appendix of undefined leaves the copy written last. The appendix is written first: up respawns
+// a lead whose settings cannot be rendered, on the last render, and that lead still gets its brief
+// as it is now (Marie on #131 at 9a65bf8e).
+export function refreshSession(ws: Workspace, agent: Agent, appendix: string | null | undefined): void {
+  if (agent.host) return;
+  if (appendix !== undefined) writeCurrentAppendix(ws.runDir, agent.name, appendix);
+  settingsFile(ws, agent);
+}
+
+// For the daemon, before it respawns a hosted agent whose request carries `appendix`: what
+// refreshSession above does for a local one. A respawn reruns the old command line, whose
+// --settings names the file rendered here, and claude reads no new appendix on a resume, so the
+// SessionStart hook gives the one written here (Otto on Claude Code 2.1.327). Throws when the
+// settings cannot be rendered; the daemon answers that as a failed respawn. The appendix is written
+// first, as refreshSession does: the daemon's resume at boot respawns anyway on a settings failure,
+// and the session still gets its brief as it is now (Marie on #131 at 5aba50fc).
+export function refreshHosted(ws: Workspace, agent: Agent, appendix: string | null): void {
+  writeCurrentAppendix(ws.runDir, agent.name, appendix);
+  settingsFile(ws, agent);
+}
+
+// The appendix a session of the agent has now, from its brief files, as its launch reads them: a
+// builder's repo: files from the checkout of the repo whose worktree it runs in (dispatch reads them
+// from repo.path), every other role's as roleAppendix has it. A builder whose cwd is in no repo's
+// worktrees reads them from its first repo's: a hosted one's cwd is on its host, and dispatch reads
+// its repo: files from the repo's path here too (Marie on #131 at 9a65bf8e).
+export function currentAppendix(ws: Workspace, agent: Agent, cwd: string | undefined): string | null {
+  if (agent.role !== "builder") return roleAppendix(ws, agent);
+  const repos = agent.repos.map((k) => ws.config.repos[k]!).filter(Boolean);
+  const repo = repos.find((r) => cwd && (cwd + "/").startsWith(worktreesDir(r.path) + "/")) ?? repos[0];
+  return buildAppendix(ws, agent, repo?.path)?.text ?? null;
 }
 
 export function buildAppendix(ws: Workspace, agent: Agent, repoDir: string | undefined): { text: string; labels: string[] } | null {

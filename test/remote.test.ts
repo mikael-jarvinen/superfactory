@@ -210,11 +210,14 @@ test("the remote transport: each operation is a request to the host's daemon", a
   const id = t.start({ agent: rae, cwd: "/far/rae", prompt: "hello", appendix: "the appendix", runDir: ws.runDir, phase: undefined, args: () => assert.fail("rendered on the host, not here"), env: { SECRET: "x" } });
   assert.equal(id, "launched1");
   assert.deepEqual(t.respawn("rae", "r0"), { ok: true, said: "back", why: "back" });
+  // a wake's respawn carries the brief, for the daemon to write there (refreshHosted)
+  t.respawn("rae", "r0", undefined, "the brief now");
   t.stop("rae", "r1", true);
   assert.deepEqual(d.requests().map((r) => [r.method, r.url, r.body]), [
     ["GET", "/agents?all=1", null],
     ["POST", "/agents/rae/start", { cwd: "/far/rae", prompt: "hello", appendix: "the appendix", phase: null }],
     ["POST", "/agents/rae/respawn", { id: "r0" }],
+    ["POST", "/agents/rae/respawn", { id: "r0", appendix: "the brief now" }],
     ["POST", "/agents/rae/stop", { id: "r1", remove: true }],
   ]);
   // a 422 on a session route is an unknown host: respawn falls back, stop throws Unreachable

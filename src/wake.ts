@@ -6,7 +6,7 @@
 // up to 10 s more to be addressable from another machine, hence WAKE_SETTLE_S.
 import type { Agent } from "./config.js";
 import { findSession, pollForName, type Session } from "./fleet.js";
-import { refreshSettings } from "./launch.js";
+import { currentAppendix, refreshSession } from "./launch.js";
 import { cameUp, freshCommand, replaceStopped, resumable, sweepStale } from "./stopped.js";
 import { ask, Unreachable } from "./remote.js";
 import { isAgentSession, LISTING_TIMEOUT_MS, newest, type Transport, transportFor } from "./transport.js";
@@ -67,15 +67,25 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   if (left() - LISTING_TIMEOUT_MS < 1000) return late(`respawning ${old.id}`);
   // A failed render fails the wake: the caller is told, rather than an agent coming back on
   // settings older than its role's (CodeRabbit on #127). The render takes time of its own, so the
-  // respawn's budget is what is left after it (CodeRabbit on #127).
+  // respawn's budget is what is left after it (CodeRabbit on #127). The appendix is read and written
+  // too: the respawned session is handed it by its SessionStart hook, as claude reads no new one on a
+  // resume (Otto on Claude Code 2.1.327); a hosted agent's daemon writes both from the request.
+  // A brief that cannot be read now is no reason to keep a message from its recipient: the copy
+  // written last stays (undefined), which is the one the session started with or a later one.
+  let appendix: string | null | undefined;
   try {
-    refreshSettings(ws, agent);
+    appendix = currentAppendix(ws, agent, old.cwd);
+  } catch {
+    appendix = undefined;
+  }
+  try {
+    refreshSession(ws, agent, appendix);
   } catch (e) {
     return { is: "failed", why: `${agent.name}'s settings could not be rendered: ${(e as Error).message}` };
   }
   const respawnMs = left() - LISTING_TIMEOUT_MS;
   if (respawnMs < 1000) return late(`respawning ${old.id}`);
-  const r = t.respawn(agent.name, old.id, Number.isFinite(respawnMs) ? respawnMs : undefined);
+  const r = t.respawn(agent.name, old.id, Number.isFinite(respawnMs) ? respawnMs : undefined, agent.host ? appendix : undefined);
   if (!r.ok) return { is: "failed", why: `respawn of ${old.id} failed: ${r.why || "no reason given"}` };
   const waitS = o.waitS ?? 60;
   const lastPollAt = (o.deadline ?? Infinity) - LISTING_TIMEOUT_MS;
@@ -83,7 +93,9 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   // Respawned, and the last listing could not be had: most likely live, so not failed.
   if (s instanceof Unreachable) return { is: "unknown", why: `respawned ${old.id}, then ${s.brief}` };
   if (!s) return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };
-  // the id that came back, which can differ from the one respawned (Marie on #130 at 2e89a7a4)
+  // the id that came back, which can differ from the one respawned (Marie on #130 at 2e89a7a4; Otto:
+  // barack 1f36afe6 came back as d7625a15). The record moves to it, so a later wake neither refuses
+  // the conversation as gone nor resumes the old row.
   // A respawn that came back under a new id leaves the old row stopped; it goes (Marie at f62a6b10).
   // No listing or stop starts that could run past the deadline. A stop has no bound of its own (a
   // remote one runs to 35 s, a local one has none) and up to two rows can go, so with a deadline
