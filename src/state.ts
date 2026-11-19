@@ -6,22 +6,32 @@ import { die, now, pyDumps, pyRepr, pyStr, squash } from "./util.js";
 
 export { STATES, type State };
 
-export const TRANSITIONS: Record<State, ReadonlySet<State>> = {
-  "queued": new Set(["designing", "building", "blocked"]),
+// `off` is not a state: it takes an item off the board and leaves its record, with state null, until
+// a dispatch brings it back. Mikael, 2026-11-18: the board's queued state was redundant with the
+// backlog; the board shows only work someone is doing, and waiting work stays in the tracker. The
+// record keeps what the tracker has no place for: an approved design, the stack, the title.
+export const OFF = "off";
+export type Target = State | typeof OFF;
+
+export const TRANSITIONS: Record<State, ReadonlySet<Target>> = {
   // A ticket that changes the UI and has no design is designed first: a designer draws it, the
-  // human approves it, and only then is it queued for a builder.
-  "designing": new Set(["design-review", "queued", "blocked"]),
-  "design-review": new Set(["designing", "queued", "blocked"]),
-  "building": new Set(["pr-open", "queued", "blocked"]),
+  // human approves it, and only then is it built. The approval takes it off the board until a
+  // builder is dispatched on it.
+  "designing": new Set(["design-review", OFF, "blocked"]),
+  "design-review": new Set(["designing", OFF, "blocked"]),
+  "building": new Set(["pr-open", OFF, "blocked"]),
   "pr-open": new Set(["pr-open", "agent-review", "blocked"]),
   "agent-review": new Set(["fixing", "gate", "blocked"]),
   "fixing": new Set(["agent-review", "gate", "blocked"]),
   "gate": new Set(["your-review", "fixing", "blocked"]),
-  "your-review": new Set(["colleague-review", "done", "fixing", "queued", "blocked"]),
-  "colleague-review": new Set(["done", "fixing", "queued", "blocked"]),
+  "your-review": new Set(["colleague-review", "done", "fixing", OFF, "blocked"]),
+  "colleague-review": new Set(["done", "fixing", OFF, "blocked"]),
   "done": new Set(),
-  "blocked": new Set(STATES.filter((s) => s !== "blocked")),
+  "blocked": new Set([...STATES.filter((s) => s !== "blocked"), OFF]),
 };
+// Where an item off the board goes back on, and where a new one starts.
+export const FROM_OFF: ReadonlySet<Target> = new Set(["designing", "building", "blocked"]);
+const FIRST: ReadonlySet<Target> = new Set(["designing", "building"]);
 export const BUSY: ReadonlySet<string> = new Set(["designing", "building", "fixing"]);
 // A design sent for approval frees its designer, as a PR in review frees its builder.
 export const WAITING_ON_YOU: ReadonlySet<string> = new Set(["design-review", "your-review", "blocked"]);
@@ -32,9 +42,9 @@ export const WAITING_ON_LEAD: ReadonlySet<string> = new Set(["pr-open", "agent-r
 // the stack and agent work on something else." An item here frees its builder and its stack slot.
 export const IN_REVIEW: ReadonlySet<string> = new Set(["your-review", "colleague-review"]);
 // Where a dispatch makes sense without argument. Anywhere else is a judgement, so it needs --force.
-export const DISPATCHABLE: ReadonlySet<string | null> = new Set([null, "queued", "building", "fixing"]);
+export const DISPATCHABLE: ReadonlySet<string | null> = new Set([null, "building", "fixing"]);
 // The same for a designer: a new design, or another round on one the human sent back.
-export const DESIGN_DISPATCHABLE: ReadonlySet<string | null> = new Set([null, "queued", "designing", "design-review"]);
+export const DESIGN_DISPATCHABLE: ReadonlySet<string | null> = new Set([null, "designing", "design-review"]);
 
 // The design a ticket was drawn to. `approved` is the human's own words, and a builder's brief
 // carries the design only once it is set.
@@ -92,7 +102,7 @@ export const KEY_HINT = "neither a ticket key nor a local key like LOCAL-fix-fla
 // are not kept in step from records yet, so its records are untracked too.
 const untracked = (ws: Workspace, k: string) => isLocal(k) || ws.config.tracker.kind !== "jira";
 
-export function trackerFor(ws: Workspace, s: State): string {
+export function trackerFor(ws: Workspace, s: State | "queued"): string {
   const st = ws.config.tracker.status;
   return st[s] ?? (s === "blocked" ? "unchanged" : (st.building ?? "unchanged"));
 }
@@ -101,8 +111,19 @@ export const recPath = (ws: Workspace, ticket: string) => join(ws.stateDir, `${t
 
 export function loadRec(ws: Workspace, ticket: string): Rec | null {
   const p = recPath(ws, ticket);
-  return existsSync(p) ? (JSON.parse(readFileSync(p, "utf8")) as Rec) : null;
+  return existsSync(p) ? migrated(JSON.parse(readFileSync(p, "utf8")) as Rec) : null;
 }
+
+// A record written while queued was a state is off the board, with everything else it carries kept:
+// an approved design above all, which a builder's brief reads. The file is rewritten at its next save.
+function migrated(rec: Rec): Rec {
+  if ((rec.state as string) === "queued") rec.state = null;
+  if ((rec.blocked_from as string | null) === "queued") rec.blocked_from = null;
+  return rec;
+}
+
+// An item on the board: one with a state, done aside.
+export const onBoard = (r: Rec): boolean => r.state !== null && r.state !== "done";
 
 export function saveRec(ws: Workspace, rec: Rec): void {
   mkdirSync(ws.stateDir, { recursive: true });
@@ -125,7 +146,7 @@ export function allRecs(ws: Workspace): Rec[] {
   return readdirSync(ws.stateDir)
     .filter((f) => f.endsWith(".json"))
     .sort()
-    .map((f) => JSON.parse(readFileSync(join(ws.stateDir, f), "utf8")) as Rec);
+    .map((f) => migrated(JSON.parse(readFileSync(join(ws.stateDir, f), "utf8")) as Rec));
 }
 
 export interface Change {
@@ -150,23 +171,31 @@ const isUrl = (s: string | undefined) => !!s && /^https?:\/\/\S+$/.test(s);
 export function transition(ws: Workspace, ticket: string, next: string, c: Change = {}, out: (line: string) => void = console.log): Rec {
   const human = ws.config.human.name;
   if (!validKey(ws, ticket)) die(`${pyRepr(ticket)} is ${KEY_HINT}`);
-  if (!(STATES as readonly string[]).includes(next)) die(`unknown state ${pyRepr(next)}; states: ${STATES.join(", ")}`);
-  const to = next as State;
+  if (next !== OFF && !(STATES as readonly string[]).includes(next))
+    die(`unknown state ${pyRepr(next)}; states: ${STATES.join(", ")}, or ${OFF} to take it off the board`);
+  const to = next as Target;
   let rec = loadRec(ws, ticket);
+  const isNew = rec === null;
   if (rec === null) {
-    if (to !== "queued" && to !== "building" && to !== "designing")
-      die(`${ticket} has no record; the first state must be queued, designing or building`);
+    // Work that waits with no tracker backlog to wait in, LOCAL- work above all, is recorded off the
+    // board, with a title so `state --off` says what it is (Niilo on #129).
+    if (to === OFF && !c.title)
+      die(`${ticket} has no record; a new item goes off the board only with --title "<what it is>", so \`state --off\` can show it`);
+    if (to !== OFF && !FIRST.has(to))
+      die(`${ticket} has no record; the first state must be designing or building, or off with --title for work ` +
+        `that waits with no backlog to wait in. A ticket nobody is doing yet waits in the backlog.`);
     rec = {
-      ticket, state: null, stack: c.stack ?? null, agent: c.agent ?? null,
-      jira: untracked(ws, ticket) ? null : trackerFor(ws, "queued"),
+      ticket, state: null, stack: c.stack ?? null, agent: c.agent ?? null, jira: null,
       worktree: null, pr: null, asked_you: null, since: null, created: now(), blocked_from: null,
     };
   }
   const old = rec.state;
-  if (old !== null && !c.force) {
-    const allowed = TRANSITIONS[old];
+  // How the item stood: an old state, off the board, or nothing yet.
+  const was = isNew ? null : old ?? OFF;
+  if (!isNew && !c.force) {
+    const allowed = old === null ? FROM_OFF : TRANSITIONS[old];
     if (!allowed.has(to))
-      die(`${ticket}: ${old} -> ${to} is not a valid transition. From ${old} you can go to: ` +
+      die(`${ticket}: ${old ?? OFF} -> ${to} is not a valid transition. From ${old ?? OFF} you can go to: ` +
         `${[...allowed].sort().join(", ") || "nowhere, it is terminal"}. Use --force if you mean it.`);
   }
   const warnings: string[] = [];
@@ -188,15 +217,15 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
     if (v !== undefined && !isUrl(v)) die(`${flag} must be the artifact's URL, got ${pyRepr(v)}`);
   if (to === "design-review" && !((c.canvas || design.canvas) && (c.slides || design.slides)))
     die(`design-review needs --canvas <url> and --slides <url>: the published design and the slideset ${human} reads`);
-  if (c.approved !== undefined && !(old === "design-review" && to === "queued"))
-    die(`--approved records ${human}'s approval of a design, so it belongs on design-review -> queued`);
-  if (old === "design-review" && to === "queued" && !c.approved && !c.force)
-    die(`design-review -> queued is ${human}'s approval: pass --approved "<${human}'s words>". ` +
+  if (c.approved !== undefined && !(old === "design-review" && to === OFF))
+    die(`--approved records ${human}'s approval of a design, so it belongs on design-review -> ${OFF}`);
+  if (old === "design-review" && to === OFF && !c.approved && !c.force)
+    die(`design-review -> ${OFF} is ${human}'s approval: pass --approved "<${human}'s words>". ` +
       `To send the design back for changes, go to designing.`);
   if (to === "done" && !c.evidence) warnings.push("done without --evidence (merge sha or PR url). Recorded, but say what you looked at.");
   if ((to === "agent-review" || to === "gate" || to === "colleague-review") && !c.evidence && !c.force)
     warnings.push(`${to} without --evidence. A sha, PR or message reference is what survives a compaction.`);
-  if (to === "queued" && (old === "colleague-review" || old === "your-review")) {
+  if (to === OFF && (old === "colleague-review" || old === "your-review")) {
     // the next slice of a multi-PR ticket: the old PR belongs to the events log, not the record
     rec.pr = null;
     rec.prs = [];
@@ -210,6 +239,10 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
     rec.asked_you = null;
   }
   if (c.agent) rec.agent = c.agent;
+  // Off the board from building, the builder is free and the next dispatch picks one. From
+  // design-review the designer stays on the record, for the next round (Niilo on #129).
+  const left = rec.agent ?? null;
+  if (to === OFF && old === "building" && !c.agent) rec.agent = null;
   if (c.stack) rec.stack = c.stack;
   if (c.worktree) rec.worktree = c.worktree;
   if (c.pr || c.head || c.reviewed) {
@@ -238,7 +271,8 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   }
   if (untracked(ws, ticket)) rec.jira = null;
   else if (c.jira) rec.jira = c.jira;
-  else if (to === "done" || to === "colleague-review" || ((to === "building" || to === "designing") && (old === null || old === "queued")))
+  else if (to === OFF) rec.jira = ws.config.tracker.status.queued ?? rec.jira;
+  else if (to === "done" || to === "colleague-review" || ((to === "building" || to === "designing") && old === null))
     rec.jira = trackerFor(ws, to);
   if (c.title) rec.title = squash(c.title, 90);
   if (c.canvas) design.canvas = c.canvas;
@@ -247,20 +281,20 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   if (to === "designing") [design.approved, design.approved_at] = [null, null];
   if (c.approved) [design.approved, design.approved_at] = [c.approved, now()];
   if (rec.design || to === "designing" || c.canvas || c.slides) rec.design = design;
-  rec.state = to;
+  rec.state = to === OFF ? null : to;
   rec.since = now();
   saveRec(ws, rec);
   appendEvent(ws, {
-    t: now(), ticket, from: old, to, agent: rec.agent ?? null,
+    t: now(), ticket, from: was, to, agent: rec.agent ?? left,
     evidence: c.evidence ?? c.approved ?? null, note: c.note ?? null, pr: rec.pr ?? null,
     ...(rec.design && (c.canvas || c.slides || c.approved) ? { design: rec.design } : {}),
   });
   const kind = ws.config.tracker.kind;
-  const head = `${ticket}: ${old ?? "(new)"} -> ${to}  agent=${pyStr(rec.agent)}`;
+  const head = `${ticket}: ${was ?? "(new)"} -> ${to}  agent=${rec.agent || "-"}`;
   if (untracked(ws, ticket)) {
     out(`${head}  no ${TRACKER_LABEL[kind]} ticket`);
   } else {
-    const should = to === "blocked" || (to === "queued" && old !== null) ? rec.jira : trackerFor(ws, to);
+    const should = to === "blocked" || to === OFF ? rec.jira : trackerFor(ws, to);
     out(`${head}  ${kind} should read: ${pyStr(should)}`);
   }
   for (const w of warnings) out(`  warning: ${w}`);
@@ -283,7 +317,7 @@ export function removePr(ws: Workspace, ticket: string, ref: string, note?: stri
   if (!rec.pr || same(rec.pr)) rec.pr = rec.prs.at(-1) ?? null;
   saveRec(ws, rec);
   appendEvent(ws, {
-    t: now(), ticket, from: rec.state, to: rec.state, agent: rec.agent ?? null,
+    t: now(), ticket, from: rec.state ?? OFF, to: rec.state ?? OFF, agent: rec.agent ?? null,
     evidence: `removed PR ${ref}`, note: note ?? null, pr: rec.pr ?? null,
   });
   out(`${ticket}: removed PR ${ref}; PRs now: ${rec.prs.map((p) => `${p.repo}#${p.number}`).join(", ") || "none"}`);
@@ -302,16 +336,17 @@ export function showRec(ws: Workspace, rec: Rec, at = new Date()): string[] {
     .join(", ") || "-";
   const s = rec.state;
   const lead = ws.config.agents.find((a) => a.role === "lead")?.name ?? "the lead";
-  const wait = s !== null && WAITING_ON_YOU.has(s) ? "you"
-    : s !== null && BUSY.has(s) ? pyStr(rec.agent)
+  const wait = s === null ? "the backlog"
+    : WAITING_ON_YOU.has(s) ? "you"
+    : BUSY.has(s) ? pyStr(rec.agent)
     : s === "agent-review" ? (rec["reviewer"] as string | undefined) || "a reviewer"
-    : s === "queued" || s === "pr-open" || s === "gate" ? lead
+    : s === "pr-open" || s === "gate" ? lead
     : s === "colleague-review" ? "colleagues"
     : "-";
   const d = rec.design;
   const jira = isLocal(rec.ticket) ? "none" : rec.jira || "?";
   const lines = [
-    `  ${rec.ticket.padEnd(12)} ${pyStr(s).padEnd(17)} ${age.padStart(6)}  agent=${(rec.agent || "-").padEnd(8)} ` +
+    `  ${rec.ticket.padEnd(12)} ${(s ?? OFF).padEnd(17)} ${age.padStart(6)}  agent=${(rec.agent || "-").padEnd(8)} ` +
     `jira=${jira.padEnd(12)} pr=${prs.padEnd(40)} waiting on: ${wait}`,
   ];
   if (rec.asked_you?.question) lines.push(`  ${"".padEnd(12)} asked you: ${rec.asked_you.question} (${rec.asked_you.at})`);

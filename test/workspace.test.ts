@@ -57,7 +57,7 @@ test("the CLI finds its workspace when run through a symlinked bin, from a neste
   symlinkSync(CLI, join(bin, "factory"));
   const nested = join(ws, "lead", "deep");
   mkdirSync(nested, { recursive: true });
-  factory(ws, ["state", "LOCAL-found-it", "queued"]);
+  factory(ws, ["state", "LOCAL-found-it", "building"]);
   const r = factory(undefined, ["state", "--list"], { cli: join(bin, "factory"), cwd: nested, env: { CLAUDE_BIN: join(ws, "bin", "claude") } });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /LOCAL-found-it/);

@@ -8,10 +8,15 @@ export const ROLES = ["lead", "builder", "reviewer", "assistant", "designer"] as
 export type RoleName = (typeof ROLES)[number];
 
 export const STATES = [
-  "queued", "designing", "design-review", "building", "pr-open", "agent-review",
+  "designing", "design-review", "building", "pr-open", "agent-review",
   "fixing", "gate", "your-review", "colleague-review", "done", "blocked",
 ] as const;
 export type State = (typeof STATES)[number];
+// The tracker's statuses are keyed by state, and by `queued`: the status of work waiting in the
+// backlog, which the tracker should read for an item taken off the board. Waiting work is no longer a
+// state of the board's, so the key is optional, and kept by that name so older configs still read.
+export const STATUS_KEYS = ["queued", ...STATES] as const;
+export type StatusKey = (typeof STATUS_KEYS)[number];
 
 export interface Repo {
   key: string;
@@ -101,7 +106,7 @@ export interface Tracker {
   site?: string;
   queueJql?: string;
   keyPattern?: RegExp;
-  status: Partial<Record<State, string>>;
+  status: Partial<Record<StatusKey, string>>;
   // kind = "local" only: the projects, and where their tickets and wiki live.
   projects: TrackerProject[];
   dir?: string;
@@ -577,14 +582,14 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     }
   }
   const statusT = t.table("status") ?? {};
-  const status: Partial<Record<State, string>> = {};
+  const status: Partial<Record<StatusKey, string>> = {};
   for (const [s, v] of Object.entries(statusT)) {
-    if (!(STATES as readonly string[]).includes(s)) problems.push(`tracker.status.${s}: unknown state; states: ${STATES.join(", ")}`);
+    if (!(STATUS_KEYS as readonly string[]).includes(s)) problems.push(`tracker.status.${s}: unknown state; states: ${STATUS_KEYS.join(", ")}`);
     else if (typeof v !== "string" || v === "") problems.push(`tracker.status.${s}: must be a non-empty string, got ${show(v)}`);
-    else status[s as State] = v;
+    else status[s as StatusKey] = v;
   }
   if (kind === "jira")
-    for (const s of ["queued", "building", "colleague-review", "done"] as const)
+    for (const s of ["building", "colleague-review", "done"] as const)
       if (statusT[s] === undefined) problems.push(`tracker.status.${s}: missing; the tracker needs a status for it`);
   const projects: TrackerProject[] = [];
   const projectsV = t.raw("projects");
