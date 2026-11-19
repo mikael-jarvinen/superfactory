@@ -1341,6 +1341,27 @@ const ROUND_128: [string, string, string][] = [
   [OK, "timeout --signal=KILL on a gh read", "timeout --signal=KILL 5 gh pr view 5"],
   [OK, "sudo --us root on a marked comment", "sudo --us root gh pr comment 5 -R acme/api --body '> Written by agent. ok'"],
   [OK, "an option nice has not, with no gh after it", "nice --frob x ls; gh pr view 5"],
+  // Marie on #128 at b845743b: short-option groups as getopt reads them, a short letter no table
+  // has, and a command word bash makes from a variable or a substitution
+  [NO, "sudo -nu: u takes the next word", "sudo -nu root gh pr comment 5 -R acme/api --body hi"],
+  [NO, "sudo -Eu: u takes the next word", "sudo -Eu root gh pr comment 5 -R acme/api --body hi"],
+  [NO, "sudo -iu: u takes the next word", "sudo -iu root gh pr comment 5 -R acme/api --body hi"],
+  [NO, "timeout -vs: s takes the next word", "timeout -vs KILL 5 gh pr comment 5 -R acme/api --body hi"],
+  [NO, "timeout -vk: k takes the next word", "timeout -vk 1 5 gh pr comment 5 -R acme/api --body hi"],
+  [NO, "time -qo: o takes the next word", "/usr/bin/time -qo f gh pr comment 5 -R acme/api --body hi"],
+  [NO, "time -af: f takes the next word", "/usr/bin/time -af x gh pr comment 5 -R acme/api --body hi"],
+  [NO, "exec -ca: a takes the next word", "exec -ca x gh pr comment 5 -R acme/api --body hi"],
+  [NO, "env -, its -i", "env - gh pr comment 5 -R acme/api --body hi"],
+  [NO, "a short letter sudo has not, before gh", "sudo -z x gh pr comment 5 -R acme/api --body hi"],
+  [NO, "a command word from a variable", "G=gh; $G pr comment 5 -R acme/api --body hi"],
+  [NO, "a command word from a substitution", "$(echo gh) pr comment 5 -R acme/api --body hi"],
+  [NO, "a command word from a backtick", "`echo gh` pr comment 5 -R acme/api --body hi"],
+  [NO, "a variable after an option sudo has not", "G=gh; sudo --frob x $G pr comment 5 -R acme/api --body hi"],
+  [NO, "a substitution after an option sudo has not", "sudo --frob x $(echo gh) pr comment 5 -R acme/api --body hi"],
+  [OK, "sudo -nu root on a marked comment", "sudo -nu root gh pr comment 5 -R acme/api --body '> Written by agent. ok'"],
+  [OK, "nice --10, a negative adjustment, on a marked comment", "nice --10 gh pr comment 5 -R acme/api --body '> Written by agent. ok'"],
+  [OK, "a short letter sudo has not, with no gh after it", "sudo -z x ls; gh pr view 5"],
+  [OK, "gh by a plain path under $HOME", "\"$HOME/.local/bin/gh\" pr view 5"],
   [NO, "xargs -d with a delimiter this cannot read", "echo 5 | xargs -d ab gh pr comment -R acme/api --body '> Written by agent. ok'"],
 ];
 

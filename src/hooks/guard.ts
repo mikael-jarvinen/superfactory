@@ -2172,24 +2172,54 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
   }
 }
 
-// The wrappers a command can run behind, and their short options that take a value (`sudo -u x`).
-// Long options are in WRAPPER_LONG.
-const WRAPPER_VALUES: Record<string, string[]> = {
-  sudo: ["-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T"],
-  xargs: ["-I", "-n", "-L", "-P", "-d", "-E", "-s", "-a"],
-  env: ["-u", "-C", "-S", "-a"],
-  timeout: ["-s", "-k"],
-  nice: ["-n"],
-  nohup: [], time: ["-f", "-o"], exec: ["-a"], command: [], builtin: [],
-  stdbuf: ["-i", "-o", "-e"],
+type Takes = "req" | "opt" | "none";
+
+// The wrappers a command can run behind, and their short options as each tool's getopt string has
+// them (a: takes a value, attached or the next word; a:: only an attached one): sudo 1.9, GNU
+// coreutils (env's a: is 9's), findutils and time, and bash's exec and command. A group is read as
+// getopt reads it: the first letter with a value takes the rest of the word, or the next word when
+// nothing is attached (Marie on #128: sudo -nu root gh, timeout -vs KILL 5 gh, exec -ca x gh).
+const getopts = (spec: string): Record<string, Takes> => {
+  const out: Record<string, Takes> = {};
+  for (const m of spec.matchAll(/([^:])(:{0,2})/g)) out[m[1] as string] = m[2] === ":" ? "req" : m[2] === "::" ? "opt" : "none";
+  return out;
 };
+const WRAPPER_SHORT: Record<string, Record<string, Takes>> = {
+  sudo: getopts("Aa:BbC:c:D:Eeg:Hh::iKklNnPp:R:r:SsT:t:U:u:Vv"),
+  xargs: getopts("0a:d:E:e::I:i::L:l::n:oP:prs:tx"),
+  env: getopts("a:C:iS:u:v0"),
+  timeout: getopts("k:s:v"),
+  nice: getopts("n:"),
+  nohup: {}, time: getopts("af:o:pqvV"), exec: getopts("a:cl"), command: getopts("pvV"), builtin: {},
+  stdbuf: getopts("i:o:e:"),
+};
+
+// One short-option word of a wrapper, as getopt reads it: whether it takes the next word, and
+// whether it has a letter the wrapper's table does not (which the tool refuses; this cannot tell
+// what it was meant to be).
+function shortOption(name: string, o: string): { next: boolean; unknown: boolean } {
+  const table = WRAPPER_SHORT[name] ?? {};
+  for (let j = 1; j < o.length; j++) {
+    const t = table[o[j] as string];
+    if (t === undefined) return { next: false, unknown: true };
+    if (t !== "none") return { next: t === "req" && j + 1 === o.length, unknown: false };
+  }
+  return { next: false, unknown: false };
+}
+
+// Whether a word after an option this cannot read may run gh: gh or a shell by name, a word that
+// names gh, or one from a variable or a substitution (Marie on #128: sudo --frob x $G pr comment).
+const mayRunGh = (x: string): boolean =>
+  x === "gh" || SHELLS.has(posix.basename(x.replace(/^\\/, "")).toLowerCase()) || namesGh(x) || dynamicWord(x);
+// A command word bash makes from a variable or a substitution ($G, ${G}, $(...), `...`), which this
+// cannot read; a plain path under $HOME is read as the path it is.
+const dynamicWord = (w: string): boolean => /[$`]/.test(w.replace(/^(?:\$HOME|\$\{HOME\})\//, ""));
 
 // Each wrapper's long options, from the tools themselves (GNU coreutils, findutils and time, sudo
 // 1.9; env's --argv0 is coreutils 9's), by how each takes a value: req as --o=V or --o V, opt only as
 // --o=V (`xargs --max-lines gh` runs gh, Marie on #128), none not at all. exec, command and builtin
 // are bash's and have none. Like getopt_long, longOption reads a unique prefix as its option
 // (--max-a is --max-args, timeout --sig is --signal); one it cannot read, unknown or ambiguous, is null.
-type Takes = "req" | "opt" | "none";
 const longs = (req: string[], opt: string[], none: string[]): Record<string, Takes> =>
   Object.fromEntries([...req.map((o) => [o, "req"]), ...opt.map((o) => [o, "opt"]), ...[...none, "help", "version"].map((o) => [o, "none"])].map(([o, t]) => [`--${o}`, t as Takes]));
 const WRAPPER_LONG: Record<string, Record<string, Takes>> = {
@@ -2245,21 +2275,28 @@ function commandWords(words: string[], via: { name: string; opts: string[] }[] =
       continue;
     }
     const name = posix.basename(w.replace(/^\\/, "")).toLowerCase();
-    const opts = WRAPPER_VALUES[name];
-    if (!opts) return words.slice(i);
+    if (!WRAPPER_SHORT[name]) return words.slice(i);
     const seen: string[] = [];
     via.push({ name, opts: seen });
     i++;
-    while (i < words.length && (words[i] as string).startsWith("-") && words[i] !== "-") {
+    // env's lone - is its -i
+    while (i < words.length && (words[i] as string).startsWith("-") && (words[i] !== "-" || name === "env")) {
       let o = words[i] as string;
+      // nice -NUM and --NUM (a negative one) are its adjustment
+      if (name === "nice" && /^-[-+]?\d+$/.test(o)) {
+        seen.push(o);
+        i++;
+        continue;
+      }
       if (o.startsWith("--") && o !== "--") {
         // a long option this cannot read might take the next word or not, so what runs after it is
         // not known: refused if gh or a shell may (Marie on #128: timeout --sig KILL 5 gh, sudo --us)
         const read = longOption(name, o);
-        if (read === null && words.slice(i + 1).some((x) => x === "gh" || SHELLS.has(posix.basename(x.replace(/^\\/, "")).toLowerCase()) || namesGh(x)))
-          refuse(`${name} ${o}: an option this cannot read, so whether it runs gh cannot be checked`);
+        if (read === null && words.slice(i + 1).some(mayRunGh)) refuse(`${name} ${o}: an option this cannot read, so whether it runs gh cannot be checked`);
         o = read ?? o;
       }
+      const short = o.startsWith("--") ? null : shortOption(name, o);
+      if (short?.unknown && words.slice(i + 1).some(mayRunGh)) refuse(`${name} ${o}: an option this cannot read, so whether it runs gh cannot be checked`);
       seen.push(o);
       i++;
       if (o === "--") break;
@@ -2271,7 +2308,7 @@ function commandWords(words: string[], via: { name: string; opts: string[] }[] =
       }
       // `command -v gh` and `command -V gh` look a name up and run nothing (Marie on #128)
       if (name === "command" && /^-[pvV]*[vV][pvV]*$/.test(o)) return [];
-      if (o.startsWith("--") ? takesNext(name, o) : name === "xargs" ? xargsShort(o).next : opts.includes(o)) seen.push(words[i++] as string);
+      if (short ? short.next : takesNext(name, o)) seen.push(words[i++] as string);
     }
     if (name === "timeout") i++;
     while ((name === "env" || name === "sudo") && assignment(words[i])) i++;
@@ -2473,6 +2510,9 @@ function checkComments(cmd: string): void {
     const via: { name: string; opts: string[] }[] = [];
     const words = commandWords(s.words, via);
     pipe(s, printedText(words));
+    // a command word from a variable or a substitution may be gh: G=gh; $G pr comment ..., and
+    // $(echo gh) pr comment ... (Marie on #128). This line names gh, or it would not be read here.
+    if (words.length && dynamicWord(words[0] as string)) refuse("a command word from a variable or a substitution cannot be checked for a comment it posts: name the command");
     const name = posix.basename((words[0] ?? "").replace(/^\\/, "")).toLowerCase();
     // xargs runs its command with its input as more arguments (Marie on #128: echo '...' | xargs gh,
     // and | xargs -0 bash -c). A gh or a shell it runs is checked with each text the line shows that
