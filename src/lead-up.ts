@@ -10,8 +10,8 @@ import type { Agent } from "./config.js";
 import { findSession, type Session, waitForName } from "./fleet.js";
 import { armText } from "./hooks/status.js";
 import { GIT_HTTPS_ENV, launch, launchArgs, leadPrompt, refreshSettings, roleAppendix, roleOf } from "./launch.js";
-import { forgetStopped, freshCommand, lastStopped, resumable } from "./stopped.js";
-import { isAgentSession, type Transport } from "./transport.js";
+import { cameUp, forgetStopped, freshCommand, lastStopped, resumable } from "./stopped.js";
+import { isAgentSession, pick, type Transport } from "./transport.js";
 import { FactoryError } from "./util.js";
 import type { Workspace } from "./workspace.js";
 
@@ -28,6 +28,7 @@ export function resumeArgs(ws: Workspace, agent: Agent, sessionId: string, promp
 export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boolean, out: (line: string) => void = console.log, waitS = 60): void {
   const s = findSession(t, ld.name);
   if (t.alive(s)) {
+    cameUp(ws, ld.name, t, s);
     out(`${ld.name} already running (${s.id})`);
     return;
   }
@@ -39,7 +40,7 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
     const st = lastStopped(ws, ld.name);
     if (!st) old = findSession(t, ld.name, true);
     else {
-      const which = resumable(ws, ld.name, t.sessions(true).filter(isAgentSession(ld.name)), () => findSession(t, ld.name, true));
+      const which = resumable(ws, ld.name, t.sessions(true).filter(isAgentSession(ld.name)), (rows) => pick(t, rows));
       if ("gone" in which)
         throw new FactoryError(`${ld.name}'s last stopped session ${which.gone} is no longer listed, and an older one is another conversation. ` +
           `\`${freshCommand(ld)}\` starts a new one.`);

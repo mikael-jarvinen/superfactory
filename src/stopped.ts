@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { join } from "node:path";
 import type { Agent } from "./config.js";
 import type { Session } from "./fleet.js";
-import type { Transport } from "./transport.js";
+import { newest, type Transport } from "./transport.js";
 import type { Workspace } from "./workspace.js";
 
 export interface Stopped {
@@ -41,24 +41,51 @@ export function lastStopped(ws: Workspace, name: string): Stopped | null {
   }
 }
 
+// The agent's rows a launch is about to add to, by id, read before it starts: what a failed launch
+// added is what was not there, with no clock compared (Marie on #130: a remote listing's startedAt
+// is another host's clock). null when the listing cannot be had.
+export function rowsBefore(t: Pick<Transport, "sessions">, name: string): Session[] | null {
+  try {
+    return t.sessions(true).filter((r) => r.name === name && r.kind === "background");
+  } catch {
+    return null;
+  }
+}
+
 // A launch that never came up, so a wake still resumes the session stopped last rather than its row
 // (CodeRabbit on #130: the listing keeps that row, started after the stop, and resumable took it for
 // a newer conversation). The row is kept for \`claude logs\`; its id is noted here, with any other
-// row of the agent listed as started since the launch began. With no record there is nothing to keep.
-export function noteFailedLaunch(ws: Workspace, name: string, t: Pick<Transport, "sessions">, launchId: string, since: number): void {
-  const st = lastStopped(ws, name);
-  if (!st) return;
-  const ids = new Set(st.failed ?? []);
-  if (/^\w+$/.test(launchId) && launchId !== st.id) ids.add(launchId);
-  try {
-    for (const r of t.sessions(true)) if (r.name === name && r.id && r.id !== st.id && startMs(r) >= since) ids.add(r.id);
-  } catch {
-    // the listing failed: the launch id alone
+// row of the agent that was not listed before the launch. With no record, the newest row from
+// before is written as the one to resume, so the dead launch is not it either (Marie on #130).
+export function noteFailedLaunch(ws: Workspace, name: string, t: Pick<Transport, "sessions">, launchId: string, before: Session[] | null): void {
+  const was = new Set((before ?? []).map((r) => r.id));
+  const ids = new Set<string>();
+  if (/^\w+$/.test(launchId) && !was.has(launchId)) ids.add(launchId);
+  if (before) {
+    try {
+      for (const r of t.sessions(true)) if (r.name === name && r.id && !was.has(r.id)) ids.add(r.id);
+    } catch {
+      // the listing failed: the launch id alone
+    }
   }
+  const st = lastStopped(ws, name) ?? (() => {
+    const old = newest((before ?? []).filter((r) => r.id && !ids.has(r.id)));
+    return old?.id ? ({ id: old.id, at: new Date().toISOString() } as Stopped) : null;
+  })();
+  if (!st || !ids.size) return;
+  for (const x of st.failed ?? []) ids.add(x);
+  ids.delete(st.id);
+  mkdirSync(ws.runDir, { recursive: true });
   const f = file(ws, name);
   const tmp = `${f}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify({ ...st, failed: [...ids] } satisfies Stopped) + "\n");
   renameSync(tmp, f);
+}
+
+// A row noted as a failed launch that is seen live came up after all: it is a new conversation,
+// and replaces the one stopped last as a launch that came up does (Marie on #130).
+export function cameUp(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, s: Session): void {
+  if (s.id && lastStopped(ws, name)?.failed?.includes(s.id)) replaceStopped(ws, name, t, s.id);
 }
 
 export const forgetStopped = (ws: Workspace, name: string) => rmSync(file(ws, name), { force: true });
@@ -84,7 +111,9 @@ export function resumable(ws: Workspace, name: string, rows: Session[], newest: 
   const st = lastStopped(ws, name);
   if (!st) return { s: newest(rows) };
   const at = Date.parse(st.at);
-  const failed = new Set(st.failed ?? []);
+  // a noted launch holds its mark while its row is failed or gone; one that came up later and
+  // ended on its own (done, stopped) is the newer conversation it is (Marie on #130)
+  const failed = new Set((st.failed ?? []).filter((id) => !rows.some((r) => r.id === id && r.state !== "failed")));
   if (rows.some((r) => r.id !== st.id && !failed.has(r.id ?? "") && startMs(r) > at)) return { s: newest(rows.filter((r) => !failed.has(r.id ?? ""))) };
   const s = rows.find((r) => r.id === st.id);
   return s ? { s } : { gone: st.id };

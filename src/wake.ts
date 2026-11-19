@@ -7,7 +7,7 @@
 import type { Agent } from "./config.js";
 import { findSession, pollForName, type Session } from "./fleet.js";
 import { refreshSettings } from "./launch.js";
-import { freshCommand, resumable } from "./stopped.js";
+import { cameUp, freshCommand, resumable } from "./stopped.js";
 import { ask, Unreachable } from "./remote.js";
 import { isAgentSession, LISTING_TIMEOUT_MS, newest, type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
@@ -43,7 +43,10 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   // A listing that cannot be had, a local one that timed out included, leaves the recipient unknown.
   const live = ask(() => findSession(t, agent.name));
   if (live instanceof Unreachable) return { is: "unknown", why: live.brief };
-  if (t.alive(live)) return { is: "live", s: live };
+  if (t.alive(live)) {
+    cameUp(ws, agent.name, t, live);
+    return { is: "live", s: live };
+  }
   if (left() < LISTING_TIMEOUT_MS) return late("the stopped sessions were listed");
   const all = ask(() => t.sessions(true));
   if (all instanceof Unreachable) return { is: "unknown", why: all.brief };
