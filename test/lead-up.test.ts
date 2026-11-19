@@ -6,7 +6,7 @@ import type { Session } from "../src/fleet.js";
 import { lead } from "../src/fleet.js";
 import { launch, leadPrompt, settingsFile } from "../src/launch.js";
 import { bringUpLead, resumePrompt } from "../src/lead-up.js";
-import { forgetStopped, lastStopped, noteStopped } from "../src/stopped.js";
+import { forgetStopped, lastStopped, noteStopped, resumable } from "../src/stopped.js";
 import type { StartRequest, Transport } from "../src/transport.js";
 import { FactoryError } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
@@ -19,7 +19,7 @@ const ws = openWorkspace(dir, {});
 const ld = lead(ws);
 
 // A transport whose listing is `sessions`; whatever it starts or respawns comes up alive.
-function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boolean; stopBug?: boolean; neverUp?: boolean } = {}) {
+function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boolean; stopBug?: boolean; neverUp?: boolean; deadRow?: number } = {}) {
   const started: { cwd: string; prompt: string; args: string[]; appendix: string | null; runDir: string }[] = [];
   const respawned: string[] = [];
   const removed: string[] = [];
@@ -32,6 +32,8 @@ function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boo
       if (opts.startFails) throw new Error("claude --bg failed: no such session");
       started.push({ cwd: req.cwd, prompt: req.prompt, args: req.args(req.appendix ? "/run/appendix.md" : null), appendix: req.appendix, runDir: req.runDir });
       if (!opts.neverUp) sessions.push({ id: "new1", name: ld.name, kind: "background", alive: true });
+      // a launch that dies at once: the listing keeps its row, started now, never alive
+      else if (opts.deadRow) sessions.push({ id: "new1", name: ld.name, kind: "background", state: "failed", startedAt: opts.deadRow });
       return "new1";
     },
     respawn(_name, id) {
@@ -236,6 +238,32 @@ test("a launch that never comes up keeps the stopped row and its record (CodeRab
     }
     assert.deepEqual(f.removed, [], "the stopped row stays, the only way back");
     assert.equal(lastStopped(ws, ld.name)?.id, "5e7a0b12");
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
+});
+
+test("a launch that never comes up does not make its row the one a wake resumes (CodeRabbit on #130 at fcf9403e)", () => {
+  const today = stopped({ id: "5e7a0b12", sessionId: "today-uuid", startedAt: Date.now() - 3_600_000 });
+  try {
+    noteStopped(ws, ld.name, today);
+    const rows: Session[] = [today];
+    const f = fake(rows, { neverUp: true, deadRow: Date.now() + 1000 });
+    let now = Date.now();
+    const m = mock.method(Date, "now", () => (now += 100_000));
+    try {
+      assert.throws(() => launch(ws, ld, join(dir, "lead"), "hi", null, undefined, f.t), /did not appear in `claude agents`/);
+    } finally {
+      m.mock.restore();
+    }
+    assert.ok(rows.some((r) => r.id === "new1"), "the failed launch's row is listed, started after the stop");
+    const newest = (r: Session[]) => r.reduce<Session | null>((a, b) => (!a || Number(b.startedAt) > Number(a.startedAt) ? b : a), null);
+    const which = resumable(ws, ld.name, rows, newest);
+    assert.ok("s" in which && which.s?.id === "5e7a0b12", `a wake resumes the session stopped last, not the launch that failed: ${JSON.stringify(which)}`);
+    // a conversation that did come up since still supersedes the record
+    rows.push({ id: "c0ffee00", name: ld.name, kind: "background", state: "stopped", startedAt: Date.now() + 5000 });
+    const later = resumable(ws, ld.name, rows, newest);
+    assert.ok("s" in later && later.s?.id === "c0ffee00", JSON.stringify(later));
   } finally {
     forgetStopped(ws, ld.name);
   }

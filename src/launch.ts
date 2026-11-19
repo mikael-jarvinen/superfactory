@@ -4,7 +4,7 @@ import type { Agent, GitOver, Role } from "./config.js";
 import { lead, type Session, waitForName } from "./fleet.js";
 import { renderSettings } from "./settings.js";
 import { branchFor, isLocal } from "./state.js";
-import { replaceStopped } from "./stopped.js";
+import { noteFailedLaunch, replaceStopped } from "./stopped.js";
 import { type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
 import { capitalize, die } from "./util.js";
@@ -143,6 +143,7 @@ export const GIT_HTTPS_ENV = {
 export const gitEnv = (over: GitOver = "https"): Record<string, string> => (over === "ssh" ? {} : GIT_HTTPS_ENV);
 
 export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string, appendix: string | null = null, phase: Phase = undefined, t: Transport = transportFor(ws, agent)): Session {
+  const began = Date.now();
   const sid = t.start({
     agent, cwd, prompt, appendix, phase, runDir: ws.runDir,
     args: (appendixPath) => launchArgs(ws, agent, prompt, appendixPath, phase),
@@ -152,10 +153,12 @@ export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string,
   if (!s) {
     const there = agent.host ? ` on host ${t.where}` : "";
     const also = agent.host ? ` there, and \`factory doctor\` for whether ${t.where} answers` : "";
+    noteFailedLaunch(ws, agent.name, t, sid, began);
     die(`${agent.name} did not appear in \`claude agents\`${there} within 90s (launch id ${sid}). Check \`claude logs ${sid}\`${also}.`);
   }
   // a new conversation, up: the one stopped last is no longer the one to resume, nor kept listed.
-  // A launch that never came up keeps both, the only way back (CodeRabbit on #130).
+  // A launch that never came up keeps both, the only way back, and its row is noted as no newer
+  // conversation (CodeRabbit on #130).
   replaceStopped(ws, agent.name, t, s.id);
   return s;
 }

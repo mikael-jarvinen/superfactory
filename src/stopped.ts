@@ -12,6 +12,8 @@ import type { Workspace } from "./workspace.js";
 export interface Stopped {
   id: string;
   at: string;
+  // launches since the stop that never came up: their rows supersede nothing (CodeRabbit on #130)
+  failed?: string[];
 }
 
 const file = (ws: Workspace, name: string) => join(ws.runDir, `stopped-${name}.json`);
@@ -31,10 +33,32 @@ export function lastStopped(ws: Workspace, name: string): Stopped | null {
   if (!existsSync(f)) return null;
   try {
     const d = JSON.parse(readFileSync(f, "utf8")) as Partial<Stopped>;
-    return typeof d.id === "string" && d.id ? { id: d.id, at: String(d.at ?? "") } : null;
+    if (typeof d.id !== "string" || !d.id) return null;
+    const failed = Array.isArray(d.failed) ? d.failed.filter((x): x is string => typeof x === "string") : [];
+    return { id: d.id, at: String(d.at ?? ""), ...(failed.length ? { failed } : {}) };
   } catch {
     return null;
   }
+}
+
+// A launch that never came up, so a wake still resumes the session stopped last rather than its row
+// (CodeRabbit on #130: the listing keeps that row, started after the stop, and resumable took it for
+// a newer conversation). The row is kept for \`claude logs\`; its id is noted here, with any other
+// row of the agent listed as started since the launch began. With no record there is nothing to keep.
+export function noteFailedLaunch(ws: Workspace, name: string, t: Pick<Transport, "sessions">, launchId: string, since: number): void {
+  const st = lastStopped(ws, name);
+  if (!st) return;
+  const ids = new Set(st.failed ?? []);
+  if (/^\w+$/.test(launchId) && launchId !== st.id) ids.add(launchId);
+  try {
+    for (const r of t.sessions(true)) if (r.name === name && r.id && r.id !== st.id && startMs(r) >= since) ids.add(r.id);
+  } catch {
+    // the listing failed: the launch id alone
+  }
+  const f = file(ws, name);
+  const tmp = `${f}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ ...st, failed: [...ids] } satisfies Stopped) + "\n");
+  renameSync(tmp, f);
 }
 
 export const forgetStopped = (ws: Workspace, name: string) => rmSync(file(ws, name), { force: true });
@@ -60,7 +84,8 @@ export function resumable(ws: Workspace, name: string, rows: Session[], newest: 
   const st = lastStopped(ws, name);
   if (!st) return { s: newest(rows) };
   const at = Date.parse(st.at);
-  if (rows.some((r) => r.id !== st.id && startMs(r) > at)) return { s: newest(rows) };
+  const failed = new Set(st.failed ?? []);
+  if (rows.some((r) => r.id !== st.id && !failed.has(r.id ?? "") && startMs(r) > at)) return { s: newest(rows.filter((r) => !failed.has(r.id ?? ""))) };
   const s = rows.find((r) => r.id === st.id);
   return s ? { s } : { gone: st.id };
 }
