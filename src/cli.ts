@@ -18,6 +18,7 @@ import { wake, wakeForRound, wokeLine } from "./wake.js";
 import { hook as appendixHook } from "./hooks/appendix.js";
 import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
+import { hook as markedCommentsHook } from "./hooks/marked-comments.js";
 import { hook as noSideChannelsHook } from "./hooks/no-side-channels.js";
 import { hook as statusHook } from "./hooks/status.js";
 import { hook as wakeHook } from "./hooks/wake.js";
@@ -1014,6 +1015,7 @@ const HOOK_FNS: Record<HookName, (argv: string[], input: string, workspace?: str
   "status": statusHook,
   "no-dialogs": noDialogsHook,
   "no-side-channels": noSideChannelsHook,
+  "marked-comments": markedCommentsHook,
   "wake": wakeHook,
   "appendix": appendixHook,
 };

@@ -76,6 +76,8 @@ export interface CheckRun {
   details_url: string | null;
   output?: { title?: string | null };
   app?: { slug?: string };
+  // the PRs GitHub tied the run to: those whose head it ran on
+  pull_requests?: { number: number }[] | null;
 }
 
 // Check-runs at one commit, every page. This is the source the gate trusts: `gh pr checks` and
@@ -132,6 +134,10 @@ export const reviewComments = (repo: Repo, n: number) => allPages<ReviewComment>
 
 // The PR's commits, oldest first. A force-push drops the commits it replaced.
 export const prCommits = (repo: Repo, n: number) => allPages<{ sha: string }>(`repos/${repo.remote}/pulls/${n}/commits`);
+
+// The PRs GitHub ties a commit to: the open PRs that contain it, or the merged PR that brought it
+// to the default branch.
+export const commitPulls = (repo: Repo, sha: string) => allPages<{ number: number }>(`repos/${repo.remote}/commits/${sha}/pulls`);
 
 // Every review on a PR, every page.
 export function reviews(repo: Repo, n: number): Review[] | undefined {

@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { allowClosePath } from "../src/allow-close.js";
-import { GITHUB_BUDGET_MS, type GuardContext, hook, mcpVerdict, verdict } from "../src/hooks/guard.js";
+import { hook as markedHook } from "../src/hooks/marked-comments.js";
+import { commentVerdict, GITHUB_BUDGET_MS, type GuardContext, hook, mcpVerdict, verdict } from "../src/hooks/guard.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, tempWorkspace } from "./helpers.js";
 
@@ -81,6 +82,8 @@ const table: [GuardContext, number, string[]][] = [
     "gh api -X POST repos/acme/workspace/branches/workspace/rename -f new_name=main", "git push https://github.com/alex/factory.git HEAD:main",
     "git push https://github.com/acme/workspace.git main",
   ]],
+  // A comment goes out under the human's login: the watcher tells the factory's from the human's by
+  // the marker (superfactory#119, L2), so a protected session posts only marked or trigger bodies.
   // Beyond the old table. timeout is unwrapped and its command checked rather than refused; a shell's
   // -c script is checked; ");" is two operators; a quoted "|" or ">" is a word; >&1 writes no file.
   [ro, REFUSE, ["(ls); git commit -m x", "timeout 5 git commit -m x", "env GIT_DIR=/x/.git git log"]],
@@ -224,10 +227,13 @@ test("the lead closes a product PR only once the human has named it", () => {
   const r = factory(dir, ["allow-close", "api", "8701", "--words", "I allow you to close the PR"]);
   assert.equal(r.status, 0, r.stderr);
   const lead: GuardContext = { ...pr, role: "lead", allowClose: allowClosePath(openWorkspace(dir).stateDir) };
-  for (const c of ["gh pr close 8701 -R acme/api", "gh pr close 8701 --repo Acme/api --comment 'Superseded by #8702'",
-    "gh pr close https://github.com/acme/api/pull/8701", "gh pr close https://github.com/acme/api/pull/8701/files -c x",
-    "cat > /tmp/c.md <<'EOF'\nSuperseded.\nEOF\ngh pr close 8701 -R acme/api --comment \"$(cat /tmp/c.md)\""])
+  for (const c of ["gh pr close 8701 -R acme/api", "gh pr close 8701 --repo Acme/api --comment '> Written by agent. Superseded by #8702'",
+    "gh pr close https://github.com/acme/api/pull/8701", "gh pr close https://github.com/acme/api/pull/8701/files -c '> Written by agent. x'"])
     assert.equal(verdict(c, lead), null, c);
+  // Its close comment is still a comment under the human's login (#119 round 4).
+  for (const c of ["gh pr close 8701 --repo Acme/api --comment 'Superseded by #8702'",
+    "cat > /tmp/c.md <<'EOF'\n> Written by agent. Superseded.\nEOF\ngh pr close 8701 -R acme/api --comment \"$(cat /tmp/c.md)\""])
+    assert.match(verdict(c, lead) ?? "", /Written by agent/, c);
   const refused = {
     "an unrecorded PR": verdict("gh pr close 8702 -R acme/api", lead),
     "the same number in another repo": verdict("gh pr close 8701 -R acme/web", lead),
@@ -273,7 +279,10 @@ test("a gh alias or extension is refused, and so is making one", () => {
     "gh pc 1 -b hi", "gh alias set --shell x 'gh pr merge 8701 -R acme/api'", "gh x", "gh alias import a.yml", "gh alias delete co",
     "gh co 12", "gh extension install o/gh-x", "gh ext install o/gh-x", "gh extensions upgrade --all", "gh extension exec x",
     "command gh m 8701 -R acme/api", "gh -- m 8701", "bash -c 'gh m 8701 -R acme/api'"];
-  const allowed = ["gh pr checkout 12", "gh pr co 12", "gh alias list", "gh alias ls", "gh ext list", "gh pr view 1", "gh --version", "gh --help", "gh help", "gh -R acme/api pr checks 1"];
+  const allowed = ["gh pr checkout 12", "gh pr co 12", "gh alias list", "gh alias ls", "gh ext list", "gh pr view 1", "gh --version", "gh --help", "gh help", "gh -R acme/api pr checks 1",
+    // Marie on #128: gh's own `version` and its help topics are no alias
+    "gh version", "gh accessibility", "gh a11y", "gh actions", "gh environment", "gh reference", "gh exit-codes", "gh formatting",
+    "gh mintty", "gh telemetry"];
   const wrong: string[] = [];
   for (const ctx of [pr, lead]) {
     for (const c of refused) if (!/aliases and extensions can't be checked/.test(verdict(c, ctx) ?? "")) wrong.push(`${ctx.role} allowed: ${c}`);
@@ -942,4 +951,532 @@ test("the lead's guard finds the allow-close list through its workspace when the
   assert.notEqual(verdict("gh pr close 8701 -R acme/api", { ...lead, role: "builder" }), null);
   // the flag overrides the workspace: a list that names nothing closes nothing
   assert.notEqual(verdict("gh pr close 8701 -R acme/api", { ...lead, allowClose: `${dir}/nothing.jsonl` }), null);
+});
+
+// The comment rule, every shape (superfactory#119, rounds 1 to 4). Every comment the factory posts
+// goes out under the human's login, so its body must start with the marker, or be a bot trigger, and
+// be checkable in the command. gh's arguments are read as gh reads them: the last of a repeated flag
+// wins, a short flag's value may be attached, `=` forms work, and -- ends the options. Only a gh
+// that runs as a command is checked. Each row runs through the marked-comments hook, and each gh row
+// that names no file through the protect guard too, which must agree on a comment it refuses.
+const M = "> Written by agent.";
+const NO = "refused";
+const OK = "allowed";
+const ADD = (body: string) => `gh api graphql -f query='mutation { addComment(input: {subjectId: "X", body: ${body}}) { clientMutationId } }'`;
+const REPLY = "gh api graphql -f query='mutation($b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \"T\", body: $b}) { clientMutationId } }'";
+const SUBMIT = "gh api graphql -f query='mutation($i: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $i) { clientMutationId } }'";
+const ADD_IN = "gh api graphql -f query='mutation($i: AddCommentInput!) { addComment(input: $i) { clientMutationId } }'";
+const COMMENT_SHAPES: [string, string, string][] = [
+  // gh pr/issue comment
+  [OK, "marked", `gh pr comment 1 --body '${M}\n\nFixed in abc'`],
+  [OK, "marked, -b", `gh pr comment 1 -b "${M} Fixed"`],
+  [OK, "a bot trigger", "gh pr comment 1 --body '@coderabbitai review'"],
+  [OK, "marked, -R before the number", `gh pr comment -R o/r 1 --body '${M}'`],
+  [OK, "marked, attached", `gh pr comment 1 '-b${M} ok'`],
+  [OK, "marked, = form", `gh issue comment 1 '--body=${M} ok'`],
+  [OK, "the last body is marked", `gh pr comment 1 -b hi -b '${M} ok'`],
+  [OK, "--web: the human writes it", "gh pr comment 1 --web"],
+  [OK, "--delete-last posts nothing", "gh pr comment 1 --delete-last --yes"],
+  [NO, "unmarked", "gh pr comment 1 --body hi"],
+  [NO, "unmarked, -b", "gh pr comment 1 -b 'Fixed in abc'"],
+  [NO, "unmarked, = form", "gh issue comment 1 --body=hi"],
+  [NO, "unmarked, attached", "gh pr comment 1 -bhi"],
+  [NO, "unmarked, -R before the number", "gh pr comment -R o/r 1 -b hi"],
+  [NO, "the last body is unmarked", `gh pr comment 1 -b '${M}' -b hi`],
+  [NO, "the last body is unmarked, = form", `gh pr comment 1 --body '${M}' --body=hi`],
+  [NO, "--edit-last, unmarked", "gh pr comment 1 --edit-last -b hi"],
+  [NO, "no body", "gh pr comment 1"],
+  [NO, "after --, -b is not a flag", `gh pr comment 1 -- -b '${M}'`],
+  [NO, "a body from $(...)", 'gh pr comment 1 --body "$(cat f)"'],
+  [NO, "a body from a variable", 'gh pr comment 1 --body "$BODY"'],
+  [NO, "--body-file", "gh pr comment 1 --body-file f"],
+  [NO, "-F", "gh pr comment 1 -F f"],
+  [NO, "-F attached", "gh pr comment 1 -Ff.md"],
+  [NO, "-e", "gh pr comment 1 -e"],
+  [NO, "--editor", "gh issue comment 1 --editor"],
+  // pr's and issue's -R/--repo before the subcommand, or before pr/issue itself (Marie, after round 4)
+  [NO, "gh -R o/r pr comment", "gh -R o/r pr comment 1 -b hi"],
+  [NO, "gh --repo o/r pr comment", "gh --repo o/r pr comment 1 -b hi"],
+  [NO, "gh --repo=o/r issue comment", "gh --repo=o/r issue comment 2 -b hi"],
+  [NO, "gh pr -R o/r comment", "gh pr -R o/r comment 1 -b hi"],
+  [NO, "gh -Ro/r pr comment", "gh -Ro/r pr comment 1 -b hi"],
+  [NO, "gh issue --repo o/r close -c", "gh issue --repo o/r close 2 -c hi"],
+  [NO, "gh pr --repo=o/r review", "gh pr --repo=o/r review 1 -c -b hi"],
+  [OK, "gh -R o/r pr comment, marked", `gh -R o/r pr comment 1 -b '${M} ok'`],
+  [OK, "gh -R o/r pr view", "gh -R o/r pr view 1"],
+  // gh pr review
+  [OK, "an approval", "gh pr review 1 --approve"],
+  [OK, "marked", `gh pr review 1 --comment -b '${M} ok'`],
+  [OK, "marked, attached after a boolean cluster", `gh pr review 1 -c '-b${M} ok'`],
+  [NO, "unmarked", "gh pr review 1 --request-changes -b 'please fix'"],
+  [NO, "unmarked, attached", "gh pr review 1 --comment -bhi"],
+  [NO, "the last body is unmarked", `gh pr review 1 -c -b '${M}' --body=hi`],
+  [NO, "--body-file", "gh pr review 1 --comment --body-file f"],
+  [NO, "-F attached", "gh pr review 1 --comment -Ff.md"],
+  // close and reopen with a comment
+  [OK, "close, no comment", "gh pr close 1"],
+  [OK, "close, marked", `gh pr close 1 -c '${M} superseded'`],
+  [OK, "issue close with a reason", "gh issue close 2 -r completed"],
+  [OK, "reopen, no comment", "gh issue reopen 2"],
+  [NO, "pr close -c", "gh pr close 1 -c hi"],
+  [NO, "pr close --comment=", "gh pr close 1 --comment=hi"],
+  [NO, "pr close, attached", "gh pr close 1 -chi"],
+  [NO, "pr close, after a boolean", "gh pr close 1 -d -c hi"],
+  [NO, "issue close --comment", "gh issue close 2 --comment hi"],
+  [NO, "issue close, a reason and a comment", "gh issue close 2 -r completed -c hi"],
+  [NO, "pr reopen -c", "gh pr reopen 1 -c hi"],
+  [NO, "issue reopen -c", "gh issue reopen 2 -c hi"],
+  // REST
+  [OK, "a read", "gh api repos/o/r/pulls/1/comments"],
+  [OK, "a read with -X GET and fields", "gh api -X GET repos/o/r/issues/1/comments -f per_page=100"],
+  [OK, "a delete", "gh api -X DELETE repos/o/r/issues/comments/5"],
+  [OK, "not a comment", "gh api repos/o/r/issues/1/labels -f 'labels[]=x'"],
+  [OK, "a marked reply", `gh api repos/o/r/pulls/1/comments/2/replies -f body='${M}\n\nFixed in abc'`],
+  [OK, "a marked review and its comments", `gh api repos/o/r/pulls/1/reviews -f body='${M} ok' -f 'comments[][path]=a.ts' -f 'comments[][body]=${M} nit'`],
+  [NO, "an unmarked reply", "gh api repos/o/r/pulls/1/comments/2/replies -f body='Fixed in abc'"],
+  [NO, "attached -f", "gh api repos/o/r/pulls/1/comments/2/replies -fbody=hi"],
+  [NO, "an issue comment", "gh api -X POST repos/o/r/issues/1/comments -f body=hi"],
+  [NO, "a leading slash", "gh api /repos/o/r/issues/1/comments -f body=hi"],
+  [NO, "a full URL", "gh api https://api.github.com/repos/o/r/issues/1/comments -f body=hi"],
+  [NO, "a review body", "gh api repos/o/r/pulls/1/reviews -f event=COMMENT -f body=hi"],
+  [NO, "a review's comment", `gh api repos/o/r/pulls/1/reviews -f 'body=${M} ok' -f 'comments[][path]=a.ts' -f 'comments[][body]=nit'`],
+  [NO, "a submitted review", "gh api repos/o/r/pulls/1/reviews/5/events -f event=COMMENT -f body=hi"],
+  [NO, "an edit", "gh api -X PATCH repos/o/r/issues/comments/5 -f body=hi"],
+  [NO, "a commit comment", "gh api repos/o/r/commits/abc/comments -f body=hi"],
+  [NO, "a second body field", `gh api repos/o/r/issues/1/comments -f 'body=${M}' -f body=hi`],
+  [NO, "a body from a file", "gh api repos/o/r/pulls/1/comments/2/replies -F body=@f"],
+  [NO, "--input", "gh api repos/o/r/issues/1/comments --input f.json"],
+  // GraphQL
+  [OK, "a read", "gh api graphql -f query='query { viewer { login } }'"],
+  [OK, "a mutation that posts nothing", "gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: \"T\"}) { clientMutationId } }'"],
+  [OK, "a marked literal", ADD(`"${M} ok"`)],
+  [OK, "a marked block string", ADD(`"""${M} ok"""`)],
+  [OK, "a marked $variable", `${REPLY} -f 'b=${M} ok'`],
+  [OK, "a trigger $variable", `${REPLY} -f 'b=@coderabbitai resolve'`],
+  [OK, "an approval through input", `${SUBMIT} -f 'i[pullRequestReviewId]=R' -f 'i[event]=APPROVE'`],
+  [OK, "a marked body in input", `${ADD_IN} -f 'i[subjectId]=X' -f 'i[body]=${M} ok'`],
+  [NO, "an unmarked literal", ADD('"hi"')],
+  [NO, "an unmarked block string", ADD('"""hi"""')],
+  [NO, "an unmarked $variable", `${REPLY} -f b=hi`],
+  [NO, "a $variable not given", REPLY],
+  [NO, "submit, no input", SUBMIT],
+  [NO, "submit, an unmarked body in input", `${SUBMIT} -f 'i[pullRequestReviewId]=R' -f 'i[body]=hi'`],
+  [NO, "an input body from a file", `${ADD_IN} -f 'i[subjectId]=X' -F 'i[body]=@note.md'`],
+  [NO, "the input as one value", `${ADD_IN} -f 'i={"body":"hi"}'`],
+  [NO, "a query from $(...)", "gh api graphql -f query=\"$(cat <<'EOF'\nmutation{addComment(input:{subjectId:\"x\",body:\"hi\"}){clientMutationId}}\nEOF\n)\""],
+  [NO, "a query from a variable", 'gh api graphql -f query="$Q"'],
+  // A query or request body from a file is refused, whatever it holds: gh reads it when it runs, and
+  // by then it could be anything (Niilo on R6, after round 4). Variables from files are refused when
+  // the mutation uses them as a body.
+  [NO, "-F query=@f", "gh api graphql -F query=@read.graphql"],
+  [NO, "-f query=@f", "gh api graphql -f query=@read.graphql"],
+  [NO, "--field query=@f", "gh api graphql --field query=@read.graphql"],
+  [NO, "--raw-field=query=@f", "gh api graphql --raw-field=query=@read.graphql"],
+  [NO, "-Fquery=@f", "gh api graphql -Fquery=@read.graphql"],
+  [NO, "-F query=@-", "gh api graphql -F query=@-"],
+  [NO, "an absolute query file", "gh api graphql -F query=@/abs/read.graphql"],
+  [NO, "--input f", "gh api graphql --input read.json"],
+  [NO, "--input=f", "gh api graphql --input=read.json"],
+  [NO, "--input -", "gh api graphql --input -"],
+  [NO, "a body variable from a file", `${REPLY} -F b=@body.txt`],
+  [NO, "an input body from a file, -F i[body]=@f", `${ADD_IN} -f 'i[subjectId]=X' -F 'i[body]=@f'`],
+  [NO, "a file-backed query beside a $(...)", 'gh api graphql -F query=@read.graphql -f x="$(cp a b)"'],
+  [NO, "a file-backed query after cd", "cd sub && gh api graphql -F query=@read.graphql"],
+  [OK, "a marked -F variable", `${REPLY} -F 'b=${M} ok'`],
+  [OK, "an @ inside a marked literal", ADD(`"${M} @someone"`)],
+  [OK, "an @ inside a marked variable", `${REPLY} -f 'b=${M} cc @x'`],
+  [OK, "a read beside a cd", "cd sub && gh api graphql -f query='query { viewer { login } }'"],
+  [OK, "after cd, a marked inline comment", `cd sub && gh pr comment 1 -b '${M} ok'`],
+  // where gh runs: behind wrappers, in other commands' bodies, by path
+  [NO, "sudo", "sudo gh pr comment 1 -b hi"],
+  [NO, "sudo -u", "sudo -u x gh pr comment 1 -b hi"],
+  [NO, "env", "env A=1 gh pr comment 1 -b hi"],
+  [NO, "an assignment", "A=1 gh pr comment 1 -b hi"],
+  [NO, "timeout", "timeout 5 gh pr comment 1 -b hi"],
+  [NO, "nice", "nice -n 5 gh pr comment 1 -b hi"],
+  [NO, "xargs", "printf 1 | xargs -I{} gh pr comment {} -b hi"],
+  [NO, "command", "command gh pr comment 1 -b hi"],
+  [NO, "nohup", "nohup gh pr comment 1 -b hi"],
+  [NO, "exec", "exec gh pr comment 1 -b hi"],
+  [NO, "by path", "/usr/bin/gh pr comment 1 -b hi"],
+  [NO, "by a linuxbrew path", "/home/linuxbrew/.linuxbrew/bin/gh pr comment 1 -b hi"],
+  [NO, "bash -c", 'bash -c "gh issue comment 3 -b hi"'],
+  [NO, "sh -lc", "sh -lc 'gh issue comment 3 -b hi'"],
+  [NO, "eval", "eval gh pr comment 1 -b hi"],
+  [NO, "after &&", "cd /x && gh pr comment 1 -b hi"],
+  [NO, "after ;", "ls; gh pr comment 1 -b hi"],
+  [NO, "a subshell", "(gh pr comment 1 -b hi)"],
+  [NO, "inside $(...)", "echo $(gh pr comment 1 -b hi)"],
+  [NO, "a for body", "for i in 1; do gh pr comment $i -b hi; done"],
+  [NO, "an if body", "if true; then gh pr comment 1 -b hi; fi"],
+  [OK, "echo prints it", "echo gh pr comment 1 -b hi"],
+  [OK, "printf prints it", "printf '%s\\n' gh pr comment 1"],
+  [OK, "grep searches for it", 'grep "gh api" f'],
+  [OK, "a commit message names it", 'git commit -m "gh pr comment 1 -b hi"'],
+  [OK, "a heredoc prints it", "cat <<'EOF'\ngh pr comment 1 -b hi\nEOF"],
+  [OK, "gh reads", "gh pr view 1 --comments"],
+  [OK, "gh checks", "gh pr checks 1"],
+  [OK, "xargs, no gh", "printf x | xargs echo"],
+  [OK, "sudo, no gh", "sudo ls"],
+  [OK, "watch, no gh", "watch ls"],
+  // gh runs an alias or an extension as readily as its own commands, and either could post anything
+  [NO, "a gh alias", "gh co 5"],
+  [NO, "a gh alias past -R", "gh -R o/r xyz 1"],
+  [NO, "a gh alias behind a wrapper", "env gh co 5"],
+  [NO, "making a gh alias", "gh alias set c 'pr comment 1 -b hi'"],
+  [NO, "getting an extension", "gh extension install o/gh-x"],
+  [NO, "running an extension", "gh ext exec x"],
+  [NO, "an alias in sh -c", "sh -c 'gh co 5'"],
+  [OK, "gh's version", "gh --version"],
+  [OK, "listing aliases", "gh alias list"],
+  // an unquoted heredoc's $(...) runs as the shell reads the body; a quoted one's is text
+  [NO, "a heredoc body's substitution", "cat <<EOF\n$(gh pr comment 1 -b hi)\nEOF"],
+  [OK, "a quoted heredoc's substitution", "cat <<'EOF'\n$(gh pr comment 1 -b hi)\nEOF"],
+  // a $'...' body is what bash gives gh, decoded (Marie on #128)
+  [OK, "an ANSI-C quoted marked body", "gh pr comment 5 -R acme/api --body $'> Written by agent.'"],
+  [OK, "an ANSI-C quoted body with the CodeRabbit trigger", "gh pr comment 5 -R acme/api --body $'> Written by agent.\\n\\n@coderabbitai review'"],
+  [OK, "an ANSI-C body marked through a hex escape", "gh pr comment 5 -R acme/api --body $'\\x3e Written by agent.'"],
+  [NO, "an ANSI-C body with the mark on its second line", "gh pr comment 5 -R acme/api --body $'hi\\n> Written by agent.'"],
+  [NO, "an escaped $ before a quoted body", "gh pr comment 5 -R acme/api --body \\$'> Written by agent.'"],
+  [NO, "an ANSI-C body with a control character", "gh pr comment 5 -R acme/api --body $'> Written by agent.\\c'"],
+  // command -v and -V look a name up and run nothing; without them, command runs it
+  [OK, "looking gh up", "command -v gh git-gh"],
+  [OK, "describing gh", "command -V gh"],
+  [NO, "an alias run through command", "command gh co 5"],
+];
+
+// The protect guard refused these two shapes from the merged comment rule (Marie on #128).
+test("protect allows a $'...' marked body and a command -v lookup", () => {
+  for (const cmd of ["gh pr comment 5 -R acme/api --body $'> Written by agent.'", "gh pr comment 5 -R acme/api --body $'> Written by agent.\\n\\n@coderabbitai review'",
+    "command -v gh git-gh", "command -V gh"])
+    assert.equal(verdict(cmd, pr), null, cmd);
+  assert.notEqual(verdict("command gh co 5", pr), null);
+});
+
+test("the comment rule: every shape a gh comment takes, refused or allowed", () => {
+  // The file rows run where their files exist and hold only reads, so a refusal is the rule's, not
+  // a missing file's: nothing reads them.
+  const dir = mkdtempSync(join(tmpdir(), "comment-rule-"));
+  const here = process.cwd();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "read.graphql"), "query { viewer { login } }");
+  writeFileSync(join(dir, "read.json"), JSON.stringify({ query: "query { viewer { login } }" }));
+  process.chdir(dir);
+  const wrong: string[] = [];
+  try {
+    for (const [want, name, cmd] of COMMENT_SHAPES) {
+      const hook = commentVerdict(cmd);
+      if ((hook === null ? OK : NO) !== want) wrong.push(`hook ${want === OK ? "refused" : "allowed"} ${name}: ${cmd}${hook ? ` (${hook})` : ""}`);
+      // The protect guard runs the same rule over the line; its own policy may refuse more, so it is
+      // held only to refusing what the rule refuses.
+      if (want === NO && /^gh /.test(cmd) && verdict(cmd, pr) === null) wrong.push(`protect allowed ${name}: ${cmd}`);
+    }
+  } finally {
+    process.chdir(here);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// CodeRabbit's review of #128 at 5332c327, its threads probed by Marie: each row was a bypass (an
+// unmarked body that got through) or a false refusal there. A NO row is refused by the hook and by
+// protect; an OK row is allowed by the hook.
+const ROUND_128: [string, string, string][] = [
+  // KJHv: an empty "" between the $ and the ' leaves the $ a letter, so the body starts with "$>"
+  [NO, "a $ before an empty quote and a marked '...'", `gh pr comment 5 -R acme/api --body $""'> Written by agent. x'`],
+  [OK, "an empty $'' then a marked \"...\"", `gh pr comment 5 -R acme/api --body $''"> Written by agent. x"`],
+  [OK, "an empty $'' then a marked $'...'", `gh pr comment 5 -R acme/api --body $''$'> Written by agent. x'`],
+  [OK, "a $'...' after a line continuation", "gh pr comment 5 -R acme/api --body $\\\n'> Written by agent. x'"],
+  // KJH3: a boolean's value is read; --web=false and --delete-last=false post the --body inline
+  [NO, "--web=false", "gh pr comment 5 -R acme/api --web=false --body hi"],
+  [NO, "-w=false", "gh pr comment 5 -R acme/api -w=false --body hi"],
+  [NO, "--delete-last=false", "gh pr comment 5 -R acme/api --delete-last=false --body hi"],
+  [NO, "--web then --web=0", "gh issue comment 5 -R acme/api --web --web=0 --body hi"],
+  [NO, "--web=maybe, which gh refuses", "gh pr comment 5 -R acme/api --web=maybe --body hi"],
+  [OK, "--web=true opens the browser", "gh pr comment 5 -R acme/api --web=true --body hi"],
+  [OK, "--web=false then --web", "gh pr comment 5 -R acme/api --web=false --web"],
+  [OK, "--web=false with a marked body", "gh pr comment 5 -R acme/api --web=false --body '> Written by agent. ok'"],
+  // KJH8: -b=VALUE is VALUE, as pflag reads it; -bVALUE and -b VALUE as before
+  [OK, "-b= with a marked body", "gh pr comment 5 -R acme/api -b='> Written by agent. ok'"],
+  [NO, "-b= with an unmarked body", "gh pr comment 5 -R acme/api -b=hi"],
+  [OK, "-b with a marked body attached", "gh pr comment 5 -R acme/api '-b> Written by agent. ok'"],
+  [OK, "-b then a marked body", "gh issue comment 5 -R acme/api -b '> Written by agent. ok'"],
+  [NO, "gh api -f=body=", "gh api repos/acme/api/issues/5/comments -f=body=hi"],
+  [OK, "gh api -f=body= marked", "gh api repos/acme/api/issues/5/comments '-f=body=> Written by agent. ok'"],
+  // KJID: GraphQL's ignored tokens (# comments, commas) between a field and its arguments or body: and its value
+  [NO, "a # comment before a mutation's arguments", `gh api graphql -f query='mutation{addComment #c\n(input:{subjectId:"X",body:"hi"}){clientMutationId}}'`],
+  [NO, "a # comment between body: and its value", `gh api graphql -f query='mutation{addComment(input:{subjectId:"X",body: #c\n"hi"}){clientMutationId}}'`],
+  [NO, "a comma before a mutation's arguments", `gh api graphql -f query='mutation{addComment,(input:{subjectId:"X",body:"hi"}){clientMutationId}}'`],
+  [NO, "a comma after body:", `gh api graphql -f query='mutation{addComment(input:{subjectId:"X",body:,"hi"}){clientMutationId}}'`],
+  [OK, "a body: in a # comment is no input", `gh api graphql -f query='mutation{addComment(input:{subjectId:"X",body:"> Written by agent. ok"}){clientMutationId}} # body: "hi"'`],
+  [OK, "a # inside a marked body is a letter", `gh api graphql -f query='mutation{addComment(input:{subjectId:"X",body:"> Written by agent. #1, done"}){clientMutationId}}'`],
+  // KJIQ: GitHub's GraphQL endpoint by its URL or a path is GraphQL too
+  [NO, "the GraphQL URL", `gh api https://api.github.com/graphql -f query='mutation{addComment(input:{subjectId:"X",body:"hi"}){clientMutationId}}'`],
+  [NO, "a GHE's GraphQL URL", `gh api https://ghe.acme.dev/api/graphql -f query='mutation{addComment(input:{subjectId:"X",body:"hi"}){clientMutationId}}'`],
+  [NO, "/graphql", `gh api /graphql -f query='mutation{addComment(input:{subjectId:"X",body:"hi"}){clientMutationId}}'`],
+  [NO, "the GraphQL URL with --input", "gh api https://api.github.com/graphql --input q.json"],
+  [OK, "the GraphQL URL with a marked body", `gh api https://api.github.com/graphql -f query='mutation{addComment(input:{subjectId:"X",body:"> Written by agent. ok"}){clientMutationId}}'`],
+  [OK, "a read by the GraphQL URL", `gh api https://api.github.com/graphql -f query='query{viewer{login}}'`],
+  // KJId: an issue number, or a whole route, from the shell
+  [NO, "a $N comments path", `gh api "repos/acme/api/issues/$N/comments" -f body=hi`],
+  [NO, "a \${N} reviews path", "gh api repos/acme/api/pulls/\${N}/reviews -f body=hi -f event=COMMENT"],
+  [NO, "a route from a variable", `gh api "$P" -f body=hi`],
+  [NO, "an issue route ending in a variable", `gh api "repos/acme/api/issues/$N" -f body=hi`],
+  [OK, "a $N comments path with a marked body", `gh api "repos/acme/api/issues/$N/comments" -f body='> Written by agent. ok'`],
+  [OK, "a $R PR edit", `gh api -X PATCH "repos/$R/pulls/5" -f title=x -f body=y`],
+  [OK, "a $N read", `gh api "repos/acme/api/issues/$N/comments"`],
+  // KJIn: gh spelled with quotes, which bash removes before it names the command
+  [NO, `g"h"`, `g"h" pr comment 5 -R acme/api --body hi`],
+  [NO, `'g'h`, `'g'h pr comment 5 -R acme/api --body hi`],
+  [NO, "g\\h", "g\\h pr comment 5 -R acme/api --body hi"],
+  [NO, "g$'h'", "g$'h' pr comment 5 -R acme/api --body hi"],
+  [NO, `g""h behind env`, `env g""h pr comment 5 -R acme/api --body hi`],
+  [OK, `g"h" with a marked body`, `g"h" pr comment 5 -R acme/api --body '> Written by agent. ok'`],
+  // KJIz: env -S, whose value is the command line it runs
+  [NO, "env -S", `env -S 'gh pr comment 5 -R acme/api --body hi'`],
+  [NO, "env -S with the value attached", `env '-Sgh pr comment 5 -R acme/api --body hi'`],
+  [NO, "env --split-string=", `env '--split-string=gh pr comment 5 -R acme/api' --body hi`],
+  [NO, "env -iS after -u", `env -u X -iS 'gh pr comment 5 -R acme/api --body hi'`],
+  [OK, "env -S with a marked body", `env -S 'gh pr comment 5 -R acme/api --body "> Written by agent. ok"'`],
+  [OK, "env -u then a command", `env -u X gh pr comment 5 -R acme/api --body '> Written by agent. ok'`],
+  // KJI8: a backtick's command is checked, not refused, in the comment-only path
+  [OK, "a status line with a backtick date", "echo \"gh: `date`\""],
+  [OK, "a marked comment with a backtick date", "gh pr comment 5 -R acme/api --body \"> Written by agent. at `date`\""],
+  [NO, "a gh comment inside backticks", "echo `gh pr comment 5 -R acme/api --body hi`"],
+  [NO, "a gh comment in backticks in double quotes", "echo \"x `gh pr comment 5 -R acme/api --body hi`\""],
+  // KJJM: a shell runs its stdin, a quoted heredoc's too
+  [NO, "a quoted heredoc to bash", "bash <<'EOF'\ngh pr comment 5 -R acme/api --body hi\nEOF"],
+  [NO, "a heredoc to sh -s", "sh -s <<EOF\ngh pr comment 5 -R acme/api --body hi\nEOF"],
+  [NO, "a here-string to bash", "bash <<< 'gh pr comment 5 -R acme/api --body hi'"],
+  [NO, "an echo piped to bash", "echo 'gh pr comment 5 -R acme/api --body hi' | bash"],
+  [OK, "a quoted heredoc to cat is data", "cat <<'EOF'\ngh pr comment 5 -R acme/api --body hi\nEOF"],
+  [OK, "a heredoc to bash with a marked body", "bash <<'EOF'\ngh pr comment 5 -R acme/api --body '> Written by agent. ok'\nEOF"],
+  // Marie on #128 at e7d13a5e: the comment rule applies no protect policy to the rest of the line
+  [OK, "a PATH export before a read", "export PATH=/x:$PATH; gh pr view 5"],
+  [OK, "a HOME override on a read", "HOME=/h gh pr view 5"],
+  [OK, "a GIT_SSH_COMMAND override on a read", "GIT_SSH_COMMAND='ssh -i k' gh pr view 5"],
+  [OK, "xargs after gh", "gh pr list | xargs -n1 echo"],
+  [OK, "xargs kill then gh", "ls | xargs -r kill; gh pr view 5"],
+  [OK, "a PATH export before a marked comment", "export PATH=/x:$PATH; gh pr comment 5 -R acme/api --body '> Written by agent. ok'"],
+  [NO, "a PATH export before an unmarked comment", "export PATH=/x:$PATH; gh pr comment 5 -R acme/api --body hi"],
+  [NO, "an env-prefixed echo piped to bash", "HOME=/h echo 'gh pr comment 5 -R acme/api --body hi' | bash"],
+  // Marie on #128 at a78ae0e8: printed text piped into xargs, which runs gh or a shell with it
+  [NO, "echo into xargs -0 bash -c", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -0 bash -c"],
+  [NO, "echo into xargs gh", "echo 'pr comment 5 -R acme/api --body hi' | xargs gh"],
+  [NO, "printf into xargs -n1 gh pr comment", "printf '5\\n' | xargs -n1 gh pr comment -R acme/api --body hi"],
+  [NO, "unknown input into xargs gh", "cat args | xargs gh"],
+  [NO, "unknown input into xargs sh -c beside gh", "gh pr view 5; cat cmds | xargs -0 sh -c"],
+  [OK, "echo into xargs gh with a marked comment", "echo \"pr comment 5 -R acme/api --body '> Written by agent. ok'\" | xargs gh"],
+  [NO, "unknown input into xargs -I gh pr comment", "cat prs | xargs -I{} gh pr comment {} -R acme/api --body hi"],
+  [NO, "unknown input into xargs -I sh -c with a comment", "ls | xargs -I{} sh -c 'gh pr comment {} -R acme/api --body hi'"],
+  [OK, "unknown input into xargs -I gh api read", "gh run list -q .[0].id | xargs -I{} gh run view {} --log-failed"],
+  [OK, "unknown input into xargs -I sh -c read", "ls -d */ | xargs -I{} sh -c 'git -C {} remote get-url origin'; gh repo view acme/api"],
+  // Marie on #128 at a29ad935: under -I the shown input goes into the replace string's slots
+  [NO, "echo into xargs -I{} bash -c {}", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -I{} bash -c {}"],
+  [NO, "echo into xargs -I{} sh -c '{}'", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -I{} sh -c '{}'"],
+  [NO, "echo into xargs -I % sh -c %", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -I % sh -c %"],
+  [NO, "echo into xargs -IX sh -c X", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -IX sh -c X"],
+  [NO, "echo into xargs -i bash -c {}", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -i bash -c {}"],
+  [NO, "echo into xargs -ri: -i in a cluster, last (Marie on #128)", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -ri bash -c {}"],
+  [NO, "echo into xargs -0i: -i after -0 (Marie on #128)", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -0i bash -c {}"],
+  [NO, "echo into xargs -ti: -i after -t (Marie on #128)", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -ti bash -c {}"],
+  [NO, "echo into xargs -r0i: -i after -r0 (Marie on #128)", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -r0i bash -c {}"],
+  [NO, "echo into xargs -dI: an I that is -d's value, then -I{} (Marie on #128)", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -dI -I{} sh -c {}"],
+  [NO, "echo into xargs -EI: an I that is -E's value, then -I{} (Marie on #128)", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -EI -I{} sh -c {}"],
+  [NO, "echo into xargs -rI: -I ending a cluster takes the next word (Marie on #128)", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -rI {} bash -c {}"],
+  [NO, "echo into xargs -rd: -d ending a cluster takes the next word (Marie on #128)", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -rd , -I{} sh -c {}"],
+  [NO, "echo into xargs -ei: -e's optional value is no slot (Marie on #128)", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -ei -I{} sh -c {}"],
+  [OK, "xargs -rI {} on a read", "echo 5 | xargs -rI {} gh pr view {} -R acme/api"],
+  [NO, "echo into xargs --replace bash -c {}", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs --replace bash -c {}"],
+  [NO, "echo into a slot after a first command", "echo 'gh pr comment 5 -R acme/api --body hi' | xargs -I{} sh -c 'echo start; {}'"],
+  [NO, "a quote break through a slot", "echo \"x' ; gh pr comment 5 -R acme/api --body hi ; '\" | xargs -I{} sh -c \"git -C '{}' status\""],
+  [NO, "a here-string into xargs -I{} sh -c", "xargs -I{} sh -c '{}' <<< 'gh pr comment 5 -R acme/api --body hi'"],
+  [NO, "a heredoc into xargs -I{} sh -c", "xargs -I{} sh -c '{}' <<'E'\ngh pr comment 5 -R acme/api --body hi\nE"],
+  [NO, "the second line into a slot", "printf 'a\\ngh pr comment 5 -R acme/api --body hi\\n' | xargs -I{} sh -c '{}'"],
+  [NO, "a printed second line piped to sh", "printf 'a\\ngh pr comment 5 -R acme/api --body hi\\n' | sh"],
+  [NO, "gh spelt in octal, piped to sh", "printf '\\147h pr comment 5 -R acme/api --body hi' | sh"],
+  [NO, "gh spelt in hex, piped to sh", "echo -e '\\x67h pr comment 5 -R acme/api --body hi' | sh"],
+  [OK, "an escape that goes to no shell", "printf '\\033[1mbold\\033[0m\\n'"],
+  [OK, "an unreadable printf in another pipe", "printf '  %-24s %s\\n' a b; git diff --name-only | xargs -I{} sh -c 'echo {}'; gh pr view 5"],
+  // CodeRabbit on #128 at 318ba864: xargs -I takes a line's quotes in its default mode, so sh gets
+  // --body > Written by agent. ok, a redirection; -d '\n' passes the line as it is
+  [NO, "a marked body whose quotes xargs takes", "echo \"gh pr comment 5 -R acme/api --body '> Written by agent. ok'\" | xargs -I{} sh -c '{}'"],
+  [OK, "a marked comment through a slot", "echo \"gh pr comment 5 -R acme/api --body '> Written by agent. ok'\" | xargs -d '\\n' -I{} sh -c '{}'"],
+  // and xargs' input fills the slots of a command that is also checked as written, so --body {} is
+  // refused whatever the input: the line's input is not read as all there is (Marie on #128 at
+  // 24ca7657: a reading that took it as whole let unmarked comments through)
+  [NO, "a marked line into --body {}", "echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
+  [NO, "a marked here-string into --body {}", "xargs -I{} gh pr comment 5 -R acme/api --body {} <<< '> Written by agent. ok'"],
+  [NO, "an unmarked line into --body {}", "echo hi | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
+  [NO, "a marked line and a file into --body {}", "{ echo '> Written by agent. ok'; cat f; } | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
+  [NO, "a file after the here-string on fd 0", "xargs -I{} gh pr comment 5 -R acme/api --body {} <<< '> Written by agent. ok' < f"],
+  [NO, "a file into --body {}", "cat f | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
+  [NO, "a marked line and a file from a subshell", "(echo '> Written by agent. ok'; cat f) | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
+  [NO, "a file piped into a group past a marked line", "cat f | { echo '> Written by agent. ok'; xargs -I{} gh pr comment 5 -R acme/api --body {}; }"],
+  [NO, "a here-string on fd 3 and a file on fd 0", "xargs -I{} gh pr comment 5 -R acme/api --body {} 3<<< '> Written by agent. ok' < f"],
+  [NO, "a file in place of the pipe", "echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 -R acme/api --body {} < f"],
+  // Marie's probes on #128 at 24ca7657, as her harness ran them: each posted an unmarked comment in bash
+  [NO, "M1 a here-string that expands $(...)", "xargs -I{} gh pr comment 5 --body {} <<< \"> Written by agent.$(cat evil2)\""],
+  [NO, "M1 a here-string that expands a backtick", "xargs -I{} gh pr comment 5 --body {} <<< \"> Written by agent.`cat evil2`\""],
+  [NO, "M1 a here-string with an unquoted $(...)", "xargs -I{} gh pr comment 5 --body {} <<< '> Written by agent.'$(cat evil2)"],
+  [NO, "M1 a heredoc that expands", "xargs -I{} gh pr comment 5 --body {} <<EOF\n> Written by agent.$(cat evil2)\nEOF"],
+  [NO, "M2 fd 0 duplicated after the here-string", "xargs -I{} gh pr comment 5 --body {} 3<evil <<< '> Written by agent. ok' <&3"],
+  [NO, "M3 echo redefined", "echo() { cat evil; }; echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 --body {}"],
+  [NO, "M3 echo redefined on the line before", "echo() { cat evil; }\necho '> Written by agent. ok' | xargs -I{} gh pr comment 5 --body {}"],
+  [NO, "M3 function echo", "function echo { cat evil; }; echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 --body {}"],
+  [NO, "M3 builtin redefined", "builtin() { cat evil; }; builtin echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 --body {}"],
+  [NO, "M3 echo disabled and found on PATH", "enable -n echo; PATH=.:$PATH; printf '#!/bin/sh\\ncat evil\\n' > echo; chmod +x echo; echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 --body {}"],
+  // a backtick after a # still runs where the # starts no comment, so none is skipped as one
+  [NO, "M4 a # after a backslash-newline", "echo a\\\n#`gh pr comment 5 --body Fixed`"],
+  [NO, "M4 a # in a $(...) in double quotes", "echo \"$(echo \" #\")`gh pr comment 5 --body Fixed`\""],
+  [NO, "M4 a # after a carriage return", "x\r#`gh pr comment 5 --body Fixed`"],
+  [NO, "M4 a # after a vertical tab", "echo x\u000b#`gh pr comment 5 --body Fixed`"],
+  [NO, "M4 a # after a form feed", "echo x\f#`gh pr comment 5 --body Fixed`"],
+  [NO, "M4 a # after a non-breaking space", "echo x #`gh pr comment 5 --body Fixed`"],
+  [NO, "a backtick in a trailing comment is still read", "gh pr view 5 # it`s"],
+  [NO, "a backtick after a # inside ${...}", "echo ${x/ #/`gh pr comment 5 -R acme/api --body hi`}"],
+  [NO, "a backtick after a # inside a word", "echo a#`gh pr comment 5 -R acme/api --body hi`"],
+  [NO, "a backtick after a quoted #", "echo '#' `gh pr comment 5 -R acme/api --body hi`"],
+  [NO, "a backtick on the line after a comment", "gh pr view 5 # x\necho `gh pr comment 5 -R acme/api --body hi`"],
+  // GNU xargs drops -I for a -L, -l, -n or --max-* with it, and {} is posted as written or the input
+  // appended, where the last --body wins (Marie on #128)
+  [NO, "M5 -I then -L1, {} posted as written", "echo '> Written by agent. ok' | xargs -I{} -L1 gh pr comment 5 --body {}"],
+  [NO, "M5 -I then -L 1", "echo '> Written by agent. ok' | xargs -I{} -L 1 gh pr comment 5 --body {}"],
+  [NO, "M5 -I then -l", "echo '> Written by agent. ok' | xargs -I{} -l gh pr comment 5 --body {}"],
+  [NO, "M5 -I then --max-lines=1", "echo '> Written by agent. ok' | xargs -I{} --max-lines=1 gh pr comment 5 --body {}"],
+  [NO, "M5 -I then -L1, the input appended", "echo '5 --body Fixed' | xargs -I{} -L1 gh pr comment --body '> Written by agent. x'"],
+  [NO, "M5 -IX then -L1", "echo '5 --body Fixed' | xargs -IX -L1 gh pr comment --body '> Written by agent. x'"],
+  [NO, "M5 -I then -n2", "echo '5 --body Fixed' | xargs -I{} -n2 gh pr comment --body '> Written by agent. x'"],
+  [NO, "M5 -I then -L1 from a file", "xargs -I{} -L1 gh pr comment --body '> Written by agent. x' < evil"],
+  [NO, "M5 -I then -L1 with {} as the number", "echo '5 --body Fixed' | xargs -I{} -L1 gh pr comment {} --body '> Written by agent. x'"],
+  [NO, "M5 -I then -L1 from a here-string", "xargs -I{} -L1 gh pr comment {} --body '> Written by agent. x' <<< '5 --body Fixed'"],
+  [NO, "M5 -I then -L1 with {} in the marked body", "echo '--body Fixed' | xargs -I{} -L1 gh pr comment 5 --body '> Written by agent. {}'"],
+  [NO, "M5 -L1 then -I", "echo '5 --body Fixed' | xargs -L1 -I{} gh pr comment --body '> Written by agent. x'"],
+  [NO, "M5 --max-args=1 then --replace", "echo '5 --body Fixed' | xargs --max-args=1 --replace gh pr comment --body '> Written by agent. x'"],
+  // a $'...' takes \' as a letter, so the backtick after it runs (Marie on #128)
+  [NO, "M6 a backtick after $'\\''", "echo $'\\'' `gh pr comment 5 --body Fixed`"],
+  [NO, "M6 a backtick after $'...' in a comment, refused though bash runs nothing", "echo $'\\'' #`gh pr comment 5 --body Fixed`"],
+  [NO, "an arithmetic # before a backtick", "echo $(( 2#1 ))`gh pr comment 5 --body Fixed`"],
+  [OK, "xargs -I alone on a marked -c", "echo 5 | xargs -I{} gh pr view {} -R acme/api"],
+  [OK, "gh output into xargs echo", "gh pr list | xargs -n1 echo"],
+  [OK, "xargs kill then a gh read", "ls | xargs -r kill; gh pr view 5"],
+  // CodeRabbit on #128 at c023ab97: a filter between printf and a shell, xargs batches, -d items
+  [NO, "printf through sed into sh", "printf '%s\\n' \"gh pr comment 5 -R acme/api --body '> Written by agent. hi'\" | sed 's/Written by agent/posted/' | sh"],
+  [NO, "echo through tr into bash", "echo \"gh pr comment 5 -R acme/api --body '> Written by agent. hi'\" | tr W w | bash"],
+  [OK, "printf straight into sh with a marked comment", "printf '%s\\n' \"gh pr comment 5 -R acme/api --body '> Written by agent. hi'\" | sh"],
+  [NO, "xargs -n1 runs gh on 5 alone", "printf '%s\\n' \"5 --body '> Written by agent. ok'\" | xargs -n1 gh pr comment -R acme/api --body hi"],
+  [NO, "xargs --max-args=1 runs gh on 5 alone", "echo \"5 --body '> Written by agent. ok'\" | xargs --max-args=1 gh pr comment -R acme/api --body hi"],
+  [NO, "xargs -L1 runs gh on its first line alone", "printf \"5\\n--body '> Written by agent. ok'\\n\" | xargs -L1 gh pr comment -R acme/api --body hi"],
+  [OK, "xargs -n3 with a marked body in each run", "echo \"5 --body '> Written by agent. ok'\" | xargs -n3 gh pr comment -R acme/api"],
+  [NO, "xargs -s cuts runs where this cannot tell", "echo \"5 --body '> Written by agent. ok'\" | xargs -s 40 gh pr comment -R acme/api"],
+  [NO, "xargs -d keeps an item's quotes", "printf '%s\\n' \"--body='> Written by agent. ok'\" | xargs -d '\\n' gh pr comment 5 -R acme/api --body hi"],
+  [NO, "xargs --delimiter=, keeps an item's quotes", "echo \"--body='> Written by agent. ok'\" | xargs --delimiter=, gh pr comment 5 -R acme/api --body hi"],
+  [OK, "xargs -d with a marked item", "printf '%s\\n' '--body=> Written by agent. ok' | xargs -d '\\n' gh pr comment 5 -R acme/api"],
+  // Niilo on #128: xargs -a takes its items from a file the line does not show
+  [NO, "xargs -a beside marked stdin", "echo \"5 --body '> Written by agent. ok'\" | xargs -a prs gh pr comment -R acme/api"],
+  [NO, "xargs -aFILE beside marked stdin", "echo \"5 --body '> Written by agent. ok'\" | xargs -aprs gh pr comment -R acme/api"],
+  [NO, "xargs --arg-file beside marked stdin", "echo \"5 --body '> Written by agent. ok'\" | xargs --arg-file prs gh pr comment -R acme/api"],
+  [NO, "xargs --arg-file= beside marked stdin", "echo \"5 --body '> Written by agent. ok'\" | xargs --arg-file=prs gh pr comment -R acme/api"],
+  [NO, "xargs -r -a into a -I slot of a marked command", "echo 5 | xargs -r -a prs -I{} gh pr comment {} -R acme/api --body '> Written by agent. ok'"],
+  // Marie on #128 at b1c03136: long options' values as GNU takes them, and the eof word
+  [NO, "xargs --max-lines takes no next word", "echo 5 | xargs --max-lines gh pr comment -R acme/api --body hi"],
+  [NO, "xargs --eof takes no next word", "echo 5 | xargs --eof gh pr comment -R acme/api --body hi"],
+  [NO, "xargs --max-l, a prefix of --max-lines", "echo 5 | xargs --max-l gh pr comment -R acme/api --body hi"],
+  [NO, "xargs --max-a 1, a prefix of --max-args", "echo 5 | xargs --max-a 1 gh pr comment -R acme/api --body hi"],
+  [NO, "xargs --process-slot-var takes the next word", "echo 5 | xargs --process-slot-var X gh pr comment -R acme/api --body hi"],
+  [NO, "xargs -E END hides a marked --body after END", "echo \"5 END --body '> Written by agent. ok'\" | xargs -E END gh pr comment -R acme/api --body hi"],
+  [NO, "xargs -eEND hides a marked --body after END", "echo \"5 END --body '> Written by agent. ok'\" | xargs -eEND gh pr comment -R acme/api --body hi"],
+  [NO, "xargs --eof=END hides a marked --body after END", "echo \"5 END --body '> Written by agent. ok'\" | xargs --eof=END gh pr comment -R acme/api --body hi"],
+  // Marie on #128 at ca970dec: every wrapper's long options as getopt_long reads them, and one
+  // none of them has refuses a line that may run gh after it
+  [NO, "timeout --sig, a prefix of --signal", "timeout --sig KILL 5 gh pr comment 5 -R acme/api --body hi"],
+  [NO, "timeout --k, a prefix of --kill-after", "timeout --k 1 5 gh pr comment 5 -R acme/api --body hi"],
+  [NO, "nice --adj, a prefix of --adjustment", "nice --adj 5 gh pr comment 5 -R acme/api --body hi"],
+  [NO, "env --spl, a prefix of --split-string", "env --spl 'gh pr comment 5 -R acme/api --body hi'"],
+  [NO, "env --ch, a prefix of --chdir", "env --ch /tmp gh pr comment 5 -R acme/api --body hi"],
+  [NO, "env --un, a prefix of --unset", "env --un X gh pr comment 5 -R acme/api --body hi"],
+  [NO, "env --argv0 takes the next word", "env --argv0 x gh pr comment 5 -R acme/api --body hi"],
+  [NO, "sudo --us, a prefix of --user", "sudo --us root gh pr comment 5 -R acme/api --body hi"],
+  [NO, "stdbuf --outp, a prefix of --output", "stdbuf --outp L gh pr comment 5 -R acme/api --body hi"],
+  [NO, "time --form, a prefix of --format", "/usr/bin/time --form x gh pr comment 5 -R acme/api --body hi"],
+  [NO, "an option sudo has not, before gh", "sudo --frob x gh pr comment 5 -R acme/api --body hi"],
+  [NO, "an option exec has not, before gh", "exec --frob x gh pr comment 5 -R acme/api --body hi"],
+  [OK, "timeout --signal=KILL on a gh read", "timeout --signal=KILL 5 gh pr view 5"],
+  [OK, "sudo --us root on a marked comment", "sudo --us root gh pr comment 5 -R acme/api --body '> Written by agent. ok'"],
+  [OK, "an option nice has not, with no gh after it", "nice --frob x ls; gh pr view 5"],
+  // Marie on #128 at b845743b: short-option groups as getopt reads them, a short letter no table
+  // has, and a command word bash makes from a variable or a substitution
+  [NO, "sudo -nu: u takes the next word", "sudo -nu root gh pr comment 5 -R acme/api --body hi"],
+  [NO, "sudo -Eu: u takes the next word", "sudo -Eu root gh pr comment 5 -R acme/api --body hi"],
+  [NO, "sudo -iu: u takes the next word", "sudo -iu root gh pr comment 5 -R acme/api --body hi"],
+  [NO, "timeout -vs: s takes the next word", "timeout -vs KILL 5 gh pr comment 5 -R acme/api --body hi"],
+  [NO, "timeout -vk: k takes the next word", "timeout -vk 1 5 gh pr comment 5 -R acme/api --body hi"],
+  [NO, "time -qo: o takes the next word", "/usr/bin/time -qo f gh pr comment 5 -R acme/api --body hi"],
+  [NO, "time -af: f takes the next word", "/usr/bin/time -af x gh pr comment 5 -R acme/api --body hi"],
+  [NO, "exec -ca: a takes the next word", "exec -ca x gh pr comment 5 -R acme/api --body hi"],
+  [NO, "env -, its -i", "env - gh pr comment 5 -R acme/api --body hi"],
+  [NO, "a short letter sudo has not, before gh", "sudo -z x gh pr comment 5 -R acme/api --body hi"],
+  [NO, "a command word from a variable", "G=gh; $G pr comment 5 -R acme/api --body hi"],
+  [NO, "a command word from a substitution", "$(echo gh) pr comment 5 -R acme/api --body hi"],
+  [NO, "a command word from a backtick", "`echo gh` pr comment 5 -R acme/api --body hi"],
+  [NO, "a variable after an option sudo has not", "G=gh; sudo --frob x $G pr comment 5 -R acme/api --body hi"],
+  [NO, "a substitution after an option sudo has not", "sudo --frob x $(echo gh) pr comment 5 -R acme/api --body hi"],
+  [OK, "sudo -nu root on a marked comment", "sudo -nu root gh pr comment 5 -R acme/api --body '> Written by agent. ok'"],
+  [OK, "nice --10, a negative adjustment, on a marked comment", "nice --10 gh pr comment 5 -R acme/api --body '> Written by agent. ok'"],
+  [OK, "a short letter sudo has not, with no gh after it", "sudo -z x ls; gh pr view 5"],
+  [OK, "gh by a plain path under $HOME", "\"$HOME/.local/bin/gh\" pr view 5"],
+  // Marie's replay of this machine's gh lines on #128 at 0ecff12c: a variable the line sets to a
+  // literal, a session directory, and a dynamic word before a read are read, not refused
+  [OK, "gh from a variable set to a path under $HOME", "G=$HOME/.local/bin/gh; $G pr view 5"],
+  [OK, "a script under $CLAUDE_JOB_DIR on a gh line", "$CLAUDE_JOB_DIR/tmp/x.sh; gh pr view 5"],
+  [OK, "a script from a variable set to a path under ~", "D=~/agents/bin/delegations.sh; $D open; gh pr view 5"],
+  [OK, "gh from a variable set twice to gh paths", "G=~/.local/bin/gh; [ -x $G ] || G=~/agents/bin/gh; $G pr view 5"],
+  [OK, "a variable set to words with blanks", "P=\"node $CLAUDE_JOB_DIR/tmp/p.mjs\"; $P 'gh pr comment 5 --body hi'; gh pr view 5"],
+  [OK, "a case subject on a gh line", "case \"$st\" in open) gh pr view 5;; esac"],
+  [OK, "a dynamic word before a gh read", "G=$(echo gh); $G pr view 5"],
+  [OK, "a dynamic word on a git ref write", "GH=${GH_BIN:-gh}; $GH api -X POST repos/a/b/git/refs -f ref=refs/heads/x -f sha=\"$M\"; gh pr view 5"],
+  [NO, "gh from a variable set to a path under $HOME, on a comment", "G=$HOME/.local/bin/gh; $G pr comment 5 -R acme/api --body hi"],
+  [NO, "a variable whose value has blanks", "G=\"gh pr\"; $G comment 5 -R acme/api --body hi"],
+  [NO, "a variable set to gh and then to ls", "G=gh; G=ls; $G pr comment 5 -R acme/api --body hi"],
+  [NO, "a variable from a substitution, on a comment", "G=$(echo gh); $G pr comment 5 -R acme/api --body hi"],
+  [NO, "a variable from a default, on a reply", "GH=${GH_BIN:-gh}; $GH api -X POST repos/a/b/pulls/5/comments/1/replies -f body=hi; gh pr view 5"],
+  [NO, "a variable set to a read and then to a comment", "G=\"gh pr view\"; G=\"gh pr comment\"; $G 5 -R a/b --body hi"],
+  [NO, "a variable set to a read and then to an issue comment", "G=\"gh issue view\"; G=\"gh issue comment\"; $G 5 -R a/b --body hi"],
+  [NO, "a variable set to a read and then to an api reply", "G=\"gh api repos/a/b/pulls/5/comments\"; G=\"gh api -X POST repos/a/b/pulls/5/comments/1/replies\"; $G -f body=hi"],
+  [NO, "a substitution on a GraphQL query from a file", "G=$(command -v gh); $G api graphql -F query=@m.graphql"],
+  [NO, "a variable from a default, on a close with a comment", "GH=${GH_BIN:-gh}; $GH pr close 5 -R acme/api -c hi"],
+  [NO, "xargs -d with a delimiter this cannot read", "echo 5 | xargs -d ab gh pr comment -R acme/api --body '> Written by agent. ok'"],
+];
+
+test("the shapes CodeRabbit found in #128 at 5332c327 are read as bash and gh read them", () => {
+  const wrong: string[] = [];
+  for (const [want, name, cmd] of ROUND_128) {
+    const hook = commentVerdict(cmd);
+    if ((hook === null ? OK : NO) !== want) wrong.push(`hook ${want === OK ? "refused" : "allowed"} ${name}: ${cmd}${hook ? ` (${hook})` : ""}`);
+    if (want === NO && verdict(cmd, pr) === null) wrong.push(`protect allowed ${name}: ${cmd}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// KJJa: the review tools other GitHub MCP releases name, and a review's inline comments[].body, are
+// comments to both the marked-comments hook and the protect guard (CodeRabbit on #128)
+test("the MCP review tools CodeRabbit found in #128 hold their bodies to the marker", () => {
+  const A = { owner: "acme", repo: "api", pullNumber: 5 };
+  const rows: [string, string, Record<string, unknown>][] = [
+    [NO, "create_pull_request_review", { ...A, event: "COMMENT", body: "lgtm" }],
+    [NO, "add_pull_request_review_comment_to_pending_review", { ...A, path: "a.ts", line: 1, body: "nit" }],
+    [NO, "add_pull_request_review_comment", { ...A, path: "a.ts", line: 1, body: "nit" }],
+    [NO, "create_pull_request_review_comment", { ...A, path: "a.ts", line: 1, body: "nit" }],
+    [NO, "create_pull_request_review", { ...A, event: "COMMENT", body: `${M} ok`, comments: [{ path: "a.ts", line: 1, body: "nit" }] }],
+    [NO, "pull_request_review_write", { ...A, method: "create", event: "COMMENT", body: `${M} ok`, comments: [{ path: "a", line: 1, body: "x" }] }],
+    [OK, "create_pull_request_review", { ...A, event: "COMMENT", body: `${M} ok`, comments: [{ path: "a.ts", line: 1, body: `${M} nit` }] }],
+    [OK, "create_pull_request_review", { ...A, event: "APPROVE" }],
+  ];
+  const wrong: string[] = [];
+  for (const [want, name, tin] of rows) {
+    const tool = `mcp__github__${name}`;
+    const r = markedHook([], JSON.stringify({ tool_name: tool, tool_input: tin }));
+    if ((r.code === 0 ? OK : NO) !== want) wrong.push(`hook ${want === OK ? "refused" : "allowed"} ${name} ${JSON.stringify(tin)}`);
+    if (want === NO && mcpVerdict(tool, tin, pr) === null) wrong.push(`protect allowed ${name} ${JSON.stringify(tin)}`);
+  }
+  assert.deepEqual(wrong, []);
 });

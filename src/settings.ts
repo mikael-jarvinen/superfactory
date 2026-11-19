@@ -12,7 +12,7 @@ import type { Workspace } from "./workspace.js";
 import { die } from "./util.js";
 
 // wake is in every session's settings whatever the template says, so it is never listed in one.
-export const HOOKS = ["guard", "status", "no-dialogs", "no-side-channels", "wake", "appendix"] as const;
+export const HOOKS = ["guard", "status", "no-dialogs", "no-side-channels", "marked-comments", "wake", "appendix"] as const;
 export type HookName = (typeof HOOKS)[number];
 
 export interface HookResult {
@@ -88,6 +88,8 @@ const BASE = { autoMemoryEnabled: false, crossSessionInbound: "accept", isolateP
 
 const DIALOGS = "EnterPlanMode|ExitPlanMode|AskUserQuestion";
 const CHAT = "mcp__claude_ai_Slack__.*";
+// Every MCP tool: the hook picks the GitHub comment tools itself (MCP_COMMENT_TOOLS, any case).
+const COMMENT_TOOLS = "Bash|mcp__.*";
 // The tracker's write tools, by tracker kind. Reads stay open to everyone. Jira comes through the
 // "claude.ai Atlassian MCP" connector (mcp__claude_ai_Atlassian_MCP__*), whose execute-family tools
 // run any discovered operation; the older "claude.ai Atlassian" connector's names stay covered in
@@ -228,6 +230,8 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
       add("PreToolUse", "Bash|Read|Grep|mcp__.*", ["hook", "guard", "--role", s.role, "--policy", t.guard as Policy, ...dirs, ...repos, ...close, ...merges], 10);
     } else if (h === "no-dialogs") {
       add("PreToolUse", DIALOGS, ["hook", "no-dialogs", "--lead", leadName], 5);
+    } else if (h === "marked-comments") {
+      add("PreToolUse", COMMENT_TOOLS, ["hook", "marked-comments"], 5);
     } else if (h === "no-side-channels") {
       add("PreToolUse", CHAT, ["hook", "no-side-channels", "--lead", leadName], 5);
       const writes = TRACKER_WRITES[ws.config.tracker.kind];

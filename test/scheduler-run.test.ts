@@ -5,6 +5,9 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
+import { notesLog } from "../src/board/inbox.js";
+import { failuresLog } from "../src/failures.js";
+import { UNSURE_CHECKS } from "../src/scheduler/run.js";
 import { openWorkspace } from "../src/workspace.js";
 import { CLI, linuxOnly, noCleanup, runningNotZombie, sleep, tempDir, until } from "./helpers.js";
 
@@ -62,6 +65,7 @@ echo "HOME=$HOME USER=$USER TMPDIR=$TMPDIR DBUS=$DBUS_SESSION_BUS_ADDRESS XDG=$X
 if [ "$1" = agents ] && tr '\\0' ' ' < /proc/$PPID/cmdline | grep -q ' up $' && [ ! -e ${join(dir, "spawned")} ]; then
   touch ${join(dir, "spawned")}
   if [ -e ${join(dir, "stray-ignores-term")} ]; then sh -c "trap '' TERM; exec sleep 600" >/dev/null 2>&1 &
+  elif [ -e ${join(dir, "stray-blank-argv")} ]; then perl -e '$0 = ""; sleep 600' >/dev/null 2>&1 &
   else sleep 600 >/dev/null 2>&1 &
   fi
   echo $! > ${join(dir, "stray.pid")}
@@ -296,6 +300,71 @@ test("what an ended run leaves in its process group is cleaned up, but never a c
   assert.match(d.out, new RegExp(`job ${UP.replace(/\./g, "\\.")}: ended, leaving (\\d+ \\(systemd-run\\), )?${stray} \\(sleep\\)(, \\d+ \\(systemd-run\\))? in its process group or scopes; SIGTERM`), d.out);
   assert.ok(runningNotZombie(session), "a claude in the group is left alone");
   assert.ok(runningNotZombie(child), "and so is what runs under it");
+  d.kill();
+});
+
+// A process caught in exec, as a systemd-run becoming the claude it runs, reads with no command line
+// for a moment, and was then killed as no claude: up's next listing, in CI on #128. A stray that blanks
+// its own command line stands in for one, and is not killed while it reads so.
+test("a process whose command line reads empty is not killed, and its group waits for the next check", { skip: noCleanup() }, async () => {
+  const t = await setup();
+  writeFileSync(join(t.dir, "stray-blank-argv"), "");
+  const d = t.start();
+  await until("up to leave its stray", () => t.pidIn("stray.pid") && t.pidIn("session.pid") && t.pidIn("child.pid") && t.upRunning());
+  const pid = t.state().jobs[UP].pid;
+  t.upPids.add(pid);
+  const stray = t.pidIn("stray.pid") as number;
+  await until("the stray to blank its command line", () => readFileSync(`/proc/${stray}/cmdline`, "utf8").replace(/\0/g, "") === "");
+  process.kill(pid, "SIGKILL");
+  await until("up's end to be seen", () => d.out.includes(`job ${UP} exited`));
+  await sleep(3000); // three checks
+  assert.ok(runningNotZombie(stray), "left alone");
+  assert.doesNotMatch(d.out, /ended, leaving/, d.out);
+  assert.ok(t.state().jobs[UP].clearing?.includes(pid), "still to be cleared");
+
+  // Niilo on #128: a stray whose argv stays blank sat in clearing forever, unseen. After
+  // UNSURE_CHECKS checks the lead is told once, naming the pid and the group, and it is still left be.
+  const notes = () => {
+    const f = notesLog(openWorkspace(t.ws));
+    return existsSync(f) ? readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l).text as string).filter((x) => x.startsWith("[scheduler]")) : [];
+  };
+  await until("the lead to be told", () => notes().length > 0, 30_000);
+  await sleep(3000); // three more checks
+  assert.equal(notes().length, 1, "told once");
+  assert.match(notes()[0] as string, new RegExp(`^\\[scheduler\\]\\njob ${UP.replace(/\./g, "\\.")}: pid ${stray} in process group ${pid} has read unsure .* for ${UNSURE_CHECKS} checks, so it is not killed`));
+  assert.ok(runningNotZombie(stray), "still left alone");
+  assert.deepEqual(t.state().jobs[UP].unsureTold, [pid], "kept, so a restarted scheduler does not tell again");
+  assert.ok(t.state().jobs[UP].clearing?.includes(pid), "still to be cleared");
+  d.kill();
+});
+
+// Marie on #128: a note that cannot be written was tried on every check past UNSURE_CHECKS, each try
+// logging "the lead is told" and leaving a relay failure. It is tried once, and said once.
+test("a lead's note about an unsure process that cannot be written is tried and said once, not on every check", { skip: noCleanup() }, async () => {
+  const t = await setup();
+  writeFileSync(join(t.dir, "stray-blank-argv"), "");
+  mkdirSync(notesLog(openWorkspace(t.ws)), { recursive: true }); // a directory: appending to it throws
+  const d = t.start();
+  await until("up to leave its stray", () => t.pidIn("stray.pid") && t.pidIn("session.pid") && t.pidIn("child.pid") && t.upRunning());
+  const pid = t.state().jobs[UP].pid;
+  t.upPids.add(pid);
+  const stray = t.pidIn("stray.pid") as number;
+  await until("the stray to blank its command line", () => readFileSync(`/proc/${stray}/cmdline`, "utf8").replace(/\0/g, "") === "");
+  process.kill(pid, "SIGKILL");
+  const failed = () => {
+    const f = failuresLog(openWorkspace(t.ws));
+    return existsSync(f) ? readFileSync(f, "utf8").split("\n").filter((l) => /relay FAILED/.test(l)) : [];
+  };
+  await until("the note to fail", () => failed().length > 0, 30_000);
+  await sleep(3000); // three more checks
+  assert.equal(failed().length, 1, `one relay failure: ${failed().join("\n")}`);
+  const said = d.out.split("\n").filter((l) => new RegExp(`process group ${pid} unsure for \\d+ checks`).test(l));
+  assert.equal(said.length, 1, d.out);
+  assert.match(said[0] as string, /the lead's note could not be written, and is tried again when the scheduler restarts/);
+  assert.doesNotMatch(d.out, /the lead is told/);
+  assert.equal(t.state().jobs[UP].unsureTold, undefined, "not kept as told");
+  assert.ok(runningNotZombie(stray), "still left alone");
+  assert.ok(t.state().jobs[UP].clearing?.includes(pid), "still to be cleared");
   d.kill();
 });
 

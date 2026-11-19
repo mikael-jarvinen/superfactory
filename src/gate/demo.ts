@@ -88,8 +88,27 @@ export function beforeSha(cwd = process.cwd(), baseRef?: string): { sha?: string
   }
   const tip = verify(main);
   const mb = tip ? git("merge-base", "HEAD", tip).stdout.trim() : "";
-  for (const sha of [mb, tip, stackTip]) if (sha && git("diff", "--quiet", sha, "--").status === 0) return { sha, base };
+  // With --base-ref the stacked base comes first: its files can equal main's (a lower PR of only
+  // tests, or one the upper reverts), and the stamp must name the base the PR is reviewed against.
+  for (const sha of baseRef !== undefined ? [stackTip, mb, tip] : [mb, tip]) if (sha && git("diff", "--quiet", sha, "--").status === 0) return { sha, base };
   return { base };
+}
+
+// What the spec runs with. The workspace's demo.env carries the app's sign-in and base URLs; the
+// command line wins. DEMO_BEFORE says which film this is, so the spec need not guess it from
+// DEMO_OUT's name (CodeRabbit on superfactory#119).
+export function demoEnv(ws: Workspace, pw: string, outDir: string, specDir: string, baseUrl: string | undefined, before: boolean): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...readEnvFile(join(ws.dir, "demo.env")),
+    NODE_PATH: dirname(dirname(pw)),
+    DEMO_OUT: outDir,
+    DEMO_SPEC_DIR: specDir,
+  };
+  if (before) env.DEMO_BEFORE = "1";
+  else delete env.DEMO_BEFORE;
+  if (baseUrl) env.DEMO_BASE_URL = baseUrl;
+  return env;
 }
 
 export function demo(ws: Workspace, key: string, spec: string, baseUrl: string | undefined, out: (line: string) => void = console.log, before = false, baseRef?: string): number {
@@ -125,15 +144,7 @@ export function demo(ws: Workspace, key: string, spec: string, baseUrl: string |
   copyFileSync(spec, join(specDir, "demo.spec.ts"));
   copyFileSync(join(TEMPLATES_DIR, "playwright.config.ts"), join(specDir, "playwright.config.ts"));
 
-  // The workspace's demo.env carries the app's sign-in and base URLs; the command line wins.
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    ...readEnvFile(join(ws.dir, "demo.env")),
-    NODE_PATH: dirname(dirname(pw)),
-    DEMO_OUT: outDir,
-    DEMO_SPEC_DIR: specDir,
-  };
-  if (baseUrl) env.DEMO_BASE_URL = baseUrl;
+  const env = demoEnv(ws, pw, outDir, specDir, baseUrl, before);
   const rc = run(process.execPath, [join(pw, "cli.js"), "test", "--config", join(specDir, "playwright.config.ts")], {
     cwd: specDir, env, stdio: "inherit",
   }).status;

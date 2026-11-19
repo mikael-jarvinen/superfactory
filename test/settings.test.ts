@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { closeSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { inboxLock } from "../src/board/inbox.js";
 import { tryLock } from "../src/tickets/lock.js";
 import { agentOrDie } from "../src/fleet.js";
+import { hook as markedComments } from "../src/hooks/marked-comments.js";
 import { statusFile } from "../src/hooks/status.js";
 import { sessionEnv, settingsFile } from "../src/launch.js";
 import { TEMPLATES_DIR } from "../src/settings.js";
@@ -208,4 +209,67 @@ test("the lead's stop is held once while nothing holds the inbox", () => {
   assert.notEqual(fd, null);
   after(() => closeSync(fd as number));
   assert.equal(stop(false).stdout, "");
+});
+
+// Mikko via Niilo on superfactory#119 (L2): every session's GitHub comments go out under the human's
+// login, so each must carry the marker, not only the guarded lead's and builders'. A template that
+// names marked-comments renders a hook on Bash and the GitHub MCP tools that holds them to it.
+test("a template with marked-comments refuses an unmarked comment and passes a marked one or a trigger", () => {
+  const dir = tempWorkspace(TOML.replace('settings = "builder"', 'settings = "settings/marked.json"'));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "settings"), { recursive: true });
+  writeFileSync(join(dir, "settings", "marked.json"), JSON.stringify({ hooks: ["no-dialogs", "marked-comments"] }));
+  const r = render(dir, "bea");
+  const entry = r.hooks.PreToolUse?.find((e) => / hook marked-comments$/.test(e.hooks[0]?.command ?? ""));
+  assert.ok(entry, "the hook is rendered");
+  const matches = (tool: string) => new RegExp(`^(${entry.matcher})$`).test(tool);
+  for (const t of ["Bash", "mcp__github__add_issue_comment", "mcp__github__add_reply_to_pull_request_comment", "mcp__claude_ai_GitHub__add_issue_comment"])
+    assert.ok(matches(t), t);
+  assert.ok(!matches("Read"), "not the other tools");
+  const cmd = entry.hooks[0]?.command as string;
+  const bash = (command: string) => runHook(cmd, { tool_name: "Bash", tool_input: { command } }).status;
+  const mcp = (tool: string, body: string) => runHook(cmd, { tool_name: tool, tool_input: { body } }).status;
+
+  assert.equal(bash("gh pr comment 7 -R acme/web --body '> Written by agent.\n\nFixed in abc1234.'"), 0, "marked passes");
+  assert.equal(bash("gh api repos/acme/web/pulls/7/comments/9/replies -f body='> Written by agent. Fixed'"), 0, "a marked reply passes");
+  assert.equal(bash("gh pr comment 7 --body '@coderabbitai review'"), 0, "a trigger passes");
+  assert.equal(bash("gh pr view 7 --comments"), 0, "a read passes");
+  assert.equal(bash("gh pr comment 7 --body 'Fixed in abc1234.'"), 2, "unmarked is refused");
+  assert.equal(bash("cd /x && gh api repos/acme/web/pulls/7/comments/9/replies -f body=Fixed"), 2, "an unmarked reply is refused");
+  assert.equal(bash("bash -c \"gh issue comment 3 -b hi\""), 2, "inside a shell -c too");
+  assert.equal(bash('gh pr comment 7 --body "$(cat note.md)"'), 2, "an unchecked body is refused");
+
+  assert.equal(mcp("mcp__github__add_issue_comment", "> Written by agent.\n\nFixed."), 0, "marked passes");
+  assert.equal(mcp("mcp__github__add_reply_to_pull_request_comment", "@coderabbitai resolve"), 0, "a trigger passes");
+  assert.equal(mcp("mcp__github__add_issue_comment", "Fixed."), 2, "unmarked is refused");
+  assert.equal(mcp("mcp__github__pull_request_review_write", "Looks good to me."), 2, "an unmarked review body is refused");
+  assert.equal(mcp("mcp__github__get_file_contents", "anything"), 0, "a read passes");
+
+  // superfactory#119 round 2. N1: the hook refuses only a comment write, never a command the
+  // guard's policy would (xargs, sudo, exec, watch), nor one it cannot parse.
+  for (const c of ["printf x | xargs echo", "find . -name '*.ts' | xargs grep -l x", "sudo ls", "exec ls", "watch ls", "echo 'unbalanced", "/opt/x/bin/tool"])
+    assert.equal(bash(c), 0, c);
+  assert.equal(bash("printf 7 | xargs -I{} gh pr comment {} -b hi"), 2, "a gh behind xargs is still checked");
+  assert.equal(bash("sudo -u x gh pr comment 7 -b hi"), 2, "and behind sudo");
+  assert.equal(bash("/usr/bin/gh pr comment 7 -b hi"), 2, "and by path");
+  assert.equal(bash("gh pr review 7 --comment -bhi"), 2, "N3: an attached value");
+  assert.equal(bash("gh api graphql -f query='mutation { addComment(input: {subjectId: \"X\", body: \"hi\"}) { clientMutationId } }'"), 2, "N4");
+  assert.equal(bash("gh api repos/acme/web/pulls/7/reviews -f 'body=> Written by agent.' -f 'comments[][body]=nit'"), 2, "N5");
+  const submit = "gh api graphql -f query='mutation($i: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $i) { clientMutationId } }' -f 'i[pullRequestReviewId]=R'";
+  assert.equal(bash(`${submit} -f 'i[body]=hi'`), 2, "round 3: an input variable's body");
+  assert.equal(bash(`${submit} -f 'i[body]=> Written by agent. ok'`), 0, "a marked one passes");
+  // N6: every MCP tool reaches the hook, which matches GitHub's comment tools in any case.
+  assert.ok(matches("mcp__claude_ai_github__add_issue_comment") && matches("mcp__claude_ai_Slack__send"));
+  assert.equal(mcp("mcp__claude_ai_github__add_issue_comment", "Fixed."), 2, "lowercase github is held too");
+  assert.equal(mcp("mcp__claude_ai_Slack__send", "hi"), 0, "another server's tool passes");
+});
+
+// CodeRabbit on superfactory#128 (KJJU): valid JSON that is not an object (null, an array, a number,
+// a string) is not a hook envelope. The hook refuses it with the invalid-input diagnostic, not a throw.
+test("marked-comments refuses valid JSON that is not an object envelope", () => {
+  for (const input of ["null", "[]", "3", '"s"']) {
+    const r = markedComments([], input);
+    assert.equal(r.code, 2, input);
+    assert.match(r.stderr ?? "", /hook input was not the expected JSON/, input);
+  }
 });

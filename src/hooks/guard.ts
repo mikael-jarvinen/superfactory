@@ -199,6 +199,8 @@ export function tokenize(cmd: string): Tok[] {
     let dq = -1;
     const subs: string[] = [];
     let tick = false;
+    // tok's length just after an unquoted, unescaped $: a ' there opens a $'...' (Marie on #128)
+    let bareDollar = -1;
     for (;;) {
       const c = next();
       if (c === "`" && (state === " " || state === "a" || state === '"')) tick = true;
@@ -225,7 +227,7 @@ export function tokenize(cmd: string): Tok[] {
         if (c === "\\") [esc, state] = [" ", "\\"];
         else if (PUNCT.includes(c)) [tok, state, op] = [c, "c", true];
         else if (c === "'" || c === '"') [state, dq] = [c, tok.length];
-        else [tok, state] = [c, "a"];
+        else [tok, state, bareDollar] = [c, "a", c === "$" ? 1 : -1];
         continue;
       }
       if (state === "'" || state === '"') {
@@ -269,9 +271,18 @@ export function tokenize(cmd: string): Tok[] {
         back.push(c);
         break;
       }
-      if (c === "'" || c === '"') [state, dq] = [c, tok.length];
-      else if (c === "\\") [esc, state] = ["a", "\\"];
-      else if (!PUNCT.includes(c)) tok += c;
+      if (c === "'" && bareDollar === tok.length) {
+        tok = tok.slice(0, -1) + ansiC(next, (x) => back.push(x));
+        quoted = true;
+      } else if (c === "'" || c === '"') {
+        // a quote ends the $'s adjacency even when its span adds nothing: bash keeps the $ of $""'x'
+        // (CodeRabbit on #128)
+        [state, dq, bareDollar] = [c, tok.length, -1];
+      } else if (c === "\\") [esc, state] = ["a", "\\"];
+      else if (!PUNCT.includes(c)) {
+        tok += c;
+        if (c === "$") bareDollar = tok.length;
+      }
       else {
         back.push(c);
         state = " ";
@@ -280,6 +291,44 @@ export function tokenize(cmd: string): Tok[] {
     }
     if (!tok && !quoted) return out;
     out.push({ t: tok, op, ...(subs.length ? { subs } : {}), ...(tick ? { tick } : {}) });
+  }
+}
+
+// The body of a $'...' after its opening quote, decoded as bash does, so a comment body written
+// $'> Written by agent.\n\n...' reads as what gh is given (Marie on #128). \c, which bash reads as a
+// control character, and an unclosed quote are refused.
+const ANSI_C: Record<string, string> = { a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?" };
+function ansiC(next: () => string, back: (c: string) => void): string {
+  let out = "";
+  for (;;) {
+    let c = next();
+    if (c === "") refuse("cannot parse quoting (No closing quotation)");
+    if (c === "'") return out;
+    if (c !== "\\") {
+      out += c;
+      continue;
+    }
+    c = next();
+    if (c === "") refuse("cannot parse quoting (No closing quotation)");
+    const digits = (re: RegExp, max: number, first = "") => {
+      let d = first;
+      while (d.length < max) {
+        const x = next();
+        if (!re.test(x)) {
+          if (x) back(x);
+          break;
+        }
+        d += x;
+      }
+      return d;
+    };
+    if (c in ANSI_C) out += ANSI_C[c];
+    else if (/[0-7]/.test(c)) out += String.fromCharCode(parseInt(digits(/^[0-7]$/, 3, c), 8) & 0xff);
+    else if (c === "x" || c === "u" || c === "U") {
+      const d = digits(/^[0-9a-fA-F]$/, c === "x" ? 2 : c === "u" ? 4 : 8);
+      out += d ? String.fromCodePoint(parseInt(d, 16)) : "\\" + c;
+    } else if (c === "c") refuse("cannot parse quoting (a \\c control character in $'...')");
+    else out += "\\" + c;
   }
 }
 
@@ -321,7 +370,7 @@ interface Simple {
 // bare fd is not a word. `>&1` duplicates a descriptor and writes no file. What runs inside a $( ... ),
 // a <( ... ) or a >( ... ), quoted or not, is a simple command of its own, and the word it stood for
 // stays in the command around it as `$(`, `<(` or `>(`.
-function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
+function simpleCommands(toks: Tok[], bodies: string[] = [], ticks: "refuse" | "pass" = "refuse"): Simple[] {
   const flat = toks.flatMap((k) => (k.op ? splitOps(k.t).map((t) => ({ t, op: true })) : [k]));
   const out: Simple[] = [];
   let cur: string[] = [];
@@ -348,8 +397,8 @@ function simpleCommands(toks: Tok[], bodies: string[] = []): Simple[] {
   };
   // what runs inside a substitution in a word: a quoted "$(...)" here, a backtick is refused
   const inner = (k: Tok | undefined) => {
-    for (const body of k?.subs ?? []) if (!/^\(.*\)$/s.test(body)) out.push(...simpleCommands(tokenize(body), bodies)); // $((...)) is arithmetic
-    if (k?.tick) refuse("backtick command substitution");
+    for (const body of k?.subs ?? []) if (!/^\(.*\)$/s.test(body)) out.push(...simpleCommands(tokenize(body), bodies, ticks)); // $((...)) is arithmetic
+    if (k?.tick && ticks === "refuse") refuse("backtick command substitution");
   };
   const open = () => {
     substitutions++;
@@ -874,6 +923,216 @@ const HOW_TO_CLOSE = "a product PR closes only once the human has named that exa
 // is a bot trigger; a body from a file, a $(...) or a variable cannot be checked here.
 const COMMENT_HINT = `start the body with "${MARKER}" (or post it with \`factory pr-comment\`), in the command itself, not from a file or $(...)`;
 const markedBody = (b: string) => b.trimStart().startsWith(MARKER) || /^@coderabbitai\b/.test(b.trimStart());
+const UNCHECKABLE = `a comment's body must be checkable: ${COMMENT_HINT}`;
+const UNMARKED = `this comment would read as the human's own: ${COMMENT_HINT}`;
+
+// gh's flags for the commands that can post a comment, read as gh reads them (pflag): a value
+// flag's value may be attached (-bhi) or given with = (--body=hi), the last of a repeated flag wins,
+// short booleans cluster, and -- ends the options. Each flag maps to its long name; a flag not
+// listed is a boolean, and one gh does not know fails the command before it posts.
+const REPO = { "-R": "repo", "--repo": "repo" };
+const BODY = { "-b": "body", "--body": "body", "-F": "body-file", "--body-file": "body-file" };
+const COMMENT = { "-c": "comment", "--comment": "comment" };
+const GH_VALUES: Record<string, Record<string, string>> = {
+  "pr comment": { ...REPO, ...BODY },
+  "issue comment": { ...REPO, ...BODY },
+  "pr review": { ...REPO, ...BODY },
+  "pr close": { ...REPO, ...COMMENT },
+  "pr reopen": { ...REPO, ...COMMENT },
+  "issue close": { ...REPO, ...COMMENT, "-r": "reason", "--reason": "reason", "--duplicate-of": "duplicate-of" },
+  "issue reopen": { ...REPO, ...COMMENT },
+  api: {
+    "-f": "raw-field", "--raw-field": "raw-field", "-F": "field", "--field": "field", "-H": "header", "--header": "header",
+    "-X": "method", "--method": "method", "-q": "jq", "--jq": "jq", "-t": "template", "--template": "template",
+    "--input": "input", "--hostname": "hostname", "--cache": "cache", "-p": "preview", "--preview": "preview",
+  },
+};
+const COMMENT_BOOLS = { "-e": "editor", "--editor": "editor", "-w": "web", "--web": "web", "--delete-last": "delete-last" };
+const GH_BOOLS: Record<string, Record<string, string>> = { "pr comment": COMMENT_BOOLS, "issue comment": COMMENT_BOOLS };
+
+interface GhArgs {
+  pos: string[];
+  flags: [string, string][]; // value flags, in order
+  bools: Set<string>;
+}
+
+// A boolean given a value (--web=false) is what pflag's ParseBool makes of it, the last one winning;
+// a value it does not parse fails the command, which posts nothing, and is read as off so the body
+// is still checked (CodeRabbit on #128: --web=false stays inline and posts its --body).
+const PFLAG_TRUE = new Set(["1", "t", "T", "true", "TRUE", "True"]);
+function setBool(bools: Set<string>, name: string, value: string | undefined): void {
+  if (value === undefined || PFLAG_TRUE.has(value)) bools.add(name);
+  else bools.delete(name);
+}
+
+export function parseGh(cmd: string, args: string[]): GhArgs {
+  const vals = GH_VALUES[cmd] ?? {};
+  const bools = GH_BOOLS[cmd] ?? {};
+  const out: GhArgs = { pos: [], flags: [], bools: new Set() };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    if (a === "--") {
+      out.pos.push(...args.slice(i + 1));
+      break;
+    }
+    if (a.startsWith("--")) {
+      const eq = a.indexOf("=");
+      const name = eq < 0 ? a : a.slice(0, eq);
+      if (vals[name]) out.flags.push([vals[name] as string, eq < 0 ? args[++i] ?? "" : a.slice(eq + 1)]);
+      else setBool(out.bools, bools[name] ?? name.slice(2), eq < 0 ? undefined : a.slice(eq + 1));
+    } else if (a.startsWith("-") && a.length > 1) {
+      for (let j = 1; j < a.length; j++) {
+        const f = `-${a[j]}`;
+        // -b=hi is "hi" and -w=false is false: pflag drops an = right after the letter when a value
+        // follows it (CodeRabbit on #128); a bare -b= is "="
+        const eqValue = a[j + 1] === "=" && a.length > j + 2;
+        if (vals[f]) {
+          out.flags.push([vals[f] as string, eqValue ? a.slice(j + 2) : j + 1 < a.length ? a.slice(j + 1) : args[++i] ?? ""]);
+          break;
+        }
+        if (eqValue) {
+          setBool(out.bools, bools[f] ?? f.slice(1), a.slice(j + 2));
+          break;
+        }
+        out.bools.add(bools[f] ?? f.slice(1));
+      }
+    } else out.pos.push(a);
+  }
+  return out;
+}
+
+const last = (p: GhArgs, name: string) => p.flags.filter(([n]) => n === name).at(-1)?.[1];
+
+// A field of gh api: -f is a string, -F typed (an @file or @- is read by gh).
+interface Field {
+  typed: boolean;
+  key: string;
+  value: string;
+}
+const fieldsOf = (p: GhArgs): Field[] =>
+  p.flags.filter(([n]) => n === "field" || n === "raw-field").map(([n, f]) => {
+    const eq = f.indexOf("=");
+    return { typed: n === "field", key: eq < 0 ? f : f.slice(0, eq), value: eq < 0 ? "" : f.slice(eq + 1) };
+  });
+const fromFile = (f: Field) => f.typed && f.value.startsWith("@");
+
+// The REST paths that post a comment, a review or a reply.
+const COMMENT_PATHS = /(^|\/)(issues|pulls)\/(\d+\/)?(comments|reviews)\b|\/replies\b|(^|\/)commits\/[^/]+\/comments\b/;
+
+// Whether a REST endpoint may post a comment. The shell fills an expansion in it ($N, ${N}, $(...),
+// `...`) before gh sees it, so an expansion reads as any one segment (issues/$N/comments is a comment
+// route), and an endpoint whose route an expansion may supply, one with no literal segment after its
+// last expansion ("$P", repos/o/r/issues/$N), is taken as one that may (CodeRabbit on #128).
+const EXPANSION = /\$\{[^}]*\}|\$\([^)]*\)|\$\w+|\$[@*#?$!-]|`[^`]*`/g;
+function commentRoute(endpoint: string): boolean {
+  const path = endpoint.replace(/\?.*$/s, "");
+  if (COMMENT_PATHS.test(path.replace(EXPANSION, "0"))) return true;
+  let end = -1;
+  for (const m of path.matchAll(EXPANSION)) end = (m.index as number) + m[0].length;
+  return end >= 0 && !/^\/[^/$`]+/.test(path.slice(end));
+}
+
+// The GraphQL mutations that post or edit a comment, a review's body or a reply.
+const COMMENT_MUTATIONS = /\b(addComment|addPullRequestReview|addPullRequestReviewComment|addPullRequestReviewThread|addPullRequestReviewThreadReply|updateIssueComment|updatePullRequestReview|updatePullRequestReviewComment|submitPullRequestReview)\s*\(/;
+
+// What a query's variables say: a string variable's value, and every body inside an input object.
+interface Vars {
+  value(name: string): string | undefined; // undefined: not given, or not checkable
+  bodies(name: string): string[] | null; // null: not given, or not checkable
+}
+
+// A query from a file is read by gh when it runs, and could be anything by then, so it is not read
+// here: a file-backed query or request body is refused (Niilo on #119 R6, after round 4).
+const QUERY_FILE = "a GraphQL query from a file (query=@file, --input) cannot be checked for a comment: put the query inline";
+
+function collectBodies(v: unknown, out: string[]): boolean {
+  if (Array.isArray(v)) return v.every((x) => collectBodies(x, out));
+  if (v && typeof v === "object") {
+    for (const [k, x] of Object.entries(v)) {
+      if (k === "body") {
+        if (typeof x !== "string") return false;
+        out.push(x);
+      } else if (!collectBodies(x, out)) return false;
+    }
+  }
+  return true;
+}
+
+// A query as GraphQL reads it: a # comment, to the end of its line, and a comma are ignored tokens,
+// so they may stand between a field and its (, or between body: and its value; a string's own #
+// and , stay (CodeRabbit on #128). An unclosed string is refused.
+function gqlSource(q: string): string {
+  let out = "";
+  for (let i = 0; i < q.length; i++) {
+    const c = q[i] as string;
+    if (c === '"') {
+      const block = q.startsWith('"""', i);
+      let j = i + (block ? 3 : 1);
+      for (; j < q.length; j++) {
+        if (q[j] === "\\") j++;
+        else if (block ? q.startsWith('"""', j) : q[j] === '"') break;
+        else if (!block && q[j] === "\n") j = q.length;
+      }
+      if (j >= q.length) refuse("a GraphQL string that does not close cannot be checked");
+      const end = j + (block ? 3 : 1);
+      out += q.slice(i, end);
+      i = end - 1;
+    } else if (c === "#") {
+      while (i + 1 < q.length && q[i + 1] !== "\n" && q[i + 1] !== "\r") i++;
+      out += " ";
+    } else out += c === "," ? " " : c;
+  }
+  return out;
+}
+
+function checkQuery(raw: string, vars: Vars): void {
+  const q = gqlSource(raw);
+  // a read passes; so does a mutation that posts no comment (resolveReviewThread)
+  if (!/\bmutation\b/.test(q) || !COMMENT_MUTATIONS.test(q)) return;
+  for (const m of q.matchAll(/\bbody\s*:\s*("""[\s\S]*?"""|"(?:[^"\\]|\\.)*"|\$\w+)/g)) {
+    const v = m[1] as string;
+    let text: string;
+    if (v.startsWith("$")) text = vars.value(v.slice(1)) ?? refuse(UNCHECKABLE);
+    else if (v.startsWith('"""')) text = v.slice(3, -3);
+    else {
+      try {
+        text = JSON.parse(v) as string;
+      } catch {
+        text = v.slice(1, -1);
+      }
+    }
+    if (!markedBody(text)) refuse(UNMARKED);
+  }
+  for (const m of q.matchAll(/\binput\s*:\s*\$(\w+)/g)) {
+    const bodies = vars.bodies(m[1] as string) ?? refuse(UNCHECKABLE);
+    for (const b of bodies) if (!markedBody(b)) refuse(UNMARKED);
+  }
+}
+
+function checkGraphql(p: GhArgs): void {
+  if (last(p, "input") !== undefined) refuse(QUERY_FILE);
+  const fields = fieldsOf(p);
+  const qf = fields.filter((f) => f.key === "query").at(-1);
+  if (!qf) return;
+  const q = qf.value;
+  // -f query=@f is sent as the text "@f", but it reads as a file to whoever wrote it: refused alike
+  if (q.startsWith("@")) refuse(QUERY_FILE);
+  // a query the shell builds ($(...), `...`, $VAR) is not what this check sees
+  if (/\$\(|`/.test(q) || /^\s*\$\w/.test(q)) refuse(`a GraphQL query built by the shell cannot be checked: put the query inline`);
+  const named = (n: string) => fields.filter((f) => f.key === n || f.key.startsWith(`${n}[`));
+  checkQuery(q, {
+    value: (n) => {
+      const f = fields.filter((x) => x.key === n).at(-1);
+      return f && !fromFile(f) ? f.value : undefined;
+    },
+    bodies: (n) => {
+      const fs = named(n);
+      // gh builds the object from i[...] fields; the whole object as one value, or a part from a file, cannot be read
+      if (!fs.length || fs.some((f) => f.key === n || fromFile(f))) return null;
+      return fs.filter((f) => /\[body\]$/.test(f.key)).map((f) => f.value);
+    },
+  });
+}
 
 // gh's command path as cobra finds it. Flags may come before each command word, and pr's and issue's
 // persistent -R/--repo takes the next word (gh -R o/r pr comment 1, gh pr --repo o/r close 2). The
@@ -895,14 +1154,59 @@ export function ghPath(args: string[]): string[] {
   return [...path, ...rest, ...args.slice(i)];
 }
 
-// gh's own top-level commands, from gh 2.97's `gh help`, with their cobra aliases (cs, ext, rs...).
+function checkCommentWrite(raw: string[]): void {
+  const args = ghPath(raw);
+  checkGhCommand(args); // an alias or an extension could post anything (Marie on #119)
+  const [g, sub] = args;
+  if ((g === "pr" || g === "issue") && sub) {
+    const cmd = `${g} ${sub}`;
+    if (!GH_VALUES[cmd]) return;
+    const p = parseGh(cmd, args.slice(2));
+    if (sub === "close" || sub === "reopen") {
+      const c = last(p, "comment");
+      if (c !== undefined && !markedBody(c)) refuse(UNMARKED);
+      return;
+    }
+    // --web opens the browser, where the human writes; --delete-last posts nothing
+    if (p.bools.has("web") || p.bools.has("delete-last")) return;
+    if (last(p, "body-file") !== undefined || p.bools.has("editor")) refuse(UNCHECKABLE);
+    const body = last(p, "body");
+    if (body === undefined) {
+      if (sub === "review") return; // an approval or a review with no words
+      refuse(`a comment needs --body: ${COMMENT_HINT}`);
+    }
+    if (!markedBody(body as string)) refuse(UNMARKED);
+    return;
+  }
+  if (g !== "api") return;
+  const p = parseGh("api", args.slice(1));
+  const endpoint = p.pos[0] ?? "";
+  // gh posts to an absolute URL as given, and /graphql is GitHub's GraphQL endpoint by any host
+  // (api.github.com, or a GHE's /api/graphql): read as checkApiProtect reads it (CodeRabbit on #128)
+  if (/^(api\/)?graphql\/?(\?.*)?$/i.test(endpoint.replace(/^https?:\/\/[^/]+/i, "").replace(/^\/+/, ""))) return checkGraphql(p);
+  const fields = fieldsOf(p);
+  const method = (last(p, "method") ?? (fields.length || last(p, "input") !== undefined ? "POST" : "GET")).toUpperCase();
+  if (method === "GET" || method === "DELETE" || !commentRoute(endpoint)) return;
+  if (last(p, "input") !== undefined) refuse(UNCHECKABLE);
+  // a review's own body and each of its comments' (comments[][body])
+  for (const f of fields) {
+    if (f.key !== "body" && !/\[body\]$/.test(f.key)) continue;
+    if (fromFile(f)) refuse(UNCHECKABLE);
+    if (!markedBody(f.value)) refuse(UNMARKED);
+  }
+}
+
+// gh's own top-level commands and help topics, from gh 2.97's `gh help`, with their cobra aliases
+// (cs, ext, rs, a11y...), and `gh version`, which `gh help` does not list.
 // Any other first word is a user alias, a shell alias or an extension, and could run anything, so
 // it is refused. gh lets no alias shadow a built-in, so this needs no read of gh's config. Making
 // an alias or getting an extension is refused outright (Marie and Niilo, the -R/alias hotfix).
 const GH_BUILTINS = new Set(["agent-task", "agent-tasks", "agent", "agents", "alias", "api", "attestation", "at", "auth", "browse",
   "cache", "codespace", "cs", "completion", "config", "copilot", "discussion", "extension", "extensions", "ext", "gist", "gpg-key",
   "help", "issue", "label", "licenses", "org", "pr", "preview", "project", "release", "repo", "ruleset", "rs", "run", "search",
-  "secret", "skill", "skills", "ssh-key", "status", "variable", "workflow"]);
+  "secret", "skill", "skills", "ssh-key", "status", "variable", "version", "workflow",
+  // help topics
+  "accessibility", "a11y", "actions", "environment", "exit-codes", "formatting", "mintty", "reference", "telemetry"]);
 const GH_ALIAS_HINT = "gh aliases and extensions can't be checked: run the full gh command";
 export function checkGhCommand(args: string[]): void {
   const [c, sub] = args;
@@ -1063,11 +1367,22 @@ function checkGhProtect(words: string[], ctx: GuardContext): void {
 }
 
 // A GitHub MCP tool that posts a comment, review body or reply: its body is held to the same rule.
-export const MCP_COMMENT_TOOLS = /^mcp__.+?__(add_issue_comment|add_reply_to_pull_request_comment|add_comment_to_pending_review|pull_request_review_write|update_issue_comment|create_pending_pull_request_review|submit_pending_pull_request_review|create_and_submit_pull_request_review)$/i;
+// The GitHub MCP tools that post or edit a comment or review, today's names and the names other
+// releases of the server use (create_pull_request_review, add_pull_request_review_comment...; CodeRabbit on #128).
+export const MCP_COMMENT_TOOLS = /^mcp__.+?__(add_issue_comment|create_issue_comment|update_issue_comment|add_reply_to_pull_request_comment|reply_to_pull_request_comment|add_comment_to_pending_review|add_pull_request_review_comment(_to_pending_review)?|create_pull_request_review_comment|update_pull_request_review_comment|update_pull_request_comment|pull_request_review_write|create_pull_request_review|update_pull_request_review|create_pending_pull_request_review|submit_pending_pull_request_review|create_and_submit_pull_request_review)$/i;
 
-export function mcpCommentVerdict(tool: string, body: unknown): string | null {
-  if (!MCP_COMMENT_TOOLS.test(tool) || typeof body !== "string" || !body.trim()) return null;
-  return markedBody(body) ? null : `this comment would read as the human's own: ${COMMENT_HINT}`;
+// A comment tool's call: its body, and each comments[].body a review carries, must start with the
+// marker. The second argument is the tool input, or (as before) the body alone.
+export function mcpCommentVerdict(tool: string, input: unknown): string | null {
+  if (!MCP_COMMENT_TOOLS.test(tool)) return null;
+  const tin = input !== null && typeof input === "object" ? (input as Record<string, unknown>) : { body: input };
+  const comments = Array.isArray(tin.comments) ? (tin.comments as unknown[]) : [];
+  const bodies = [tin.body, ...comments.map((c) => (c !== null && typeof c === "object" ? (c as Record<string, unknown>).body : c))];
+  for (const body of bodies) {
+    if (typeof body !== "string" || !body.trim()) continue;
+    if (!markedBody(body)) return `this comment would read as the human's own: ${COMMENT_HINT}`;
+  }
+  return null;
 }
 
 // The GitHub MCP server's tools reach the same PRs as gh, so the guard sees them too (Marie and
@@ -1090,7 +1405,7 @@ function checkMcpGithub(tool: string, tin: Record<string, unknown>, ctx: GuardCo
   const repo = `${str("owner")}/${str("repo")}`;
   const n = String(tin.pullNumber ?? "");
   if (MCP_COMMENT_TOOLS.test(tool)) {
-    const why = mcpCommentVerdict(tool, tin.body);
+    const why = mcpCommentVerdict(tool, tin);
     if (why !== null) refuse(why);
   } else if (name === "merge_pull_request") {
     const head = str("expectedHeadSha");
@@ -1849,21 +2164,579 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
     const header = `<< HEREDOC${bodies.push(h.body) - 1}${h.rest}`;
     text = text.slice(0, h.start) + header + "\n" + text.slice(h.end);
   }
-  // What a pipe carries: in each scope from the line inward, what was printed there since its last cut,
-  // up to where the next scope inward opened (a group's stdin is what was piped into it).
+  // the comment rule, over the whole line so a cd before a gh is seen (readonly refuses gh writes)
+  if (ctx.policy !== "readonly" && namesGh(cmd)) checkComments(cmd);
+  const pipe = pipeTracker();
+  for (const simple of simpleCommands(tokenize(text), bodies)) {
+    pipe(simple, printedText(stripPrefixes(simple.words)));
+    checkSecrets({ ...simple, words: stripPrefixes(simple.words) });
+    if (ctx.policy === "readonly") checkReadonly(simple, ctx);
+    else checkProtect(simple, ctx);
+  }
+}
+
+type Takes = "req" | "opt" | "none";
+
+// The wrappers a command can run behind, and their short options as each tool's getopt string has
+// them (a: takes a value, attached or the next word; a:: only an attached one): sudo 1.9, GNU
+// coreutils (env's a: is 9's), findutils and time, and bash's exec and command. A group is read as
+// getopt reads it: the first letter with a value takes the rest of the word, or the next word when
+// nothing is attached (Marie on #128: sudo -nu root gh, timeout -vs KILL 5 gh, exec -ca x gh).
+const getopts = (spec: string): Record<string, Takes> => {
+  const out: Record<string, Takes> = {};
+  for (const m of spec.matchAll(/([^:])(:{0,2})/g)) out[m[1] as string] = m[2] === ":" ? "req" : m[2] === "::" ? "opt" : "none";
+  return out;
+};
+const WRAPPER_SHORT: Record<string, Record<string, Takes>> = {
+  sudo: getopts("Aa:BbC:c:D:Eeg:Hh::iKklNnPp:R:r:SsT:t:U:u:Vv"),
+  xargs: getopts("0a:d:E:e::I:i::L:l::n:oP:prs:tx"),
+  env: getopts("a:C:iS:u:v0"),
+  timeout: getopts("k:s:v"),
+  nice: getopts("n:"),
+  nohup: {}, time: getopts("af:o:pqvV"), exec: getopts("a:cl"), command: getopts("pvV"), builtin: {},
+  stdbuf: getopts("i:o:e:"),
+};
+
+// One short-option word of a wrapper, as getopt reads it: whether it takes the next word, and
+// whether it has a letter the wrapper's table does not (which the tool refuses; this cannot tell
+// what it was meant to be).
+function shortOption(name: string, o: string): { next: boolean; unknown: boolean } {
+  const table = WRAPPER_SHORT[name] ?? {};
+  for (let j = 1; j < o.length; j++) {
+    const t = table[o[j] as string];
+    if (t === undefined) return { next: false, unknown: true };
+    if (t !== "none") return { next: t === "req" && j + 1 === o.length, unknown: false };
+  }
+  return { next: false, unknown: false };
+}
+
+// Whether the words after an option this cannot read may run gh: gh or a shell by name, a word that
+// names gh, or one from a variable or a substitution before what looks like a comment write (Marie
+// on #128: sudo --frob x $G pr comment).
+const mayRunGh = (rest: string[]): boolean =>
+  rest.some((x, k) =>
+    x === "gh" || SHELLS.has(posix.basename(x.replace(/^\\/, "")).toLowerCase()) || namesGh(x) ||
+    (dynamicWord(x) && writeAfter(rest.slice(k + 1))));
+// Whether what follows a word this cannot read may be a comment write, the word being any words at
+// all: G="gh pr"; $G comment 5 splits to gh pr comment 5, so the word may end in pr, issue or api.
+const writeAfter = (rest: string[], line = ""): boolean =>
+  (line !== "" && looksLikeWrite([line])) || looksLikeWrite(rest) || ["pr", "issue", "api"].some((g) => looksLikeWrite([g, ...rest]));
+// A word bash makes from a variable or a substitution ($G, ${G}, $(...), `...`) that lineValues
+// could not resolve, which this cannot read.
+const dynamicWord = (w: string): boolean => /\$[A-Za-z_{(0-9@*#?!$-]|`/.test(w);
+
+// Whether words a command this cannot read gets look like a comment write, wherever they stand (a
+// -c script's included): what checkCommentWrite checks, pr or issue comment or review, a --comment
+// on close or reopen, and api with a body field, a comment or review mutation, or a method other
+// than GET on a comment route. A PR's own body (create, edit) is no comment to this rule. A read is
+// let through, so a $G that is gh after all only ever reads (Marie on #128: 1,143 real reads
+// refused when every such word was).
+function looksLikeWrite(rest: string[]): boolean {
+  const t = rest.flatMap((w) => w.split(/[\s;&|()'"`]+/)).filter(Boolean);
+  return t.some((w, k) => {
+    const after = t.slice(k + 1);
+    if (w === "pr" || w === "issue") {
+      let j = 0;
+      while ((after[j] ?? "").startsWith("-")) j += /^(-R|--repo)$/.test(after[j] as string) ? 2 : 1;
+      const sub = after[j];
+      const flags = after.slice(j + 1);
+      if (sub === "comment" || sub === "review") return true;
+      if (sub === "close" || sub === "reopen") return flags.some((f) => /^(-c|--comment)(=|$)/.test(f) || /^-c./.test(f));
+      return false;
+    }
+    if (w !== "api") return false;
+    // a field that is a comment's body (body=, comments[][body]=), --input, or a GraphQL mutation
+    // that adds or edits a comment or a review; a query, a commit message or a label is no comment
+    if (after.some((f) => /^(-[fF]|--(raw-)?field=)?(\w*\[\]\[)?body\]?=/.test(f) || /^--input(=|$)/.test(f))) return true;
+    if (after.some((f) => /(add|update)\w*(Comment|Review)|submitPullRequestReview/i.test(f))) return true;
+    // a GraphQL query read from a file is not seen, so it may be a mutation (Marie on #128)
+    if (after.includes("graphql") && after.some((f, i) => /^(-F|--field=)query=@/.test(f) || (/^query=@/.test(f) && /^(-F|--field)$/.test(after[i - 1] ?? ""))))
+      return true;
+    const m = after.findIndex((f) => /^(-X|--method)(=|$)/.test(f) || /^-X./.test(f));
+    if (m < 0) return false;
+    const f = after[m] as string;
+    const method = (/^(-X|--method)$/.test(f) ? after[m + 1] ?? "" : f.replace(/^(-X|--method=)/, "")).toUpperCase();
+    // the endpoint is the first word that is no flag and no flag's value, as gh reads it: a field's
+    // value (-f sha="$MAIN") is no route
+    let e = 0;
+    while (e < after.length && (after[e] as string).startsWith("-"))
+      e += /^(-[XHfFqtp]|--(method|header|field|raw-field|jq|template|input|preview|hostname|cache))$/.test(after[e] as string) ? 2 : 1;
+    return method !== "GET" && commentRoute(after[e] ?? "");
+  });
+}
+
+// Variables this line's words can be read through: one the line sets once, on its own (G=gh; $G),
+// to a value of plain path letters, and a directory the session's environment sets (HOME, PWD,
+// CLAUDE_JOB_DIR and the like), read as a path by its basename, when the line never names it bare
+// (no HOME=, export HOME, read HOME, for HOME in). A value with a blank or a glob bash would split
+// or expand, and a name set twice or set any other way, stays unread (Marie on #128).
+const ENV_DIRS = ["HOME", "PWD", "OLDPWD", "TMPDIR", "CLAUDE_JOB_DIR", "CLAUDE_PROJECT_DIR", "XDG_RUNTIME_DIR"];
+// A name the line sets twice is read only when its values are the same but for the first word's
+// directory, one program by its basename (G=~/.local/bin/gh; [ -x $G ] || G=~/agents/bin/gh), as
+// which one bash runs depends on the path taken (Marie on #128: G="gh pr view"; G="gh pr comment"). A value with blanks is
+// read as the words bash splits it into (P="node $CLAUDE_JOB_DIR/tmp/p.mjs"; $P ...). `named` is
+// whether the line names a variable this could not read, bare (G=$(...), read G, for G in).
+function lineValues(text: string, sims: Simple[]): { vals: Map<string, string>; named: (n: string) => boolean } {
+  const bare = (n: string) => (text.match(new RegExp(`(?<![\\w$])(?<!\\$\\{)${n}(?!\\w)`, "g")) ?? []).length;
+  const vals = new Map<string, string>();
+  for (const n of ENV_DIRS) if (bare(n) === 0) vals.set(n, `/${n}`);
+  const isSet = (sim: Simple) => sim.words.length > 0 && sim.words.every((w) => /^[A-Za-z_]\w*=/.test(w));
+  const seen = new Map<string, string[]>();
+  const same = (a: string, b: string) => {
+    const [x = "", ...xs] = a.trim().split(/\s+/);
+    const [y = "", ...ys] = b.trim().split(/\s+/);
+    return posix.basename(x) === posix.basename(y) && xs.join(" ") === ys.join(" ");
+  };
+  for (const sim of sims) {
+    if (!isSet(sim)) continue;
+    for (const w of sim.words) {
+      const n = w.slice(0, w.indexOf("="));
+      const vs = [...(seen.get(n) ?? []), resolveWord(w.slice(n.length + 1), vals)];
+      seen.set(n, vs);
+      if (!ENV_DIRS.includes(n) && bare(n) === vs.length && vs.every((v) => /^[\w@%+=:,./~ \t-]*$/.test(v) && same(v, vs[0] as string)))
+        vals.set(n, vs[vs.length - 1] as string);
+      else vals.delete(n);
+    }
+  }
+  return { vals, named: (n: string) => bare(n) > 0 && !vals.has(n) };
+}
+// A word with each $N and ${N} lineValues read put in; any other stays as written.
+const resolveWord = (w: string, vals: Map<string, string>): string =>
+  w.replace(/\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g, (m, a?: string, b?: string) => vals.get((a ?? b) as string) ?? m);
+
+// Each wrapper's long options, from the tools themselves (GNU coreutils, findutils and time, sudo
+// 1.9; env's --argv0 is coreutils 9's), by how each takes a value: req as --o=V or --o V, opt only as
+// --o=V (`xargs --max-lines gh` runs gh, Marie on #128), none not at all. exec, command and builtin
+// are bash's and have none. Like getopt_long, longOption reads a unique prefix as its option
+// (--max-a is --max-args, timeout --sig is --signal); one it cannot read, unknown or ambiguous, is null.
+const longs = (req: string[], opt: string[], none: string[]): Record<string, Takes> =>
+  Object.fromEntries([...req.map((o) => [o, "req"]), ...opt.map((o) => [o, "opt"]), ...[...none, "help", "version"].map((o) => [o, "none"])].map(([o, t]) => [`--${o}`, t as Takes]));
+const WRAPPER_LONG: Record<string, Record<string, Takes>> = {
+  sudo: longs(["chdir", "chroot", "close-from", "command-timeout", "group", "host", "other-user", "prompt", "role", "type", "user"], ["preserve-env"],
+    ["askpass", "background", "bell", "edit", "list", "login", "non-interactive", "preserve-groups", "remove-timestamp", "reset-timestamp", "set-home", "shell", "stdin", "validate"]),
+  xargs: longs(["arg-file", "delimiter", "max-args", "max-chars", "max-procs", "process-slot-var"], ["eof", "max-lines", "replace"],
+    ["null", "interactive", "no-run-if-empty", "exit", "verbose", "show-limits", "open-tty"]),
+  env: longs(["unset", "chdir", "split-string", "argv0"], ["block-signal", "default-signal", "ignore-signal"], ["ignore-environment", "null", "list-signal-handling", "debug"]),
+  timeout: longs(["kill-after", "signal"], [], ["foreground", "preserve-status", "verbose"]),
+  nice: longs(["adjustment"], [], []),
+  nohup: longs([], [], []),
+  time: longs(["format", "output"], [], ["append", "portability", "quiet", "verbose"]),
+  stdbuf: longs(["input", "output", "error"], [], []),
+  exec: {}, command: {}, builtin: {},
+};
+function longOption(name: string, o: string): string | null {
+  const table = WRAPPER_LONG[name] ?? {};
+  const eq = o.indexOf("=");
+  const k = eq < 0 ? o : o.slice(0, eq);
+  const hits = k in table ? [k] : Object.keys(table).filter((n) => n.startsWith(k));
+  return hits.length === 1 ? (hits[0] as string) + (eq < 0 ? "" : o.slice(eq)) : null;
+}
+// Whether a wrapper's long option, read whole by longOption, takes the next word as its value.
+const takesNext = (name: string, o: string): boolean => WRAPPER_LONG[name]?.[o] === "req";
+
+// An env option as getopt reads it: the -S/--split-string value it carries (taking the next word when
+// none is attached), null for another option it has read whole (-u NAME, -iC dir), undefined for
+// one left to the generic reading.
+function envSplit(o: string, nextWord: () => string | undefined): string | null | undefined {
+  if (o === "--split-string") return nextWord() ?? "";
+  if (o.startsWith("--split-string=")) return o.slice(15);
+  if (o.startsWith("--") || !/^-[^-]/.test(o)) return undefined;
+  for (let j = 1; j < o.length; j++) {
+    const c = o[j] as string;
+    if (c === "S") return j + 1 < o.length ? o.slice(j + 1) : nextWord() ?? "";
+    if (c === "u" || c === "C") {
+      if (j + 1 === o.length) nextWord();
+      return null;
+    }
+  }
+  return null;
+}
+
+// The words from the command a simple command runs: past shell keywords, VAR=value words and the
+// wrappers above with their options (timeout's duration too). `echo gh pr comment` runs echo.
+function commandWords(words: string[], via: { name: string; opts: string[] }[] = []): string[] {
+  let i = 0;
+  const assignment = (w: string | undefined) => w !== undefined && /^[A-Za-z_]\w*=/.test(w);
+  while (i < words.length) {
+    const w = words[i] as string;
+    // case WORD in, for NAME in WORDS, select and [[ ... ]] run no command of their own: a $o there
+    // is a word tested, not one run (Marie's replay on #128: case "$st" in ...)
+    if (w === "case" || w === "for" || w === "select" || w === "[[") return [];
+    if (KEYWORDS.has(w) || assignment(w)) {
+      i++;
+      continue;
+    }
+    const name = posix.basename(w.replace(/^\\/, "")).toLowerCase();
+    if (!WRAPPER_SHORT[name]) return words.slice(i);
+    const seen: string[] = [];
+    via.push({ name, opts: seen });
+    i++;
+    // env's lone - is its -i
+    while (i < words.length && (words[i] as string).startsWith("-") && (words[i] !== "-" || name === "env")) {
+      let o = words[i] as string;
+      // nice -NUM and --NUM (a negative one) are its adjustment
+      if (name === "nice" && /^-[-+]?\d+$/.test(o)) {
+        seen.push(o);
+        i++;
+        continue;
+      }
+      if (o.startsWith("--") && o !== "--") {
+        // a long option this cannot read might take the next word or not, so what runs after it is
+        // not known: refused if gh or a shell may (Marie on #128: timeout --sig KILL 5 gh, sudo --us)
+        const read = longOption(name, o);
+        if (read === null && mayRunGh(words.slice(i + 1))) refuse(`${name} ${o}: an option this cannot read, so whether it runs gh cannot be checked`);
+        o = read ?? o;
+      }
+      const short = o.startsWith("--") ? null : shortOption(name, o);
+      if (short?.unknown && mayRunGh(words.slice(i + 1))) refuse(`${name} ${o}: an option this cannot read, so whether it runs gh cannot be checked`);
+      seen.push(o);
+      i++;
+      if (o === "--") break;
+      // env -S splits its value into the command and its first arguments (CodeRabbit on #128)
+      if (name === "env") {
+        const split = envSplit(o, () => words[i++]);
+        if (split === null) continue;
+        if (split !== undefined) return commandWords([...tokenize(split).map((k) => k.t), ...words.slice(i)], via);
+      }
+      // `command -v gh` and `command -V gh` look a name up and run nothing (Marie on #128)
+      if (name === "command" && /^-[pvV]*[vV][pvV]*$/.test(o)) return [];
+      if (short ? short.next : takesNext(name, o)) seen.push(words[i++] as string);
+    }
+    if (name === "timeout") i++;
+    while ((name === "env" || name === "sudo") && assignment(words[i])) i++;
+  }
+  return [];
+}
+
+// What a pipe carries: in each scope from the line inward, what was printed there since its last cut,
+// up to where the next scope inward opened (a group's stdin is what was piped into it). Called on each
+// simple command in order with what it prints; sets a piped one's upstream.
+function pipeTracker(): (simple: Simple, printed: string | null) => void {
   const said: string[] = [];
   const opened = new Map<number, number>([[0, 0]]);
   const cut = new Map<number, number>([[0, 0]]);
-  for (const simple of simpleCommands(tokenize(text), bodies)) {
+  return (simple, printed) => {
     const path = simple.scope ?? [0];
     for (const id of simple.cuts ?? []) cut.set(id, said.length);
     for (const id of path) if (!opened.has(id)) [opened, cut].forEach((m) => m.set(id, said.length));
     if (simple.piped) simple.upstream = path.flatMap((id, k) => said.slice(cut.get(id) ?? 0, k + 1 < path.length ? opened.get(path[k + 1] as number) : said.length));
-    const printed = printedText(stripPrefixes(simple.words));
+    // a command piped text it does not print, sed or tr, passes on what this cannot read, not that
+    // text (CodeRabbit on #128: printf '...' | sed 's/Written by agent/x/' | sh)
     if (printed !== null) said.push(printed);
-    checkSecrets({ ...simple, words: stripPrefixes(simple.words) });
-    if (ctx.policy === "readonly") checkReadonly(simple, ctx);
-    else checkProtect(simple, ctx);
+    else if (simple.piped && simple.upstream?.length) said.push(UNREADABLE);
+  };
+}
+
+// What a command's stdin can be, of what the line shows: its heredocs and here-strings, and what echo
+// and printf print earlier in a pipe. Printed text with an escape this cannot read is refused, as
+// what gh or a shell is given from it cannot be checked (printf '\147h pr comment ...' | sh).
+function shownInput(s: Simple, into: string): string[] {
+  const out = [...(s.stdin ?? []), ...(s.piped && !s.redirected0 ? (s.upstream ?? []) : [])];
+  if (out.includes(UNREADABLE)) refuse(`what echo or printf prints into ${into} here cannot be read, so a comment it posts cannot be checked: write the line plainly`);
+  return out;
+}
+
+// One xargs short-option word, read as xargs reads it: left to right, the first letter that takes a
+// value ends the cluster and the rest of the word is that value (Marie on #128), so -dI is a
+// delimiter of I and -ri is -r -i. I, d, E, n, L, P, s and a with nothing after them take the next
+// word; i, e and l take only an attached value. Only I and i set the replace slot (i's is {}).
+const XARGS_VALUE = "IiedElnLPsa";
+function xargsShort(o: string): { next: boolean; slot?: string | "next" } {
+  for (let j = 1; j < o.length; j++) {
+    const c = o[j] as string;
+    if (!XARGS_VALUE.includes(c)) continue;
+    const rest = o.slice(j + 1);
+    const next = !"iel".includes(c) && rest === "";
+    if (c === "I") return { next, slot: next ? "next" : rest };
+    if (c === "i") return { next, slot: rest || "{}" };
+    return { next };
+  }
+  return { next: false };
+}
+
+// How xargs splits its input and runs its command, from the options commandWords recorded: the
+// delimiter -d or -0 sets (its items are taken as they are, quotes and all), and the batch -n or -L
+// sets (each batch is its own run), the last of the two winning. -s cuts batches where this cannot
+// tell. -a and --arg-file read the items from a file, not stdin. -E, -e and --eof end the input at a
+// word, which this does not cut at. A -d value is a letter or a C escape (\n, \t, \\, \0, an octal or hex code).
+function xargsSplit(opts: string[]): { delim: string | null; args?: number; lines?: number; sized: boolean; file: boolean; eof: boolean } {
+  const out: { delim: string | null; args?: number; lines?: number; sized: boolean; file: boolean; eof: boolean } = { delim: null, sized: false, file: false, eof: false };
+  const delim = (v: string): string => {
+    const m = /^(?:(.)|\\([ntrabfv\\])|\\([0-7]{1,3})|\\x([0-9a-fA-F]{1,2}))$/s.exec(v);
+    if (!m) return refuse(`xargs -d ${v}: a delimiter this cannot read, so a comment it posts cannot be checked`);
+    if (m[1] !== undefined) return m[1];
+    if (m[2] !== undefined) return ({ n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", f: "\f", v: "\v", "\\": "\\" } as Record<string, string>)[m[2]] as string;
+    return String.fromCharCode(parseInt((m[3] ?? m[4]) as string, m[3] !== undefined ? 8 : 16));
+  };
+  const count = (v: string | undefined): number => {
+    const n = Number(v);
+    return Number.isInteger(n) && n > 0 ? n : 1;
+  };
+  const set = (c: string, v: string | undefined): void => {
+    if (c === "0") out.delim = "\0";
+    else if (c === "d") out.delim = delim(v ?? "");
+    else if (c === "n") [out.args, out.lines] = [count(v), undefined];
+    else if (c === "L" || c === "l") [out.args, out.lines] = [undefined, v ? count(v) : 1];
+    else if (c === "s") out.sized = true;
+    else if (c === "a") out.file = true;
+    else if (c === "E" || c === "e") out.eof = true;
+  };
+  for (let i = 0; i < opts.length; i++) {
+    const o = opts[i] as string;
+    if (o.startsWith("--")) {
+      const [k, eq] = o.includes("=") ? [o.slice(0, o.indexOf("=")), o.slice(o.indexOf("=") + 1)] : [o, undefined];
+      const v = eq ?? (takesNext("xargs", o) ? opts[++i] : undefined);
+      const c = ({ "--null": "0", "--delimiter": "d", "--max-args": "n", "--max-lines": "L", "--max-chars": "s", "--arg-file": "a", "--eof": "E" } as Record<string, string>)[k];
+      if (c) set(c, v);
+      continue;
+    }
+    for (let j = 1; j < o.length; j++) {
+      const c = o[j] as string;
+      if (!XARGS_VALUE.includes(c)) {
+        set(c, undefined);
+        continue;
+      }
+      const rest = o.slice(j + 1);
+      set(c, rest === "" && !"iel".includes(c) ? opts[++i] : rest);
+      break;
+    }
+  }
+  return out;
+}
+
+// xargs' items in its default mode, line by line: words split at blanks, with '...', "..." and \
+// quoting as xargs reads them (no quote spans a line). An unclosed quote is refused.
+function xargsWords(text: string): string[][] {
+  const lines: string[][] = [];
+  for (const line of text.split("\n")) {
+    const words: string[] = [];
+    let w: string | null = null;
+    let q = "";
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i] as string;
+      if (q) {
+        if (c === q) q = "";
+        else w += c;
+      } else if (c === "'" || c === '"') [q, w] = [c, w ?? ""];
+      else if (c === "\\" && i + 1 < line.length) w = (w ?? "") + line[++i];
+      else if (c === " " || c === "\t") {
+        if (w !== null) words.push(w);
+        w = null;
+      } else w = (w ?? "") + c;
+    }
+    if (q) refuse("xargs input with an unclosed quote: a comment it posts cannot be checked");
+    if (w !== null) words.push(w);
+    if (words.length) lines.push(words);
+  }
+  return lines;
+}
+
+// One input line as xargs -I passes it in its default mode: leading blanks cut, '...', "..." and \
+// quoting removed, other blanks kept. An unclosed quote is null: xargs stops there and runs nothing
+// for it, and the line is still checked as it is written.
+function xargsLine(line: string): string | null {
+  let out = "";
+  let q = "";
+  const text = line.replace(/^[ \t]+/, "");
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i] as string;
+    if (q) {
+      if (c === q) q = "";
+      else out += c;
+    } else if (c === "'" || c === '"') q = c;
+    else if (c === "\\" && i + 1 < text.length) out += text[++i];
+    else out += c;
+  }
+  return q ? null : out;
+}
+
+// The runs xargs makes of one input: its items, cut into batches as its options say.
+function xargsBatches(input: string, how: ReturnType<typeof xargsSplit>): string[][] {
+  if (how.delim !== null) {
+    const items = input.split(how.delim);
+    if (items[items.length - 1] === "") items.pop();
+    const n = how.args ?? how.lines;
+    if (!n) return [items];
+    const out: string[][] = [];
+    for (let i = 0; i < items.length; i += n) out.push(items.slice(i, i + n));
+    return out;
+  }
+  const lines = xargsWords(input);
+  const out: string[][] = [];
+  if (how.lines) for (let i = 0; i < lines.length; i += how.lines) out.push(lines.slice(i, i + how.lines).flat());
+  else if (how.args) for (let i = 0, all = lines.flat(); i < all.length; i += how.args) out.push(all.slice(i, i + how.args));
+  else out.push(lines.flat());
+  return out;
+}
+
+// xargs' replace string, from the options commandWords recorded (each value after its option).
+function replaceString(opts: string[]): string | null {
+  let r: string | null = null;
+  for (let i = 0; i < opts.length; i++) {
+    const o = opts[i] as string;
+    if (o === "--replace") r = "{}";
+    else if (o.startsWith("--replace=")) r = o.slice("--replace=".length) || "{}";
+    else if (o.startsWith("--")) {
+      if (takesNext("xargs", o)) i++;
+    } else {
+      const x = xargsShort(o);
+      const v = x.next ? (opts[++i] ?? "") : undefined;
+      if (x.slot !== undefined) r = x.slot === "next" ? (v as string) : x.slot;
+    }
+  }
+  return r;
+}
+
+// Whether a line may run gh once bash has removed its quotes: g"h", 'g'h, g\h and g$'h' are all gh
+// (CodeRabbit on #128). It only picks the lines the comment rule parses, so it may say yes too often;
+// the rule itself reads the parsed command names. env's -Sgh names it too.
+// A \n or \t that echo or printf prints splits words as well: printf 'a\ngh ...' | sh runs gh (Marie
+// on #128), so each is read both ways. An octal, hex or unicode escape can spell gh itself
+// (printf '\147h ...' | sh), so a line with one is parsed, where printed text it cannot read is
+// refused only on its way into a shell.
+const GH_WORD = /(?:\b|-[A-Za-z]*S)gh\b/i;
+export const namesGh = (cmd: string): boolean =>
+  /\\(?:[0-7]|x[0-9a-f]|[uU][0-9a-f])/i.test(cmd) ||
+  [cmd, cmd.replace(/\\[nt]/g, " ")].some((c) => GH_WORD.test(c.replace(/\$(?=['"])/g, "").replace(/["'\\]/g, "")));
+
+// Only the comment rule, for a session that runs no guard (an assistant) or whose guard leaves gh
+// alone: the marked-comments hook. A gh run as a command is checked, by name or path, behind any
+// wrapper; a shell's -c script and eval's words are checked as a command line.
+function checkComments(cmd: string): void {
+  // heredocs as checkCommand reads them: a body is not commands, but an unquoted one's $(...) runs
+  let text = cmd;
+  const bodies: string[] = [];
+  for (let h = nextHeredoc(text, 0); h; h = nextHeredoc(text, h.start + 1)) {
+    if (!h.quoted) for (const body of bodySubstitutions(h.body)) checkComments(body);
+    text = text.slice(0, h.start) + `<< HEREDOC${bodies.push(h.body) - 1}${h.rest}` + "\n" + text.slice(h.end);
+  }
+  // a backtick runs its command line: that line is checked here, and the protect policy refuses
+  // backticks on its own, so a status line that prints `date` is no refusal here (CodeRabbit on #128)
+  for (const body of backtickBodies(text)) if (namesGh(body)) checkComments(body);
+  // what echo and printf print earlier in a pipe, which it may carry to a shell (pipeTracker)
+  const pipe = pipeTracker();
+  const sims = simpleCommands(tokenize(text), bodies, "pass");
+  const { vals, named } = lineValues(text, sims);
+  // a whole $V whose value has blanks is the words bash splits it into
+  const read = (ws: string[]) => ws.flatMap((w) => {
+    const m = /^\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))$/.exec(w);
+    const v = m ? vals.get((m[1] ?? m[2]) as string) : undefined;
+    return v !== undefined && /\s/.test(v) ? v.trim().split(/\s+/) : [resolveWord(w, vals)];
+  });
+  for (const s of sims) {
+    // commandWords, not protect's stripPrefixes: this rule holds sessions that run no protect guard,
+    // so an env override or a wrapper is no refusal here (Marie on #128)
+    const via: { name: string; opts: string[] }[] = [];
+    const words = commandWords(read(s.words), via);
+    pipe(s, printedText(words));
+    // a command word from a variable or a substitution may be gh: G=gh; $G pr comment ..., and
+    // $(echo gh) pr comment ... (Marie on #128). This line names gh, or it would not be read here.
+    // One lineValues cannot read is refused before what looks like a comment write, not a read.
+    // The whole line is read for one too when what the word holds was made on it: a substitution, or
+    // a variable the line sets some way this cannot read (G=$(echo gh pr comment 5 --body); $G hi).
+    const w0 = words[0] ?? "";
+    const made = /\$\(|`/.test(w0) || [...w0.matchAll(/\$\{?([A-Za-z_]\w*)/g)].some((m) => named(m[1] as string));
+    if (dynamicWord(w0) && writeAfter(words.slice(1), made ? text : "")) refuse("a command word from a variable or a substitution cannot be checked for a comment it posts: name the command");
+    const name = posix.basename((words[0] ?? "").replace(/^\\/, "")).toLowerCase();
+    // xargs runs its command with its input as more arguments (Marie on #128: echo '...' | xargs gh,
+    // and | xargs -0 bash -c). A gh or a shell it runs is checked with each text the line shows that
+    // input can be. Input the line does not show is refused, except under -I, where it only fills the
+    // replace string's slots of a command the line shows whole: that command is checked as written.
+    // Shown input under -I goes into those slots, each line and the whole text, so a -c script made
+    // of it is the script checked (Marie on #128: xargs -I{} sh -c '{}').
+    const xargs = via.find((v) => v.name === "xargs");
+    if (xargs && (name === "gh" || SHELLS.has(name))) {
+      const inputs = shownInput(s, name);
+      const slot = replaceString(xargs.opts);
+      if (!inputs.length && slot === null) refuse(`xargs runs ${name} on input this line does not show, so a comment it posts cannot be checked`);
+      const q = (w: string) => `'${w.replace(/'/g, "'\\''")}'`;
+      const script = SHELLS.has(name) ? shellScript(words.slice(1)) : {};
+      // each run xargs makes is checked as its own command, with its items as xargs passes them
+      // (CodeRabbit on #128: -n1 runs gh on 5 alone, and -d '\n' keeps an item's quotes)
+      const how = xargsSplit(xargs.opts);
+      // -a reads the items from a file the line does not show, slots under -I too (Niilo on #128)
+      // the items after an eof word are never passed, so a marked --body there hides the run's own
+      // (Marie on #128)
+      if (how.eof) refuse(`xargs -E stops ${name}'s input at a word this does not cut at, so a comment it posts cannot be checked`);
+      if (how.file) refuse(`xargs -a reads ${name}'s input from a file this line does not show, so a comment it posts cannot be checked`);
+      if (how.sized && slot === null) refuse(`xargs -s cuts ${name}'s runs where this cannot tell, so a comment it posts cannot be checked`);
+      // GNU xargs lets a later -L, -l, -n or --max-* undo -I: {} stays as written and the input is
+      // appended (Marie on #128). Which one wins is order and version, so the two together are refused
+      if (slot !== null && (how.args !== undefined || how.lines !== undefined))
+        refuse(`xargs -I with -L, -l or -n may run ${name} with its input appended, not in {}, so a comment it posts cannot be checked: use one of them`);
+      for (const input of inputs) {
+        if (slot !== null) {
+          const items = how.delim !== null ? input.split(how.delim) : input.split(/\n|\\n/);
+          // in its default mode xargs takes each line's quotes and backslashes as it does for any item,
+          // so sh gets --body > Written..., a redirection (CodeRabbit on #128); each is read both ways
+          const unquoted = how.delim !== null ? [] : items.map(xargsLine).filter((l): l is string => l !== null);
+          for (const line of new Set([input, ...items, ...unquoted]))
+            checkComments(words.map((w) => q(slot ? w.split(slot).join(how.delim !== null ? line : line.replace(/^[ \t]+/, "")) : w)).join(" "));
+          continue;
+        }
+        for (const batch of xargsBatches(input, how)) {
+          // a shell whose -c has no script yet takes the batch's first item as it
+          if (script.code === "") checkComments(batch[0] ?? "");
+          checkComments([...words, ...batch].map(q).join(" "));
+        }
+      }
+      if (slot !== null) checkComments(words.map(q).join(" "));
+      continue;
+    }
+    if (name === "gh") checkCommentWrite(words.slice(1));
+    else if (SHELLS.has(name)) {
+      const script = shellScript(words.slice(1));
+      if (script.code !== undefined) checkComments(script.code);
+      // no -c and no script file: the shell runs its stdin, a heredoc or here-string included, which
+      // a quoted heredoc's delimiter does not keep from running (CodeRabbit on #128)
+      else if (script.file === undefined)
+        for (const input of shownInput(s, name)) if (namesGh(input)) checkComments(input);
+    } else if (name === "eval" && words.length > 1) checkComments(words.slice(1).join(" "));
+  }
+}
+
+// The command lines inside a line's backticks, outside single quotes; \` and \\ inside one are the
+// letters bash makes of them. An unclosed backtick is refused.
+function backtickBodies(text: string): string[] {
+  const out: string[] = [];
+  let q = "";
+  // a $'...' takes \' as a letter, so it ends where a plain '...' would not, and a backtick after
+  // it may run though it reads as quoted (Marie on #128). One before a backtick is refused
+  let ansi = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i] as string;
+    if (q !== "'" && c === "$" && text[i + 1] === "'") ansi = true;
+    // where it ends is not read here, so a backtick anywhere after it, in what reads as '...' too
+    if (ansi && c === "`") refuse("cannot parse quoting (a $'...' before a backtick): write the line without one");
+    if (q === "'") {
+      if (c === "'") q = "";
+    } else if (c === "\\") i++;
+    else if (c === "'" && !q) q = c;
+    else if (c === '"') q = q ? "" : c;
+    else if (c === "`") {
+      let body = "";
+      let j = i + 1;
+      for (; j < text.length && text[j] !== "`"; j++) {
+        if (text[j] === "\\" && /[`\\$]/.test(text[j + 1] ?? "")) j++;
+        body += text[j];
+      }
+      if (j >= text.length) refuse("cannot parse quoting (No closing backtick)");
+      out.push(body);
+      i = j;
+    }
+  }
+  return out;
+}
+
+// The comment rule alone (superfactory#119, N1): a command that names no gh cannot post through it,
+// and nothing here refuses for any other reason, so the hook never takes a tool away.
+export function commentVerdict(cmd: string): string | null {
+  if (!namesGh(cmd)) return null;
+  try {
+    checkComments(cmd);
+    return null;
+  } catch (e) {
+    return e instanceof Refused ? e.message : `the comment check failed (${(e as Error).message})`;
   }
 }
 

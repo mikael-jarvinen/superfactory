@@ -53,7 +53,7 @@ src/
   tracker/        jira.ts (driven by config), none.ts
   watchers/       queue.ts, round.ts, relay.ts; prompts come from the workspace
   scheduler/      launchd.ts, rendering jobs from config
-  hooks/          guard.ts, status.ts, no-dialogs.ts, no-side-channels.ts, run as `factory hook <name>`
+  hooks/          guard.ts, status.ts, no-dialogs.ts, no-side-channels.ts, marked-comments.ts, run as `factory hook <name>`
   doctor.ts       checks derived from config, plus each stack's own `doctor` verb
 templates/        role settings, launch prompts, the demo camera and Playwright config
 test/             node:test suites

@@ -6,6 +6,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { run } from "../src/util.js";
 import { claudeArgs, type ClaudeRun, runFailure, TIMED_OUT, watcherGh } from "../src/watchers/job.js";
+import { reviewQuery } from "../src/watchers/reviews.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, TOML, tempWorkspace } from "./helpers.js";
 
@@ -590,16 +591,16 @@ test("the review watcher tells the lead about new review comments, once, and not
   const finding = thread("PRRT_bot2", "src/c.ts", 9, false, c("coderabbitai", 20, "<!-- metadata -->\n_⚠️ Potential issue_\n\nThe loop never ends when `n` is 0.", "Bot"));
   const question = { ...c("sam", 21, "Why not reuse the existing exporter?"), state: "COMMENTED" };
   const routes = (a: object) => ({ "pr list": { stdout: [] }, "api graphql": a });
-  const cursor = () => (JSON.parse(readFileSync(join(ws, "state", "reviews.state"), "utf8")) as Record<string, string>)["acme/web#7"];
+  const cursor = () => (JSON.parse(readFileSync(join(ws, "state", "reviews.state"), "utf8")) as Record<string, string[]>)["acme/web#7"];
 
-  // First sight: only a resolved thread, so nothing is outstanding; the cursor starts at it.
+  // First sight: only a resolved thread, so nothing is outstanding; it is read.
   let r = run(["watch", "reviews"], [], routes(answer([old])));
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.equal(r.calls.length, 0, "no model");
   assert.ok(existsSync(logs("reviews.heartbeat")), "a read writes the heartbeat");
   assert.match(read("reviews.log"), /outcome=quiet prs=1 gh_calls=1 ms=\d+/);
   assert.deepEqual(notes(), []);
-  assert.equal(cursor(), at(0));
+  assert.deepEqual(cursor(), ["c100"]);
 
   // A colleague's comment is news. A bot thread the factory has answered is handled, and neither
   // the factory's reply nor a label bot is news.
@@ -611,7 +612,7 @@ test("the review watcher tells the lead about new review comments, once, and not
     '  - colleague sam, change request, app/Report.php:42: "Using Collection class instead of standard arrays would read better here." [thread PRRT_ask, comment 101]',
   ].join("\n");
   assert.deepEqual(notes(), [first]);
-  assert.equal(cursor(), at(12));
+  assert.deepEqual(cursor(), ["c100", "c101", "c102", "c103", "i104"]);
 
   // The same comments again: the cursor keeps them from being told twice.
   r = run(["watch", "reviews"], [], routes(answer([old, ask, replied], [], [label])));
@@ -631,7 +632,7 @@ test("the review watcher tells the lead about new review comments, once, and not
   r = run(["watch", "reviews"], [], routes({ status: 1, stderr: "HTTP 502" }));
   assert.equal(r.status, 1);
   assert.equal(notes().length, 2);
-  assert.equal(cursor(), at(21));
+  assert.deepEqual(cursor(), ["c100", "c101", "c102", "c103", "c105", "i104", "r106"]);
   assert.equal(statSync(logs("reviews.heartbeat")).mtimeMs, before);
   assert.match(read("reviews.log"), /reviews: cannot read the review comments: HTTP 502/);
 
@@ -639,6 +640,308 @@ test("the review watcher tells the lead about new review comments, once, and not
   r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes(answer([old, ask, replied, finding], [question], [label])));
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.doesNotMatch(readFileSync(join(ws, "gh.log"), "utf8"), /graphql/);
+});
+
+// CodeRabbit on superfactory#119: a time cursor lost what it read. A review is published when it is
+// submitted while its inline comments keep the draft's time (M1); two comments in one second, read
+// on either side of a poll, lost the second (L4); and only the first 100 threads, 50 comments of a
+// thread and last 50 reviews were read (L3). Marie on #119 (L2): the factory's sessions reply under
+// the human's login, so its reply must not be told as the human's.
+test("the review watcher reads by id: a late-submitted review, a comment in the same second, a second page, and not its own replies", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  assert.equal(factory(ws, ["state", "WEB-2", "building", "--title", "Fix login"]).status, 0);
+  const file = join(ws, "state", "WEB-2.json");
+  const pr7 = { repo: "acme/web", number: 7 };
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
+  const at = (min: number) => new Date(Date.parse("2026-11-17T10:00:00Z") + min * 60_000).toISOString();
+  const sam = { login: "sam", __typename: "User" };
+  const c = (databaseId: number, min: number, body: string, extra: object = {}) => ({ databaseId, createdAt: at(min), publishedAt: at(min), body, author: sam, ...extra });
+  const page = (nodes: object[], next?: string) => ({ pageInfo: { hasNextPage: !!next, endCursor: next ?? null }, nodes });
+  const thread = (id: string, line: number, comments: object[], next?: string) =>
+    ({ id, isResolved: false, path: "src/a.ts", line, originalLine: line, comments: page(comments, next) });
+  const pr = (threads: object[], reviews: object[] = [], comments: object[] = [], more: { threads?: string; reviews?: string } = {}) => ({
+    url: "https://github.com/acme/web/pull/7", reviewThreads: page(threads, more.threads), reviews: page(reviews, more.reviews), comments: page(comments),
+  });
+  const answer = (p: object) => ({ stdout: { data: { viewer: { login: "alex-gh" }, rateLimit: { cost: 1, remaining: 4999, resetAt: at(60) }, r0: { p7: p } } } });
+  const routes = (...a: object[]) => ({ "pr list": { stdout: [] }, "api graphql": a.length === 1 ? a[0] as object : a });
+  const told = (i: number) => (notes()[i] ?? "").split("\n").filter((l) => l.startsWith("  - "));
+  const first = thread("PRRT_1", 1, [c(1, 0, "Rename this.")]);
+
+  assert.equal(run(["watch", "reviews"], [], routes(answer(pr([first])))).status, 0);
+  assert.equal(notes().length, 1, "first sight tells the open thread");
+
+  // A review drafted at minute 2, submitted at 30; its inline comment, pending while drafted, has
+  // no publishedAt then and is not read; a comment in the first second (minute 5) is read.
+  const draft = c(10, 2, "Use the exporter.", { publishedAt: null });
+  const pending = { ...c(20, 2, "", { publishedAt: null }), state: "PENDING", submittedAt: null };
+  const a5 = c(30, 5, "First of the second.");
+  let r = run(["watch", "reviews"], [], routes(answer(pr([first, thread("PRRT_2", 2, [draft])], [pending], [{ ...a5, author: sam }]))));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(told(1), ['  - colleague sam, change request, top-level: "First of the second." [comment 30]']);
+
+  // Now the review is submitted at 30, its comment published with it; a second comment shares
+  // minute 5 with the first; and the factory's reply, under the human's login, starts after a newline.
+  const reply = { ...c(40, 31, "\n> Written by agent.\n\nFixed in abc1234."), author: { login: "alex-gh", __typename: "User" } };
+  const submitted = { ...c(20, 2, "Please split this.", { publishedAt: at(30) }), state: "CHANGES_REQUESTED", submittedAt: at(30) };
+  r = run(["watch", "reviews"], [], routes(answer(pr([first, thread("PRRT_2", 2, [{ ...draft, publishedAt: at(30) }])], [submitted], [a5, c(31, 5, "Second of the second."), reply]))));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(told(2), [
+    '  - colleague sam, change request, top-level: "Second of the second." [comment 31]',
+    '  - colleague sam, change request, src/a.ts:2: "Use the exporter." [thread PRRT_2, comment 10]',
+    '  - colleague sam, change request, review: "Please split this." [review 20]',
+  ]);
+
+  // A second page of threads and of a thread's comments, and of reviews, each read by its own query.
+  const base = [first, thread("PRRT_2", 2, [{ ...draft, publishedAt: at(30) }])];
+  const long = thread("PRRT_3", 3, [c(50, 40, "Page one.")], "TC1");
+  r = run(["watch", "reviews"], [], routes(
+    answer(pr([...base, long], [submitted], [a5, c(31, 5, "x"), reply], { threads: "T1", reviews: "R1" })),
+    { stdout: { data: { repository: { pullRequest: { reviewThreads: page([thread("PRRT_4", 4, [c(60, 41, "Thread on page two.")])]) } } } } },
+    { stdout: { data: { repository: { pullRequest: { reviews: page([{ ...c(70, 42, "Review on page two."), state: "COMMENTED", submittedAt: at(42) }]) } } } } },
+    { stdout: { data: { node: { comments: page([c(51, 43, "Comment on page two.")]) } } } },
+  ));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(told(3), [
+    '  - colleague sam, change request, src/a.ts:3: "Page one." [thread PRRT_3, comment 50]',
+    '  - colleague sam, change request, src/a.ts:4: "Thread on page two." [thread PRRT_4, comment 60]',
+    '  - colleague sam, change request, review: "Review on page two." [review 70]',
+    '  - colleague sam, change request, src/a.ts:3: "Comment on page two." [thread PRRT_3, comment 51]',
+  ]);
+
+  // A page that cannot be read leaves nothing read: the next good read tells it.
+  const state = readFileSync(join(ws, "state", "reviews.state"), "utf8");
+  const more = thread("PRRT_5", 5, [c(80, 50, "Behind a bad page.")]);
+  r = run(["watch", "reviews"], [], routes(answer(pr([more], [], [], { threads: "T2" })), { status: 1, stderr: "HTTP 502" }));
+  assert.equal(r.status, 1);
+  assert.equal(readFileSync(join(ws, "state", "reviews.state"), "utf8"), state);
+  assert.equal(notes().length, 4);
+});
+
+// CodeRabbit on superfactory#119, round 2. N2: the factory's reply ends a thread, and a
+// colleague's comment just before it, in the same poll, was skipped with the bot's findings. N7: a
+// reply with errors and no node for a PR beat the heartbeat as if that PR had been read.
+test("the review watcher tells a colleague's comment above the factory's reply, and a PR GitHub did not return is not a clean read", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  assert.equal(factory(ws, ["state", "WEB-2", "building", "--title", "Fix login"]).status, 0);
+  const file = join(ws, "state", "WEB-2.json");
+  const pr7 = { repo: "acme/web", number: 7 };
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
+  const at = (min: number) => new Date(Date.parse("2026-11-17T10:00:00Z") + min * 60_000).toISOString();
+  const who = (login: string, __typename = "User") => ({ login, __typename });
+  const c = (databaseId: number, min: number, body: string, author: object) => ({ databaseId, createdAt: at(min), publishedAt: at(min), body, author });
+  const page = (nodes: object[]) => ({ pageInfo: { hasNextPage: false, endCursor: null }, nodes });
+  const pr = (comments: object[]) => ({
+    url: "https://github.com/acme/web/pull/7", comments: page([]), reviews: page([]),
+    reviewThreads: page([{ id: "PRRT_1", isResolved: false, path: "src/a.ts", line: 1, originalLine: 1, comments: page(comments) }]),
+  });
+  const answer = (p: object | null, errors?: object[]) => ({ stdout: { data: { viewer: { login: "alex-gh" }, r0: { p7: p } }, ...(errors ? { errors } : {}) } });
+  const routes = (a: object) => ({ "pr list": { stdout: [] }, "api graphql": a });
+  const finding = c(1, 0, "Rename this.", who("coderabbitai", "Bot"));
+  assert.equal(run(["watch", "reviews"], [], routes(answer(pr([finding])))).status, 0);
+  assert.equal(notes().length, 1);
+
+  // In one poll: CodeRabbit's second finding, sam's comment, then the factory's reply to the bot.
+  const reply = c(4, 3, "> Written by agent.\n\nFixed in abc1234.", who("alex-gh"));
+  let r = run(["watch", "reviews"], [], routes(answer(pr([finding, c(2, 1, "Also this.", who("coderabbitai", "Bot")), c(3, 2, "I disagree with the bot.", who("sam")), reply]))));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const told = (notes()[1] ?? "").split("\n").filter((l) => l.startsWith("  - "));
+  assert.equal(told.length, 1, notes()[1]);
+  assert.match(told[0] as string, /colleague sam.*"I disagree with the bot\." \[thread PRRT_1, comment 3\]/);
+
+  // GitHub answers with errors and no node for the PR: nothing is lost, and the read is not clean.
+  const hb = join(openWorkspace(ws).logsDir, "reviews.heartbeat");
+  const state = readFileSync(join(ws, "state", "reviews.state"), "utf8");
+  rmSync(hb, { force: true });
+  r = run(["watch", "reviews"], [], routes({ ...answer(null, [{ message: "Something went wrong while executing your query.", path: ["r0", "p7"] }]), status: 1 }));
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /reviews: partial/);
+  assert.ok(!existsSync(hb), "no heartbeat");
+  assert.equal(readFileSync(join(ws, "state", "reviews.state"), "utf8"), state, "the cursor is kept");
+  r = run(["watch", "reviews"], [], routes(answer(pr([finding, reply]))));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.ok(existsSync(hb), "a clean read beats it");
+});
+
+// CodeRabbit on #119, round 3: GitHub returns what it could beside its errors, and gh exits 1 with
+// that output. A read with errors counted as read, and could move a cursor past what it did not get.
+test("the review watcher does not count a read with GraphQL errors or a failed exit as read", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  assert.equal(factory(ws, ["state", "WEB-2", "building", "--title", "Fix login"]).status, 0);
+  const file = join(ws, "state", "WEB-2.json");
+  const pr7 = { repo: "acme/web", number: 7 };
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
+  const at = (min: number) => new Date(Date.parse("2026-11-17T10:00:00Z") + min * 60_000).toISOString();
+  const c = (databaseId: number, min: number, body: string) => ({ databaseId, createdAt: at(min), publishedAt: at(min), body, author: { login: "sam", __typename: "User" } });
+  const page = (nodes: object[], next?: string) => ({ pageInfo: { hasNextPage: !!next, endCursor: next ?? null }, nodes });
+  const pr = (comments: object[], next?: string) => ({
+    url: "https://github.com/acme/web/pull/7", reviews: page([]), reviewThreads: page([]), comments: page(comments, next),
+  });
+  const answer = (p: object, extra: object = {}) => ({ stdout: { data: { viewer: { login: "alex-gh" }, r0: { p7: p } }, ...extra } });
+  const routes = (...a: object[]) => ({ "pr list": { stdout: [] }, "api graphql": a.length === 1 ? a[0] as object : a });
+  assert.equal(run(["watch", "reviews"], [], routes(answer(pr([c(1, 0, "First.")])))).status, 0);
+  assert.equal(notes().length, 0, "first sight tells only open threads");
+  const state = () => readFileSync(join(ws, "state", "reviews.state"), "utf8");
+  const before = state();
+  const two = [c(1, 0, "First."), c(2, 1, "Second.")];
+  const err = (path?: string[]) => ({ errors: [{ message: "Something went wrong.", ...(path ? { path } : {}) }] });
+
+  const cases: [string, Record<string, unknown>, RegExp][] = [
+    ["an error on the PR, beside its data", routes({ ...answer(pr(two), err(["r0", "p7", "comments"])), status: 1 }), /reviews: partial/],
+    ["an error naming no PR", routes({ ...answer(pr(two), err()), status: 1 }), /reviews: unreadable/],
+    ["a failed exit with parseable data", routes({ ...answer(pr(two)), status: 1 }), /reviews: unreadable/],
+    ["a page with errors", routes(answer(pr(two, "C1")), { stdout: { data: { repository: { pullRequest: { comments: page([c(3, 2, "Third.")]) } } }, errors: [{ message: "x" }] }, status: 1 }), /reviews: partial/],
+    ["a page from a failed exit", routes(answer(pr(two, "C1")), { stdout: { data: { repository: { pullRequest: { comments: page([c(3, 2, "Third.")]) } } } }, status: 1 }), /reviews: partial/],
+  ];
+  for (const [name, rt, outcome] of cases) {
+    rmSync(join(ws, "routes.json.counts"), { force: true }); // each case's replies from the first
+    const r = run(["watch", "reviews"], [], rt);
+    assert.equal(r.status, 1, `${name}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, outcome, name);
+    assert.equal(notes().length, 0, `${name}: nothing told`);
+    assert.equal(state(), before, `${name}: the cursor is kept`);
+  }
+  const r = run(["watch", "reviews"], [], routes(answer(pr(two))));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(notes()[0] ?? "", /"Second\." \[comment 2\]/, "the next clean read tells it");
+});
+
+// GitHub's node limit, as it counts it: each connection's first, times the firsts of the connections
+// it is nested in, summed over the query.
+function declaredNodes(query: string): number {
+  const stack = [1];
+  let total = 0;
+  let pending: number | undefined;
+  for (const m of query.matchAll(/\(([^)]*)\)|\{|\}/g)) {
+    const tok = m[0];
+    if (tok.startsWith("(")) {
+      const first = /\bfirst:\s*(\d+)/.exec(m[1] as string);
+      pending = first ? Number(first[1]) : undefined;
+    } else if (tok === "{") {
+      const parent = stack[stack.length - 1] as number;
+      const here = pending === undefined ? parent : parent * pending;
+      if (pending !== undefined) total += here;
+      stack.push(here);
+      pending = undefined;
+    } else stack.pop();
+  }
+  return total;
+}
+
+// CodeRabbit on superfactory#128 (KJJ2): the one query for every watched PR declared 100 threads of
+// 100 comments each, 10,300 nodes a PR, so 49 PRs passed GitHub's 500,000 and the whole read was
+// refused every poll. Two hundred PRs across two repos stay under it.
+test("the review watcher's query stays under GitHub's node limit for many PRs", () => {
+  assert.equal(declaredNodes("query { a(first: 100) { b(first: 10) { x } } c(first: 5) { y } }"), 100 + 1000 + 5, "the counter");
+  const keys = Array.from({ length: 200 }, (_, i) => `acme/${i % 2 ? "web" : "api"}#${i + 1}`);
+  const n = declaredNodes(reviewQuery(keys));
+  assert.ok(n < 500_000, `${n} declared nodes for ${keys.length} PRs`);
+});
+
+// CodeRabbit on superfactory#128 (KJKF): readRest followed hasNextPage without checking the cursor
+// moved. The same endCursor again read the same page forever; a null one sent `after: ""`, which reads
+// page one forever; a page with no pageInfo ended the read as if the connection were complete. Each
+// now leaves the PR unread with its cursor kept, after no more calls than the pages it could follow.
+// The fake gh errors after a few repeats, so a regression fails on the call count rather than hangs.
+test("the review watcher does not follow a page cursor that does not move on", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  assert.equal(factory(ws, ["state", "WEB-2", "building", "--title", "Fix login"]).status, 0);
+  const file = join(ws, "state", "WEB-2.json");
+  const pr7 = { repo: "acme/web", number: 7 };
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
+  const at = (min: number) => new Date(Date.parse("2026-11-17T10:00:00Z") + min * 60_000).toISOString();
+  const c = (databaseId: number, min: number, body: string) => ({ databaseId, createdAt: at(min), publishedAt: at(min), body, author: { login: "sam", __typename: "User" } });
+  const info = (hasNextPage: boolean, endCursor: string | null) => ({ hasNextPage, endCursor });
+  const page = (nodes: object[], pageInfo: object | null = info(false, null)) => ({ ...(pageInfo ? { pageInfo } : {}), nodes });
+  const thread = (comments: object) => ({ id: "PRRT_1", isResolved: true, path: "a.ts", line: 1, originalLine: 1, comments });
+  const pr = (comments: object, threads: object[] = []) => ({ url: "https://github.com/acme/web/pull/7", reviews: page([]), reviewThreads: page(threads), comments });
+  const answer = (p: object) => ({ stdout: { data: { viewer: { login: "alex-gh" }, r0: { p7: p } } } });
+  const more = (comments: object) => ({ stdout: { data: { repository: { pullRequest: { comments } } } } });
+  const moreThread = (comments: object) => ({ stdout: { data: { node: { comments } } } });
+  const stop = { status: 1, stderr: "fake gh: too many calls" };
+  const routes = (...a: object[]) => ({ "pr list": { stdout: [] }, "api graphql": a });
+  const graphqlCalls = () => readFileSync(join(ws, "gh.log"), "utf8").split("\n").filter((l) => l.includes('"graphql"')).length;
+  const state = () => readFileSync(join(ws, "state", "reviews.state"), "utf8");
+
+  assert.equal(run(["watch", "reviews"], [], routes(answer(pr(page([c(1, 0, "First.")]))))).status, 0);
+  const before = state();
+  const same = page([c(2, 1, "Second.")], info(true, "C1"));
+  const cases: [string, object[], number][] = [
+    ["the same cursor again", [answer(pr(page([c(1, 0, "First.")], info(true, "C1")))), more(same), more(same), more(same), stop], 2],
+    ["a next page with a null cursor, on the first page", [answer(pr(page([c(1, 0, "First.")], info(true, null)))), more(same), more(same), stop], 1],
+    ["a next page with a null cursor, on a later page", [answer(pr(page([c(1, 0, "First.")], info(true, "C1")))), more(page([c(2, 1, "Second.")], info(true, null))), more(same), more(same), stop], 2],
+    ["a later page with no pageInfo", [answer(pr(page([c(1, 0, "First.")], info(true, "C1")))), more(page([c(2, 1, "Second.")], null)), stop], 2],
+    ["a thread's comments with the same cursor again", [answer(pr(page([c(1, 0, "First.")]), [thread(page([c(9, 0, "T.")], info(true, "TC1")))])), moreThread(page([c(10, 1, "T2.")], info(true, "TC1"))), moreThread(page([], info(true, "TC1"))), stop], 2],
+    ["a thread's comments with a null cursor", [answer(pr(page([c(1, 0, "First.")]), [thread(page([c(9, 0, "T.")], info(true, null)))])), moreThread(page([])), stop], 1],
+  ];
+  for (const [name, replies, calls] of cases) {
+    rmSync(join(ws, "routes.json.counts"), { force: true });
+    const r = run(["watch", "reviews"], [], routes(...replies));
+    assert.equal(r.status, 1, `${name}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /reviews: partial/, name);
+    assert.equal(graphqlCalls(), calls, `${name}: no page read twice`);
+    assert.equal(notes().length, 0, `${name}: nothing told`);
+    assert.equal(state(), before, `${name}: the cursor is kept`);
+  }
+  // A cursor that moves on is still followed to the end.
+  rmSync(join(ws, "routes.json.counts"), { force: true });
+  const r = run(["watch", "reviews"], [], routes(answer(pr(page([c(1, 0, "First.")], info(true, "C1")))), more(page([c(2, 1, "Second.")], info(true, "C2"))), more(page([c(3, 2, "Third.")])), stop));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(graphqlCalls(), 3);
+  assert.match(notes()[0] ?? "", /"Second\." \[comment 2\][\s\S]*"Third\." \[comment 3\]/);
+});
+
+// CodeRabbit on #119, round 4 (R1): a repo the token cannot read (moved, deleted, access lost) made
+// every poll unreadable for every PR. Now its PRs wait, named with GitHub's error, and the rest are read.
+test("the review watcher reads the other repos when one cannot be read, and names it", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  const watch = (key: string, p: { repo: string; number: number }) => {
+    assert.equal(factory(ws, ["state", key, "building", "--title", key]).status, 0);
+    const file = join(ws, "state", `${key}.json`);
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: p, prs: [p] }));
+  };
+  watch("WEB-2", { repo: "acme/web", number: 7 });
+  watch("OLD-1", { repo: "acme/old", number: 3 });
+  const page = (nodes: object[]) => ({ pageInfo: { hasNextPage: false, endCursor: null }, nodes });
+  const thread = { id: "PRRT_1", isResolved: false, path: "src/a.ts", line: 1, originalLine: 1, comments: page([{ databaseId: 1, createdAt: "2026-11-17T10:00:00Z", publishedAt: "2026-11-17T10:00:00Z", body: "Rename this.", author: { login: "sam", __typename: "User" } }]) };
+  const web = { url: "https://github.com/acme/web/pull/7", comments: page([]), reviews: page([]), reviewThreads: page([thread]) };
+  const gone = { message: "Could not resolve to a Repository with the name 'acme/old'.", type: "NOT_FOUND" };
+  // the repos are aliased in key order: OLD-1's acme/old is r0, WEB-2's acme/web is r1
+  const answer = (path: string[]) => ({ stdout: { data: { viewer: { login: "alex-gh" }, r0: null, r1: { p7: web } }, errors: [{ ...gone, path }] }, status: 1 });
+  const routes = (a: object) => ({ "pr list": { stdout: [] }, "api graphql": a });
+  let r = run(["watch", "reviews"], [], routes(answer(["r0"])));
+  const q = readFileSync(join(ws, "gh.log"), "utf8");
+  assert.match(q, /r0: repository\(owner: \\"acme\\", name: \\"old\\"\)/, q);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /reviews: cannot read acme\/old#3 \(acme\/old: Could not resolve to a Repository/);
+  assert.match(r.stdout, /reviews: partial/);
+  assert.equal(notes().length, 1, "acme/web was still read");
+  assert.match(notes()[0] as string, /"Rename this\."/);
+  assert.ok(!("acme/old#3" in JSON.parse(readFileSync(join(ws, "state", "reviews.state"), "utf8"))), "acme/old has no cursor yet");
+  // An error the watcher cannot place still leaves the whole read unread.
+  r = run(["watch", "reviews"], [], routes(answer(["r9"])));
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /reviews: unreadable/);
+});
+
+// A reviews.state from before the ids holds a time per PR: what came before it is read.
+test("the review watcher reads a time cursor from before the ids as everything up to it", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  assert.equal(factory(ws, ["state", "WEB-2", "building"]).status, 0);
+  const file = join(ws, "state", "WEB-2.json");
+  const pr7 = { repo: "acme/web", number: 7 };
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
+  writeFileSync(join(ws, "state", "reviews.state"), JSON.stringify({ "acme/web#7": "2026-11-17T10:05:00.000Z" }));
+  const sam = { login: "sam", __typename: "User" };
+  const comments = [
+    { databaseId: 1, createdAt: "2026-11-17T10:05:00.000Z", body: "Old.", author: sam },
+    { databaseId: 2, createdAt: "2026-11-17T10:06:00.000Z", body: "New.", author: sam },
+  ];
+  const answer = { stdout: { data: { viewer: { login: "alex-gh" }, r0: { p7: { url: "https://github.com/acme/web/pull/7", reviewThreads: { nodes: [] }, reviews: { nodes: [] }, comments: { nodes: comments } } } } } };
+  assert.equal(run(["watch", "reviews"], [], { "pr list": { stdout: [] }, "api graphql": answer }).status, 0);
+  assert.equal(notes().length, 1);
+  assert.match(notes()[0] as string, /"New\." \[comment 2\]/);
+  assert.doesNotMatch(notes()[0] as string, /Old/);
+  assert.deepEqual(JSON.parse(readFileSync(join(ws, "state", "reviews.state"), "utf8")), { "acme/web#7": ["i1", "i2"] });
 });
 
 // The first live note, 2026-11-17: CodeRabbit opens a finding with an <img> icon inside bold, and the

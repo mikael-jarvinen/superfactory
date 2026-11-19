@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { beforeSha } from "../src/gate/demo.js";
+import { beforeSha, demoEnv } from "../src/gate/demo.js";
 import { BEFORE_BEGIN, BEFORE_END, MEDIA_BEGIN, MEDIA_END, STAMP } from "../src/gate/media.js";
 import { proseLines } from "../src/gate/ready.js";
 import { loadRec, saveRec } from "../src/state.js";
@@ -308,16 +308,28 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
   const EARLIER = /CodeRabbit reviewed an earlier head, bbbbbbb, not aaaaaaa; later versions go without its review/;
 
   // never reviewed: refused, with the same ask as before
-  let r = ready({ [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, [`api repos/${REMOTE}/commits/${OLD}/status`]: { stdout: { statuses: [] } } });
+  const oldStatus = `api repos/${REMOTE}/commits/${OLD}/status`;
+  const oldRuns = `api repos/${REMOTE}/commits/${OLD}/check-runs?per_page=100&page=1`;
+  const oldPulls = `api repos/${REMOTE}/commits/${OLD}/pulls?per_page=100&page=1`;
+  const onlyThisPr = { [oldPulls]: { stdout: [{ number: N }] } };
+  let r = ready({ [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, [oldStatus]: { stdout: { statuses: [] } }, [oldRuns]: checkRuns() });
   assert.equal(r.status, 1, r.stdout);
   assert.match(r.stdout, /CodeRabbit has not reviewed aaaaaaa: its status here says "Review skipped: draft pull request" -- comment "@coderabbitai review" on the PR, then run this again/);
 
-  // reviewed an earlier head, by a review, by an inline comment of its own, or by its status there
+  // reviewed an earlier head, by a review, by an inline comment of its own, or by its finished
+  // check-run there, which GitHub ties to this PR: a rebase it had already reviewed
+  const ours = { pull_requests: [{ number: N }] };
   const evidence: Routes[] = [
     { [rv]: { stdout: [{ user: { login: "coderabbitai[bot]" }, commit_id: OLD, state: "COMMENTED", body: REVIEW_BODY }] } },
     { [cm]: { stdout: [{ user: { login: "coderabbitai[bot]" }, original_commit_id: OLD, in_reply_to_id: null }] } },
-    { [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] },
-      [`api repos/${REMOTE}/commits/${OLD}/status`]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review completed" }] } } },
+    { [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, ...onlyThisPr, [oldStatus]: { stdout: { statuses: [] } },
+      [oldRuns]: checkRuns(check("test"), rabbitRun("Review completed", { conclusion: "success", ...ours })) },
+    // a clean incremental pass leaves no review, no comment and no status, only its check-run titled
+    // Finished: CodeRabbit on superfactory#130 at f61c245d and #131 at eb279a03, and on #128 at
+    // 5332c327 and c023ab97, where GitHub ties the run to the open PR. It posted no commit status on
+    // any of #128-#131's 90 commits, so a status is not read for it
+    { [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, ...onlyThisPr, [oldStatus]: { stdout: { statuses: [] } },
+      [oldRuns]: checkRuns(check("test"), rabbitRun("Finished", { conclusion: "success", ...ours })) },
   ];
   for (const over of evidence) {
     r = ready(over);
@@ -325,6 +337,39 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
     assert.match(r.stdout, EARLIER);
     assert.match(r.stdout, /^SENDABLE/m);
   }
+
+  // a check-run on a commit another PR also has is that PR's review: a stacked PR carries its lower
+  // PR's commits (CodeRabbit on superfactory#119)
+  r = ready({ ...evidence[2], [oldPulls]: { stdout: [{ number: N - 1 }, { number: N }] } });
+  assert.equal(r.status, 1, r.stdout);
+  assert.doesNotMatch(r.stdout, /earlier head/);
+  // CodeRabbit on superfactory#128: a closed, unmerged PR's review stays on its commits, and GitHub
+  // lists only open and merged PRs for a commit, so a commit of this PR's that only this PR is listed
+  // for may carry that one's review. Its status names no PR, and its check-run names the closed PR,
+  // or none: neither is this PR's review.
+  const closed = { pull_requests: [{ number: N - 5 }] };
+  const retained: [string, Routes][] = [
+    ["a status", { ...evidence[2], [oldRuns]: checkRuns(check("test")),
+      [oldStatus]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review completed" }] } } }],
+    ["a check-run tied to the closed PR", { ...evidence[2], [oldRuns]: checkRuns(rabbitRun("Review completed", { conclusion: "success", ...closed })) }],
+    ["a check-run tied to no PR", { ...evidence[2], [oldRuns]: checkRuns(rabbitRun("Review completed", { conclusion: "success", pull_requests: [] })) }],
+    ["a check-run with no PRs read", { ...evidence[2], [oldRuns]: checkRuns(rabbitRun("Review completed", { conclusion: "success" })) }],
+  ];
+  for (const [name, over] of retained) {
+    r = ready(over);
+    assert.equal(r.status, 1, `${name}: ${r.stdout}`);
+    assert.doesNotMatch(r.stdout, /earlier head/, name);
+    assert.match(r.stdout, /CodeRabbit has not reviewed aaaaaaa/, name);
+  }
+  // a skipped or unfinished check-run there is no review
+  for (const run of [rabbitRun("Review skipped", { conclusion: "skipped", ...ours }), rabbitRun("Review completed", { status: "in_progress", conclusion: null, ...ours }), rabbitRun("Review completed", ours)]) {
+    r = ready({ ...evidence[2], [oldRuns]: checkRuns(run) });
+    assert.equal(r.status, 1, r.stdout);
+  }
+  // the PRs of the commit unreadable: not a pass
+  r = ready({ ...evidence[2], [oldPulls]: { status: 1 } });
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /COULD NOT READ the PRs of commit bbbbbbb/);
 
   // its reply in a thread on an older head is not a review of it
   r = ready({ [cm]: { stdout: [{ user: { login: "coderabbitai[bot]" }, original_commit_id: OLD, in_reply_to_id: 11 }] } });
@@ -457,6 +502,13 @@ test("a rate-limited review bot lets the PR go without its review, said as a rem
   r = run(green({ [st]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review rate limited" }] } }, [rv]: { stdout: [] } }), ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 0, r.stdout);
   assert.ok(r.stdout.includes(REMARK), "its status alone says it too");
+
+  // the waiver needs no history: a failed read of the PR's comments or commits does not hold it back
+  for (const broken of [`api repos/${REMOTE}/pulls/${N}/comments?per_page=100&page=1`, `api repos/${REMOTE}/pulls/${N}/commits?per_page=100&page=1`]) {
+    r = run(green({ ...limited, [broken]: { status: 1 } }), ["pr-ready", "web", String(N)]);
+    assert.equal(r.status, 0, r.stdout);
+    assert.ok(r.stdout.includes(REMARK), r.stdout);
+  }
 
   r = run(green(limited), ["pr-send", "web", String(N), HEAD]);
   assert.equal(r.status, 0, r.stderr);
@@ -806,6 +858,15 @@ test("demo --before --base-ref accepts a stacked PR's base and still refuses an 
   g("switch", "-q", "--detach", unrelated);
   assert.equal(beforeSha(dir, "lower").sha, undefined, "an unrelated commit is no base");
 
+  // CodeRabbit on #119 (L7): a base branch whose files equal main's is still the base named.
+  g("switch", "-qc", "same", "main");
+  g("commit", "-q", "--allow-empty", "-m", "same files as main");
+  const same = g("rev-parse", "HEAD");
+  g("update-ref", "refs/remotes/origin/same", same);
+  g("switch", "-q", "--detach", "origin/same");
+  assert.equal(beforeSha(dir, "same").sha, same, "--base-ref's head first");
+  assert.equal(beforeSha(dir).sha, g("rev-parse", "origin/main"), "without --base-ref, main as before");
+
   // --base-ref names a branch on origin; a sha or a branch never fetched is refused outright.
   assert.throws(() => beforeSha(dir, lower), /is not a branch on origin/);
   assert.throws(() => beforeSha(dir, "unrelated"), /is not a branch on origin; `git fetch origin unrelated` first/);
@@ -839,4 +900,18 @@ test("pr-media puts a stacked PR's base-stamped demo under Before and refuses ma
   r = media();
   assert.equal(r.status, 1);
   assert.match(r.stderr, /the demo captured ccccccc but the PR head is aaaaaaa and its base \(lower\) is eeeeeee/);
+});
+
+// CodeRabbit on #119 (L8): the spec read Before from DEMO_OUT's "-before" suffix, so a key or a
+// moved output dir could film the wrong label. factory demo says it, and the template reads it.
+test("factory demo tells the spec which film it is by DEMO_BEFORE, and the template reads it", () => {
+  const dir = tempWorkspace(TOML);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const ws = openWorkspace(dir, {});
+  writeFileSync(join(dir, "demo.env"), "DEMO_BEFORE=1\n");
+  assert.equal(demoEnv(ws, "/pw/node_modules/@playwright/test", "/tmp/demo/WEB-1-before", "/s", undefined, true).DEMO_BEFORE, "1");
+  assert.equal(demoEnv(ws, "/pw/node_modules/@playwright/test", "/tmp/demo/WEB-1", "/s", undefined, false).DEMO_BEFORE, undefined, "an after run is never Before");
+  const spec = readFileSync(fileURLToPath(new URL("../../templates/demo.spec.ts", import.meta.url)), "utf8");
+  assert.match(spec, /const STATE = process\.env\.DEMO_BEFORE === '1' \? 'Before' : 'After';/);
+  assert.doesNotMatch(spec, /endsWith\('-before'\)/);
 });
