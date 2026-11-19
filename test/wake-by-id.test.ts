@@ -233,3 +233,14 @@ test("a down leaves a marked launch that showed a pid read as having run", () =>
   assert.equal(run("wake", "rae").status, 0);
   assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn runA"], "the conversation since the stop");
 });
+
+// CodeRabbit on #130 at 2f878288: down's stale sweep listed each host once per agent.
+test("down lists a host once to remove the rows a hook's wake left", () => {
+  const { ws, run, calls } = fleet();
+  const w = openWorkspace(ws, {});
+  mkdirSync(w.runDir, { recursive: true });
+  writeFileSync(join(w.runDir, "stale-rae.json"), JSON.stringify(["91c86061"]));
+  assert.equal(run("down").status, 0);
+  assert.ok(calls().includes("rm 91c86061"), calls().join("\n"));
+  assert.ok(calls().filter((c) => c.startsWith("agents")).length <= 2, calls().join("\n"));
+});

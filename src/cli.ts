@@ -7,7 +7,7 @@ import { followInbox } from "./board/inbox.js";
 import { markHandledMany, queue as waitingQueue, queueTrouble } from "./board/queue.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
-import { lastStopped, noteStopped, noteUnrun, ran, sweepStale } from "./stopped.js";
+import { lastStopped, noteStopped, noteUnrun, ran, staleIds, sweepStale } from "./stopped.js";
 import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owesSession, lead, listing, type Session, stopSession, stopWorktree, waitForName } from "./fleet.js";
 import { Unreachable } from "./remote.js";
 import { agentSessions, type Transport, transportFor, transports } from "./transport.js";
@@ -624,9 +624,15 @@ function cmdDown(ws: Workspace, argv: string[]) {
       if (live) noteStopped(ws, s.name ?? "", s, hits);
     }
   // rows a hook's wake left (stopped.ts), once every session is stopped
-  for (const { t, hits } of agentSessions(ws, (where) => rows.get(where))) {
-    const after = rowsNow(t);
-    for (const name of new Set(hits.map((h) => h.name ?? ""))) sweepStale(ws, name, t, after);
+  // One listing per host, taken only once an agent there has any, and kept when it fails: a host
+  // that does not answer costs one timeout, not one per agent (CodeRabbit on #130 at 2f878288).
+  const after = new Map<string, Session[] | undefined>();
+  for (const { agent, t } of agentSessions(ws, (where) => rows.get(where))) {
+    if (!staleIds(ws, agent.name).length) continue;
+    if (!after.has(t.where)) after.set(t.where, rowsNow(t));
+    const listed = after.get(t.where);
+    const removed = sweepStale(ws, agent.name, t, listed);
+    if (listed && removed.length) after.set(t.where, listed.filter((r) => !removed.includes(r.id ?? "")));
   }
   stopBoard(ws, true);
   return code;

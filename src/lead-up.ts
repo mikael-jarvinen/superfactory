@@ -40,16 +40,14 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
   let marks: string[] | undefined;
   if (!fresh) {
     sweepStale(ws, ld.name, t);
-    const st = lastStopped(ws, ld.name);
-    if (!st) old = findSession(t, ld.name, true);
-    else {
-      const which = resumable(ws, ld.name, t.sessions(true).filter(isAgentSession(ld.name)), (rows) => pick(t, rows));
-      if ("gone" in which)
-        throw new FactoryError(`${ld.name}'s last stopped session ${which.gone} is no longer listed, and an older one is another conversation. ` +
-          `\`${freshCommand(ld)}\` starts a new one.`);
-      old = which.s;
-      marks = which.failed;
-    }
+    // with no record too: resumable leaves out the rows a hook's wake left, which a sweep that
+    // failed still lists (CodeRabbit on #130 at 2f878288)
+    const which = resumable(ws, ld.name, t.sessions(true).filter(isAgentSession(ld.name)), (rows) => pick(t, rows));
+    if ("gone" in which)
+      throw new FactoryError(`${ld.name}'s last stopped session ${which.gone} is no longer listed, and an older one is another conversation. ` +
+        `\`${freshCommand(ld)}\` starts a new one.`);
+    old = which.s;
+    marks = which.failed;
   }
   if (old) {
     const sid = old.id as string;

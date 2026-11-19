@@ -289,7 +289,10 @@ export function replaceStopped(ws: Workspace, name: string, t: Pick<Transport, "
       // the listing failed: every mark is carried (held), and the rows stay
     }
   const st = seen(ws, name, lastStopped(ws, name), rows);
-  if (newId && st) moveRecord(ws, name, newId, held(st, rows, newId).filter((id) => id !== stale));
+  // a listing taken before the respawn speaks only for the rows it shows: a mark written since,
+  // for a launch it never saw, stands (CodeRabbit on #130 at 2f878288)
+  const unseen = listed ? (st?.failed ?? []).filter((id) => id !== newId && !listed.some((r) => r.id === id)) : [];
+  if (newId && st) moveRecord(ws, name, newId, [...held(st, rows, newId), ...unseen].filter((id) => id !== stale));
   else forgetStopped(ws, name);
   const old = [...new Set([st?.id, stale])].filter((id): id is string => !!id && id !== newId);
   // with no time to remove them, they are noted for the next caller that has it

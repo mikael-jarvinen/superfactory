@@ -697,6 +697,42 @@ test("a sweep keeps an id a hook's wake noted while it ran (Marie on #130 at 654
   }
 });
 
+test("up with no record never resumes a row a hook's wake left, its removal failed (CodeRabbit on #130 at 2f878288)", () => {
+  try {
+    noteStaleIds(["runA"]);
+    const f = fake([{ id: "runA", name: ld.name, kind: "background", state: "stopped", startedAt: Date.now() - 60_000 }], { stopFails: true });
+    bringUpLead(ws, ld, f.t, false, () => {}, 1);
+    assert.deepEqual(f.respawned, [], "the superseded conversation is not revived");
+    assert.equal(f.started.length, 1, "a fresh one starts");
+    assert.deepEqual(staleIds(), ["runA"], "kept for a later sweep");
+  } finally {
+    forgetAll();
+  }
+});
+
+test("a deadline wake keeps a mark written during its respawn, for a launch its listing never saw (CodeRabbit on #130 at 2f878288)", () => {
+  const t0 = Date.now();
+  try {
+    record({ id: "runA", at: new Date(t0 - 3_600_000).toISOString(), failed: ["deadB"] });
+    const rows: Session[] = [
+      { id: "runA", name: ld.name, kind: "background", state: "stopped", startedAt: t0 - 7_200_000 },
+      { id: "deadB", name: ld.name, kind: "background", state: "failed", startedAt: t0 + 7_200_000 },
+    ];
+    const f = fake(rows);
+    f.t.respawn = (_name, id) => {
+      f.respawned.push(id);
+      rows.push({ id: `${id}2`, name: ld.name, kind: "background", alive: true, startedAt: t0 });
+      // meanwhile a launch elsewhere fails, and marks newC
+      record({ id: "runA", at: new Date(t0 - 3_600_000).toISOString(), failed: ["deadB", "newC"] });
+      return { ok: true, said: "respawned", why: "" };
+    };
+    assert.equal(wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10, deadline: Date.now() + 120_000 }).is, "woke");
+    assert.deepEqual(lastStopped(ws, ld.name)?.failed, ["deadB", "newC"]);
+  } finally {
+    forgetAll();
+  }
+});
+
 test("a listing that fails or comes back empty keeps the rows a hook's wake left", () => {
   try {
     mkdirSync(ws.runDir, { recursive: true });
