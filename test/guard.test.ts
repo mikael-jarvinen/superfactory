@@ -1297,7 +1297,30 @@ const ROUND_128: [string, string, string][] = [
   [NO, "gh spelt in hex, piped to sh", "echo -e '\\x67h pr comment 5 -R acme/api --body hi' | sh"],
   [OK, "an escape that goes to no shell", "printf '\\033[1mbold\\033[0m\\n'"],
   [OK, "an unreadable printf in another pipe", "printf '  %-24s %s\\n' a b; git diff --name-only | xargs -I{} sh -c 'echo {}'; gh pr view 5"],
-  [OK, "a marked comment through a slot", "echo \"gh pr comment 5 -R acme/api --body '> Written by agent. ok'\" | xargs -I{} sh -c '{}'"],
+  // CodeRabbit on #128 at 318ba864: xargs -I takes a line's quotes in its default mode, so sh gets
+  // --body > Written by agent. ok, a redirection; -d '\n' passes the line as it is
+  [NO, "a marked body whose quotes xargs takes", "echo \"gh pr comment 5 -R acme/api --body '> Written by agent. ok'\" | xargs -I{} sh -c '{}'"],
+  [OK, "a marked comment through a slot", "echo \"gh pr comment 5 -R acme/api --body '> Written by agent. ok'\" | xargs -d '\\n' -I{} sh -c '{}'"],
+  // and the command as written is checked only when the line shows all xargs' input: a marked line
+  // that fills --body {} is the body
+  [OK, "a marked line into --body {}", "echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
+  [OK, "a marked here-string into --body {}", "xargs -I{} gh pr comment 5 -R acme/api --body {} <<< '> Written by agent. ok'"],
+  [NO, "an unmarked line into --body {}", "echo hi | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
+  [NO, "a file into --body {}", "cat f | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
+  [NO, "a marked line and a file into --body {}", "{ echo '> Written by agent. ok'; cat f; } | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
+  [NO, "a marked line and a file from a subshell", "(echo '> Written by agent. ok'; cat f) | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
+  [NO, "a file piped into a group past a marked line", "cat f | { echo '> Written by agent. ok'; xargs -I{} gh pr comment 5 -R acme/api --body {}; }"],
+  [NO, "a file after the here-string on fd 0", "xargs -I{} gh pr comment 5 -R acme/api --body {} <<< '> Written by agent. ok' < f"],
+  [NO, "a here-string on fd 3 and a file on fd 0", "xargs -I{} gh pr comment 5 -R acme/api --body {} 3<<< '> Written by agent. ok' < f"],
+  [NO, "a file in place of the pipe", "echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 -R acme/api --body {} < f"],
+  // CodeRabbit on #128 at 318ba864: a backtick in a shell comment runs nothing; one in ${...}, or
+  // after a # that starts no word, or on the next line, still runs
+  [OK, "a backtick in a trailing comment", "gh pr view 5 # it`s"],
+  [OK, "a backtick in a comment after &&", "gh pr view 5 && echo x # don't `y"],
+  [NO, "a backtick after a # inside ${...}", "echo ${x/ #/`gh pr comment 5 -R acme/api --body hi`}"],
+  [NO, "a backtick after a # inside a word", "echo a#`gh pr comment 5 -R acme/api --body hi`"],
+  [NO, "a backtick after a quoted #", "echo '#' `gh pr comment 5 -R acme/api --body hi`"],
+  [NO, "a backtick on the line after a comment", "gh pr view 5 # x\necho `gh pr comment 5 -R acme/api --body hi`"],
   [OK, "gh output into xargs echo", "gh pr list | xargs -n1 echo"],
   [OK, "xargs kill then a gh read", "ls | xargs -r kill; gh pr view 5"],
   // CodeRabbit on #128 at c023ab97: a filter between printf and a shell, xargs batches, -d items

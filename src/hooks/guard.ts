@@ -357,8 +357,13 @@ interface Simple {
   piped?: boolean;
   // whether a <, <<, <<< or <> on fd 0 replaces that pipe as its stdin
   redirected0?: boolean;
+  // whether the last of those is a here-string or a heredoc, the one in stdin, so the line shows it
+  shown0?: boolean;
   // what echo and printf earlier in the line print, which a pipe may carry to it
   upstream?: string[];
+  // whether a command whose output this cannot know (cat f, git diff) may also be in that pipe, so
+  // upstream is not all it can read
+  blind?: boolean;
   // the groups, loops, ifs and subshells it is inside, outermost first, each by its own number; 0 is the line
   scope?: number[];
   // the scopes a ;, &&, || or & closed a pipeline in just before it: what was printed in such a scope before
@@ -390,7 +395,7 @@ function simpleCommands(toks: Tok[], bodies: string[] = [], ticks: "refuse" | "p
   const flush = () => {
     if (in0 !== null) stdin.push(in0);
     if (cur.length || writes.length || reads.length || stdin.length) {
-      out.push({ words: cur, writes, reads, stdin, piped, redirected0, scope: [...scope], cuts });
+      out.push({ words: cur, writes, reads, stdin, piped, redirected0, shown0: redirected0 && in0 !== null, scope: [...scope], cuts });
       cuts = [];
     }
     [cur, writes, reads, stdin, in0, piped, redirected0] = [[], [], [], [], null, false, false];
@@ -2050,6 +2055,8 @@ function nextHeredoc(text: string, from: number): Heredoc | null {
 // other format (%.2s, %b), is UNREADABLE, which a pipe into crontab, at or batch refuses (Marie on
 // #124 at c197d465).
 const UNREADABLE = "\u0000unreadable";
+// what a command other than echo or printf prints, in pipeTracker: unknown, and not checked as text
+const UNSEEN = "\u0000unseen";
 function printedText(words: string[]): string | null {
   const name = posix.basename(words[0] ?? "");
   const esc = (t: string): string | null =>
@@ -2419,11 +2426,18 @@ function pipeTracker(): (simple: Simple, printed: string | null) => void {
     const path = simple.scope ?? [0];
     for (const id of simple.cuts ?? []) cut.set(id, said.length);
     for (const id of path) if (!opened.has(id)) [opened, cut].forEach((m) => m.set(id, said.length));
-    if (simple.piped) simple.upstream = path.flatMap((id, k) => said.slice(cut.get(id) ?? 0, k + 1 < path.length ? opened.get(path[k + 1] as number) : said.length));
+    if (simple.piped) {
+      const all = path.flatMap((id, k) => said.slice(cut.get(id) ?? 0, k + 1 < path.length ? opened.get(path[k + 1] as number) : said.length));
+      simple.upstream = all.filter((t) => t !== UNSEEN);
+      simple.blind = all.length > simple.upstream.length;
+    }
     // a command piped text it does not print, sed or tr, passes on what this cannot read, not that
-    // text (CodeRabbit on #128: printf '...' | sed 's/Written by agent/x/' | sh)
+    // text (CodeRabbit on #128: printf '...' | sed 's/Written by agent/x/' | sh). Any other command
+    // prints what this cannot know, which is not text to check but leaves the pipe's text not all
+    // there is: { echo '> Written by agent.'; cat f; } | xargs -I{} gh ... --body {} (#128)
     if (printed !== null) said.push(printed);
     else if (simple.piped && simple.upstream?.length) said.push(UNREADABLE);
+    else said.push(UNSEEN);
   };
 }
 
@@ -2529,6 +2543,25 @@ function xargsWords(text: string): string[][] {
     if (words.length) lines.push(words);
   }
   return lines;
+}
+
+// One input line as xargs -I passes it in its default mode: leading blanks cut, '...', "..." and \
+// quoting removed, other blanks kept. An unclosed quote is null: xargs stops there and runs nothing
+// for it, and the line is still checked as it is written.
+function xargsLine(line: string): string | null {
+  let out = "";
+  let q = "";
+  const text = line.replace(/^[ \t]+/, "");
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i] as string;
+    if (q) {
+      if (c === q) q = "";
+      else out += c;
+    } else if (c === "'" || c === '"') q = c;
+    else if (c === "\\" && i + 1 < text.length) out += text[++i];
+    else out += c;
+  }
+  return q ? null : out;
 }
 
 // The runs xargs makes of one input: its items, cut into batches as its options say.
@@ -2644,7 +2677,10 @@ function checkComments(cmd: string): void {
       for (const input of inputs) {
         if (slot !== null) {
           const items = how.delim !== null ? input.split(how.delim) : input.split(/\n|\\n/);
-          for (const line of new Set([input, ...items]))
+          // in its default mode xargs takes each line's quotes and backslashes as it does for any item,
+          // so sh gets --body > Written..., a redirection (CodeRabbit on #128); each is read both ways
+          const unquoted = how.delim !== null ? [] : items.map(xargsLine).filter((l): l is string => l !== null);
+          for (const line of new Set([input, ...items, ...unquoted]))
             checkComments(words.map((w) => q(slot ? w.split(slot).join(how.delim !== null ? line : line.replace(/^[ \t]+/, "")) : w)).join(" "));
           continue;
         }
@@ -2654,7 +2690,11 @@ function checkComments(cmd: string): void {
           checkComments([...words, ...batch].map(q).join(" "));
         }
       }
-      if (slot !== null) checkComments(words.map(q).join(" "));
+      // the command is checked as written unless the line shows all its input: then only the runs
+      // it makes are, so a marked body that fills --body {} is no refusal (CodeRabbit on #128). Input
+      // from a file, or from a command in the pipe this cannot read, keeps the written check
+      const whole = s.piped && !s.redirected0 ? !!s.upstream?.length && !s.blind : !!s.shown0;
+      if (slot !== null && !whole) checkComments(words.map(q).join(" "));
       continue;
     }
     if (name === "gh") checkCommentWrite(words.slice(1));
@@ -2670,15 +2710,28 @@ function checkComments(cmd: string): void {
 }
 
 // The command lines inside a line's backticks, outside single quotes; \` and \\ inside one are the
-// letters bash makes of them. An unclosed backtick is refused.
+// letters bash makes of them. An unclosed backtick is refused. A # that starts a word outside quotes
+// and outside ${...} begins a comment to the end of the line, which bash does not run, so a backtick
+// there is no command (CodeRabbit on #128). Only a # after a blank, a newline, ;, &, |, ( or the
+// line's start is taken as one; any other is read on, which can only refuse more.
 function backtickBodies(text: string): string[] {
   const out: string[] = [];
   let q = "";
+  let braces = 0; // inside ${...}, where # is no comment: ${x/ #/`cmd`} runs cmd
   for (let i = 0; i < text.length; i++) {
     const c = text[i] as string;
     if (q === "'") {
       if (c === "'") q = "";
     } else if (c === "\\") i++;
+    else if (!q && c === "$" && text[i + 1] === "{") {
+      braces++;
+      i++;
+    } else if (!q && braces && c === "}") braces--;
+    else if (!q && !braces && c === "#" && (i === 0 || /[\s;&|(]/.test(text[i - 1] as string))) {
+      const nl = text.indexOf("\n", i);
+      if (nl < 0) break;
+      i = nl;
+    }
     else if (c === "'" && !q) q = c;
     else if (c === '"') q = q ? "" : c;
     else if (c === "`") {
