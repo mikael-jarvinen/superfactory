@@ -6,12 +6,14 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { join } from "node:path";
 import type { Agent } from "./config.js";
 import type { Session } from "./fleet.js";
-import type { Transport } from "./transport.js";
+import { newest, type Transport } from "./transport.js";
 import type { Workspace } from "./workspace.js";
 
 export interface Stopped {
   id: string;
   at: string;
+  // launches since the stop that never came up: their rows supersede nothing (CodeRabbit on #130)
+  failed?: string[];
 }
 
 const file = (ws: Workspace, name: string) => join(ws.runDir, `stopped-${name}.json`);
@@ -31,10 +33,62 @@ export function lastStopped(ws: Workspace, name: string): Stopped | null {
   if (!existsSync(f)) return null;
   try {
     const d = JSON.parse(readFileSync(f, "utf8")) as Partial<Stopped>;
-    return typeof d.id === "string" && d.id ? { id: d.id, at: String(d.at ?? "") } : null;
+    if (typeof d.id !== "string" || !d.id) return null;
+    const failed = Array.isArray(d.failed) ? d.failed.filter((x): x is string => typeof x === "string") : [];
+    return { id: d.id, at: String(d.at ?? ""), ...(failed.length ? { failed } : {}) };
   } catch {
     return null;
   }
+}
+
+// The agent's rows a launch is about to add to, by id, read before it starts: what a failed launch
+// added is what was not there, with no clock compared (Marie on #130: a remote listing's startedAt
+// is another host's clock). null when the listing cannot be had.
+export function rowsBefore(t: Pick<Transport, "sessions">, name: string): Session[] | null {
+  try {
+    return t.sessions(true).filter((r) => r.name === name && r.kind === "background");
+  } catch {
+    return null;
+  }
+}
+
+// A launch that never came up, so a wake still resumes the session stopped last rather than its row
+// (CodeRabbit on #130: the listing keeps that row, started after the stop, and resumable took it for
+// a newer conversation). The row is kept for \`claude logs\`; its id is noted here, with any other
+// row of the agent that was not listed before the launch. With no record, the newest row from
+// before is written as the one to resume, so the dead launch is not it either (Marie on #130).
+export function noteFailedLaunch(ws: Workspace, name: string, t: Pick<Transport, "sessions">, launchId: string, before: Session[] | null): void {
+  const was = new Set((before ?? []).map((r) => r.id));
+  const ids = new Set<string>();
+  if (/^\w+$/.test(launchId) && !was.has(launchId)) ids.add(launchId);
+  if (before) {
+    try {
+      for (const r of t.sessions(true)) if (r.name === name && r.kind === "background" && r.id && !was.has(r.id)) ids.add(r.id);
+    } catch {
+      // the listing failed: the launch id alone
+    }
+  }
+  // With no record, one is written here, so it is also what the next launch that comes up replaces:
+  // replaceStopped then removes that older row from the listing, as it removes any stopped row a
+  // new conversation supersedes. That is intended; the older row was the way back only until then.
+  const st = lastStopped(ws, name) ?? (() => {
+    const old = newest((before ?? []).filter((r) => r.id && !ids.has(r.id)));
+    return old?.id ? ({ id: old.id, at: new Date().toISOString() } as Stopped) : null;
+  })();
+  if (!st || !ids.size) return;
+  for (const x of st.failed ?? []) ids.add(x);
+  ids.delete(st.id);
+  mkdirSync(ws.runDir, { recursive: true });
+  const f = file(ws, name);
+  const tmp = `${f}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ ...st, failed: [...ids] } satisfies Stopped) + "\n");
+  renameSync(tmp, f);
+}
+
+// A row noted as a failed launch that is seen live came up after all: it is a new conversation,
+// and replaces the one stopped last as a launch that came up does (Marie on #130).
+export function cameUp(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, s: Session): void {
+  if (s.id && lastStopped(ws, name)?.failed?.includes(s.id)) replaceStopped(ws, name, t, s.id);
 }
 
 export const forgetStopped = (ws: Workspace, name: string) => rmSync(file(ws, name), { force: true });
@@ -46,6 +100,9 @@ export const freshCommand = (a: Pick<Agent, "name" | "role">): string =>
     : a.role === "reviewer" ? `factory review --name ${a.name} --force`
     : a.role === "assistant" ? `factory assistant ${a.name} --force`
     : `factory dispatch ${a.name} <KEY> --force`;
+
+// Whether a row shows its session came up at some point.
+const ran = (r: Session): boolean => ["done", "blocked", "stopped"].includes(String(r.state)) || typeof r.pid === "number";
 
 // When a row started, in epoch ms, or NaN.
 const startMs = (r: Session): number =>
@@ -60,7 +117,11 @@ export function resumable(ws: Workspace, name: string, rows: Session[], newest: 
   const st = lastStopped(ws, name);
   if (!st) return { s: newest(rows) };
   const at = Date.parse(st.at);
-  if (rows.some((r) => r.id !== st.id && startMs(r) > at)) return { s: newest(rows) };
+  // a noted launch holds its mark until its row shows it ran: a state only a session that came up
+  // reaches (done, blocked, stopped), or a worker's pid. A row still "working" with no pid after the
+  // launch gave up, or one with no state, has shown nothing and stays marked (Marie on #130).
+  const failed = new Set((st.failed ?? []).filter((id) => !rows.some((r) => r.id === id && ran(r))));
+  if (rows.some((r) => r.id !== st.id && !failed.has(r.id ?? "") && startMs(r) > at)) return { s: newest(rows.filter((r) => !failed.has(r.id ?? ""))) };
   const s = rows.find((r) => r.id === st.id);
   return s ? { s } : { gone: st.id };
 }

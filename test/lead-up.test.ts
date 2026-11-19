@@ -6,7 +6,8 @@ import type { Session } from "../src/fleet.js";
 import { lead } from "../src/fleet.js";
 import { launch, leadPrompt, settingsFile } from "../src/launch.js";
 import { bringUpLead, resumePrompt } from "../src/lead-up.js";
-import { forgetStopped, lastStopped, noteStopped } from "../src/stopped.js";
+import { forgetStopped, lastStopped, noteStopped, resumable } from "../src/stopped.js";
+import { wake } from "../src/wake.js";
 import type { StartRequest, Transport } from "../src/transport.js";
 import { FactoryError } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
@@ -19,7 +20,7 @@ const ws = openWorkspace(dir, {});
 const ld = lead(ws);
 
 // A transport whose listing is `sessions`; whatever it starts or respawns comes up alive.
-function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boolean; stopBug?: boolean; neverUp?: boolean } = {}) {
+function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boolean; stopBug?: boolean; neverUp?: boolean; deadRow?: number; launchId?: string } = {}) {
   const started: { cwd: string; prompt: string; args: string[]; appendix: string | null; runDir: string }[] = [];
   const respawned: string[] = [];
   const removed: string[] = [];
@@ -32,7 +33,9 @@ function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boo
       if (opts.startFails) throw new Error("claude --bg failed: no such session");
       started.push({ cwd: req.cwd, prompt: req.prompt, args: req.args(req.appendix ? "/run/appendix.md" : null), appendix: req.appendix, runDir: req.runDir });
       if (!opts.neverUp) sessions.push({ id: "new1", name: ld.name, kind: "background", alive: true });
-      return "new1";
+      // a launch that dies at once: the listing keeps its row, started now, never alive
+      else if (opts.deadRow) sessions.push({ id: "new1", name: ld.name, kind: "background", state: "failed", startedAt: opts.deadRow });
+      return opts.launchId ?? "new1";
     },
     respawn(_name, id) {
       respawned.push(id);
@@ -239,5 +242,154 @@ test("a launch that never comes up keeps the stopped row and its record (CodeRab
     assert.equal(lastStopped(ws, ld.name)?.id, "5e7a0b12");
   } finally {
     forgetStopped(ws, ld.name);
+  }
+});
+
+test("a launch that never comes up does not make its row the one a wake resumes (CodeRabbit on #130 at fcf9403e)", () => {
+  const today = stopped({ id: "5e7a0b12", sessionId: "today-uuid", startedAt: Date.now() - 3_600_000 });
+  try {
+    noteStopped(ws, ld.name, today);
+    const rows: Session[] = [today];
+    const f = fake(rows, { neverUp: true, deadRow: Date.now() + 1000 });
+    let now = Date.now();
+    const m = mock.method(Date, "now", () => (now += 100_000));
+    try {
+      assert.throws(() => launch(ws, ld, join(dir, "lead"), "hi", null, undefined, f.t), /did not appear in `claude agents`/);
+    } finally {
+      m.mock.restore();
+    }
+    assert.ok(rows.some((r) => r.id === "new1"), "the failed launch's row is listed, started after the stop");
+    const newest = (r: Session[]) => r.reduce<Session | null>((a, b) => (!a || Number(b.startedAt) > Number(a.startedAt) ? b : a), null);
+    const which = resumable(ws, ld.name, rows, newest);
+    assert.ok("s" in which && which.s?.id === "5e7a0b12", `a wake resumes the session stopped last, not the launch that failed: ${JSON.stringify(which)}`);
+    // a conversation that did come up since still supersedes the record
+    rows.push({ id: "c0ffee00", name: ld.name, kind: "background", state: "stopped", startedAt: Date.now() + 5000 });
+    const later = resumable(ws, ld.name, rows, newest);
+    assert.ok("s" in later && later.s?.id === "c0ffee00", JSON.stringify(later));
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
+});
+
+// Marie's gate on #130 at 5e10c7e0
+const record = (st: { id: string; at: string; failed?: string[] }) => {
+  mkdirSync(ws.runDir, { recursive: true });
+  writeFileSync(join(ws.runDir, `stopped-${ld.name}.json`), JSON.stringify(st));
+};
+const failNow = (rows: Session[], deadRow: number, launchId?: string) => {
+  const f = fake(rows, { neverUp: true, deadRow, ...(launchId ? { launchId } : {}) });
+  let now = Date.now();
+  const m = mock.method(Date, "now", () => (now += 100_000));
+  try {
+    assert.throws(() => launch(ws, ld, join(dir, "lead"), "hi", null, undefined, f.t), /did not appear in `claude agents`/);
+  } finally {
+    m.mock.restore();
+  }
+  return f;
+};
+
+test("up picks among the rows resumable filtered, not the whole listing (Marie on #130 at 5e10c7e0)", () => {
+  const t0 = Date.now();
+  try {
+    record({ id: "old1", at: new Date(t0 - 3_600_000).toISOString(), failed: ["new1"] });
+    const rows: Session[] = [
+      { id: "old1", name: ld.name, kind: "background", state: "stopped", startedAt: t0 - 7_200_000 },
+      { id: "box2", name: ld.name, kind: "background", state: "done", startedAt: t0 - 1_800_000 },
+      { id: "new1", name: ld.name, kind: "background", state: "failed", startedAt: t0 - 60_000 },
+    ];
+    const f = fake(rows);
+    bringUpLead(ws, ld, f.t, false, () => {}, 1);
+    assert.deepEqual(f.respawned, ["box2"], "the conversation started after the stop, not the launch that failed");
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
+});
+
+test("a failed launch that comes up later is no longer passed over (Marie on #130 at 5e10c7e0)", () => {
+  for (const seenLive of [true, false]) {
+    const today = stopped({ id: "5e7a0b12", sessionId: undefined, startedAt: Date.now() - 3_600_000 });
+    try {
+      noteStopped(ws, ld.name, today);
+      const rows: Session[] = [today];
+      failNow(rows, Date.now() + 1000);
+      assert.deepEqual(lastStopped(ws, ld.name)?.failed, ["new1"]);
+      const row = rows.find((r) => r.id === "new1") as Session;
+      const f = fake(rows);
+      if (seenLive) {
+        // it comes up: a wake finds it live, and it replaces the record as a launch that came up does
+        Object.assign(row, { alive: true, state: "idle" });
+        assert.equal(wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 }).is, "live");
+        assert.equal(lastStopped(ws, ld.name), null, `seen live, the record is replaced`);
+      }
+      // it ends on its own: a wake resumes it, the newer conversation
+      Object.assign(row, { alive: false, state: "done" });
+      const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+      assert.deepEqual(f.respawned, ["new1"], `seenLive=${seenLive}: ${JSON.stringify(w)}`);
+    } finally {
+      forgetStopped(ws, ld.name);
+    }
+  }
+});
+
+test("a failed launch's rows are told by the listing, not by this host's clock (Marie on #130 at 5e10c7e0)", () => {
+  const today = stopped({ id: "5e7a0b12", startedAt: Date.now() - 7_200_000 });
+  try {
+    noteStopped(ws, ld.name, today);
+    // its id is not known ("?"), and the host's clock is behind this one: the row's startedAt is
+    // after the stop and before the launch began here
+    const rows: Session[] = [today];
+    const at = Date.parse(lastStopped(ws, ld.name)?.at as string);
+    failNow(rows, at + 1000, "?");
+    assert.deepEqual(lastStopped(ws, ld.name)?.failed, ["new1"]);
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
+});
+
+test("with no stop record, a failed launch is still not the one resumed (Marie on #130 at 5e10c7e0)", () => {
+  const old = stopped({ id: "old1", sessionId: undefined, state: "done", startedAt: Date.now() - 3_600_000 });
+  try {
+    forgetStopped(ws, ld.name);
+    const rows: Session[] = [old];
+    failNow(rows, Date.now() + 1000);
+    assert.deepEqual(lastStopped(ws, ld.name), { id: "old1", at: lastStopped(ws, ld.name)?.at, failed: ["new1"] });
+    const f = fake(rows);
+    wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+    assert.deepEqual(f.respawned, ["old1"]);
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
+});
+
+test("a note that cannot be written leaves die's launch id message (Marie on #130 at 5e10c7e0)", () => {
+  const old = stopped({ id: "old1", startedAt: Date.now() - 3_600_000 });
+  const f = join(ws.runDir, `stopped-${ld.name}.json`);
+  mkdirSync(f, { recursive: true });
+  const err = mock.method(console, "error", () => {});
+  try {
+    failNow([old], Date.now() + 1000);
+  } finally {
+    err.mock.restore();
+    rmSync(f, { recursive: true, force: true });
+  }
+});
+
+test("a failed launch's row that has shown nothing keeps its mark (Marie on #130 at 24691398)", () => {
+  for (const shown of [{ state: "working" }, {}] as Partial<Session>[]) {
+    const today = stopped({ id: "5e7a0b12", sessionId: undefined, startedAt: Date.now() - 3_600_000 });
+    try {
+      noteStopped(ws, ld.name, today);
+      const rows: Session[] = [today];
+      failNow(rows, Date.now() + 1000);
+      const row = rows.find((r) => r.id === "new1") as Session;
+      // still listed "working" with no pid after the launch gave up, or with no state at all
+      delete row.state;
+      Object.assign(row, shown, { pid: null });
+      const f = fake(rows);
+      const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+      assert.deepEqual(f.respawned, ["5e7a0b12"], `${JSON.stringify(shown)}: ${JSON.stringify(w)}`);
+    } finally {
+      forgetStopped(ws, ld.name);
+    }
   }
 });
