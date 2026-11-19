@@ -1196,14 +1196,17 @@ function checkCommentWrite(raw: string[]): void {
   }
 }
 
-// gh's own top-level commands, from gh 2.97's `gh help`, with their cobra aliases (cs, ext, rs...).
+// gh's own top-level commands and help topics, from gh 2.97's `gh help`, with their cobra aliases
+// (cs, ext, rs, a11y...), and `gh version`, which `gh help` does not list.
 // Any other first word is a user alias, a shell alias or an extension, and could run anything, so
 // it is refused. gh lets no alias shadow a built-in, so this needs no read of gh's config. Making
 // an alias or getting an extension is refused outright (Marie and Niilo, the -R/alias hotfix).
 const GH_BUILTINS = new Set(["agent-task", "agent-tasks", "agent", "agents", "alias", "api", "attestation", "at", "auth", "browse",
   "cache", "codespace", "cs", "completion", "config", "copilot", "discussion", "extension", "extensions", "ext", "gist", "gpg-key",
   "help", "issue", "label", "licenses", "org", "pr", "preview", "project", "release", "repo", "ruleset", "rs", "run", "search",
-  "secret", "skill", "skills", "ssh-key", "status", "variable", "workflow"]);
+  "secret", "skill", "skills", "ssh-key", "status", "variable", "version", "workflow",
+  // help topics
+  "accessibility", "a11y", "actions", "environment", "exit-codes", "formatting", "mintty", "reference", "telemetry"]);
 const GH_ALIAS_HINT = "gh aliases and extensions can't be checked: run the full gh command";
 export function checkGhCommand(args: string[]): void {
   const [c, sub] = args;

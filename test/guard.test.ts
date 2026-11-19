@@ -279,7 +279,10 @@ test("a gh alias or extension is refused, and so is making one", () => {
     "gh pc 1 -b hi", "gh alias set --shell x 'gh pr merge 8701 -R acme/api'", "gh x", "gh alias import a.yml", "gh alias delete co",
     "gh co 12", "gh extension install o/gh-x", "gh ext install o/gh-x", "gh extensions upgrade --all", "gh extension exec x",
     "command gh m 8701 -R acme/api", "gh -- m 8701", "bash -c 'gh m 8701 -R acme/api'"];
-  const allowed = ["gh pr checkout 12", "gh pr co 12", "gh alias list", "gh alias ls", "gh ext list", "gh pr view 1", "gh --version", "gh --help", "gh help", "gh -R acme/api pr checks 1"];
+  const allowed = ["gh pr checkout 12", "gh pr co 12", "gh alias list", "gh alias ls", "gh ext list", "gh pr view 1", "gh --version", "gh --help", "gh help", "gh -R acme/api pr checks 1",
+    // Marie on #128: gh's own `version` and its help topics are no alias
+    "gh version", "gh accessibility", "gh a11y", "gh actions", "gh environment", "gh reference", "gh exit-codes", "gh formatting",
+    "gh mintty", "gh telemetry"];
   const wrong: string[] = [];
   for (const ctx of [pr, lead]) {
     for (const c of refused) if (!/aliases and extensions can't be checked/.test(verdict(c, ctx) ?? "")) wrong.push(`${ctx.role} allowed: ${c}`);

@@ -110,6 +110,7 @@ export async function runScheduler(ws: Workspace, opts: RunOptions = {}): Promis
 
   const clearingInProcess = new Set<string>(); // label:pgid, a cleanUp under way in this process
   const unsureChecks = new Map<string, number>(); // label:pgid, checks in a row it deferred on an unsure process
+  const unsureTried = new Set<string>(); // label:pgid, the lead told, or tried, about it in this process
   function clear(label: string, pgid: number) {
     const r = runs[label] as JobRun;
     if (!r.clearing?.includes(pgid)) r.clearing = [...(r.clearing ?? []), pgid];
@@ -122,19 +123,25 @@ export async function runScheduler(ws: Workspace, opts: RunOptions = {}): Promis
         // still in clearing, so the next check tries again
         const n = unsure === undefined ? 0 : (unsureChecks.get(key) ?? 0) + 1;
         unsureChecks.set(key, n);
-        if (unsure !== undefined && n >= UNSURE_CHECKS && !r.unsureTold?.includes(pgid)) {
+        if (unsure !== undefined && n >= UNSURE_CHECKS && !r.unsureTold?.includes(pgid) && !unsureTried.has(key)) {
+          // tried once in this process: a note that cannot be written says so once, in the log and
+          // the failures log, not on every check after; a restarted scheduler tries again
+          unsureTried.add(key);
           const text = `[scheduler]\njob ${label}: pid ${unsure} in process group ${pgid} has read unsure (a blank command line, or a name that changes) ` +
             `for ${n} checks, so it is not killed, and the group stays in clearing. Look at it with \`ps -o pid,pgid,stat,args -g ${pgid}\`, ` +
             `and kill it yourself if it is a stray. This is said once.`;
-          log(`job ${label}: pid ${unsure} in process group ${pgid} unsure for ${n} checks; the lead is told`);
           if (deliver(ws, text)) {
+            log(`job ${label}: pid ${unsure} in process group ${pgid} unsure for ${n} checks; the lead is told`);
             r.unsureTold = [...(r.unsureTold ?? []), pgid];
             writeState();
+          } else {
+            log(`job ${label}: pid ${unsure} in process group ${pgid} unsure for ${n} checks; the lead's note could not be written, and is tried again when the scheduler restarts`);
           }
         }
         return;
       }
       unsureChecks.delete(key);
+      unsureTried.delete(key);
       r.clearing = r.clearing?.filter((g) => g !== pgid);
       if (!r.clearing?.length) delete r.clearing;
       r.unsureTold = r.unsureTold?.filter((g) => g !== pgid);

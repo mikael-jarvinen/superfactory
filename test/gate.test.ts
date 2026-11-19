@@ -324,6 +324,12 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
     { [cm]: { stdout: [{ user: { login: "coderabbitai[bot]" }, original_commit_id: OLD, in_reply_to_id: null }] } },
     { [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, ...onlyThisPr, [oldStatus]: { stdout: { statuses: [] } },
       [oldRuns]: checkRuns(check("test"), rabbitRun("Review completed", { conclusion: "success", ...ours })) },
+    // a clean incremental pass leaves no review, no comment and no status, only its check-run titled
+    // Finished: CodeRabbit on superfactory#130 at f61c245d and #131 at eb279a03, and on #128 at
+    // 5332c327 and c023ab97, where GitHub ties the run to the open PR. It posted no commit status on
+    // any of #128-#131's 90 commits, so a status is not read for it
+    { [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, ...onlyThisPr, [oldStatus]: { stdout: { statuses: [] } },
+      [oldRuns]: checkRuns(check("test"), rabbitRun("Finished", { conclusion: "success", ...ours })) },
   ];
   for (const over of evidence) {
     r = ready(over);
