@@ -10,7 +10,7 @@ import type { Agent } from "./config.js";
 import { findSession, type Session, waitForName } from "./fleet.js";
 import { armText } from "./hooks/status.js";
 import { GIT_HTTPS_ENV, launch, launchArgs, leadPrompt, refreshSettings, roleAppendix, roleOf } from "./launch.js";
-import { cameUp, forgetStopped, freshCommand, lastStopped, resumable, supersede } from "./stopped.js";
+import { cameUp, freshCommand, lastStopped, moveRecord, resumable, supersede } from "./stopped.js";
 import { isAgentSession, pick, type Transport } from "./transport.js";
 import { FactoryError } from "./util.js";
 import type { Workspace } from "./workspace.js";
@@ -92,8 +92,9 @@ function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId:
   // Up under a new id, the one a later stop records; until now the record stays, so a resume that
   // fails leaves the next try aimed at the same conversation (CodeRabbit on #130). The row it
   // replaced is removed below.
+  // Launches still marked keep their marks, now on the new id (CodeRabbit on #130 at 7a20b268).
   if (marks && back.id) supersede(ws, ld.name, t, back.id, marks);
-  else forgetStopped(ws, ld.name);
+  else moveRecord(ws, ld.name, back.id ?? "", lastStopped(ws, ld.name)?.failed ?? []);
   // A resume that comes back under a new id leaves the old one listed, stopped; take it off the list.
   // The lead is up by now, so a stop that dies (a scope systemd-run cannot make) only leaves the
   // old entry listed; it is no reason to fail the bring-up. Any other error is a bug, and throws.

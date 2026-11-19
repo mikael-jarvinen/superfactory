@@ -98,8 +98,15 @@ export function cameUp(ws: Workspace, name: string, t: Pick<Transport, "sessions
 // #130 at 85389fcf).
 export function supersede(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, id: string, failed: Iterable<string>): void {
   replaceStopped(ws, name, t, id);
+  moveRecord(ws, name, id, failed);
+}
+
+// The record moves to id, the session now up, with the launches still marked; with none, it goes
+// (CodeRabbit on #130 at 7a20b268: a lead resumed under a new id dropped the marks with the record).
+export function moveRecord(ws: Workspace, name: string, id: string, failed: Iterable<string>): void {
   const keep = [...failed].filter((x) => x !== id);
   if (keep.length) save(ws, name, { id, at: new Date().toISOString(), failed: keep });
+  else forgetStopped(ws, name);
 }
 
 export const forgetStopped = (ws: Workspace, name: string) => rmSync(file(ws, name), { force: true });

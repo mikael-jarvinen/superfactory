@@ -492,3 +492,25 @@ test("a wake that resumes nothing leaves the record and the stopped row (Marie o
     forgetStopped(ws, ld.name);
   }
 });
+
+test("a lead resumed under a new id keeps the marks of launches that never came up (CodeRabbit on #130 at 7a20b268)", () => {
+  const t0 = Date.now();
+  try {
+    // a launch that ran has replaced the stopped session; another never came up, and sorts newest
+    record({ id: "ran1", at: new Date(t0 - 60_000).toISOString(), failed: ["dead2"] });
+    const rows: Session[] = [
+      stopped({ id: "ran1", sessionId: UUID, startedAt: t0 - 1_800_000 }),
+      { id: "dead2", name: ld.name, kind: "background", state: "failed", startedAt: t0 + 3_600_000 },
+    ];
+    const f = fake(rows);
+    bringUpLead(ws, ld, f.t, false, () => {}, 1);
+    assert.equal(f.started.length, 1, "resumed by its conversation id");
+    assert.deepEqual(lastStopped(ws, ld.name)?.failed, ["dead2"], "the mark stays, on the new id");
+    // the resumed lead ends; a wake resumes it, not the launch that never came up
+    Object.assign(rows.find((r) => r.id === "new1") as Session, { alive: false, state: "done", startedAt: t0 });
+    const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+    assert.deepEqual(f.respawned, ["new1"], JSON.stringify(w));
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
+});
