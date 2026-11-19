@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { freshCommand, lastStopped, noteStopped, replaceStopped, resumable } from "../src/stopped.js";
+import { freshCommand, lastStopped, noteStopped, noteUnrun, replaceStopped, resumable } from "../src/stopped.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, fakeDaemon, TOML, tempWorkspace } from "./helpers.js";
 
@@ -190,3 +190,23 @@ for (const how of ["a stop", "a launch that came up"] as const)
     const which = resumable(w, "rae", rows as never, (r) => r.reduce((a, b) => ((b.startedAt as number) > (a.startedAt as number) ? b : a)));
     assert.equal("s" in which ? which.s?.id : "gone", "cur1");
   });
+
+// Marie on #130 at b9d55a37: a launch down stopped unrun that came up late, seen by no factory
+// command while live, then ended by a raw `claude stop`, stayed unrun, and was never resumed.
+test("a launch down stopped unrun that shows a pid later reads as having run", () => {
+  const ws = tempWorkspace(TOML);
+  after(() => rmSync(ws, { recursive: true, force: true }));
+  const w = openWorkspace(ws, {});
+  mkdirSync(w.runDir, { recursive: true });
+  const t0 = Date.now();
+  writeFileSync(join(w.runDir, "stopped-rae.json"), JSON.stringify({ id: "old1", at: new Date(t0 - 7_200_000).toISOString(), failed: ["A"] }));
+  noteUnrun(w, "rae", "A"); // down stopped A while it had shown nothing
+  const newest = (r: Record<string, unknown>[]) => r.reduce((a, b) => ((b.startedAt as number) > (a.startedAt as number) ? b : a));
+  const old1 = { id: "old1", name: "rae", kind: "background", state: "stopped", startedAt: t0 - 9_000_000 };
+  // A came up late, with a pid, on a host whose clock is behind
+  resumable(w, "rae", [old1, { id: "A", name: "rae", kind: "background", state: "working", pid: 4242, startedAt: t0 - 10_000_000 }] as never, newest as never);
+  assert.equal(lastStopped(w, "rae")?.unrun, undefined, "A leaves unrun once a listing shows it ran");
+  // then a raw `claude stop` ends it; the wake resumes A, the conversation since the stop
+  const which = resumable(w, "rae", [old1, { id: "A", name: "rae", kind: "background", state: "stopped", startedAt: t0 - 10_000_000 }] as never, newest as never);
+  assert.equal("s" in which ? which.s?.id : "gone", "A");
+});

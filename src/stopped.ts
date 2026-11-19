@@ -40,7 +40,7 @@ function save(ws: Workspace, name: string, given: Stopped): void {
 export function noteStopped(ws: Workspace, name: string, s: Session | null, rows?: Session[]): void {
   // a row with no name is no agent's (Marie on #130: down wrote stopped-.json)
   if (!s?.id || !name) return;
-  const st = lastStopped(ws, name);
+  const st = seen(ws, name, lastStopped(ws, name), rows);
   const failed = held(st, rows, s.id);
   save(ws, name, { id: s.id, at: new Date().toISOString(), ...(failed.length ? { failed, unrun: st?.unrun } : {}) });
 }
@@ -52,6 +52,18 @@ export function noteStopped(ws: Workspace, name: string, s: Session | null, rows
 function held(st: Stopped | null | undefined, rows: Session[] | undefined, except: string): string[] {
   const listed = rows?.length ? rows : null;
   return (st?.failed ?? []).filter((id) => id !== except && (!listed || listed.some((r) => r.id === id && !ran(r, st))));
+}
+
+// A launch down stopped unrun that any listing shows with a pid, or live, came up after all: it
+// leaves unrun, so a later stop by any hand (a raw `claude stop`) reads as having run, and its
+// conversation is resumed (Marie on #130 at b9d55a37). The record is saved without it.
+function seen(ws: Workspace, name: string, st: Stopped | null, rows: Session[] | undefined): Stopped | null {
+  if (!st?.unrun?.length || !rows) return st;
+  const up = (id: string) => rows.some((r) => r.id === id && (typeof r.pid === "number" || r.alive === true));
+  if (!st.unrun.some(up)) return st;
+  const next: Stopped = { ...st, unrun: st.unrun.filter((id) => !up(id)) };
+  save(ws, name, next);
+  return lastStopped(ws, name);
 }
 
 // `factory down` stops a marked launch that has shown nothing, so one that comes up late does not
@@ -158,7 +170,7 @@ const startMs = (r: Session): number =>
 // leaves the record and the stopped row as they were (Marie on #130 at 85389fcf).
 export function resumable(ws: Workspace, name: string, rows: Session[], newest: (r: Session[]) => Session | null):
   { s: Session | null; failed?: string[] } | { gone: string } {
-  const st = lastStopped(ws, name);
+  const st = seen(ws, name, lastStopped(ws, name), rows);
   if (!st) return { s: newest(rows) };
   const at = Date.parse(st.at);
   // a noted launch holds its mark until its row shows it ran: a state only a session that came up
@@ -190,13 +202,13 @@ export function resumable(ws: Workspace, name: string, rows: Session[], newest: 
 // stale: the row a respawn came back from under another id, which goes too (Marie on #130 at
 // f62a6b10: rows pile up otherwise).
 export function replaceStopped(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, newId?: string, stale?: string): void {
-  const st = lastStopped(ws, name);
   let rows: Session[] | undefined;
   try {
     rows = t.sessions(true);
   } catch {
     // the listing failed: every mark is carried (held), and the rows stay
   }
+  const st = seen(ws, name, lastStopped(ws, name), rows);
   if (newId && st) moveRecord(ws, name, newId, held(st, rows, newId));
   else forgetStopped(ws, name);
   for (const id of new Set([st?.id, stale]))
