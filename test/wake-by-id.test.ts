@@ -160,7 +160,33 @@ for (const how of ["stop", "down"] as const)
     const r = how === "stop" ? run("stop", "rae") : run("down");
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(lastStopped(w, "rae")?.failed, ["dead2"]);
+    assert.deepEqual(lastStopped(w, "rae")?.unrun, how === "down" ? ["dead2"] : undefined);
     assert.equal(run("wake", "rae").status, 0);
     assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn 5e7a0b12"], "not dead2, the launch that never came up");
-    assert.ok(!calls().includes("stop dead2"), "the launch that never came up is not stopped, which would list it as one that ran");
+    if (how === "stop") assert.ok(!calls().includes("stop dead2"), "a stop of rae is no stop of the launch that never came up");
+    // down stops it too, so one up late does not outlive the down; it stays marked, and its
+    // "stopped" is not read as having run (Marie on #130 at f62a6b10)
+    else assert.ok(calls().includes("stop dead2"), calls().join("\n"));
+  });
+
+// CodeRabbit on #130 at f62a6b10: a listing that failed at the stop, or when a new conversation took
+// the record, showed no rows, and every mark went with it.
+for (const how of ["a stop", "a launch that came up"] as const)
+  test(`${how} keeps every mark when the listing fails`, () => {
+    const ws = tempWorkspace(TOML);
+    after(() => rmSync(ws, { recursive: true, force: true }));
+    const w = openWorkspace(ws, {});
+    mkdirSync(w.runDir, { recursive: true });
+    writeFileSync(join(w.runDir, "stopped-rae.json"), JSON.stringify({ id: "old1", at: new Date(Date.now() - 7_200_000).toISOString(), failed: ["dead2"] }));
+    const failing = { sessions: () => { throw new Error("listing timed out"); }, alive: () => false, stop: () => assert.fail("nothing is removed without a listing") };
+    if (how === "a stop") noteStopped(w, "rae", { id: "cur1", name: "rae" }, undefined);
+    else replaceStopped(w, "rae", failing as never, "cur1");
+    assert.deepEqual(lastStopped(w, "rae")?.failed, ["dead2"]);
+    // the next wake: dead2, whose host clock is 2 h ahead, never came up; cur1 is the one to resume
+    const rows = [
+      { id: "cur1", name: "rae", kind: "background", state: "stopped", startedAt: Date.now() - 600_000 },
+      { id: "dead2", name: "rae", kind: "background", state: "failed", startedAt: Date.now() + 7_200_000 },
+    ];
+    const which = resumable(w, "rae", rows as never, (r) => r.reduce((a, b) => ((b.startedAt as number) > (a.startedAt as number) ? b : a)));
+    assert.equal("s" in which ? which.s?.id : "gone", "cur1");
   });

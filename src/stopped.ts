@@ -14,11 +14,18 @@ export interface Stopped {
   at: string;
   // launches since the stop that never came up: their rows supersede nothing (CodeRabbit on #130)
   failed?: string[];
+  // of those, the ones `factory down` stopped while they had shown nothing: their "stopped" is the
+  // factory's doing, no evidence they ran (Marie on #130 at f62a6b10)
+  unrun?: string[];
 }
 
 const file = (ws: Workspace, name: string) => join(ws.runDir, `stopped-${name}.json`);
 
-function save(ws: Workspace, name: string, st: Stopped): void {
+function save(ws: Workspace, name: string, given: Stopped): void {
+  const { unrun, ...rest } = given;
+  const st: Stopped = rest;
+  const keep = (unrun ?? []).filter((id) => st.failed?.includes(id));
+  if (keep.length) st.unrun = keep;
   mkdirSync(ws.runDir, { recursive: true });
   const f = file(ws, name);
   const tmp = `${f}.${process.pid}.tmp`;
@@ -29,18 +36,29 @@ function save(ws: Workspace, name: string, st: Stopped): void {
 // rows: the listing at the stop, when it could be had. A launch still marked as never come up keeps
 // its mark across the stop, while its row is listed and has shown nothing; the mark is all that
 // keeps a row whose host clock is ahead from passing as newer than the stop (CodeRabbit on #130 at
-// 2e89a7a4). Without a listing nothing is carried.
+// 2e89a7a4). Without a listing every mark is carried.
 export function noteStopped(ws: Workspace, name: string, s: Session | null, rows?: Session[]): void {
   // a row with no name is no agent's (Marie on #130: down wrote stopped-.json)
   if (!s?.id || !name) return;
-  const failed = held(lastStopped(ws, name)?.failed, rows, s.id);
-  save(ws, name, { id: s.id, at: new Date().toISOString(), ...(failed.length ? { failed } : {}) });
+  const st = lastStopped(ws, name);
+  const failed = held(st, rows, s.id);
+  save(ws, name, { id: s.id, at: new Date().toISOString(), ...(failed.length ? { failed, unrun: st?.unrun } : {}) });
 }
 
 // The marks that still stand: a launch whose row is listed and has not shown it ran, except the
-// row now taking the record. Every writer of a record carries these, so no path drops one.
-function held(failed: string[] | undefined, rows: Session[] | undefined, except: string): string[] {
-  return (failed ?? []).filter((id) => id !== except && !!rows?.some((r) => r.id === id && !ran(r)));
+// row now taking the record. Every writer of a record carries these, so no path drops one. A listing
+// that failed or came back empty shows nothing either way, so every mark is kept (CodeRabbit on
+// #130 at f62a6b10): a mark kept too long costs a skipped row, one dropped can wake a dead launch.
+function held(st: Stopped | null | undefined, rows: Session[] | undefined, except: string): string[] {
+  const listed = rows?.length ? rows : null;
+  return (st?.failed ?? []).filter((id) => id !== except && (!listed || listed.some((r) => r.id === id && !ran(r, st))));
+}
+
+// `factory down` stops a marked launch that has shown nothing, so one that comes up late does not
+// outlive the down; the mark stays, and its stopped state is not read as having run.
+export function noteUnrun(ws: Workspace, name: string, id: string): void {
+  const st = lastStopped(ws, name);
+  if (st?.failed?.includes(id)) save(ws, name, { ...st, unrun: [...new Set([...(st.unrun ?? []), id])] });
 }
 
 export function lastStopped(ws: Workspace, name: string): Stopped | null {
@@ -50,7 +68,8 @@ export function lastStopped(ws: Workspace, name: string): Stopped | null {
     const d = JSON.parse(readFileSync(f, "utf8")) as Partial<Stopped>;
     if (typeof d.id !== "string" || !d.id) return null;
     const failed = Array.isArray(d.failed) ? d.failed.filter((x): x is string => typeof x === "string") : [];
-    return { id: d.id, at: String(d.at ?? ""), ...(failed.length ? { failed } : {}) };
+    const unrun = Array.isArray(d.unrun) ? d.unrun.filter((x): x is string => typeof x === "string" && failed.includes(x)) : [];
+    return { id: d.id, at: String(d.at ?? ""), ...(failed.length ? { failed } : {}), ...(unrun.length ? { unrun } : {}) };
   } catch {
     return null;
   }
@@ -106,7 +125,7 @@ export function cameUp(ws: Workspace, name: string, t: Pick<Transport, "sessions
 // (CodeRabbit on #130 at 7a20b268: a lead resumed under a new id dropped the marks with the record).
 export function moveRecord(ws: Workspace, name: string, id: string, failed: Iterable<string>): void {
   const keep = [...failed].filter((x) => x !== id);
-  if (keep.length) save(ws, name, { id, at: new Date().toISOString(), failed: keep });
+  if (keep.length) save(ws, name, { id, at: new Date().toISOString(), failed: keep, unrun: lastStopped(ws, name)?.unrun });
   else forgetStopped(ws, name);
 }
 
@@ -120,8 +139,11 @@ export const freshCommand = (a: Pick<Agent, "name" | "role">): string =>
     : a.role === "assistant" ? `factory assistant ${a.name} --force`
     : `factory dispatch ${a.name} <KEY> --force`;
 
-// Whether a row shows its session came up at some point.
-const ran = (r: Session): boolean => ["done", "blocked", "stopped"].includes(String(r.state)) || typeof r.pid === "number";
+// Whether a row shows its session came up at some point. A row down stopped before it showed
+// anything is "stopped" by the factory, which says nothing of whether it ran.
+const ran = (r: Session, st?: Stopped | null): boolean =>
+  ["done", "blocked"].includes(String(r.state)) || typeof r.pid === "number" ||
+  (r.state === "stopped" && !st?.unrun?.includes(r.id ?? ""));
 
 // When a row started, in epoch ms, or NaN.
 const startMs = (r: Session): number =>
@@ -143,7 +165,7 @@ export function resumable(ws: Workspace, name: string, rows: Session[], newest: 
   // reaches (done, blocked, stopped), or a worker's pid. A row still "working" with no pid after the
   // launch gave up, or one with no state, has shown nothing and stays marked (Marie on #130).
   const marked = new Set(st.failed ?? []);
-  const failed = new Set([...marked].filter((id) => !rows.some((r) => r.id === id && ran(r))));
+  const failed = new Set([...marked].filter((id) => !rows.some((r) => r.id === id && ran(r, st))));
   // A marked launch that has run since came up after the stop, whatever its host's clock says of
   // its start. It replaces the record once up, as cameUp does for one seen live, so a later wake
   // does not read the mark again once the row is back to "working" (CodeRabbit on #130 at 43510c94).
@@ -165,21 +187,24 @@ export function resumable(ws: Workspace, name: string, rows: Session[], newest: 
 // left alone. Any launch still marked keeps its mark: the new conversation is then the record, the
 // session a wake resumes, rather than no record and the newest row, which can be a launch that never
 // came up (CodeRabbit and Marie on #130 at 85389fcf; a fresh launch, CodeRabbit at 2e89a7a4).
-export function replaceStopped(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, newId?: string): void {
+// stale: the row a respawn came back from under another id, which goes too (Marie on #130 at
+// f62a6b10: rows pile up otherwise).
+export function replaceStopped(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, newId?: string, stale?: string): void {
   const st = lastStopped(ws, name);
   let rows: Session[] | undefined;
   try {
     rows = t.sessions(true);
   } catch {
-    // the listing failed: no mark is carried, and the row stays
+    // the listing failed: every mark is carried (held), and the rows stay
   }
-  if (newId) moveRecord(ws, name, newId, held(st?.failed, rows, newId));
+  if (newId && st) moveRecord(ws, name, newId, held(st, rows, newId));
   else forgetStopped(ws, name);
-  if (!st || st.id === newId) return;
-  try {
-    const row = rows?.find((r) => r.id === st.id);
-    if (row && !t.alive(row)) t.stop(name, st.id, true);
-  } catch {
-    // the rm failed: the row stays, as it did before
-  }
+  for (const id of new Set([st?.id, stale]))
+    if (id && id !== newId)
+      try {
+        const row = rows?.find((r) => r.id === id);
+        if (row && !t.alive(row)) t.stop(name, id, true);
+      } catch {
+        // the rm failed: the row stays, as it did before
+      }
 }

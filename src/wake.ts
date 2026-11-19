@@ -79,7 +79,8 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   if (s instanceof Unreachable) return { is: "unknown", why: `respawned ${old.id}, then ${s.brief}` };
   if (!s) return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };
   // the id that came back, which can differ from the one respawned (Marie on #130 at 2e89a7a4)
-  if (which.failed) replaceStopped(ws, agent.name, t, s.id ?? old.id);
+  // A respawn that came back under a new id leaves the old row stopped; it goes (Marie at f62a6b10).
+  if (which.failed || (s.id && s.id !== old.id)) replaceStopped(ws, agent.name, t, s.id ?? old.id, old.id);
   return { is: "woke", s, from: old.id };
 }
 

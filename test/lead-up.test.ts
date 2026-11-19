@@ -563,3 +563,26 @@ test("a launch that ran and comes back under a new id takes the record, marks an
     forgetStopped(ws, ld.name);
   }
 });
+
+// Marie on #130 at f62a6b10: a respawn that came back under a new id left the old row listed,
+// stopped, and such rows piled up.
+for (const via of ["wake", "up"] as const)
+  test(`a respawn by ${via} that comes back under a new id takes the old row off the list`, () => {
+    const t0 = Date.now();
+    try {
+      record({ id: "runA", at: new Date(t0 - 3_600_000).toISOString() });
+      const rows: Session[] = [{ id: "runA", name: ld.name, kind: "background", state: "stopped", startedAt: t0 - 7_200_000 }];
+      const f = fake(rows);
+      f.t.respawn = (_name, id) => {
+        f.respawned.push(id);
+        rows.push({ id: `${id}2`, name: ld.name, kind: "background", alive: true, startedAt: t0 });
+        return { ok: true, said: "respawned", why: "" };
+      };
+      if (via === "wake") assert.equal(wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 }).is, "woke");
+      else bringUpLead(ws, ld, f.t, false, () => {}, 1);
+      assert.deepEqual(f.respawned, ["runA"]);
+      assert.deepEqual(f.removed, ["runA"]);
+    } finally {
+      forgetStopped(ws, ld.name);
+    }
+  });

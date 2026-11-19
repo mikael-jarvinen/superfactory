@@ -65,7 +65,7 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
     const up = r.ok ? waitForName(t, ld.name, waitS) : null;
     if (up) {
       // the id that came back, which can differ from the one respawned (Marie on #130 at 2e89a7a4)
-      if (marks) replaceStopped(ws, ld.name, t, up.id ?? sid);
+      if (marks || (up.id && up.id !== sid)) replaceStopped(ws, ld.name, t, up.id ?? sid, sid);
       out(`${ld.name} respawned from ${sid}: ${r.said}`);
       return;
     }

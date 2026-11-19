@@ -7,7 +7,7 @@ import { followInbox } from "./board/inbox.js";
 import { markHandledMany, queue as waitingQueue, queueTrouble } from "./board/queue.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
-import { lastStopped, noteStopped } from "./stopped.js";
+import { lastStopped, noteStopped, noteUnrun } from "./stopped.js";
 import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owesSession, lead, listing, type Session, stopSession, stopWorktree, waitForName } from "./fleet.js";
 import { Unreachable } from "./remote.js";
 import { agentSessions, type Transport, transportFor, transports } from "./transport.js";
@@ -608,11 +608,12 @@ function cmdDown(ws: Workspace, argv: string[]) {
       console.log(`stopping ${s.name} (${s.id})`);
       // only a row live at the stop is the one to bring back: a dead duplicate listed after it
       // must not replace its record (CodeRabbit on #130)
-      const marked = !!s.id && !!lastStopped(ws, s.name ?? "")?.failed?.includes(s.id);
+      const sid = s.id ?? "", sname = s.name ?? "";
+      const marked = !!sid && !!lastStopped(ws, sname)?.failed?.includes(sid);
       const live = t.alive(s);
-      // a launch marked as never come up is left as it is: a stop would list it "stopped", which
-      // reads as evidence that it ran (CodeRabbit on #130 at 2e89a7a4)
-      if (marked && !live) continue;
+      // a launch marked as never come up is stopped too, so one up late does not outlive the down,
+      // and keeps its mark: its "stopped" is ours, no evidence that it ran (Marie on #130 at f62a6b10)
+      if (marked && !live) noteUnrun(ws, sname, sid);
       stopSession(t, s, false);
       if (live) noteStopped(ws, s.name ?? "", s, hits);
     }
