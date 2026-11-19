@@ -55,9 +55,10 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   // Not findSession: it prefers a row alive() passes, and locally that is a host-wide check, so a
   // stale "done" row would beat the newest stopped session. The session the factory stopped is
   // resumed by its id, and never an older row in its place (stopped.ts).
-  // with no deadline, rows a hook's wake left are removed first (stopped.ts)
-  if (o.deadline === undefined) sweepStale(ws, agent.name, t, all);
-  const which = resumable(ws, agent.name, all.filter(isAgentSession(agent.name)), newest);
+  // with no deadline, rows a hook's wake left are removed first, and are no candidates after (Marie
+  // on #130 at 6544d8fd)
+  const swept = o.deadline === undefined ? sweepStale(ws, agent.name, t, all) : [];
+  const which = resumable(ws, agent.name, all.filter((r) => isAgentSession(agent.name)(r) && !swept.includes(r.id ?? "")), newest);
   if ("gone" in which)
     return { is: "failed", fresh: freshCommand(agent),
       why: `${which.gone}, the session stopped last, is no longer listed, and an older one is another conversation; \`${freshCommand(agent)}\` starts it fresh` };

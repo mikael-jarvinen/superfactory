@@ -31,6 +31,8 @@ function save(ws: Workspace, name: string, given: Stopped): void {
   const tmp = `${f}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(st) + "\n");
   renameSync(tmp, f);
+  // the session the record names is the conversation, never a stale row (Marie on #130 at 6544d8fd)
+  dropStale(ws, name, [st.id]);
 }
 
 // rows: the listing at the stop, when it could be had. A launch still marked as never come up keeps
@@ -172,30 +174,47 @@ function noteStale(ws: Workspace, name: string, ids: string[]): void {
   if (ids.length) saveStale(ws, name, [...new Set([...staleIds(ws, name), ...ids])]);
 }
 
-// For a caller with no deadline: the stale rows are stopped and removed. One live again is no longer
-// stale, and is left; one no longer listed is gone already. A listing that failed or came back empty
-// shows nothing, and every id is kept, as are those whose removal failed.
-export function sweepStale(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, rows?: Session[]): void {
+// Only the ids given leave, read from the file as it is now: an id a hook's wake noted meanwhile
+// stays (Marie on #130 at 6544d8fd).
+function dropStale(ws: Workspace, name: string, ids: string[]): void {
+  const now = staleIds(ws, name);
+  if (now.some((id) => ids.includes(id))) saveStale(ws, name, now.filter((id) => !ids.includes(id)));
+}
+
+// For a caller with no deadline: the stale rows are stopped and removed, and their ids returned. One
+// live again is no longer stale, and is left; one no longer listed is gone already; the one the record
+// names is the conversation, and is never removed (Marie on #130 at 6544d8fd: a stale row resumed by
+// hand, then stopped, would go with its conversation). A listing that failed or came back empty shows
+// nothing, and every id is kept, as are those whose removal failed.
+export function sweepStale(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, rows?: Session[]): string[] {
   const ids = staleIds(ws, name);
-  if (!ids.length || !name) return;
+  if (!ids.length || !name) return [];
   if (!rows)
     try {
       rows = t.sessions(true);
     } catch {
-      return;
+      return [];
     }
-  if (!rows.length) return;
-  const keep: string[] = [];
+  if (!rows.length) return [];
+  const record = lastStopped(ws, name)?.id;
+  const done: string[] = [];
+  const removed: string[] = [];
   for (const id of ids) {
     const row = rows.find((r) => r.id === id);
-    if (!row || t.alive(row)) continue;
+    if (id === record || !row || t.alive(row)) {
+      done.push(id);
+      continue;
+    }
     try {
       t.stop(name, id, true);
+      done.push(id);
+      removed.push(id);
     } catch {
-      keep.push(id);
+      // kept for the next caller
     }
   }
-  saveStale(ws, name, keep);
+  dropStale(ws, name, done);
+  return removed;
 }
 
 // The command that starts an agent fresh, for when its conversation cannot come back (Marie on #130:
@@ -226,8 +245,8 @@ const startMs = (r: Session): number =>
 export function resumable(ws: Workspace, name: string, rows: Session[], newest: (r: Session[]) => Session | null):
   { s: Session | null; failed?: string[] } | { gone: string } {
   // the record's own id is never stale: a writer that names it again has taken it back
-  const gone = staleIds(ws, name).filter((id) => id !== lastStopped(ws, name)?.id);
-  if (gone.length) rows = rows.filter((r) => !gone.includes(r.id ?? ""));
+  const stale = staleIds(ws, name).filter((id) => id !== lastStopped(ws, name)?.id);
+  if (stale.length) rows = rows.filter((r) => !stale.includes(r.id ?? ""));
   const st = seen(ws, name, lastStopped(ws, name), rows);
   if (!st) return { s: newest(rows) };
   const at = Date.parse(st.at);

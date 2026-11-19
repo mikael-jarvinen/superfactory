@@ -6,7 +6,7 @@ import type { Session } from "../src/fleet.js";
 import { lead } from "../src/fleet.js";
 import { launch, leadPrompt, settingsFile } from "../src/launch.js";
 import { bringUpLead, resumePrompt } from "../src/lead-up.js";
-import { forgetStopped, lastStopped, noteStopped, resumable } from "../src/stopped.js";
+import { forgetStopped, lastStopped, moveRecord, noteStopped, resumable } from "../src/stopped.js";
 import { wake } from "../src/wake.js";
 import type { StartRequest, Transport } from "../src/transport.js";
 import { FactoryError } from "../src/util.js";
@@ -623,6 +623,75 @@ test(`a wake with a deadline ${leftS} s off starts no listing or stop after its 
     assert.equal(after, 0, "no full listing after the respawn");
     assert.deepEqual(f.removed, [], "no stop: the old row waits for a later step");
     assert.deepEqual(lastStopped(ws, ld.name), { id: "runA2", at: lastStopped(ws, ld.name)?.at, failed: ["deadB"] });
+  } finally {
+    forgetAll();
+  }
+});
+
+const noteStaleIds = (ids: string[]) => (mkdirSync(ws.runDir, { recursive: true }), writeFileSync(staleFile(), JSON.stringify(ids) + "\n"));
+
+test("a sweep never removes the row the record names (Marie on #130 at 6544d8fd)", () => {
+  const t0 = Date.now();
+  try {
+    // runA, left stale, was resumed by hand and stopped again: the record names it
+    record({ id: "runA", at: new Date(t0).toISOString() });
+    noteStaleIds(["runA"]);
+    const rows: Session[] = [{ id: "runA", name: ld.name, kind: "background", state: "stopped", startedAt: t0 - 60_000 }];
+    const f = fake(rows);
+    const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+    assert.deepEqual(f.removed, [], "the conversation is kept");
+    assert.deepEqual(f.respawned, ["runA"], JSON.stringify(w));
+  } finally {
+    forgetAll();
+  }
+});
+
+test("a stale id that noteStopped or moveRecord writes as the record leaves the stale list (Marie on #130 at 6544d8fd)", () => {
+  try {
+    noteStaleIds(["runA", "runB"]);
+    noteStopped(ws, ld.name, { id: "runA", name: ld.name, kind: "background", alive: true });
+    assert.deepEqual(staleIds(), ["runB"], "noteStopped");
+    moveRecord(ws, ld.name, "runB", ["deadC"]);
+    assert.deepEqual(staleIds(), [], "moveRecord");
+  } finally {
+    forgetAll();
+  }
+});
+
+test("a wake with no deadline never respawns a row its sweep just removed (Marie on #130 at 6544d8fd)", () => {
+  const t0 = Date.now();
+  try {
+    noteStaleIds(["newB"]);
+    const rows: Session[] = [
+      { id: "oldC", name: ld.name, kind: "background", state: "stopped", startedAt: t0 - 7_200_000 },
+      { id: "newB", name: ld.name, kind: "background", state: "stopped", startedAt: t0 - 60_000 },
+    ];
+    const f = fake(rows);
+    wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+    assert.deepEqual(f.removed, ["newB"]);
+    assert.ok(!f.respawned.includes("newB"), `respawned the row it removed: ${JSON.stringify(f.respawned)}`);
+  } finally {
+    forgetAll();
+  }
+});
+
+test("a sweep keeps an id a hook's wake noted while it ran (Marie on #130 at 6544d8fd)", () => {
+  const t0 = Date.now();
+  try {
+    noteStaleIds(["oldB"]);
+    const rows: Session[] = [
+      { id: "liveA", name: ld.name, kind: "background", alive: true },
+      { id: "oldB", name: ld.name, kind: "background", state: "stopped", startedAt: t0 - 60_000 },
+    ];
+    const f = fake(rows);
+    const stop = f.t.stop;
+    f.t.stop = (name, id, remove) => {
+      noteStaleIds(["oldB", "oldC"]); // a hook's wake, meanwhile
+      stop(name, id, remove);
+    };
+    assert.equal(wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 }).is, "live");
+    assert.deepEqual(f.removed, ["oldB"]);
+    assert.deepEqual(staleIds(), ["oldC"]);
   } finally {
     forgetAll();
   }
