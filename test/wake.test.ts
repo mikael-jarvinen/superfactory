@@ -624,6 +624,7 @@ repos = ["web", "api"]
     const dir = join(ws, "repos", name), origin = join(ws, `${name}-origin.git`);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "README"), name);
+    writeFileSync(join(dir, "AGENTS.md"), "the repo's brief");
     execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
     for (const a of [["init", "-q", "-b", "main"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
       ["remote", "add", "origin", origin], ["push", "-q", "origin", "main"]])
@@ -658,4 +659,26 @@ repos = ["web", "api"]
   r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "web"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^--repo web ignored: kit is kept on api, the stack TEST-40's record has$/m);
+
+  // A builder with a stack of its own: --repo is checked against its worktree's repo, never against
+  // the stack's name (Marie on #129: bea in web's worktree with --repo web was told it was ignored).
+  mkdirSync(join(ws, "briefs"), { recursive: true });
+  writeFileSync(join(ws, "briefs", "app.md"), "the app stack's brief");
+  r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "web", "--title", "On the web"]);
+  assert.equal(r.status, 0, r.stderr);
+  const bwt = (JSON.parse(readFileSync(join(ws, "state", "TEST-41.json"), "utf8")) as { worktree: string }).worktree;
+  put("live.json", [sess("new1", "bea", { state: "idle", cwd: bwt })]);
+  for (const args of [["pr-open", "--pr", "acme/web#2", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "1 high"]])
+    assert.equal(factory(ws, ["state", "TEST-41", ...args]).status, 0);
+  r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "web"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /bea is still on TEST-41 .*so it keeps its context/);
+  assert.doesNotMatch(r.stdout, /--repo web/, "web is the worktree's repo: nothing ignored");
+  r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "api"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^--repo api ignored: bea is kept in web's worktree$/m);
+  put("live.json", [sess("new1", "bea", { state: "idle", cwd: "/far/worktrees/TEST-41" })]);
+  r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "api"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^--repo api not checked: bea's session is in no local worktree$/m);
 });
