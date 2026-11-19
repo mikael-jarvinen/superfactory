@@ -22,7 +22,8 @@ const [cmd, id] = process.argv.slice(2);
 const row = rows.find((r) => r.id === id);
 const shown = (r) => { const { args, ...rest } = r; return rest; };
 fs.appendFileSync(log, process.argv.slice(2).join(" ") + "\\n");
-if (cmd === "agents") {
+if (cmd === "agents" && process.argv.includes("--all") && fs.existsSync(path.join(D, "all-fails"))) process.exit(1);
+else if (cmd === "agents") {
   const all = process.argv.includes("--all");
   console.log(JSON.stringify(rows.filter((r) => all || r.state !== "stopped").map(shown)));
 } else if (cmd === "stop" && row) { row.state = "stopped"; row.pid = null; save(); }
@@ -243,4 +244,18 @@ test("down lists a host once to remove the rows a hook's wake left", () => {
   assert.equal(run("down").status, 0);
   assert.ok(calls().includes("rm 91c86061"), calls().join("\n"));
   assert.ok(calls().filter((c) => c.startsWith("agents")).length <= 2, calls().join("\n"));
+});
+
+// CodeRabbit on #130 at f10e2da: a host whose listing failed was asked again for each agent.
+test("down asks a host whose listing failed once, and keeps the rows a hook's wake left", () => {
+  const { ws, run, calls } = fleet();
+  const w = openWorkspace(ws, {});
+  mkdirSync(w.runDir, { recursive: true });
+  writeFileSync(join(w.runDir, "stale-rae.json"), JSON.stringify(["91c86061"]));
+  writeFileSync(join(w.runDir, "stale-cal.json"), JSON.stringify(["c1"]));
+  writeFileSync(join(ws, "all-fails"), "");
+  run("down");
+  assert.equal(calls().filter((c) => c.startsWith("agents --json --all")).length, 1, calls().join("\n"));
+  assert.deepEqual(JSON.parse(readFileSync(join(w.runDir, "stale-rae.json"), "utf8")), ["91c86061"]);
+  assert.deepEqual(JSON.parse(readFileSync(join(w.runDir, "stale-cal.json"), "utf8")), ["c1"]);
 });

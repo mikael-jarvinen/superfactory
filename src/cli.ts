@@ -630,8 +630,10 @@ function cmdDown(ws: Workspace, argv: string[]) {
   for (const { agent, t } of agentSessions(ws, (where) => rows.get(where))) {
     if (!staleIds(ws, agent.name).length) continue;
     if (!after.has(t.where)) after.set(t.where, rowsNow(t));
+    // a host whose listing failed shows nothing: its ids are kept, and it is not asked again, which
+    // sweepStale would do given no rows (CodeRabbit on #130 at f10e2da)
     const listed = after.get(t.where);
-    const removed = sweepStale(ws, agent.name, t, listed);
+    const removed = sweepStale(ws, agent.name, t, listed ?? []);
     if (listed && removed.length) after.set(t.where, listed.filter((r) => !removed.includes(r.id ?? "")));
   }
   stopBoard(ws, true);
