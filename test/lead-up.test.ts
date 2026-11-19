@@ -514,3 +514,52 @@ test("a lead resumed under a new id keeps the marks of launches that never came 
     forgetStopped(ws, ld.name);
   }
 });
+
+test("a fresh launch that comes up keeps the marks of launches that never did (CodeRabbit on #130 at 2e89a7a4)", () => {
+  const t0 = Date.now();
+  try {
+    record({ id: "old1", at: new Date(t0 - 3_600_000).toISOString(), failed: ["dead2"] });
+    const rows: Session[] = [
+      { id: "old1", name: ld.name, kind: "background", state: "stopped", startedAt: t0 - 7_200_000 },
+      // its host's clock is ahead: it sorts newest of all
+      { id: "dead2", name: ld.name, kind: "background", state: "failed", startedAt: t0 + 3_600_000 },
+    ];
+    const f = fake(rows);
+    launch(ws, ld, join(dir, "lead"), "hi", null, undefined, f.t);
+    assert.deepEqual(lastStopped(ws, ld.name), { id: "new1", at: lastStopped(ws, ld.name)?.at, failed: ["dead2"] });
+    assert.deepEqual(f.removed, ["old1"], "the stopped row it replaces goes");
+    // the new conversation ends; a wake resumes it, not the launch that never came up
+    Object.assign(rows.find((r) => r.id === "new1") as Session, { alive: false, state: "done", startedAt: t0 });
+    const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+    assert.deepEqual(f.respawned, ["new1"], JSON.stringify(w));
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
+});
+
+test("a launch that ran and comes back under a new id takes the record, marks and all (Marie on #130 at 2e89a7a4)", () => {
+  const t0 = Date.now();
+  try {
+    record({ id: "old1", at: new Date(t0 - 3_600_000).toISOString(), failed: ["runA", "deadB"] });
+    const rows: Session[] = [
+      { id: "old1", name: ld.name, kind: "background", state: "stopped", startedAt: t0 - 7_200_000 },
+      { id: "runA", name: ld.name, kind: "background", state: "done", startedAt: t0 - 1_800_000 },
+      { id: "deadB", name: ld.name, kind: "background", state: "failed", startedAt: t0 - 60_000 },
+    ];
+    const f = fake(rows);
+    // claude brings runA back as runA2
+    f.t.respawn = (_name, id) => {
+      f.respawned.push(id);
+      rows.push({ id: `${id}2`, name: ld.name, kind: "background", alive: true, startedAt: t0 });
+      return { ok: true, said: "respawned", why: "" };
+    };
+    assert.equal(wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 }).is, "woke");
+    assert.deepEqual(lastStopped(ws, ld.name), { id: "runA2", at: lastStopped(ws, ld.name)?.at, failed: ["deadB"] });
+    // runA2 ends; the next wake resumes it, not runA nor deadB
+    Object.assign(rows.find((r) => r.id === "runA2") as Session, { alive: false, state: "done" });
+    const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+    assert.deepEqual(f.respawned, ["runA", "runA2"], JSON.stringify(w));
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
+});

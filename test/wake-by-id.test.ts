@@ -3,7 +3,7 @@
 // just stopped, so wake respawned the newest row left: an older conversation, on its older command
 // line. A stop now keeps the row and records its id, and wake resumes that one or none.
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { freshCommand, lastStopped, noteStopped, replaceStopped, resumable } from "../src/stopped.js";
@@ -143,3 +143,24 @@ test("down records the row that was live, not a dead duplicate listed after it (
   assert.equal(r.status, 0, r.stderr);
   assert.equal(lastStopped(openWorkspace(ws, {}), "rae")?.id, "5e7a0b12", "the live one, which wake should bring back");
 });
+
+// CodeRabbit on #130 at 2e89a7a4: a stop wrote its record without the marks of launches that never
+// came up, so a dead launch whose host clock is ahead passed for newer than the stop.
+for (const how of ["stop", "down"] as const)
+  test(`a ${how} keeps the mark of a launch that never came up`, () => {
+    const { ws, run, calls } = fleet();
+    const w = openWorkspace(ws, {});
+    mkdirSync(w.runDir, { recursive: true });
+    writeFileSync(join(w.runDir, "stopped-rae.json"), JSON.stringify({ id: "91c86061", at: new Date(Date.now() - 7_200_000).toISOString(), failed: ["dead2"] }));
+    const db = join(ws, "db.json");
+    const all = JSON.parse(readFileSync(db, "utf8")) as Record<string, unknown>[];
+    all.push({ id: "dead2", name: "rae", kind: "background", state: "failed", status: "idle", pid: null,
+      startedAt: Date.now() + 7_200_000, cwd: "/w/rae", sessionId: "dead2-uuid", args: ["--bg", "--name", "rae", "never came up"] });
+    writeFileSync(db, JSON.stringify(all));
+    const r = how === "stop" ? run("stop", "rae") : run("down");
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(lastStopped(w, "rae")?.failed, ["dead2"]);
+    assert.equal(run("wake", "rae").status, 0);
+    assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn 5e7a0b12"], "not dead2, the launch that never came up");
+    assert.ok(!calls().includes("stop dead2"), "the launch that never came up is not stopped, which would list it as one that ran");
+  });

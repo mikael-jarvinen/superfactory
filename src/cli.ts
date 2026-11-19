@@ -7,10 +7,10 @@ import { followInbox } from "./board/inbox.js";
 import { markHandledMany, queue as waitingQueue, queueTrouble } from "./board/queue.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
-import { noteStopped } from "./stopped.js";
+import { lastStopped, noteStopped } from "./stopped.js";
 import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owesSession, lead, listing, type Session, stopSession, stopWorktree, waitForName } from "./fleet.js";
 import { Unreachable } from "./remote.js";
-import { agentSessions, transportFor, transports } from "./transport.js";
+import { agentSessions, type Transport, transportFor, transports } from "./transport.js";
 import type { Agent } from "./config.js";
 import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
 import { bringUpLead } from "./lead-up.js";
@@ -463,7 +463,7 @@ function cmdStop(ws: Workspace, argv: string[]) {
   }
   // The row stays, so a wake resumes this conversation by its id (stopped.ts).
   stopSession(t, s, false);
-  noteStopped(ws, name, s);
+  noteStopped(ws, name, s, rowsNow(t));
   console.log(`stopped ${name} (${s.id})`);
   const remove = !!v["remove-worktree"] && !v["keep-worktree"];
   // The worktree stays unless asked for: a worktree can hold a running stack and its database.
@@ -590,6 +590,15 @@ function sayUnknown(rows: Iterable<Session[] | Unreachable>, so: string): number
   return code;
 }
 
+// The full listing for a stop's record, or none when it cannot be had (stopped.ts).
+function rowsNow(t: Pick<Transport, "sessions">): Session[] | undefined {
+  try {
+    return t.sessions(true);
+  } catch {
+    return undefined;
+  }
+}
+
 function cmdDown(ws: Workspace, argv: string[]) {
   args("down", argv, {}, [0, 0]);
   const rows = new Map(transports(ws).map((t) => [t.where, listing(t)]));
@@ -599,9 +608,13 @@ function cmdDown(ws: Workspace, argv: string[]) {
       console.log(`stopping ${s.name} (${s.id})`);
       // only a row live at the stop is the one to bring back: a dead duplicate listed after it
       // must not replace its record (CodeRabbit on #130)
+      const marked = !!s.id && !!lastStopped(ws, s.name ?? "")?.failed?.includes(s.id);
       const live = t.alive(s);
+      // a launch marked as never come up is left as it is: a stop would list it "stopped", which
+      // reads as evidence that it ran (CodeRabbit on #130 at 2e89a7a4)
+      if (marked && !live) continue;
       stopSession(t, s, false);
-      if (live) noteStopped(ws, s.name ?? "", s);
+      if (live) noteStopped(ws, s.name ?? "", s, hits);
     }
   stopBoard(ws, true);
   return code;
@@ -614,7 +627,7 @@ function cmdRestartLead(ws: Workspace, argv: string[]) {
   const s = findSession(t, name);
   if (t.alive(s)) {
     stopSession(t, s, false);
-    noteStopped(ws, name, s);
+    noteStopped(ws, name, s, rowsNow(t));
     // wait for the supervisor to report it stopped, or up sees it as running
     for (let i = 0; i < 20 && t.alive(findSession(t, name)); i++) sleep(1000);
     console.log(`stopped ${name}`);

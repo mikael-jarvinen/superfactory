@@ -7,7 +7,7 @@
 import type { Agent } from "./config.js";
 import { findSession, pollForName, type Session } from "./fleet.js";
 import { refreshSettings } from "./launch.js";
-import { cameUp, freshCommand, resumable, supersede } from "./stopped.js";
+import { cameUp, freshCommand, replaceStopped, resumable } from "./stopped.js";
 import { ask, Unreachable } from "./remote.js";
 import { isAgentSession, LISTING_TIMEOUT_MS, newest, type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
@@ -78,7 +78,8 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   // Respawned, and the last listing could not be had: most likely live, so not failed.
   if (s instanceof Unreachable) return { is: "unknown", why: `respawned ${old.id}, then ${s.brief}` };
   if (!s) return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };
-  if (which.failed) supersede(ws, agent.name, t, old.id, which.failed);
+  // the id that came back, which can differ from the one respawned (Marie on #130 at 2e89a7a4)
+  if (which.failed) replaceStopped(ws, agent.name, t, s.id ?? old.id);
   return { is: "woke", s, from: old.id };
 }
 

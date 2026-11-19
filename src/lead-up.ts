@@ -10,7 +10,7 @@ import type { Agent } from "./config.js";
 import { findSession, type Session, waitForName } from "./fleet.js";
 import { armText } from "./hooks/status.js";
 import { GIT_HTTPS_ENV, launch, launchArgs, leadPrompt, refreshSettings, roleAppendix, roleOf } from "./launch.js";
-import { cameUp, freshCommand, lastStopped, moveRecord, resumable, supersede } from "./stopped.js";
+import { cameUp, freshCommand, lastStopped, moveRecord, replaceStopped, resumable } from "./stopped.js";
 import { isAgentSession, pick, type Transport } from "./transport.js";
 import { FactoryError } from "./util.js";
 import type { Workspace } from "./workspace.js";
@@ -62,8 +62,10 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
       out(`WARNING: ${ld.name}'s settings could not be rendered (${(e as Error).message}); respawning on the last rendered settings. Fix the template, then \`factory stop ${ld.name}\` and \`factory up\`: up leaves a running lead as it is.`);
     }
     const r = t.respawn(ld.name, sid);
-    if (r.ok && waitForName(t, ld.name, waitS)) {
-      if (marks) supersede(ws, ld.name, t, sid, marks);
+    const up = r.ok ? waitForName(t, ld.name, waitS) : null;
+    if (up) {
+      // the id that came back, which can differ from the one respawned (Marie on #130 at 2e89a7a4)
+      if (marks) replaceStopped(ws, ld.name, t, up.id ?? sid);
       out(`${ld.name} respawned from ${sid}: ${r.said}`);
       return;
     }
@@ -93,8 +95,8 @@ function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId:
   // fails leaves the next try aimed at the same conversation (CodeRabbit on #130). The row it
   // replaced is removed below.
   // Launches still marked keep their marks, now on the new id (CodeRabbit on #130 at 7a20b268).
-  if (marks && back.id) supersede(ws, ld.name, t, back.id, marks);
-  else moveRecord(ws, ld.name, back.id ?? "", lastStopped(ws, ld.name)?.failed ?? []);
+  if (marks && back.id) replaceStopped(ws, ld.name, t, back.id);
+  else if (back.id) moveRecord(ws, ld.name, back.id, lastStopped(ws, ld.name)?.failed ?? []);
   // A resume that comes back under a new id leaves the old one listed, stopped; take it off the list.
   // The lead is up by now, so a stop that dies (a scope systemd-run cannot make) only leaves the
   // old entry listed; it is no reason to fail the bring-up. Any other error is a bug, and throws.

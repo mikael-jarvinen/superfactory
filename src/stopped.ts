@@ -26,10 +26,21 @@ function save(ws: Workspace, name: string, st: Stopped): void {
   renameSync(tmp, f);
 }
 
-export function noteStopped(ws: Workspace, name: string, s: Session | null): void {
+// rows: the listing at the stop, when it could be had. A launch still marked as never come up keeps
+// its mark across the stop, while its row is listed and has shown nothing; the mark is all that
+// keeps a row whose host clock is ahead from passing as newer than the stop (CodeRabbit on #130 at
+// 2e89a7a4). Without a listing nothing is carried.
+export function noteStopped(ws: Workspace, name: string, s: Session | null, rows?: Session[]): void {
   // a row with no name is no agent's (Marie on #130: down wrote stopped-.json)
   if (!s?.id || !name) return;
-  save(ws, name, { id: s.id, at: new Date().toISOString() });
+  const failed = held(lastStopped(ws, name)?.failed, rows, s.id);
+  save(ws, name, { id: s.id, at: new Date().toISOString(), ...(failed.length ? { failed } : {}) });
+}
+
+// The marks that still stand: a launch whose row is listed and has not shown it ran, except the
+// row now taking the record. Every writer of a record carries these, so no path drops one.
+function held(failed: string[] | undefined, rows: Session[] | undefined, except: string): string[] {
+  return (failed ?? []).filter((id) => id !== except && !!rows?.some((r) => r.id === id && !ran(r)));
 }
 
 export function lastStopped(ws: Workspace, name: string): Stopped | null {
@@ -88,17 +99,7 @@ export function noteFailedLaunch(ws: Workspace, name: string, t: Pick<Transport,
 // A row noted as a failed launch that is seen live came up after all: it is a new conversation,
 // and replaces the one stopped last as a launch that came up does (Marie on #130).
 export function cameUp(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, s: Session): void {
-  const failed = lastStopped(ws, name)?.failed ?? [];
-  if (s.id && failed.includes(s.id)) supersede(ws, name, t, s.id, failed);
-}
-
-// A marked launch that came up replaces the session stopped last. Any other launch still marked
-// keeps its mark: the one that came up is then the record, the session a wake resumes, rather than
-// no record and the newest row, which can be a launch that never came up (CodeRabbit and Marie on
-// #130 at 85389fcf).
-export function supersede(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, id: string, failed: Iterable<string>): void {
-  replaceStopped(ws, name, t, id);
-  moveRecord(ws, name, id, failed);
+  if (s.id && lastStopped(ws, name)?.failed?.includes(s.id)) replaceStopped(ws, name, t, s.id);
 }
 
 // The record moves to id, the session now up, with the launches still marked; with none, it goes
@@ -159,17 +160,26 @@ export function resumable(ws: Workspace, name: string, rows: Session[], newest: 
   return s ? { s } : { gone: st.id };
 }
 
-// A new conversation replaces the one stopped last: forget it, and remove its row, which no wake
-// will resume now, so stopped rows do not build up in the listing (Marie on #130). A row that is
-// live again is left alone.
+// A new conversation replaces the one stopped last, and remove its row, which no wake will resume
+// now, so stopped rows do not build up in the listing (Marie on #130). A row that is live again is
+// left alone. Any launch still marked keeps its mark: the new conversation is then the record, the
+// session a wake resumes, rather than no record and the newest row, which can be a launch that never
+// came up (CodeRabbit and Marie on #130 at 85389fcf; a fresh launch, CodeRabbit at 2e89a7a4).
 export function replaceStopped(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, newId?: string): void {
   const st = lastStopped(ws, name);
-  forgetStopped(ws, name);
+  let rows: Session[] | undefined;
+  try {
+    rows = t.sessions(true);
+  } catch {
+    // the listing failed: no mark is carried, and the row stays
+  }
+  if (newId) moveRecord(ws, name, newId, held(st?.failed, rows, newId));
+  else forgetStopped(ws, name);
   if (!st || st.id === newId) return;
   try {
-    const row = t.sessions(true).find((r) => r.id === st.id);
+    const row = rows?.find((r) => r.id === st.id);
     if (row && !t.alive(row)) t.stop(name, st.id, true);
   } catch {
-    // the listing or the rm failed: the row stays, as it did before
+    // the rm failed: the row stays, as it did before
   }
 }
