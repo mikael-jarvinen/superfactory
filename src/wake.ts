@@ -7,6 +7,7 @@
 import type { Agent } from "./config.js";
 import { findSession, pollForName, type Session } from "./fleet.js";
 import { refreshSettings } from "./launch.js";
+import { cameUp, freshCommand, replaceStopped, resumable, sweepStale } from "./stopped.js";
 import { ask, Unreachable } from "./remote.js";
 import { isAgentSession, LISTING_TIMEOUT_MS, newest, type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
@@ -18,7 +19,8 @@ export type Woken =
   | { is: "woke"; s: Session; from: string }
   // no session under the name, or the newest is not the one the caller would wake
   | { is: "none" }
-  | { is: "failed"; why: string }
+  // fresh: the command that starts it fresh, when its conversation cannot come back
+  | { is: "failed"; why: string; fresh?: string }
   // the sessions could not be listed
   | { is: "unknown"; why: string };
 
@@ -41,13 +43,26 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   // A listing that cannot be had, a local one that timed out included, leaves the recipient unknown.
   const live = ask(() => findSession(t, agent.name));
   if (live instanceof Unreachable) return { is: "unknown", why: live.brief };
-  if (t.alive(live)) return { is: "live", s: live };
+  if (t.alive(live)) {
+    cameUp(ws, agent.name, t, live);
+    // with no deadline, rows a hook's wake left are removed (stopped.ts)
+    if (o.deadline === undefined) sweepStale(ws, agent.name, t);
+    return { is: "live", s: live };
+  }
   if (left() < LISTING_TIMEOUT_MS) return late("the stopped sessions were listed");
   const all = ask(() => t.sessions(true));
   if (all instanceof Unreachable) return { is: "unknown", why: all.brief };
   // Not findSession: it prefers a row alive() passes, and locally that is a host-wide check, so a
-  // stale "done" row would beat the newest stopped session.
-  const old = newest(all.filter(isAgentSession(agent.name)));
+  // stale "done" row would beat the newest stopped session. The session the factory stopped is
+  // resumed by its id, and never an older row in its place (stopped.ts).
+  // with no deadline, rows a hook's wake left are removed first, and are no candidates after (Marie
+  // on #130 at 6544d8fd)
+  const swept = o.deadline === undefined ? sweepStale(ws, agent.name, t, all) : [];
+  const which = resumable(ws, agent.name, all.filter((r) => isAgentSession(agent.name)(r) && !swept.includes(r.id ?? "")), newest);
+  if ("gone" in which)
+    return { is: "failed", fresh: freshCommand(agent),
+      why: `${which.gone}, the session stopped last, is no longer listed, and an older one is another conversation; \`${freshCommand(agent)}\` starts it fresh` };
+  const old = which.s;
   if (!old?.id || (o.match && !o.match(old))) return { is: "none" };
   if (left() - LISTING_TIMEOUT_MS < 1000) return late(`respawning ${old.id}`);
   // A failed render fails the wake: the caller is told, rather than an agent coming back on
@@ -67,8 +82,16 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   const s = pollForName(t, agent.name, waitS, o.pollMs ?? 1000, lastPollAt);
   // Respawned, and the last listing could not be had: most likely live, so not failed.
   if (s instanceof Unreachable) return { is: "unknown", why: `respawned ${old.id}, then ${s.brief}` };
-  if (s) return { is: "woke", s, from: old.id };
-  return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };
+  if (!s) return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };
+  // the id that came back, which can differ from the one respawned (Marie on #130 at 2e89a7a4)
+  // A respawn that came back under a new id leaves the old row stopped; it goes (Marie at f62a6b10).
+  // No listing or stop starts that could run past the deadline. A stop has no bound of its own (a
+  // remote one runs to 35 s, a local one has none) and up to two rows can go, so with a deadline
+  // no cleanup starts at all: the record still moves, on the listing had before the respawn, and
+  // the old rows are left for a later step (CodeRabbit on #130 at d1c64cc6 and b77aae5c).
+  if (which.failed || (s.id && s.id !== old.id))
+    replaceStopped(ws, agent.name, t, s.id ?? old.id, old.id, o.deadline !== undefined ? all : undefined);
+  return { is: "woke", s, from: old.id };
 }
 
 export const wokeLine = (name: string, from: string) => `${name} was off; woke ${from} (its conversation kept)`;

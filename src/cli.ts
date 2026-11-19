@@ -7,9 +7,10 @@ import { followInbox } from "./board/inbox.js";
 import { markHandledMany, queue as waitingQueue, queueTrouble } from "./board/queue.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
+import { lastStopped, noteRan, noteStopped, noteUnrun, ran, staleIds, sweepStale } from "./stopped.js";
 import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owesSession, lead, listing, type Session, stopSession, stopWorktree, waitForName } from "./fleet.js";
 import { Unreachable } from "./remote.js";
-import { agentSessions, transportFor, transports } from "./transport.js";
+import { agentSessions, type Transport, transportFor, transports } from "./transport.js";
 import type { Agent } from "./config.js";
 import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
 import { bringUpLead } from "./lead-up.js";
@@ -72,11 +73,14 @@ usage: factory [--workspace <dir>] <command> [options]
                                   worktree, from the backlog or off the board (records designing) or design-review
                                   (another round).
   wake <agent>                    bring back an agent whose session is off (stopped idle, or retired
-                                  by Claude's daemon): respawn its newest session, same conversation,
-                                  and wait until it is listed live. Exit 1 when it does not come back.
+                                  by Claude's daemon): respawn the session \`stop\` stopped last, by
+                                  id, else its newest; same conversation, same command line. Wait
+                                  until it is listed live. Exit 1 when it does not come back, or when
+                                  the session stopped last is no longer listed.
   stop <agent> [--force] [--remove-worktree]
                                   stop a teammate; refuses on uncommitted or unpushed work. Keeps
-                                  the worktree unless --remove-worktree.
+                                  its session listed, stopped, for wake, and the worktree unless
+                                  --remove-worktree.
   review [--name <r>] [--prompt-file <f>] [--force]
                                   a fresh reviewer for one review: the first free one
   assistant [name] [--prompt-file <f>] [--force]
@@ -522,7 +526,11 @@ function cmdStop(ws: Workspace, argv: string[]) {
     const left = builderLeft(ws, ag, t, cwd);
     if (left) throw new FactoryError(left);
   }
-  stopSession(t, s);
+  // The row stays, so a wake resumes this conversation by its id (stopped.ts).
+  stopSession(t, s, false);
+  const after = rowsNow(t);
+  noteStopped(ws, name, s, after);
+  sweepStale(ws, name, t, after);
   console.log(`stopped ${name} (${s.id})`);
   const remove = !!v["remove-worktree"] && !v["keep-worktree"];
   // The worktree stays unless asked for: a worktree can hold a running stack and its database.
@@ -590,6 +598,7 @@ function cmdAssistant(ws: Workspace, argv: string[]) {
       console.log(`  next: send it the task by message, or pass --force for a fresh session`);
       return;
     }
+    if (w.is === "failed" && w.fresh) throw new FactoryError(`${want} was off and did not wake: ${w.why}.`);
     if (w.is === "failed" || w.is === "unknown") throw new FactoryError(`${want} was off and did not wake: ${w.why}. Nothing was started, so its conversation is kept; \`factory wake ${want}\` tries again, and --force starts a fresh session without it.`);
   }
   const ready = (name: string) => onDemand(ws, agentOrDie(ws, name), () => (promptFile ? readFileSync(promptFile, "utf8") : assistantPrompt(ws)));
@@ -648,6 +657,15 @@ function sayUnknown(rows: Iterable<Session[] | Unreachable>, so: string): number
   return code;
 }
 
+// The full listing for a stop's record, or none when it cannot be had (stopped.ts).
+function rowsNow(t: Pick<Transport, "sessions">): Session[] | undefined {
+  try {
+    return t.sessions(true);
+  } catch {
+    return undefined;
+  }
+}
+
 function cmdDown(ws: Workspace, argv: string[]) {
   args("down", argv, {}, [0, 0]);
   const rows = new Map(transports(ws).map((t) => [t.where, listing(t)]));
@@ -655,8 +673,37 @@ function cmdDown(ws: Workspace, argv: string[]) {
   for (const { t, hits } of agentSessions(ws, (where) => rows.get(where)))
     for (const s of hits) {
       console.log(`stopping ${s.name} (${s.id})`);
+      // only a row live at the stop is the one to bring back: a dead duplicate listed after it
+      // must not replace its record (CodeRabbit on #130)
+      const sid = s.id ?? "", sname = s.name ?? "";
+      const st = lastStopped(ws, sname);
+      const marked = !!sid && !!st?.failed?.includes(sid);
+      // what the row showed before the stop clears its pid (CodeRabbit on #130 at d1c64cc6)
+      const showed = ran(s, st);
+      const live = t.alive(s);
+      // a launch marked as never come up is stopped too, so one up late does not outlive the down,
+      // and keeps its mark: its "stopped" is ours, no evidence that it ran (Marie on #130 at f62a6b10).
+      // One that had shown it ran (a pid, though dead) is not unrun: its stop is read as it is.
+      if (marked && !live && !showed) noteUnrun(ws, sname, sid);
+      // and one a down before marked unrun that has shown it ran since leaves unrun before the stop
+      // clears its pid (CodeRabbit on #130 at 2f878288)
+      if (marked && showed && st?.unrun?.includes(sid)) noteRan(ws, sname, [s]);
       stopSession(t, s, false);
+      if (live) noteStopped(ws, s.name ?? "", s, hits);
     }
+  // rows a hook's wake left (stopped.ts), once every session is stopped
+  // One listing per host, taken only once an agent there has any, and kept when it fails: a host
+  // that does not answer costs one timeout, not one per agent (CodeRabbit on #130 at 2f878288).
+  const after = new Map<string, Session[] | undefined>();
+  for (const { agent, t } of agentSessions(ws, (where) => rows.get(where))) {
+    if (!staleIds(ws, agent.name).length) continue;
+    if (!after.has(t.where)) after.set(t.where, rowsNow(t));
+    // a host whose listing failed shows nothing: its ids are kept, and it is not asked again, which
+    // sweepStale would do given no rows (CodeRabbit on #130 at f10e2da)
+    const listed = after.get(t.where);
+    const removed = sweepStale(ws, agent.name, t, listed ?? []);
+    if (listed && removed.length) after.set(t.where, listed.filter((r) => !removed.includes(r.id ?? "")));
+  }
   stopBoard(ws, true);
   return code;
 }
@@ -668,6 +715,9 @@ function cmdRestartLead(ws: Workspace, argv: string[]) {
   const s = findSession(t, name);
   if (t.alive(s)) {
     stopSession(t, s, false);
+    const after = rowsNow(t);
+    noteStopped(ws, name, s, after);
+    sweepStale(ws, name, t, after);
     // wait for the supervisor to report it stopped, or up sees it as running
     for (let i = 0; i < 20 && t.alive(findSession(t, name)); i++) sleep(1000);
     console.log(`stopped ${name}`);
