@@ -7,7 +7,7 @@ import { followInbox } from "./board/inbox.js";
 import { markHandledMany, queue as waitingQueue, queueTrouble } from "./board/queue.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
-import { lastStopped, noteStopped, noteUnrun, ran } from "./stopped.js";
+import { lastStopped, noteStopped, noteUnrun, ran, sweepStale } from "./stopped.js";
 import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owesSession, lead, listing, type Session, stopSession, stopWorktree, waitForName } from "./fleet.js";
 import { Unreachable } from "./remote.js";
 import { agentSessions, type Transport, transportFor, transports } from "./transport.js";
@@ -463,7 +463,9 @@ function cmdStop(ws: Workspace, argv: string[]) {
   }
   // The row stays, so a wake resumes this conversation by its id (stopped.ts).
   stopSession(t, s, false);
-  noteStopped(ws, name, s, rowsNow(t));
+  const after = rowsNow(t);
+  noteStopped(ws, name, s, after);
+  sweepStale(ws, name, t, after);
   console.log(`stopped ${name} (${s.id})`);
   const remove = !!v["remove-worktree"] && !v["keep-worktree"];
   // The worktree stays unless asked for: a worktree can hold a running stack and its database.
@@ -621,6 +623,11 @@ function cmdDown(ws: Workspace, argv: string[]) {
       stopSession(t, s, false);
       if (live) noteStopped(ws, s.name ?? "", s, hits);
     }
+  // rows a hook's wake left (stopped.ts), once every session is stopped
+  for (const { t, hits } of agentSessions(ws, (where) => rows.get(where))) {
+    const after = rowsNow(t);
+    for (const name of new Set(hits.map((h) => h.name ?? ""))) sweepStale(ws, name, t, after);
+  }
   stopBoard(ws, true);
   return code;
 }
@@ -632,7 +639,9 @@ function cmdRestartLead(ws: Workspace, argv: string[]) {
   const s = findSession(t, name);
   if (t.alive(s)) {
     stopSession(t, s, false);
-    noteStopped(ws, name, s, rowsNow(t));
+    const after = rowsNow(t);
+    noteStopped(ws, name, s, after);
+    sweepStale(ws, name, t, after);
     // wait for the supervisor to report it stopped, or up sees it as running
     for (let i = 0; i < 20 && t.alive(findSession(t, name)); i++) sleep(1000);
     console.log(`stopped ${name}`);

@@ -7,7 +7,7 @@
 import type { Agent } from "./config.js";
 import { findSession, pollForName, type Session } from "./fleet.js";
 import { refreshSettings } from "./launch.js";
-import { cameUp, freshCommand, replaceStopped, resumable } from "./stopped.js";
+import { cameUp, freshCommand, replaceStopped, resumable, sweepStale } from "./stopped.js";
 import { ask, Unreachable } from "./remote.js";
 import { isAgentSession, LISTING_TIMEOUT_MS, newest, type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
@@ -45,6 +45,8 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   if (live instanceof Unreachable) return { is: "unknown", why: live.brief };
   if (t.alive(live)) {
     cameUp(ws, agent.name, t, live);
+    // with no deadline, rows a hook's wake left are removed (stopped.ts)
+    if (o.deadline === undefined) sweepStale(ws, agent.name, t);
     return { is: "live", s: live };
   }
   if (left() < LISTING_TIMEOUT_MS) return late("the stopped sessions were listed");
@@ -53,6 +55,8 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   // Not findSession: it prefers a row alive() passes, and locally that is a host-wide check, so a
   // stale "done" row would beat the newest stopped session. The session the factory stopped is
   // resumed by its id, and never an older row in its place (stopped.ts).
+  // with no deadline, rows a hook's wake left are removed first (stopped.ts)
+  if (o.deadline === undefined) sweepStale(ws, agent.name, t, all);
   const which = resumable(ws, agent.name, all.filter(isAgentSession(agent.name)), newest);
   if ("gone" in which)
     return { is: "failed", fresh: freshCommand(agent),

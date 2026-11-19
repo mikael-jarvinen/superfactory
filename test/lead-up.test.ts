@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, mock, test } from "node:test";
 import type { Session } from "../src/fleet.js";
@@ -18,6 +18,10 @@ mkdirSync(join(dir, "lead"));
 after(() => rmSync(dir, { recursive: true, force: true }));
 const ws = openWorkspace(dir, {});
 const ld = lead(ws);
+// the rows a hook's wake left for later (stopped.ts), read as the file holds them
+const staleFile = () => join(ws.runDir, `stale-${ld.name}.json`);
+const staleIds = (): string[] => (existsSync(staleFile()) ? (JSON.parse(readFileSync(staleFile(), "utf8")) as string[]) : []);
+const forgetAll = () => (forgetStopped(ws, ld.name), rmSync(staleFile(), { force: true }));
 
 // A transport whose listing is `sessions`; whatever it starts or respawns comes up alive.
 function fake(sessions: Session[], opts: { startFails?: boolean; stopFails?: boolean; stopBug?: boolean; neverUp?: boolean; deadRow?: number; launchId?: string } = {}) {
@@ -620,6 +624,55 @@ test(`a wake with a deadline ${leftS} s off starts no listing or stop after its 
     assert.deepEqual(f.removed, [], "no stop: the old row waits for a later step");
     assert.deepEqual(lastStopped(ws, ld.name), { id: "runA2", at: lastStopped(ws, ld.name)?.at, failed: ["deadB"] });
   } finally {
-    forgetStopped(ws, ld.name);
+    forgetAll();
+  }
+});
+
+test("a listing that fails or comes back empty keeps the rows a hook's wake left", () => {
+  try {
+    mkdirSync(ws.runDir, { recursive: true });
+    writeFileSync(staleFile(), JSON.stringify(["oldA"]) + "\n");
+    const rows: Session[] = [{ id: "liveB", name: ld.name, kind: "background", alive: true }];
+    const f = fake(rows);
+    const list = f.t.sessions;
+    for (const all of [() => assert.fail("listing timed out"), () => []] as (() => Session[])[]) {
+      f.t.sessions = (wantAll) => (wantAll ? all() : list(false));
+      const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+      assert.equal(w.is, "live", JSON.stringify(w));
+      assert.deepEqual(f.removed, []);
+      assert.deepEqual(staleIds(), ["oldA"]);
+    }
+  } finally {
+    forgetAll();
+  }
+});
+
+test("a row a deadline wake left goes at the next wake with no deadline, and is never a candidate", () => {
+  const t0 = Date.now();
+  try {
+    record({ id: "runA", at: new Date(t0 - 3_600_000).toISOString() });
+    const rows: Session[] = [{ id: "runA", name: ld.name, kind: "background", state: "stopped", startedAt: t0 - 7_200_000 }];
+    const f = fake(rows);
+    f.t.respawn = (_name, id) => {
+      f.respawned.push(id);
+      rows.push({ id: `${id}2`, name: ld.name, kind: "background", alive: true, startedAt: t0 });
+      return { ok: true, said: "respawned", why: "" };
+    };
+    const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10, deadline: Date.now() + 120_000 });
+    assert.equal(w.is, "woke", JSON.stringify(w));
+    assert.deepEqual(f.removed, [], "the hook's wake stops nothing");
+    assert.deepEqual(staleIds(), ["runA"], "the old row is noted for later");
+    // runA2 ends: the next hook wake resumes runA2, never the stale runA (Niilo on #130 at c2ef44e3)
+    const a2 = rows.find((r) => r.id === "runA2");
+    if (a2) Object.assign(a2, { alive: false, state: "stopped" });
+    f.respawned.length = 0;
+    wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10, deadline: Date.now() + 120_000 });
+    assert.ok(!f.respawned.includes("runA"), `stale runA respawned: ${JSON.stringify(f.respawned)}`);
+    // a CLI wake, with no deadline, stops and removes the old row
+    wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+    assert.deepEqual([...f.removed].sort(), ["runA", "runA2"], "both rows the hook's wakes left");
+    assert.deepEqual(staleIds(), [], "the noted id is cleared once removed");
+  } finally {
+    forgetAll();
   }
 });

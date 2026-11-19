@@ -143,6 +143,61 @@ export function moveRecord(ws: Workspace, name: string, id: string, failed: Iter
 
 export const forgetStopped = (ws: Workspace, name: string) => rmSync(file(ws, name), { force: true });
 
+// Rows a new conversation replaced that a caller with a deadline could not stop and remove (a hook's
+// wake: CodeRabbit on #130 at b77aae5c). They live in a file of their own, beside the record, so no
+// writer of the record drops them, and the next caller with no deadline (up, a CLI wake, stop,
+// down, restart-lead, a launch) stops and removes them (Niilo on #130 at c2ef44e3: rows pile up
+// otherwise). A stale id is never a wake candidate.
+const staleFile = (ws: Workspace, name: string) => join(ws.runDir, `stale-${name}.json`);
+
+export function staleIds(ws: Workspace, name: string): string[] {
+  try {
+    const d = JSON.parse(readFileSync(staleFile(ws, name), "utf8")) as unknown;
+    return Array.isArray(d) ? d.filter((x): x is string => typeof x === "string" && !!x) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveStale(ws: Workspace, name: string, ids: string[]): void {
+  const f = staleFile(ws, name);
+  if (!ids.length) return rmSync(f, { force: true });
+  mkdirSync(ws.runDir, { recursive: true });
+  const tmp = `${f}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(ids) + "\n");
+  renameSync(tmp, f);
+}
+
+function noteStale(ws: Workspace, name: string, ids: string[]): void {
+  if (ids.length) saveStale(ws, name, [...new Set([...staleIds(ws, name), ...ids])]);
+}
+
+// For a caller with no deadline: the stale rows are stopped and removed. One live again is no longer
+// stale, and is left; one no longer listed is gone already. A listing that failed or came back empty
+// shows nothing, and every id is kept, as are those whose removal failed.
+export function sweepStale(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, rows?: Session[]): void {
+  const ids = staleIds(ws, name);
+  if (!ids.length || !name) return;
+  if (!rows)
+    try {
+      rows = t.sessions(true);
+    } catch {
+      return;
+    }
+  if (!rows.length) return;
+  const keep: string[] = [];
+  for (const id of ids) {
+    const row = rows.find((r) => r.id === id);
+    if (!row || t.alive(row)) continue;
+    try {
+      t.stop(name, id, true);
+    } catch {
+      keep.push(id);
+    }
+  }
+  saveStale(ws, name, keep);
+}
+
 // The command that starts an agent fresh, for when its conversation cannot come back (Marie on #130:
 // a refusal that says only "factory wake" sends people back into the command that just failed).
 export const freshCommand = (a: Pick<Agent, "name" | "role">): string =>
@@ -170,6 +225,9 @@ const startMs = (r: Session): number =>
 // leaves the record and the stopped row as they were (Marie on #130 at 85389fcf).
 export function resumable(ws: Workspace, name: string, rows: Session[], newest: (r: Session[]) => Session | null):
   { s: Session | null; failed?: string[] } | { gone: string } {
+  // the record's own id is never stale: a writer that names it again has taken it back
+  const gone = staleIds(ws, name).filter((id) => id !== lastStopped(ws, name)?.id);
+  if (gone.length) rows = rows.filter((r) => !gone.includes(r.id ?? ""));
   const st = seen(ws, name, lastStopped(ws, name), rows);
   if (!st) return { s: newest(rows) };
   const at = Date.parse(st.at);
@@ -214,9 +272,12 @@ export function replaceStopped(ws: Workspace, name: string, t: Pick<Transport, "
   const st = seen(ws, name, lastStopped(ws, name), rows);
   if (newId && st) moveRecord(ws, name, newId, held(st, rows, newId).filter((id) => id !== stale));
   else forgetStopped(ws, name);
-  if (listed) return;
-  for (const id of new Set([st?.id, stale]))
-    if (id && id !== newId)
+  const old = [...new Set([st?.id, stale])].filter((id): id is string => !!id && id !== newId);
+  // with no time to remove them, they are noted for the next caller that has it
+  if (listed) return noteStale(ws, name, old.filter((id) => rows?.some((r) => r.id === id && !t.alive(r))));
+  sweepStale(ws, name, t, rows);
+  for (const id of old)
+    if (id)
       try {
         const row = rows?.find((r) => r.id === id);
         if (row && !t.alive(row)) t.stop(name, id, true);

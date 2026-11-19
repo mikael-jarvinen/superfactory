@@ -10,7 +10,7 @@ import type { Agent } from "./config.js";
 import { findSession, type Session, waitForName } from "./fleet.js";
 import { armText } from "./hooks/status.js";
 import { GIT_HTTPS_ENV, launch, launchArgs, leadPrompt, refreshSettings, roleAppendix, roleOf } from "./launch.js";
-import { cameUp, freshCommand, lastStopped, moveRecord, replaceStopped, resumable } from "./stopped.js";
+import { cameUp, freshCommand, lastStopped, moveRecord, replaceStopped, resumable, sweepStale } from "./stopped.js";
 import { isAgentSession, pick, type Transport } from "./transport.js";
 import { FactoryError } from "./util.js";
 import type { Workspace } from "./workspace.js";
@@ -39,6 +39,7 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
   // the marks a launch that ran leaves standing, once the row chosen for it is up (stopped.ts)
   let marks: string[] | undefined;
   if (!fresh) {
+    sweepStale(ws, ld.name, t);
     const st = lastStopped(ws, ld.name);
     if (!st) old = findSession(t, ld.name, true);
     else {
