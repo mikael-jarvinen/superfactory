@@ -7,7 +7,7 @@
 import type { Agent } from "./config.js";
 import { findSession, pollForName, type Session } from "./fleet.js";
 import { refreshSettings } from "./launch.js";
-import { cameUp, freshCommand, resumable } from "./stopped.js";
+import { cameUp, freshCommand, resumable, supersede } from "./stopped.js";
 import { ask, Unreachable } from "./remote.js";
 import { isAgentSession, LISTING_TIMEOUT_MS, newest, type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
@@ -53,7 +53,7 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   // Not findSession: it prefers a row alive() passes, and locally that is a host-wide check, so a
   // stale "done" row would beat the newest stopped session. The session the factory stopped is
   // resumed by its id, and never an older row in its place (stopped.ts).
-  const which = resumable(ws, agent.name, all.filter(isAgentSession(agent.name)), newest, t);
+  const which = resumable(ws, agent.name, all.filter(isAgentSession(agent.name)), newest);
   if ("gone" in which)
     return { is: "failed", fresh: freshCommand(agent),
       why: `${which.gone}, the session stopped last, is no longer listed, and an older one is another conversation; \`${freshCommand(agent)}\` starts it fresh` };
@@ -77,8 +77,9 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   const s = pollForName(t, agent.name, waitS, o.pollMs ?? 1000, lastPollAt);
   // Respawned, and the last listing could not be had: most likely live, so not failed.
   if (s instanceof Unreachable) return { is: "unknown", why: `respawned ${old.id}, then ${s.brief}` };
-  if (s) return { is: "woke", s, from: old.id };
-  return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };
+  if (!s) return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };
+  if (which.failed) supersede(ws, agent.name, t, old.id, which.failed);
+  return { is: "woke", s, from: old.id };
 }
 
 export const wokeLine = (name: string, from: string) => `${name} was off; woke ${from} (its conversation kept)`;

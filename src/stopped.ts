@@ -18,14 +18,18 @@ export interface Stopped {
 
 const file = (ws: Workspace, name: string) => join(ws.runDir, `stopped-${name}.json`);
 
-export function noteStopped(ws: Workspace, name: string, s: Session | null): void {
-  // a row with no name is no agent's (Marie on #130: down wrote stopped-.json)
-  if (!s?.id || !name) return;
+function save(ws: Workspace, name: string, st: Stopped): void {
   mkdirSync(ws.runDir, { recursive: true });
   const f = file(ws, name);
   const tmp = `${f}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ id: s.id, at: new Date().toISOString() } satisfies Stopped) + "\n");
+  writeFileSync(tmp, JSON.stringify(st) + "\n");
   renameSync(tmp, f);
+}
+
+export function noteStopped(ws: Workspace, name: string, s: Session | null): void {
+  // a row with no name is no agent's (Marie on #130: down wrote stopped-.json)
+  if (!s?.id || !name) return;
+  save(ws, name, { id: s.id, at: new Date().toISOString() });
 }
 
 export function lastStopped(ws: Workspace, name: string): Stopped | null {
@@ -78,17 +82,24 @@ export function noteFailedLaunch(ws: Workspace, name: string, t: Pick<Transport,
   if (!st || !ids.size) return;
   for (const x of st.failed ?? []) ids.add(x);
   ids.delete(st.id);
-  mkdirSync(ws.runDir, { recursive: true });
-  const f = file(ws, name);
-  const tmp = `${f}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ ...st, failed: [...ids] } satisfies Stopped) + "\n");
-  renameSync(tmp, f);
+  save(ws, name, { ...st, failed: [...ids] });
 }
 
 // A row noted as a failed launch that is seen live came up after all: it is a new conversation,
 // and replaces the one stopped last as a launch that came up does (Marie on #130).
 export function cameUp(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, s: Session): void {
-  if (s.id && lastStopped(ws, name)?.failed?.includes(s.id)) replaceStopped(ws, name, t, s.id);
+  const failed = lastStopped(ws, name)?.failed ?? [];
+  if (s.id && failed.includes(s.id)) supersede(ws, name, t, s.id, failed);
+}
+
+// A marked launch that came up replaces the session stopped last. Any other launch still marked
+// keeps its mark: the one that came up is then the record, the session a wake resumes, rather than
+// no record and the newest row, which can be a launch that never came up (CodeRabbit and Marie on
+// #130 at 85389fcf).
+export function supersede(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, id: string, failed: Iterable<string>): void {
+  replaceStopped(ws, name, t, id);
+  const keep = [...failed].filter((x) => x !== id);
+  if (keep.length) save(ws, name, { id, at: new Date().toISOString(), failed: keep });
 }
 
 export const forgetStopped = (ws: Workspace, name: string) => rmSync(file(ws, name), { force: true });
@@ -112,8 +123,11 @@ const startMs = (r: Session): number =>
 // A recorded row that is gone is said, never replaced by an older one. The record lives on the box
 // that stopped it, so a launch from another box does not forget it; a row started after the stop
 // (another conversation, launched since) makes it stale, and the newest is the one (Marie on #130).
-export function resumable(ws: Workspace, name: string, rows: Session[], newest: (r: Session[]) => Session | null,
-  t: Pick<Transport, "sessions" | "alive" | "stop">): { s: Session | null } | { gone: string } {
+// A row chosen because a marked launch ran comes with the marks still held: once it is up, the
+// caller passes them to supersede. Nothing is replaced before then, so a wake that resumes nothing
+// leaves the record and the stopped row as they were (Marie on #130 at 85389fcf).
+export function resumable(ws: Workspace, name: string, rows: Session[], newest: (r: Session[]) => Session | null):
+  { s: Session | null; failed?: string[] } | { gone: string } {
   const st = lastStopped(ws, name);
   if (!st) return { s: newest(rows) };
   const at = Date.parse(st.at);
@@ -123,14 +137,17 @@ export function resumable(ws: Workspace, name: string, rows: Session[], newest: 
   const marked = new Set(st.failed ?? []);
   const failed = new Set([...marked].filter((id) => !rows.some((r) => r.id === id && ran(r))));
   // A marked launch that has run since came up after the stop, whatever its host's clock says of
-  // its start. It replaces the record, as cameUp does for one seen live, so a later wake does not
-  // read the mark again once the row is back to "working" (CodeRabbit on #130 at 43510c94).
-  const since = rows.some((r) => !!r.id && marked.has(r.id) && !failed.has(r.id));
-  if (since || rows.some((r) => r.id !== st.id && !marked.has(r.id ?? "") && startMs(r) > at)) {
-    const s = newest(rows.filter((r) => !failed.has(r.id ?? "")));
-    if (since) replaceStopped(ws, name, t, s?.id);
-    return { s };
+  // its start. It replaces the record once up, as cameUp does for one seen live, so a later wake
+  // does not read the mark again once the row is back to "working" (CodeRabbit on #130 at 43510c94).
+  // The stopped row is no candidate then: its start and the marked row's are not compared, as a
+  // remote clock can put the launch before it; the rows are those started since (CodeRabbit on #130
+  // at 85389fcf).
+  const after = (r: Session) => r.id !== st.id && !marked.has(r.id ?? "") && startMs(r) > at;
+  const since = rows.filter((r) => !!r.id && marked.has(r.id) && !failed.has(r.id));
+  if (since.length) {
+    return { s: newest(rows.filter((r) => since.includes(r) || after(r))), failed: [...failed] };
   }
+  if (rows.some(after)) return { s: newest(rows.filter((r) => !failed.has(r.id ?? ""))) };
   const s = rows.find((r) => r.id === st.id);
   return s ? { s } : { gone: st.id };
 }

@@ -259,11 +259,11 @@ test("a launch that never comes up does not make its row the one a wake resumes 
     }
     assert.ok(rows.some((r) => r.id === "new1"), "the failed launch's row is listed, started after the stop");
     const newest = (r: Session[]) => r.reduce<Session | null>((a, b) => (!a || Number(b.startedAt) > Number(a.startedAt) ? b : a), null);
-    const which = resumable(ws, ld.name, rows, newest, fake(rows).t);
+    const which = resumable(ws, ld.name, rows, newest);
     assert.ok("s" in which && which.s?.id === "5e7a0b12", `a wake resumes the session stopped last, not the launch that failed: ${JSON.stringify(which)}`);
     // a conversation that did come up since still supersedes the record
     rows.push({ id: "c0ffee00", name: ld.name, kind: "background", state: "stopped", startedAt: Date.now() + 5000 });
-    const later = resumable(ws, ld.name, rows, newest, fake(rows).t);
+    const later = resumable(ws, ld.name, rows, newest);
     assert.ok("s" in later && later.s?.id === "c0ffee00", JSON.stringify(later));
   } finally {
     forgetStopped(ws, ld.name);
@@ -428,6 +428,66 @@ test("a marked launch that ran is not marked again on a later wake (CodeRabbit o
     Object.assign(row, { state: "working", pid: null });
     const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
     assert.deepEqual(f.respawned, ["new1", "new1"], JSON.stringify(w));
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
+});
+
+test("a marked launch that ran is resumed even when its row sorts before the stopped one (CodeRabbit on #130 at 85389fcf)", () => {
+  const t0 = Date.now();
+  try {
+    record({ id: "old1", at: new Date(t0 - 60_000).toISOString(), failed: ["new1"] });
+    const rows: Session[] = [
+      { id: "old1", name: ld.name, kind: "background", state: "stopped", startedAt: t0 - 3_600_000 },
+      // the host's clock was set back since: the launch's row sorts before the stopped one
+      { id: "new1", name: ld.name, kind: "background", state: "done", startedAt: t0 - 7_200_000 },
+    ];
+    const f = fake(rows);
+    const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+    assert.deepEqual(f.respawned, ["new1"], JSON.stringify(w));
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
+});
+
+test("a marked launch that ran leaves the other marks in place (CodeRabbit on #130 at 85389fcf)", () => {
+  const t0 = Date.now();
+  try {
+    record({ id: "old1", at: new Date(t0 - 3_600_000).toISOString(), failed: ["new1", "new2"] });
+    const ran: Session = { id: "new1", name: ld.name, kind: "background", state: "done", startedAt: t0 - 1_800_000 };
+    const rows: Session[] = [
+      { id: "old1", name: ld.name, kind: "background", state: "stopped", startedAt: t0 - 7_200_000 },
+      ran,
+      { id: "new2", name: ld.name, kind: "background", state: "failed", startedAt: t0 - 60_000 },
+    ];
+    const f = fake(rows);
+    wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+    assert.deepEqual(f.respawned, ["new1"]);
+    assert.deepEqual(lastStopped(ws, ld.name)?.failed, ["new2"], "the launch that never came up stays marked");
+    // the respawn ends, and its row is listed "working" with no pid again
+    rows.splice(rows.findIndex((r) => r.id === "new1" && r.alive), 1);
+    Object.assign(ran, { state: "working", pid: null });
+    const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10 });
+    assert.deepEqual(f.respawned, ["new1", "new1"], JSON.stringify(w));
+  } finally {
+    forgetStopped(ws, ld.name);
+  }
+});
+
+test("a wake that resumes nothing leaves the record and the stopped row (Marie on #130 at 85389fcf)", () => {
+  const t0 = Date.now();
+  try {
+    record({ id: "old1", at: new Date(t0 - 3_600_000).toISOString(), failed: ["new1"] });
+    const rows: Session[] = [
+      { id: "old1", name: ld.name, kind: "background", state: "stopped", startedAt: t0 - 7_200_000 },
+      { id: "new1", name: ld.name, kind: "background", state: "done", startedAt: t0 - 1_800_000 },
+    ];
+    const f = fake(rows);
+    const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10, match: () => false });
+    assert.equal(w.is, "none");
+    assert.deepEqual(f.respawned, []);
+    assert.deepEqual(f.removed, [], "the stopped row stays");
+    assert.deepEqual(lastStopped(ws, ld.name)?.failed, ["new1"], "the record stays");
   } finally {
     forgetStopped(ws, ld.name);
   }
