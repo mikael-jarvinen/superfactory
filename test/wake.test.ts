@@ -641,4 +641,15 @@ repos = ["web", "api"]
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /kit is still on TEST-40 .*so it keeps its context/);
   assert.deepEqual([rec().state, rec().stack, rec().worktree], ["building", "api", wt], "api's stack, where the worktree is; not web's, the default");
+  assert.doesNotMatch(r.stdout, /ignored/, "no --repo given, nothing ignored");
+  // a fix round: a --repo that names another repo is said to be ignored; one naming the worktree's is not (Marie on #129)
+  for (const args of [["pr-open", "--pr", "acme/api#1", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "2 high"]])
+    assert.equal(factory(ws, ["state", "TEST-40", ...args]).status, 0);
+  r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "web"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^--repo web ignored: kit is kept in api's worktree$/m);
+  assert.equal(rec().stack, "api");
+  r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "api"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stdout, /ignored/);
 });

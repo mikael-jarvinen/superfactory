@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { worktreePath } from "./worktree.js";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
@@ -48,6 +47,7 @@ import { runQueue } from "./watchers/queue.js";
 import { runRound } from "./watchers/round.js";
 import { runReviews } from "./watchers/reviews.js";
 import { openWorkspace, resolveWorkspace, type Workspace } from "./workspace.js";
+import { worktreePath } from "./worktree.js";
 
 const USAGE = `factory: start, stop, dispatch and track a fleet of Claude Code sessions.
 
@@ -336,7 +336,10 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
       // The stack is the kept worktree's: the repo it is in, else what the record has. The repo this
       // dispatch defaults to can be another (CodeRabbit on #129).
       const at = (s.cwd ?? "").replace(/\/+$/, "");
-      const keptStack = ag.stack ?? allowed.find((k) => worktreePath(ws.config.repos[k]!.path, ticket) === at) ?? kept?.stack ?? stack;
+      const keptRepo = allowed.find((k) => worktreePath(ws.config.repos[k]!.path, ticket) === at);
+      const keptStack = ag.stack ?? keptRepo ?? kept?.stack ?? stack;
+      // the round stays where its worktree is: a --repo naming another is said, not silently dropped (Marie on #129)
+      if (str(v.repo) && keptRepo && str(v.repo) !== keptRepo) console.log(`--repo ${str(v.repo)} ignored: ${name} is kept in ${keptRepo}'s worktree`);
       if (cur === null)
         transition(ws, ticket, "building", { agent: name, stack: keptStack, worktree: s.cwd, evidence: `back on the board on the live session ${s.id}, context kept` });
       else if (cur !== "fixing")
