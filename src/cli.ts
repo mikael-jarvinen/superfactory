@@ -337,9 +337,14 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
       // dispatch defaults to can be another (CodeRabbit on #129).
       const at = (s.cwd ?? "").replace(/\/+$/, "");
       const keptRepo = allowed.find((k) => worktreePath(ws.config.repos[k]!.path, ticket) === at);
-      const keptStack = ag.stack ?? keptRepo ?? kept?.stack ?? stack;
-      // the round stays where its worktree is: a --repo naming another is said, not silently dropped (Marie on #129)
-      if (str(v.repo) && keptRepo && str(v.repo) !== keptRepo) console.log(`--repo ${str(v.repo)} ignored: ${name} is kept in ${keptRepo}'s worktree`);
+      const [keptStack, keptWhy] =
+        ag.stack ? [ag.stack, `${name} is kept on its own stack ${ag.stack}`]
+        : keptRepo ? [keptRepo, `${name} is kept in ${keptRepo}'s worktree`]
+        : kept?.stack ? [kept.stack, `${name} is kept on ${kept.stack}, the stack ${ticket}'s record has`]
+        : [stack, `${name} is kept on ${stack}`];
+      // A kept round uses the stack above, whatever --repo says; one that names another is said, with
+      // where the stack came from, never dropped silently (Marie on #129).
+      if (str(v.repo) && str(v.repo) !== keptStack) console.log(`--repo ${str(v.repo)} ignored: ${keptWhy}`);
       if (cur === null)
         transition(ws, ticket, "building", { agent: name, stack: keptStack, worktree: s.cwd, evidence: `back on the board on the live session ${s.id}, context kept` });
       else if (cur !== "fixing")

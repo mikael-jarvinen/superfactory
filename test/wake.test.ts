@@ -652,4 +652,10 @@ repos = ["web", "api"]
   r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "api"]);
   assert.equal(r.status, 0, r.stderr);
   assert.doesNotMatch(r.stdout, /ignored/);
+  // a session in no local repo's worktree (a hosted builder's path, say): the record's stack, and
+  // the --repo it overrides is said, with where the stack came from (Marie on #129)
+  put("live.json", [sess("new1", "kit", { state: "idle", cwd: "/far/worktrees/TEST-40" })]);
+  r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "web"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^--repo web ignored: kit is kept on api, the stack TEST-40's record has$/m);
 });
