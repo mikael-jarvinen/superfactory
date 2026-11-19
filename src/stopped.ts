@@ -61,21 +61,24 @@ function held(st: Stopped | null | undefined, rows: Session[] | undefined, excep
 // conversation is resumed (Marie on #130 at b9d55a37). The record is saved without it.
 function seen(ws: Workspace, name: string, st: Stopped | null, rows: Session[] | undefined): Stopped | null {
   if (!st?.unrun?.length || !rows) return st;
-  const up = (id: string) => rows.some((r) => r.id === id && (typeof r.pid === "number" || r.alive === true));
+  // the evidence ran() takes, but "stopped": a session the daemon retired ends "done" or "blocked"
+  // with no pid (Marie on #130 at ed2b9911)
+  const up = (id: string) => rows.some((r) => r.id === id &&
+    (typeof r.pid === "number" || r.alive === true || ["done", "blocked"].includes(r.state ?? "")));
   if (!st.unrun.some(up)) return st;
   const next: Stopped = { ...st, unrun: st.unrun.filter((id) => !up(id)) };
   save(ws, name, next);
   return lastStopped(ws, name);
 }
 
-// `factory down` stops a marked launch that has shown nothing, so one that comes up late does not
-// outlive the down; the mark stays, and its stopped state is not read as having run.
 // For a caller about to clear a row's evidence (down's stop clears its pid): the launches the rows
 // show ran leave unrun first (CodeRabbit on #130 at 2f878288).
 export function noteRan(ws: Workspace, name: string, rows: Session[]): void {
   seen(ws, name, lastStopped(ws, name), rows);
 }
 
+// `factory down` stops a marked launch that has shown nothing, so one that comes up late does not
+// outlive the down; the mark stays, and its stopped state is not read as having run.
 export function noteUnrun(ws: Workspace, name: string, id: string): void {
   const st = lastStopped(ws, name);
   if (st?.failed?.includes(id)) save(ws, name, { ...st, unrun: [...new Set([...(st.unrun ?? []), id])] });

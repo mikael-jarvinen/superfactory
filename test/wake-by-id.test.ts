@@ -278,3 +278,21 @@ test("down asks a host whose listing failed once, and keeps the rows a hook's wa
   assert.deepEqual(JSON.parse(readFileSync(join(w.runDir, "stale-rae.json"), "utf8")), ["91c86061"]);
   assert.deepEqual(JSON.parse(readFileSync(join(w.runDir, "stale-cal.json"), "utf8")), ["c1"]);
 });
+
+// Marie on #130 at ed2b9911: a session the daemon retired idle ends "done" with no pid, and down kept
+// its unrun mark, as seen() took only a pid or alive as evidence; it was never resumed.
+test("a down clears the unrun mark of a launch that has ended done, with no pid", () => {
+  const { ws, run, calls } = fleet();
+  const w = openWorkspace(ws, {});
+  mkdirSync(w.runDir, { recursive: true });
+  writeFileSync(join(w.runDir, "stopped-rae.json"), JSON.stringify({ id: "91c86061", at: new Date(Date.now() - 1_800_000).toISOString(), failed: ["runA"], unrun: ["runA"] }));
+  const db = join(ws, "db.json");
+  const all = (JSON.parse(readFileSync(db, "utf8")) as Record<string, unknown>[]).filter((r) => r.id !== "5e7a0b12");
+  all.push({ id: "runA", name: "rae", kind: "background", state: "done", status: "done", pid: null,
+    startedAt: Date.now() - 600_000, cwd: "/w/rae", sessionId: "runA-uuid", args: ["--bg", "--name", "rae", "ran"] });
+  writeFileSync(db, JSON.stringify(all));
+  assert.equal(run("down").status, 0);
+  assert.equal(lastStopped(w, "rae")?.unrun, undefined);
+  assert.equal(run("wake", "rae").status, 0);
+  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn runA"], "the conversation the daemon retired");
+});
