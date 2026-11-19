@@ -163,6 +163,19 @@ test("a builder's current brief reads its repo: files from the checkout of the r
   assert.match(currentAppendix(ws, bea, join(dir, "elsewhere")) ?? "", /web's agents file/, "else its first repo's");
 });
 
+// Marie on #131 at 9a65bf8e: roleAppendix with no repo threw on a repo: file, the wake took that as
+// undefined, and a hosted builder was never sent its brief as it is now.
+test("a hosted builder's current brief reads its repo: files from its first repo, as dispatch does", () => {
+  const { ws } = workspace();
+  const bea = { ...agentOrDie(ws, "bea"), host: "far" };
+  assert.ok(bea.appendix.some((a) => a.startsWith("repo:")), "the fixture's builder has a repo: file");
+  for (const k of ["web", "api"]) {
+    mkdirSync(ws.config.repos[k]!.path, { recursive: true });
+    writeFileSync(join(ws.config.repos[k]!.path, "AGENTS.md"), `${k}'s agents file\n`);
+  }
+  assert.match(currentAppendix(ws, bea, "/home/far/work/TEST-1") ?? "", /web's agents file/);
+});
+
 // The lead's resume and its respawn fallback: the current file is written first.
 function leadFake(sessions: Session[], startFails = false) {
   const respawned: { id: string; appendix: string | null | undefined }[] = [];
@@ -202,6 +215,21 @@ test("up resumes the lead with its brief as it is now written for the hook, on r
   const h = leadFake([stoppedLead()]);
   bringUpLead(ws, { ...lead(ws), host: "far" }, h.t, false, () => {}, 1);
   assert.match(String(h.respawned[0]?.appendix), /edited since/);
+});
+
+// Marie on #131 at 9a65bf8e: the settings were rendered first, so a render that threw skipped the
+// appendix, and the lead came back on its old brief with only the settings warning said.
+test("up's respawn writes the lead's brief as it is now even when its settings cannot be rendered", () => {
+  const { dir, ws } = workspace();
+  writeFileSync(join(dir, "briefs", "ada.md"), "ada's brief, edited since\n");
+  (ws.config.roles[lead(ws).role] as { settings: string }).settings = join(dir, "gone.json");
+  // no session id: up goes straight to the respawn, with no resume to write the brief first
+  const f = leadFake([{ ...stoppedLead(), sessionId: undefined }]);
+  const said: string[] = [];
+  bringUpLead(ws, lead(ws), f.t, false, (l) => said.push(l), 1);
+  assert.deepEqual(f.respawned.map((r) => r.id), ["a1"]);
+  assert.ok(said.some((l) => /settings could not be rendered/.test(l)), said.join("\n"));
+  assert.match(readFileSync(currentAppendixPath(ws.runDir, "ada"), "utf8"), /edited since/);
 });
 
 // A claude whose -p prints JSON, and whose --resume runs the settings' SessionStart hook as claude
