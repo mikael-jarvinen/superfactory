@@ -1301,26 +1301,53 @@ const ROUND_128: [string, string, string][] = [
   // --body > Written by agent. ok, a redirection; -d '\n' passes the line as it is
   [NO, "a marked body whose quotes xargs takes", "echo \"gh pr comment 5 -R acme/api --body '> Written by agent. ok'\" | xargs -I{} sh -c '{}'"],
   [OK, "a marked comment through a slot", "echo \"gh pr comment 5 -R acme/api --body '> Written by agent. ok'\" | xargs -d '\\n' -I{} sh -c '{}'"],
-  // and the command as written is checked only when the line shows all xargs' input: a marked line
-  // that fills --body {} is the body
-  [OK, "a marked line into --body {}", "echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
-  [OK, "a marked here-string into --body {}", "xargs -I{} gh pr comment 5 -R acme/api --body {} <<< '> Written by agent. ok'"],
+  // and xargs' input fills the slots of a command that is also checked as written, so --body {} is
+  // refused whatever the input: the line's input is not read as all there is (Marie on #128 at
+  // 24ca7657: a reading that took it as whole let unmarked comments through)
+  [NO, "a marked line into --body {}", "echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
+  [NO, "a marked here-string into --body {}", "xargs -I{} gh pr comment 5 -R acme/api --body {} <<< '> Written by agent. ok'"],
   [NO, "an unmarked line into --body {}", "echo hi | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
-  [NO, "a file into --body {}", "cat f | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
   [NO, "a marked line and a file into --body {}", "{ echo '> Written by agent. ok'; cat f; } | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
-  [NO, "a marked line and a file from a subshell", "(echo '> Written by agent. ok'; cat f) | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
-  [NO, "a file piped into a group past a marked line", "cat f | { echo '> Written by agent. ok'; xargs -I{} gh pr comment 5 -R acme/api --body {}; }"],
   [NO, "a file after the here-string on fd 0", "xargs -I{} gh pr comment 5 -R acme/api --body {} <<< '> Written by agent. ok' < f"],
-  [NO, "a here-string on fd 3 and a file on fd 0", "xargs -I{} gh pr comment 5 -R acme/api --body {} 3<<< '> Written by agent. ok' < f"],
-  [NO, "a file in place of the pipe", "echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 -R acme/api --body {} < f"],
-  // CodeRabbit on #128 at 318ba864: a backtick in a shell comment runs nothing; one in ${...}, or
-  // after a # that starts no word, or on the next line, still runs
-  [OK, "a backtick in a trailing comment", "gh pr view 5 # it`s"],
-  [OK, "a backtick in a comment after &&", "gh pr view 5 && echo x # don't `y"],
-  [NO, "a backtick after a # inside ${...}", "echo ${x/ #/`gh pr comment 5 -R acme/api --body hi`}"],
-  [NO, "a backtick after a # inside a word", "echo a#`gh pr comment 5 -R acme/api --body hi`"],
-  [NO, "a backtick after a quoted #", "echo '#' `gh pr comment 5 -R acme/api --body hi`"],
-  [NO, "a backtick on the line after a comment", "gh pr view 5 # x\necho `gh pr comment 5 -R acme/api --body hi`"],
+  // Marie's probes on #128 at 24ca7657, as her harness ran them: each posted an unmarked comment in bash
+  [NO, "M1 a here-string that expands $(...)", "xargs -I{} gh pr comment 5 --body {} <<< \"> Written by agent.$(cat evil2)\""],
+  [NO, "M1 a here-string that expands a backtick", "xargs -I{} gh pr comment 5 --body {} <<< \"> Written by agent.`cat evil2`\""],
+  [NO, "M1 a here-string with an unquoted $(...)", "xargs -I{} gh pr comment 5 --body {} <<< '> Written by agent.'$(cat evil2)"],
+  [NO, "M1 a heredoc that expands", "xargs -I{} gh pr comment 5 --body {} <<EOF\n> Written by agent.$(cat evil2)\nEOF"],
+  [NO, "M2 fd 0 duplicated after the here-string", "xargs -I{} gh pr comment 5 --body {} 3<evil <<< '> Written by agent. ok' <&3"],
+  [NO, "M3 echo redefined", "echo() { cat evil; }; echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 --body {}"],
+  [NO, "M3 echo redefined on the line before", "echo() { cat evil; }\necho '> Written by agent. ok' | xargs -I{} gh pr comment 5 --body {}"],
+  [NO, "M3 function echo", "function echo { cat evil; }; echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 --body {}"],
+  [NO, "M3 builtin redefined", "builtin() { cat evil; }; builtin echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 --body {}"],
+  [NO, "M3 echo disabled and found on PATH", "enable -n echo; PATH=.:$PATH; printf '#!/bin/sh\\ncat evil\\n' > echo; chmod +x echo; echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 --body {}"],
+  // a backtick after a # still runs where the # starts no comment, so none is skipped as one
+  [NO, "M4 a # after a backslash-newline", "echo a\\\n#`gh pr comment 5 --body Fixed`"],
+  [NO, "M4 a # in a $(...) in double quotes", "echo \"$(echo \" #\")`gh pr comment 5 --body Fixed`\""],
+  [NO, "M4 a # after a carriage return", "x\r#`gh pr comment 5 --body Fixed`"],
+  [NO, "M4 a # after a vertical tab", "echo x\u000b#`gh pr comment 5 --body Fixed`"],
+  [NO, "M4 a # after a form feed", "echo x\f#`gh pr comment 5 --body Fixed`"],
+  [NO, "M4 a # after a non-breaking space", "echo x #`gh pr comment 5 --body Fixed`"],
+  [NO, "a backtick in a trailing comment is still read", "gh pr view 5 # it`s"],
+  // GNU xargs drops -I for a -L, -l, -n or --max-* with it, and {} is posted as written or the input
+  // appended, where the last --body wins (Marie on #128)
+  [NO, "M5 -I then -L1, {} posted as written", "echo '> Written by agent. ok' | xargs -I{} -L1 gh pr comment 5 --body {}"],
+  [NO, "M5 -I then -L 1", "echo '> Written by agent. ok' | xargs -I{} -L 1 gh pr comment 5 --body {}"],
+  [NO, "M5 -I then -l", "echo '> Written by agent. ok' | xargs -I{} -l gh pr comment 5 --body {}"],
+  [NO, "M5 -I then --max-lines=1", "echo '> Written by agent. ok' | xargs -I{} --max-lines=1 gh pr comment 5 --body {}"],
+  [NO, "M5 -I then -L1, the input appended", "echo '5 --body Fixed' | xargs -I{} -L1 gh pr comment --body '> Written by agent. x'"],
+  [NO, "M5 -IX then -L1", "echo '5 --body Fixed' | xargs -IX -L1 gh pr comment --body '> Written by agent. x'"],
+  [NO, "M5 -I then -n2", "echo '5 --body Fixed' | xargs -I{} -n2 gh pr comment --body '> Written by agent. x'"],
+  [NO, "M5 -I then -L1 from a file", "xargs -I{} -L1 gh pr comment --body '> Written by agent. x' < evil"],
+  [NO, "M5 -I then -L1 with {} as the number", "echo '5 --body Fixed' | xargs -I{} -L1 gh pr comment {} --body '> Written by agent. x'"],
+  [NO, "M5 -I then -L1 from a here-string", "xargs -I{} -L1 gh pr comment {} --body '> Written by agent. x' <<< '5 --body Fixed'"],
+  [NO, "M5 -I then -L1 with {} in the marked body", "echo '--body Fixed' | xargs -I{} -L1 gh pr comment 5 --body '> Written by agent. {}'"],
+  [NO, "M5 -L1 then -I", "echo '5 --body Fixed' | xargs -L1 -I{} gh pr comment --body '> Written by agent. x'"],
+  [NO, "M5 --max-args=1 then --replace", "echo '5 --body Fixed' | xargs --max-args=1 --replace gh pr comment --body '> Written by agent. x'"],
+  // a $'...' takes \' as a letter, so the backtick after it runs (Marie on #128)
+  [NO, "M6 a backtick after $'\\''", "echo $'\\'' `gh pr comment 5 --body Fixed`"],
+  [NO, "M6 a backtick after $'...' in a comment, refused though bash runs nothing", "echo $'\\'' #`gh pr comment 5 --body Fixed`"],
+  [NO, "an arithmetic # before a backtick", "echo $(( 2#1 ))`gh pr comment 5 --body Fixed`"],
+  [OK, "xargs -I alone on a marked -c", "echo 5 | xargs -I{} gh pr view {} -R acme/api"],
   [OK, "gh output into xargs echo", "gh pr list | xargs -n1 echo"],
   [OK, "xargs kill then a gh read", "ls | xargs -r kill; gh pr view 5"],
   // CodeRabbit on #128 at c023ab97: a filter between printf and a shell, xargs batches, -d items
