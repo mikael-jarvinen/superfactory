@@ -2207,13 +2207,91 @@ function shortOption(name: string, o: string): { next: boolean; unknown: boolean
   return { next: false, unknown: false };
 }
 
-// Whether a word after an option this cannot read may run gh: gh or a shell by name, a word that
-// names gh, or one from a variable or a substitution (Marie on #128: sudo --frob x $G pr comment).
-const mayRunGh = (x: string): boolean =>
-  x === "gh" || SHELLS.has(posix.basename(x.replace(/^\\/, "")).toLowerCase()) || namesGh(x) || dynamicWord(x);
-// A command word bash makes from a variable or a substitution ($G, ${G}, $(...), `...`), which this
-// cannot read; a plain path under $HOME is read as the path it is.
-const dynamicWord = (w: string): boolean => /[$`]/.test(w.replace(/^(?:\$HOME|\$\{HOME\})\//, ""));
+// Whether the words after an option this cannot read may run gh: gh or a shell by name, a word that
+// names gh, or one from a variable or a substitution before what looks like a comment write (Marie
+// on #128: sudo --frob x $G pr comment).
+const mayRunGh = (rest: string[]): boolean =>
+  rest.some((x, k) =>
+    x === "gh" || SHELLS.has(posix.basename(x.replace(/^\\/, "")).toLowerCase()) || namesGh(x) ||
+    (dynamicWord(x) && writeAfter(rest.slice(k + 1))));
+// Whether what follows a word this cannot read may be a comment write, the word being any words at
+// all: G="gh pr"; $G comment 5 splits to gh pr comment 5, so the word may end in pr, issue or api.
+const writeAfter = (rest: string[], line = ""): boolean =>
+  (line !== "" && looksLikeWrite([line])) || looksLikeWrite(rest) || ["pr", "issue", "api"].some((g) => looksLikeWrite([g, ...rest]));
+// A word bash makes from a variable or a substitution ($G, ${G}, $(...), `...`) that lineValues
+// could not resolve, which this cannot read.
+const dynamicWord = (w: string): boolean => /\$[A-Za-z_{(0-9@*#?!$-]|`/.test(w);
+
+// Whether words a command this cannot read gets look like a comment write, wherever they stand (a
+// -c script's included): what checkCommentWrite checks, pr or issue comment or review, a --comment
+// on close or reopen, and api with a body field, a comment or review mutation, or a method other
+// than GET on a comment route. A PR's own body (create, edit) is no comment to this rule. A read is
+// let through, so a $G that is gh after all only ever reads (Marie on #128: 1,143 real reads
+// refused when every such word was).
+function looksLikeWrite(rest: string[]): boolean {
+  const t = rest.flatMap((w) => w.split(/[\s;&|()'"`]+/)).filter(Boolean);
+  return t.some((w, k) => {
+    const after = t.slice(k + 1);
+    if (w === "pr" || w === "issue") {
+      let j = 0;
+      while ((after[j] ?? "").startsWith("-")) j += /^(-R|--repo)$/.test(after[j] as string) ? 2 : 1;
+      const sub = after[j];
+      const flags = after.slice(j + 1);
+      if (sub === "comment" || sub === "review") return true;
+      if (sub === "close" || sub === "reopen") return flags.some((f) => /^(-c|--comment)(=|$)/.test(f) || /^-c./.test(f));
+      return false;
+    }
+    if (w !== "api") return false;
+    // a field that is a comment's body (body=, comments[][body]=), --input, or a GraphQL mutation
+    // that adds or edits a comment or a review; a query, a commit message or a label is no comment
+    if (after.some((f) => /^(-[fF]|--(raw-)?field=)?(\w*\[\]\[)?body\]?=/.test(f) || /^--input(=|$)/.test(f))) return true;
+    if (after.some((f) => /(add|update)\w*(Comment|Review)|submitPullRequestReview/i.test(f))) return true;
+    const m = after.findIndex((f) => /^(-X|--method)(=|$)/.test(f) || /^-X./.test(f));
+    if (m < 0) return false;
+    const f = after[m] as string;
+    const method = (/^(-X|--method)$/.test(f) ? after[m + 1] ?? "" : f.replace(/^(-X|--method=)/, "")).toUpperCase();
+    // the endpoint is the first word that is no flag and no flag's value, as gh reads it: a field's
+    // value (-f sha="$MAIN") is no route
+    let e = 0;
+    while (e < after.length && (after[e] as string).startsWith("-"))
+      e += /^(-[XHfFqtp]|--(method|header|field|raw-field|jq|template|input|preview|hostname|cache))$/.test(after[e] as string) ? 2 : 1;
+    return method !== "GET" && commentRoute(after[e] ?? "");
+  });
+}
+
+// Variables this line's words can be read through: one the line sets once, on its own (G=gh; $G),
+// to a value of plain path letters, and a directory the session's environment sets (HOME, PWD,
+// CLAUDE_JOB_DIR and the like), read as a path by its basename, when the line never names it bare
+// (no HOME=, export HOME, read HOME, for HOME in). A value with a blank or a glob bash would split
+// or expand, and a name set twice or set any other way, stays unread (Marie on #128).
+const ENV_DIRS = ["HOME", "PWD", "OLDPWD", "TMPDIR", "CLAUDE_JOB_DIR", "CLAUDE_PROJECT_DIR", "XDG_RUNTIME_DIR"];
+// A name the line sets twice is read when each value starts with the same program, which is all a
+// command word needs (G=~/.local/bin/gh; [ -x $G ] || G=~/agents/bin/gh). A value with blanks is
+// read as the words bash splits it into (P="node $CLAUDE_JOB_DIR/tmp/p.mjs"; $P ...). `named` is
+// whether the line names a variable this could not read, bare (G=$(...), read G, for G in).
+function lineValues(text: string, sims: Simple[]): { vals: Map<string, string>; named: (n: string) => boolean } {
+  const bare = (n: string) => (text.match(new RegExp(`(?<![\\w$])(?<!\\$\\{)${n}(?!\\w)`, "g")) ?? []).length;
+  const vals = new Map<string, string>();
+  for (const n of ENV_DIRS) if (bare(n) === 0) vals.set(n, `/${n}`);
+  const isSet = (sim: Simple) => sim.words.length > 0 && sim.words.every((w) => /^[A-Za-z_]\w*=/.test(w));
+  const seen = new Map<string, string[]>();
+  const first = (v: string) => posix.basename(v.trim().split(/\s+/)[0] ?? "");
+  for (const sim of sims) {
+    if (!isSet(sim)) continue;
+    for (const w of sim.words) {
+      const n = w.slice(0, w.indexOf("="));
+      const vs = [...(seen.get(n) ?? []), resolveWord(w.slice(n.length + 1), vals)];
+      seen.set(n, vs);
+      if (!ENV_DIRS.includes(n) && bare(n) === vs.length && vs.every((v) => /^[\w@%+=:,./~ \t-]*$/.test(v) && first(v) === first(vs[0] as string)))
+        vals.set(n, vs[0] as string);
+      else vals.delete(n);
+    }
+  }
+  return { vals, named: (n: string) => bare(n) > 0 && !vals.has(n) };
+}
+// A word with each $N and ${N} lineValues read put in; any other stays as written.
+const resolveWord = (w: string, vals: Map<string, string>): string =>
+  w.replace(/\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g, (m, a?: string, b?: string) => vals.get((a ?? b) as string) ?? m);
 
 // Each wrapper's long options, from the tools themselves (GNU coreutils, findutils and time, sudo
 // 1.9; env's --argv0 is coreutils 9's), by how each takes a value: req as --o=V or --o V, opt only as
@@ -2270,6 +2348,9 @@ function commandWords(words: string[], via: { name: string; opts: string[] }[] =
   const assignment = (w: string | undefined) => w !== undefined && /^[A-Za-z_]\w*=/.test(w);
   while (i < words.length) {
     const w = words[i] as string;
+    // case WORD in, for NAME in WORDS, select and [[ ... ]] run no command of their own: a $o there
+    // is a word tested, not one run (Marie's replay on #128: case "$st" in ...)
+    if (w === "case" || w === "for" || w === "select" || w === "[[") return [];
     if (KEYWORDS.has(w) || assignment(w)) {
       i++;
       continue;
@@ -2292,11 +2373,11 @@ function commandWords(words: string[], via: { name: string; opts: string[] }[] =
         // a long option this cannot read might take the next word or not, so what runs after it is
         // not known: refused if gh or a shell may (Marie on #128: timeout --sig KILL 5 gh, sudo --us)
         const read = longOption(name, o);
-        if (read === null && words.slice(i + 1).some(mayRunGh)) refuse(`${name} ${o}: an option this cannot read, so whether it runs gh cannot be checked`);
+        if (read === null && mayRunGh(words.slice(i + 1))) refuse(`${name} ${o}: an option this cannot read, so whether it runs gh cannot be checked`);
         o = read ?? o;
       }
       const short = o.startsWith("--") ? null : shortOption(name, o);
-      if (short?.unknown && words.slice(i + 1).some(mayRunGh)) refuse(`${name} ${o}: an option this cannot read, so whether it runs gh cannot be checked`);
+      if (short?.unknown && mayRunGh(words.slice(i + 1))) refuse(`${name} ${o}: an option this cannot read, so whether it runs gh cannot be checked`);
       seen.push(o);
       i++;
       if (o === "--") break;
@@ -2504,15 +2585,28 @@ function checkComments(cmd: string): void {
   for (const body of backtickBodies(text)) if (namesGh(body)) checkComments(body);
   // what echo and printf print earlier in a pipe, which it may carry to a shell (pipeTracker)
   const pipe = pipeTracker();
-  for (const s of simpleCommands(tokenize(text), bodies, "pass")) {
+  const sims = simpleCommands(tokenize(text), bodies, "pass");
+  const { vals, named } = lineValues(text, sims);
+  // a whole $V whose value has blanks is the words bash splits it into
+  const read = (ws: string[]) => ws.flatMap((w) => {
+    const m = /^\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))$/.exec(w);
+    const v = m ? vals.get((m[1] ?? m[2]) as string) : undefined;
+    return v !== undefined && /\s/.test(v) ? v.trim().split(/\s+/) : [resolveWord(w, vals)];
+  });
+  for (const s of sims) {
     // commandWords, not protect's stripPrefixes: this rule holds sessions that run no protect guard,
     // so an env override or a wrapper is no refusal here (Marie on #128)
     const via: { name: string; opts: string[] }[] = [];
-    const words = commandWords(s.words, via);
+    const words = commandWords(read(s.words), via);
     pipe(s, printedText(words));
     // a command word from a variable or a substitution may be gh: G=gh; $G pr comment ..., and
     // $(echo gh) pr comment ... (Marie on #128). This line names gh, or it would not be read here.
-    if (words.length && dynamicWord(words[0] as string)) refuse("a command word from a variable or a substitution cannot be checked for a comment it posts: name the command");
+    // One lineValues cannot read is refused before what looks like a comment write, not a read.
+    // The whole line is read for one too when what the word holds was made on it: a substitution, or
+    // a variable the line sets some way this cannot read (G=$(echo gh pr comment 5 --body); $G hi).
+    const w0 = words[0] ?? "";
+    const made = /\$\(|`/.test(w0) || [...w0.matchAll(/\$\{?([A-Za-z_]\w*)/g)].some((m) => named(m[1] as string));
+    if (dynamicWord(w0) && writeAfter(words.slice(1), made ? text : "")) refuse("a command word from a variable or a substitution cannot be checked for a comment it posts: name the command");
     const name = posix.basename((words[0] ?? "").replace(/^\\/, "")).toLowerCase();
     // xargs runs its command with its input as more arguments (Marie on #128: echo '...' | xargs gh,
     // and | xargs -0 bash -c). A gh or a shell it runs is checked with each text the line shows that

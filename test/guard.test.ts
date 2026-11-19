@@ -1362,6 +1362,22 @@ const ROUND_128: [string, string, string][] = [
   [OK, "nice --10, a negative adjustment, on a marked comment", "nice --10 gh pr comment 5 -R acme/api --body '> Written by agent. ok'"],
   [OK, "a short letter sudo has not, with no gh after it", "sudo -z x ls; gh pr view 5"],
   [OK, "gh by a plain path under $HOME", "\"$HOME/.local/bin/gh\" pr view 5"],
+  // Marie's replay of this machine's gh lines on #128 at 0ecff12c: a variable the line sets to a
+  // literal, a session directory, and a dynamic word before a read are read, not refused
+  [OK, "gh from a variable set to a path under $HOME", "G=$HOME/.local/bin/gh; $G pr view 5"],
+  [OK, "a script under $CLAUDE_JOB_DIR on a gh line", "$CLAUDE_JOB_DIR/tmp/x.sh; gh pr view 5"],
+  [OK, "a script from a variable set to a path under ~", "D=~/agents/bin/delegations.sh; $D open; gh pr view 5"],
+  [OK, "gh from a variable set twice to gh paths", "G=~/.local/bin/gh; [ -x $G ] || G=~/agents/bin/gh; $G pr view 5"],
+  [OK, "a variable set to words with blanks", "P=\"node $CLAUDE_JOB_DIR/tmp/p.mjs\"; $P 'gh pr comment 5 --body hi'; gh pr view 5"],
+  [OK, "a case subject on a gh line", "case \"$st\" in open) gh pr view 5;; esac"],
+  [OK, "a dynamic word before a gh read", "G=$(echo gh); $G pr view 5"],
+  [OK, "a dynamic word on a git ref write", "GH=${GH_BIN:-gh}; $GH api -X POST repos/a/b/git/refs -f ref=refs/heads/x -f sha=\"$M\"; gh pr view 5"],
+  [NO, "gh from a variable set to a path under $HOME, on a comment", "G=$HOME/.local/bin/gh; $G pr comment 5 -R acme/api --body hi"],
+  [NO, "a variable whose value has blanks", "G=\"gh pr\"; $G comment 5 -R acme/api --body hi"],
+  [NO, "a variable set to gh and then to ls", "G=gh; G=ls; $G pr comment 5 -R acme/api --body hi"],
+  [NO, "a variable from a substitution, on a comment", "G=$(echo gh); $G pr comment 5 -R acme/api --body hi"],
+  [NO, "a variable from a default, on a reply", "GH=${GH_BIN:-gh}; $GH api -X POST repos/a/b/pulls/5/comments/1/replies -f body=hi; gh pr view 5"],
+  [NO, "a variable from a default, on a close with a comment", "GH=${GH_BIN:-gh}; $GH pr close 5 -R acme/api -c hi"],
   [NO, "xargs -d with a delimiter this cannot read", "echo 5 | xargs -d ab gh pr comment -R acme/api --body '> Written by agent. ok'"],
 ];
 
