@@ -1315,6 +1315,15 @@ const ROUND_128: [string, string, string][] = [
   [NO, "xargs --arg-file beside marked stdin", "echo \"5 --body '> Written by agent. ok'\" | xargs --arg-file prs gh pr comment -R acme/api"],
   [NO, "xargs --arg-file= beside marked stdin", "echo \"5 --body '> Written by agent. ok'\" | xargs --arg-file=prs gh pr comment -R acme/api"],
   [NO, "xargs -r -a into a -I slot of a marked command", "echo 5 | xargs -r -a prs -I{} gh pr comment {} -R acme/api --body '> Written by agent. ok'"],
+  // Marie on #128 at b1c03136: long options' values as GNU takes them, and the eof word
+  [NO, "xargs --max-lines takes no next word", "echo 5 | xargs --max-lines gh pr comment -R acme/api --body hi"],
+  [NO, "xargs --eof takes no next word", "echo 5 | xargs --eof gh pr comment -R acme/api --body hi"],
+  [NO, "xargs --max-l, a prefix of --max-lines", "echo 5 | xargs --max-l gh pr comment -R acme/api --body hi"],
+  [NO, "xargs --max-a 1, a prefix of --max-args", "echo 5 | xargs --max-a 1 gh pr comment -R acme/api --body hi"],
+  [NO, "xargs --process-slot-var takes the next word", "echo 5 | xargs --process-slot-var X gh pr comment -R acme/api --body hi"],
+  [NO, "xargs -E END hides a marked --body after END", "echo \"5 END --body '> Written by agent. ok'\" | xargs -E END gh pr comment -R acme/api --body hi"],
+  [NO, "xargs -eEND hides a marked --body after END", "echo \"5 END --body '> Written by agent. ok'\" | xargs -eEND gh pr comment -R acme/api --body hi"],
+  [NO, "xargs --eof=END hides a marked --body after END", "echo \"5 END --body '> Written by agent. ok'\" | xargs --eof=END gh pr comment -R acme/api --body hi"],
   [NO, "xargs -d with a delimiter this cannot read", "echo 5 | xargs -d ab gh pr comment -R acme/api --body '> Written by agent. ok'"],
 ];
 

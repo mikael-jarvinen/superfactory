@@ -2175,9 +2175,25 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
 // The wrappers a command can run behind, and their options that take a value (`sudo -u x`).
 // --replace takes its value only as --replace=R, so it is not here: `xargs --replace bash -c {}` runs
 // bash (Marie on #128).
+// GNU findutils xargs' long options, by how each takes a value: req as --o=V or --o V, opt only as
+// --o=V (--eof, --max-lines and --replace: `xargs --max-lines gh` runs gh, Marie on #128), none not
+// at all. Like getopt_long, xargsLong reads a unique prefix as its option (--max-a is --max-args).
+const XARGS_LONG: Record<string, "req" | "opt" | "none"> = {
+  "--arg-file": "req", "--delimiter": "req", "--max-args": "req", "--max-chars": "req", "--max-procs": "req",
+  "--process-slot-var": "req", "--eof": "opt", "--max-lines": "opt", "--replace": "opt", "--null": "none",
+  "--interactive": "none", "--no-run-if-empty": "none", "--exit": "none", "--verbose": "none",
+  "--show-limits": "none", "--open-tty": "none", "--help": "none", "--version": "none",
+};
+function xargsLong(o: string): string {
+  const eq = o.indexOf("=");
+  const k = eq < 0 ? o : o.slice(0, eq);
+  const hits = k in XARGS_LONG ? [k] : Object.keys(XARGS_LONG).filter((n) => n.startsWith(k));
+  return hits.length === 1 ? (hits[0] as string) + (eq < 0 ? "" : o.slice(eq)) : o;
+}
+
 const WRAPPER_VALUES: Record<string, string[]> = {
   sudo: ["-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T", "--user", "--group", "--host", "--prompt", "--chdir"],
-  xargs: ["-I", "-n", "-L", "-P", "-d", "-E", "-s", "-a", "--max-args", "--max-lines", "--max-procs", "--delimiter", "--eof", "--max-chars", "--arg-file"],
+  xargs: ["-I", "-n", "-L", "-P", "-d", "-E", "-s", "-a", "--max-args", "--max-procs", "--delimiter", "--max-chars", "--arg-file", "--process-slot-var"],
   env: ["-u", "-C", "-S", "--unset", "--chdir", "--split-string"],
   timeout: ["-s", "-k", "--signal", "--kill-after"],
   nice: ["-n", "--adjustment"],
@@ -2221,7 +2237,7 @@ function commandWords(words: string[], via: { name: string; opts: string[] }[] =
     via.push({ name, opts: seen });
     i++;
     while (i < words.length && (words[i] as string).startsWith("-") && words[i] !== "-") {
-      const o = words[i] as string;
+      const o = name === "xargs" && words[i] !== "--" && (words[i] as string).startsWith("--") ? xargsLong(words[i] as string) : (words[i] as string);
       seen.push(o);
       i++;
       if (o === "--") break;
@@ -2290,9 +2306,10 @@ function xargsShort(o: string): { next: boolean; slot?: string | "next" } {
 // How xargs splits its input and runs its command, from the options commandWords recorded: the
 // delimiter -d or -0 sets (its items are taken as they are, quotes and all), and the batch -n or -L
 // sets (each batch is its own run), the last of the two winning. -s cuts batches where this cannot
-// tell. -a and --arg-file read the items from a file, not stdin. A -d value is a letter or a C escape (\n, \t, \\, \0, an octal or hex code).
-function xargsSplit(opts: string[]): { delim: string | null; args?: number; lines?: number; sized: boolean; file: boolean } {
-  const out: { delim: string | null; args?: number; lines?: number; sized: boolean; file: boolean } = { delim: null, sized: false, file: false };
+// tell. -a and --arg-file read the items from a file, not stdin. -E, -e and --eof end the input at a
+// word, which this does not cut at. A -d value is a letter or a C escape (\n, \t, \\, \0, an octal or hex code).
+function xargsSplit(opts: string[]): { delim: string | null; args?: number; lines?: number; sized: boolean; file: boolean; eof: boolean } {
+  const out: { delim: string | null; args?: number; lines?: number; sized: boolean; file: boolean; eof: boolean } = { delim: null, sized: false, file: false, eof: false };
   const delim = (v: string): string => {
     const m = /^(?:(.)|\\([ntrabfv\\])|\\([0-7]{1,3})|\\x([0-9a-fA-F]{1,2}))$/s.exec(v);
     if (!m) return refuse(`xargs -d ${v}: a delimiter this cannot read, so a comment it posts cannot be checked`);
@@ -2311,13 +2328,14 @@ function xargsSplit(opts: string[]): { delim: string | null; args?: number; line
     else if (c === "L" || c === "l") [out.args, out.lines] = [undefined, v ? count(v) : 1];
     else if (c === "s") out.sized = true;
     else if (c === "a") out.file = true;
+    else if (c === "E" || c === "e") out.eof = true;
   };
   for (let i = 0; i < opts.length; i++) {
     const o = opts[i] as string;
     if (o.startsWith("--")) {
       const [k, eq] = o.includes("=") ? [o.slice(0, o.indexOf("=")), o.slice(o.indexOf("=") + 1)] : [o, undefined];
       const v = eq ?? (WRAPPER_VALUES.xargs?.includes(o) ? opts[++i] : undefined);
-      const c = ({ "--null": "0", "--delimiter": "d", "--max-args": "n", "--max-lines": "L", "--max-chars": "s", "--arg-file": "a" } as Record<string, string>)[k];
+      const c = ({ "--null": "0", "--delimiter": "d", "--max-args": "n", "--max-lines": "L", "--max-chars": "s", "--arg-file": "a", "--eof": "E" } as Record<string, string>)[k];
       if (c) set(c, v);
       continue;
     }
@@ -2451,6 +2469,9 @@ function checkComments(cmd: string): void {
       // (CodeRabbit on #128: -n1 runs gh on 5 alone, and -d '\n' keeps an item's quotes)
       const how = xargsSplit(xargs.opts);
       // -a reads the items from a file the line does not show, slots under -I too (Niilo on #128)
+      // the items after an eof word are never passed, so a marked --body there hides the run's own
+      // (Marie on #128)
+      if (how.eof) refuse(`xargs -E stops ${name}'s input at a word this does not cut at, so a comment it posts cannot be checked`);
       if (how.file) refuse(`xargs -a reads ${name}'s input from a file this line does not show, so a comment it posts cannot be checked`);
       if (how.sized && slot === null) refuse(`xargs -s cuts ${name}'s runs where this cannot tell, so a comment it posts cannot be checked`);
       for (const input of inputs) {
