@@ -138,6 +138,15 @@ test("refreshHosted, for the daemon: the settings rendered again and the current
   assert.ok(!existsSync(currentAppendixPath(ws.runDir, "vega")));
 });
 
+// Marie on #131 at 5aba50fc: the daemon's resume at boot respawns on a settings failure, so a render
+// that threw first left the session on its old brief.
+test("refreshHosted writes the brief before the settings, so a render that throws leaves it written", () => {
+  const { dir, ws } = workspace();
+  (ws.config.roles[agentOrDie(ws, "vega").role] as { settings: string }).settings = join(dir, "gone.json");
+  assert.throws(() => refreshHosted(ws, agentOrDie(ws, "vega"), "the brief as it is now\n"), /gone\.json/);
+  assert.equal(readFileSync(currentAppendixPath(ws.runDir, "vega"), "utf8"), "the brief as it is now\n");
+});
+
 test("a session that comes back under a new id: the stop record naming the old one is dropped", () => {
   const { ws } = workspace();
   noteStopped(ws, "vega", { id: "v1", name: "vega", kind: "background" } as Session);

@@ -86,10 +86,12 @@ export function refreshSession(ws: Workspace, agent: Agent, appendix: string | n
 // refreshSession above does for a local one. A respawn reruns the old command line, whose
 // --settings names the file rendered here, and claude reads no new appendix on a resume, so the
 // SessionStart hook gives the one written here (Otto on Claude Code 2.1.327). Throws when the
-// settings cannot be rendered; the daemon answers that as a failed respawn.
+// settings cannot be rendered; the daemon answers that as a failed respawn. The appendix is written
+// first, as refreshSession does: the daemon's resume at boot respawns anyway on a settings failure,
+// and the session still gets its brief as it is now (Marie on #131 at 5aba50fc).
 export function refreshHosted(ws: Workspace, agent: Agent, appendix: string | null): void {
-  settingsFile(ws, agent);
   writeCurrentAppendix(ws.runDir, agent.name, appendix);
+  settingsFile(ws, agent);
 }
 
 // The appendix a session of the agent has now, from its brief files, as its launch reads them: a
