@@ -1309,6 +1309,12 @@ const ROUND_128: [string, string, string][] = [
   [NO, "xargs -d keeps an item's quotes", "printf '%s\\n' \"--body='> Written by agent. ok'\" | xargs -d '\\n' gh pr comment 5 -R acme/api --body hi"],
   [NO, "xargs --delimiter=, keeps an item's quotes", "echo \"--body='> Written by agent. ok'\" | xargs --delimiter=, gh pr comment 5 -R acme/api --body hi"],
   [OK, "xargs -d with a marked item", "printf '%s\\n' '--body=> Written by agent. ok' | xargs -d '\\n' gh pr comment 5 -R acme/api"],
+  // Niilo on #128: xargs -a takes its items from a file the line does not show
+  [NO, "xargs -a beside marked stdin", "echo \"5 --body '> Written by agent. ok'\" | xargs -a prs gh pr comment -R acme/api"],
+  [NO, "xargs -aFILE beside marked stdin", "echo \"5 --body '> Written by agent. ok'\" | xargs -aprs gh pr comment -R acme/api"],
+  [NO, "xargs --arg-file beside marked stdin", "echo \"5 --body '> Written by agent. ok'\" | xargs --arg-file prs gh pr comment -R acme/api"],
+  [NO, "xargs --arg-file= beside marked stdin", "echo \"5 --body '> Written by agent. ok'\" | xargs --arg-file=prs gh pr comment -R acme/api"],
+  [NO, "xargs -r -a into a -I slot of a marked command", "echo 5 | xargs -r -a prs -I{} gh pr comment {} -R acme/api --body '> Written by agent. ok'"],
   [NO, "xargs -d with a delimiter this cannot read", "echo 5 | xargs -d ab gh pr comment -R acme/api --body '> Written by agent. ok'"],
 ];
 

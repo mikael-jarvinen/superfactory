@@ -2290,9 +2290,9 @@ function xargsShort(o: string): { next: boolean; slot?: string | "next" } {
 // How xargs splits its input and runs its command, from the options commandWords recorded: the
 // delimiter -d or -0 sets (its items are taken as they are, quotes and all), and the batch -n or -L
 // sets (each batch is its own run), the last of the two winning. -s cuts batches where this cannot
-// tell. A -d value is a letter or a C escape (\n, \t, \\, \0, an octal or hex code).
-function xargsSplit(opts: string[]): { delim: string | null; args?: number; lines?: number; sized: boolean } {
-  const out: { delim: string | null; args?: number; lines?: number; sized: boolean } = { delim: null, sized: false };
+// tell. -a and --arg-file read the items from a file, not stdin. A -d value is a letter or a C escape (\n, \t, \\, \0, an octal or hex code).
+function xargsSplit(opts: string[]): { delim: string | null; args?: number; lines?: number; sized: boolean; file: boolean } {
+  const out: { delim: string | null; args?: number; lines?: number; sized: boolean; file: boolean } = { delim: null, sized: false, file: false };
   const delim = (v: string): string => {
     const m = /^(?:(.)|\\([ntrabfv\\])|\\([0-7]{1,3})|\\x([0-9a-fA-F]{1,2}))$/s.exec(v);
     if (!m) return refuse(`xargs -d ${v}: a delimiter this cannot read, so a comment it posts cannot be checked`);
@@ -2310,13 +2310,14 @@ function xargsSplit(opts: string[]): { delim: string | null; args?: number; line
     else if (c === "n") [out.args, out.lines] = [count(v), undefined];
     else if (c === "L" || c === "l") [out.args, out.lines] = [undefined, v ? count(v) : 1];
     else if (c === "s") out.sized = true;
+    else if (c === "a") out.file = true;
   };
   for (let i = 0; i < opts.length; i++) {
     const o = opts[i] as string;
     if (o.startsWith("--")) {
       const [k, eq] = o.includes("=") ? [o.slice(0, o.indexOf("=")), o.slice(o.indexOf("=") + 1)] : [o, undefined];
       const v = eq ?? (WRAPPER_VALUES.xargs?.includes(o) ? opts[++i] : undefined);
-      const c = ({ "--null": "0", "--delimiter": "d", "--max-args": "n", "--max-lines": "L", "--max-chars": "s" } as Record<string, string>)[k];
+      const c = ({ "--null": "0", "--delimiter": "d", "--max-args": "n", "--max-lines": "L", "--max-chars": "s", "--arg-file": "a" } as Record<string, string>)[k];
       if (c) set(c, v);
       continue;
     }
@@ -2449,6 +2450,8 @@ function checkComments(cmd: string): void {
       // each run xargs makes is checked as its own command, with its items as xargs passes them
       // (CodeRabbit on #128: -n1 runs gh on 5 alone, and -d '\n' keeps an item's quotes)
       const how = xargsSplit(xargs.opts);
+      // -a reads the items from a file the line does not show, slots under -I too (Niilo on #128)
+      if (how.file) refuse(`xargs -a reads ${name}'s input from a file this line does not show, so a comment it posts cannot be checked`);
       if (how.sized && slot === null) refuse(`xargs -s cuts ${name}'s runs where this cannot tell, so a comment it posts cannot be checked`);
       for (const input of inputs) {
         if (slot !== null) {
