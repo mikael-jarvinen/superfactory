@@ -1309,6 +1309,11 @@ const ROUND_128: [string, string, string][] = [
   [NO, "an unmarked line into --body {}", "echo hi | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
   [NO, "a marked line and a file into --body {}", "{ echo '> Written by agent. ok'; cat f; } | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
   [NO, "a file after the here-string on fd 0", "xargs -I{} gh pr comment 5 -R acme/api --body {} <<< '> Written by agent. ok' < f"],
+  [NO, "a file into --body {}", "cat f | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
+  [NO, "a marked line and a file from a subshell", "(echo '> Written by agent. ok'; cat f) | xargs -I{} gh pr comment 5 -R acme/api --body {}"],
+  [NO, "a file piped into a group past a marked line", "cat f | { echo '> Written by agent. ok'; xargs -I{} gh pr comment 5 -R acme/api --body {}; }"],
+  [NO, "a here-string on fd 3 and a file on fd 0", "xargs -I{} gh pr comment 5 -R acme/api --body {} 3<<< '> Written by agent. ok' < f"],
+  [NO, "a file in place of the pipe", "echo '> Written by agent. ok' | xargs -I{} gh pr comment 5 -R acme/api --body {} < f"],
   // Marie's probes on #128 at 24ca7657, as her harness ran them: each posted an unmarked comment in bash
   [NO, "M1 a here-string that expands $(...)", "xargs -I{} gh pr comment 5 --body {} <<< \"> Written by agent.$(cat evil2)\""],
   [NO, "M1 a here-string that expands a backtick", "xargs -I{} gh pr comment 5 --body {} <<< \"> Written by agent.`cat evil2`\""],
@@ -1328,6 +1333,10 @@ const ROUND_128: [string, string, string][] = [
   [NO, "M4 a # after a form feed", "echo x\f#`gh pr comment 5 --body Fixed`"],
   [NO, "M4 a # after a non-breaking space", "echo x #`gh pr comment 5 --body Fixed`"],
   [NO, "a backtick in a trailing comment is still read", "gh pr view 5 # it`s"],
+  [NO, "a backtick after a # inside ${...}", "echo ${x/ #/`gh pr comment 5 -R acme/api --body hi`}"],
+  [NO, "a backtick after a # inside a word", "echo a#`gh pr comment 5 -R acme/api --body hi`"],
+  [NO, "a backtick after a quoted #", "echo '#' `gh pr comment 5 -R acme/api --body hi`"],
+  [NO, "a backtick on the line after a comment", "gh pr view 5 # x\necho `gh pr comment 5 -R acme/api --body hi`"],
   // GNU xargs drops -I for a -L, -l, -n or --max-* with it, and {} is posted as written or the input
   // appended, where the last --body wins (Marie on #128)
   [NO, "M5 -I then -L1, {} posted as written", "echo '> Written by agent. ok' | xargs -I{} -L1 gh pr comment 5 --body {}"],
