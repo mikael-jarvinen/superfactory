@@ -294,7 +294,9 @@ test("what an ended run leaves in its process group is cleaned up, but never a c
   const [stray, session, child] = [t.pidIn("stray.pid") as number, t.pidIn("session.pid") as number, t.pidIn("child.pid") as number];
   process.kill(pid, "SIGKILL"); // up alone: its group lives on
   await until("the stray to be cleaned up", () => !runningNotZombie(stray));
-  assert.match(d.out, new RegExp(`job ${UP.replace(/\./g, "\\.")}: ended, leaving ${stray} \\(sleep\\) in its process group or scopes; SIGTERM`), d.out);
+  // up's own systemd-run can still be in the group when the run ends: it may be listed beside the stray, which
+  // is still required (Marie on #130 at 2e89a7a4: the CI flake at 7a20b268)
+  assert.match(d.out, new RegExp(`job ${UP.replace(/\./g, "\\.")}: ended, leaving (\\d+ \\(systemd-run\\), )?${stray} \\(sleep\\)(, \\d+ \\(systemd-run\\))? in its process group or scopes; SIGTERM`), d.out);
   assert.ok(runningNotZombie(session), "a claude in the group is left alone");
   assert.ok(runningNotZombie(child), "and so is what runs under it");
   d.kill();

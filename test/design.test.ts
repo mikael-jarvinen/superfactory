@@ -45,32 +45,33 @@ test("design walk", () => {
     return r;
   };
 
-  ok("state", T, "queued");
   let r = ok("state", T, "designing", "--agent", "dee");
-  assert.match(r.stdout, /queued -> designing .* jira should read: In Progress/);
+  assert.match(r.stdout, /\(new\) -> designing .* jira should read: In Progress/);
   no("state", T, "design-review");
   no("state", T, "design-review", "--canvas", CANVAS);
   no("state", T, "design-review", "--canvas", "not a url", "--slides", SLIDES);
   ok("state", T, "design-review", "--canvas", CANVAS, "--slides", SLIDES);
   no("state", T, "building");
-  r = no("state", T, "queued");
+  r = no("state", T, "off");
   assert.match(r.stderr, /pass --approved "<Alex's words>"/);
   ok("state", T, "designing", "--note", "Alex: show the empty state too");
   ok("state", T, "design-review", "--slides", "https://claude.ai/artifact/slides2");
   no("state", T, "designing", "--approved", "looks good");
-  ok("state", T, "queued", "--approved", "Approved, build it");
+  r = ok("state", T, "off", "--approved", "Approved, build it");
+  assert.match(r.stdout, /design-review -> off .* jira should read: To Do/, "off the board, the ticket waits in the backlog");
+  assert.equal(JSON.parse(readFileSync(join(ws, "state", `${T}.json`), "utf8")).agent, "dee", "the designer stays on the record, for the next round");
   r = ok("state", T);
   assert.match(r.stdout, /design: slides https:\/\/claude\.ai\/artifact\/slides2 canvas https:\/\/claude\.ai\/artifact\/canvas1 approved: Approved, build it/);
   ok("state", T, "building", "--agent", "bea");
   assert.deepEqual(failures, []);
 
   const rec = JSON.parse(readFileSync(join(ws, "state", `${T}.json`), "utf8"));
-  assert.equal(rec.jira, "In Progress", "Jira reads In Progress from the moment the design starts, and nothing else moves it");
+  assert.equal(rec.jira, "In Progress", "Jira reads In Progress from the moment the design starts, and again once it is built");
   assert.equal(rec.design.canvas, CANVAS);
   assert.equal(rec.design.slides, "https://claude.ai/artifact/slides2");
   assert.equal(rec.design.approved, "Approved, build it");
   const events = readFileSync(join(ws, "state", "events.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  const approval = events.find((e) => e.from === "design-review" && e.to === "queued");
+  const approval = events.find((e) => e.from === "design-review" && e.to === "off");
   assert.equal(approval.evidence, "Approved, build it");
   assert.equal(approval.design.approved, "Approved, build it");
 
@@ -78,7 +79,7 @@ test("design walk", () => {
   const U = "TEST-8";
   ok("state", U, "designing", "--agent", "dee");
   ok("state", U, "design-review", "--canvas", CANVAS, "--slides", SLIDES);
-  ok("state", U, "queued", "--approved", "yes");
+  ok("state", U, "off", "--approved", "yes");
   ok("state", U, "designing");
   assert.equal(JSON.parse(readFileSync(join(ws, "state", `${U}.json`), "utf8")).design.approved, null);
   assert.deepEqual(failures, []);
@@ -92,12 +93,11 @@ test("a designer is dispatched without a repo, and a builder is refused a ticket
   assert.match(r.stderr, /a designer reads every repo and works in none, so it takes no --repo/);
   r = factory(ws, ["dispatch", "bea", "TEST-9"]);
   assert.match(r.stderr, /TEST-9 is designing; a dispatch makes no sense there/);
-  factory(ws, ["state", "TEST-10", "queued"]);
   r = factory(ws, ["dispatch", "dee", "TEST-10"]);
   assert.match(r.stderr, /dee is recorded as designing TEST-9/);
   factory(ws, ["state", "TEST-11", "building", "--agent", "bea"]);
   r = factory(ws, ["dispatch", "dee", "TEST-11"]);
-  assert.match(r.stderr, /TEST-11 is building; a design starts from queued/);
+  assert.match(r.stderr, /TEST-11 is building; a design starts from the backlog or off the board/);
 });
 
 test("a designer launches in the shared cwd with the repos read-only and a browser", () => {

@@ -31,7 +31,10 @@ src/
   config.ts       load and validate factory.toml into typed objects; expand ~, $VARS and
                   workspace-relative paths; one error per bad key, naming the key
   workspace.ts    resolution (above), state/, logs/, logs/run/
-  state.ts        records, the transition graph, evidence rules, events.jsonl
+  state.ts        records, the transition graph, evidence rules, events.jsonl. `factory state`
+                  moves an item. Waiting work lives in the tracker's backlog, not on the board;
+                  LOCAL- work, with no backlog to wait in, goes off with --title, and
+                  `factory state --off` lists it
   fleet.ts        agents from config; finding, waiting for and stopping their sessions
   transport.ts    where an agent's sessions live and every session operation; the local one
                   runs `claude agents --json` and friends, with any undocumented daemon

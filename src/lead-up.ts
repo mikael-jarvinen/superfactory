@@ -9,43 +9,66 @@
 import type { Agent } from "./config.js";
 import { findSession, type Session, waitForName } from "./fleet.js";
 import { armText } from "./hooks/status.js";
-import { GIT_HTTPS_ENV, launch, launchArgs, leadPrompt, refreshSettings, roleAppendix, roleOf } from "./launch.js";
-import type { Transport } from "./transport.js";
+import { GIT_HTTPS_ENV, launch, launchArgs, leadPrompt, refreshSession, roleAppendix, roleOf } from "./launch.js";
+import { writeCurrentAppendix } from "./transport.js";
+import { cameUp, freshCommand, lastStopped, moveRecord, replaceStopped, resumable, sweepStale } from "./stopped.js";
+import { isAgentSession, pick, type Transport } from "./transport.js";
 import { FactoryError } from "./util.js";
 import type { Workspace } from "./workspace.js";
 
 export const resumePrompt = (ws: Workspace) => `You were restarted by \`factory up\`. ${armText(ws)}`;
 
-// A resumed session gets its messages back, not the system prompt it started with, so the appendix
-// goes on the command line again. A fresh launch's argv with `--resume <id>` before the prompt, so
-// the two cannot pass the appendix differently.
-export function resumeArgs(ws: Workspace, agent: Agent, sessionId: string, prompt: string, appendixPath: string | null): string[] {
-  const args = launchArgs(ws, agent, prompt, appendixPath, undefined);
+// A fresh launch's argv with `--resume <id>` before the prompt, and no appendix flag: a resumed
+// session keeps the system prompt it started with, its appendix included, and claude ignores
+// --append-system-prompt-file and --append-system-prompt given on a resume (Otto on Claude Code
+// 2.1.327). The current appendix reaches it through its SessionStart hook (hooks/appendix.ts), from
+// the file resume() writes first.
+export function resumeArgs(ws: Workspace, agent: Agent, sessionId: string, prompt: string): string[] {
+  const args = launchArgs(ws, agent, prompt, null, undefined);
   return [...args.slice(0, -1), "--resume", sessionId, prompt];
 }
 
 export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boolean, out: (line: string) => void = console.log, waitS = 60): void {
   const s = findSession(t, ld.name);
   if (t.alive(s)) {
+    cameUp(ws, ld.name, t, s);
     out(`${ld.name} already running (${s.id})`);
     return;
   }
   // Read before anything starts: a missing brief refuses here, not after a resume and a respawn.
   const appendix = roleAppendix(ws, ld);
-  const old = fresh ? null : findSession(t, ld.name, true);
+  // The session stopped last, by its id (stopped.ts); else the newest, as findSession has it.
+  let old: Session | null = null;
+  // the marks a launch that ran leaves standing, once the row chosen for it is up (stopped.ts)
+  let marks: string[] | undefined;
+  if (!fresh) {
+    sweepStale(ws, ld.name, t);
+    // with no record too: resumable leaves out the rows a hook's wake left, which a sweep that
+    // failed still lists (CodeRabbit on #130 at 2f878288)
+    const which = resumable(ws, ld.name, t.sessions(true).filter(isAgentSession(ld.name)), (rows) => pick(t, rows));
+    if ("gone" in which)
+      throw new FactoryError(`${ld.name}'s last stopped session ${which.gone} is no longer listed, and an older one is another conversation. ` +
+        `\`${freshCommand(ld)}\` starts a new one.`);
+    old = which.s;
+    marks = which.failed;
+  }
   if (old) {
     const sid = old.id as string;
-    if (!ld.host && typeof old.sessionId === "string" && resume(ws, ld, t, old, old.sessionId, waitS, out, appendix)) return;
+    if (!ld.host && typeof old.sessionId === "string" && resume(ws, ld, t, old, old.sessionId, waitS, out, appendix, marks)) return;
     // A respawn reruns the old command line, which still names the settings file: a render that
     // fails (a role's template gone) leaves the last render there, so the lead comes back on it
     // rather than staying down, and the failure is said loudly (CodeRabbit on #127).
     try {
-      refreshSettings(ws, ld);
+      refreshSession(ws, ld, appendix);
     } catch (e) {
       out(`WARNING: ${ld.name}'s settings could not be rendered (${(e as Error).message}); respawning on the last rendered settings. Fix the template, then \`factory stop ${ld.name}\` and \`factory up\`: up leaves a running lead as it is.`);
     }
-    const r = t.respawn(ld.name, sid);
-    if (r.ok && waitForName(t, ld.name, waitS)) {
+    // a hosted lead's daemon writes its settings and appendix from the request
+    const r = t.respawn(ld.name, sid, undefined, ld.host ? appendix : undefined);
+    const up = r.ok ? waitForName(t, ld.name, waitS) : null;
+    if (up) {
+      // the id that came back, which can differ from the one respawned (Marie on #130 at 2e89a7a4)
+      if (marks || (up.id && up.id !== sid)) replaceStopped(ws, ld.name, t, up.id ?? sid, sid);
       out(`${ld.name} respawned from ${sid}: ${r.said}`);
       return;
     }
@@ -56,11 +79,14 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
   out(`${ld.name} started (${started.id}) in ${cwd}${ld.remoteControl ? " with Remote Control" : ""}`);
 }
 
-function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId: string, waitS: number, out: (line: string) => void, appendix: string | null): boolean {
+function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId: string, waitS: number, out: (line: string) => void, appendix: string | null,
+  marks?: string[]): boolean {
   const prompt = resumePrompt(ws);
   const cwd = old.cwd ?? (roleOf(ws, ld).cwd as string);
   try {
-    t.start({ agent: ld, cwd, prompt, appendix, runDir: ws.runDir, phase: undefined, args: (p) => resumeArgs(ws, ld, sessionId, prompt, p), env: { ...process.env, ...GIT_HTTPS_ENV } });
+    // the resumed session's SessionStart hook hands it this (resumeArgs)
+    writeCurrentAppendix(ws.runDir, ld.name, appendix);
+    t.start({ agent: ld, cwd, prompt, appendix, runDir: ws.runDir, phase: undefined, args: () => resumeArgs(ws, ld, sessionId, prompt), env: { ...process.env, ...GIT_HTTPS_ENV } });
   } catch (e) {
     out(`resuming ${sessionId} failed (${(e as Error).message}); respawning instead`);
     return false;
@@ -70,6 +96,12 @@ function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId:
     out(`resumed ${sessionId} did not come back; respawning instead`);
     return false;
   }
+  // Up under a new id, the one a later stop records; until now the record stays, so a resume that
+  // fails leaves the next try aimed at the same conversation (CodeRabbit on #130). The row it
+  // replaced is removed below.
+  // Launches still marked keep their marks, now on the new id (CodeRabbit on #130 at 7a20b268).
+  if (marks && back.id) replaceStopped(ws, ld.name, t, back.id);
+  else if (back.id) moveRecord(ws, ld.name, back.id, lastStopped(ws, ld.name)?.failed ?? []);
   // A resume that comes back under a new id leaves the old one listed, stopped; take it off the list.
   // The lead is up by now, so a stop that dies (a scope systemd-run cannot make) only leaves the
   // old entry listed; it is no reason to fail the bring-up. Any other error is a bug, and throws.

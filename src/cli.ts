@@ -7,13 +7,15 @@ import { followInbox } from "./board/inbox.js";
 import { markHandledMany, queue as waitingQueue, queueTrouble } from "./board/queue.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
+import { lastStopped, noteRan, noteStopped, noteUnrun, ran, staleIds, sweepStale } from "./stopped.js";
 import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owesSession, lead, listing, type Session, stopSession, stopWorktree, waitForName } from "./fleet.js";
 import { Unreachable } from "./remote.js";
-import { agentSessions, transportFor, transports } from "./transport.js";
+import { agentSessions, type Transport, transportFor, transports } from "./transport.js";
 import type { Agent } from "./config.js";
 import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
 import { bringUpLead } from "./lead-up.js";
 import { wake, wakeForRound, wokeLine } from "./wake.js";
+import { hook as appendixHook } from "./hooks/appendix.js";
 import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
 import { hook as markedCommentsHook } from "./hooks/marked-comments.js";
@@ -39,43 +41,50 @@ import { cmdStack, STACK_USAGE } from "./stacks/command.js";
 import { cmdTicket, cmdWiki, TICKET_USAGE } from "./tickets/cli.js";
 import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/engine.js";
 import {
-  allRecs, appendEvent, BUSY, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removePr, removeRec, saveRec, showRec, transition, validKey,
+  allRecs, appendEvent, BUSY, OFF, onBoard, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removePr, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
+import { trackerTitle } from "./tracker/title.js";
 import { chars, FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.js";
 import { failure } from "./failures.js";
 import { runQueue } from "./watchers/queue.js";
 import { runRound } from "./watchers/round.js";
 import { runReviews } from "./watchers/reviews.js";
 import { openWorkspace, resolveWorkspace, type Workspace } from "./workspace.js";
+import { worktreePath } from "./worktree.js";
 
 const USAGE = `factory: start, stop, dispatch and track a fleet of Claude Code sessions.
 
 usage: factory [--workspace <dir>] <command> [options]
 
-  doctor                          what this machine and workspace lack to run the fleet: one
+  doctor [--resume-probe]         what this machine and workspace lack to run the fleet: one
                                   \`ok\` or \`MISSING ... [fix: ...]\` line per check, derived from
                                   config, then each stack script's own doctor. Reads only.
-                                  Exit 1 when anything is missing.
+                                  Exit 1 when anything is missing. --resume-probe also starts
+                                  and resumes a throwaway \`claude -p\` session (two model
+                                  turns) to check a resumed session is handed its brief.
   up [--fresh]                    start the board, and the lead (resuming its thread if one exists);
                                   in the background, bring up every stack slot that does not answer
   down                            stop every fleet session and the board
   restart-lead [--fresh]          stop the lead, then up
   status [--all]                  sessions joined with the state store
   sessions [--all] [--fleet]      raw \`claude agents --json\`, or one line per fleet member
-  dispatch <agent> <KEY> [--repo <repo>] [--prompt-file <f>] [--force]
+  dispatch <agent> <KEY> [--repo <repo>] [--prompt-file <f>] [--title T] [--force]
                                   fresh building session for one item in a per-item worktree.
-                                  Dispatch from queued, building or fixing; anywhere else needs
+                                  Dispatch from the backlog, off the board, building or fixing; anywhere else needs
                                   --force. A live session already on KEY keeps its context, and
                                   so does one that is off, woken unless --force.
                                   For a designer: a design session in the designers' cwd, no
-                                  worktree, from queued (records designing) or design-review
+                                  worktree, from the backlog or off the board (records designing) or design-review
                                   (another round).
   wake <agent>                    bring back an agent whose session is off (stopped idle, or retired
-                                  by Claude's daemon): respawn its newest session, same conversation,
-                                  and wait until it is listed live. Exit 1 when it does not come back.
+                                  by Claude's daemon): respawn the session \`stop\` stopped last, by
+                                  id, else its newest; same conversation, same command line. Wait
+                                  until it is listed live. Exit 1 when it does not come back, or when
+                                  the session stopped last is no longer listed.
   stop <agent> [--force] [--remove-worktree]
                                   stop a teammate; refuses on uncommitted or unpushed work. Keeps
-                                  the worktree unless --remove-worktree.
+                                  its session listed, stopped, for wake, and the worktree unless
+                                  --remove-worktree.
   review [--name <r>] [--prompt-file <f>] [--force]
                                   a fresh reviewer for one review: the first free one
   assistant [name] [--prompt-file <f>] [--force]
@@ -90,8 +99,20 @@ usage: factory [--workspace <dir>] <command> [options]
         [--pr owner/repo#N] [--head SHA] [--reviewed SHA] [--jira STATUS] [--force]
         [--canvas URL] [--slides URL] [--approved "<the human's words>"]
                                   transition. design-review needs the canvas and slides links;
-                                  design-review -> queued is the approval and needs --approved
-  state --list [--all]            every open item
+                                  design-review -> off is the approval and needs --approved.
+                                  The first state is designing or building: a ticket nobody is
+                                  doing waits in the backlog, not on the board.
+  state <KEY> off [--approved "<words>"] [--note N] [--title T]
+                                  take it off the board and keep the record (an approved design,
+                                  the stack, the title) until a dispatch brings it back. A new
+                                  item, LOCAL- work with no backlog to wait in, goes off with
+                                  --title, and \`state --off\` lists it. From
+                                  design-review it is the approval and the designer stays on the
+                                  record, for the next round; from building it clears the
+                                  builder; from a review it ends the slice, for the next slice
+                                  of a multi-PR ticket
+  state --list [--all]            every item on the board; --all adds done and off-board ones
+  state --off                     every item off the board: key, agent and title
   drop <LOCAL-key>... [--note N] [--force]
                                   delete a LOCAL record; tracker tickets are never droppable
   say "<text>" [--ticket K] [--link URL] [--kind ${KINDS.join("|")}] [--via ${VIAS.join("|")}]
@@ -145,8 +166,9 @@ usage: factory [--workspace <dir>] <command> [options]
                                   the same with main's code checked out; media in /tmp/demo/<KEY>-before
   demo --before --base-ref <branch> <KEY> <spec.ts> [base-url]
                                   a PR stacked on <branch>: the same with origin/<branch> checked out
-  watch queue                     read the tracker's queue once, and tell the lead about new queued
-                                  tickets and fresh merges. What the scheduler runs; prompts/queue.md.
+  watch queue                     read the tracker's queue once, and tell the lead about new tickets
+                                  waiting there and fresh merges. It makes no records: waiting work
+                                  lives in the backlog. What the scheduler runs; prompts/queue.md.
   watch reviews                   read the review comments on the PRs in review once, and tell the
                                   lead about new ones. No model; every 5 minutes by default.
   watch round [--facts]           the round once: facts gathered here, and a note to the lead with
@@ -170,7 +192,8 @@ ${TICKET_USAGE}
 The workspace is --workspace, else $FACTORY_WORKSPACE, else the nearest factory.toml above the
 current directory. Only this program writes the state store.
 
-states: queued designing design-review building pr-open agent-review fixing gate your-review colleague-review done blocked`;
+states: designing design-review building pr-open agent-review fixing gate your-review colleague-review done blocked
+Waiting work lives in the backlog. off takes an item off the board and keeps its record.`;
 
 class UsageError extends FactoryError {
   constructor(message: string) {
@@ -206,7 +229,7 @@ function cmdStatus(ws: Workspace, argv: string[]) {
   console.log(lines.join("\n"));
   console.log(boardLine(ws));
   console.log("-- tickets (state/) --");
-  const recs = v.all ? allRecs(ws) : allRecs(ws).filter((r) => r.state !== "done");
+  const recs = v.all ? allRecs(ws) : allRecs(ws).filter(onBoard);
   if (!recs.length) console.log("  none");
   for (const r of recs) {
     for (const l of showRec(ws, r)) console.log(l);
@@ -229,15 +252,25 @@ function cmdIdleWork(ws: Workspace, argv: string[]) {
 function cmdState(ws: Workspace, argv: string[]) {
   const s = { type: "string" } as const;
   const { v, p } = args("state", argv, {
-    list: { type: "boolean" }, all: { type: "boolean" }, force: { type: "boolean" },
+    list: { type: "boolean" }, all: { type: "boolean" }, off: { type: "boolean" }, force: { type: "boolean" },
     agent: s, stack: s, evidence: s, note: s, title: s, pr: s, head: s, reviewed: s, jira: s, canvas: s, slides: s, approved: s,
     "remove-pr": s,
   }, [0, 2]);
   const [ticket, next] = p;
+  if (v.off) {
+    // Items taken off the board: waiting work with no ticket to wait in, LOCAL- above all, is found here.
+    const recs = allRecs(ws).filter((r) => r.state === null);
+    for (const r of recs) console.log(`  ${r.ticket.padEnd(12)} agent=${(r.agent || "-").padEnd(8)} ${r.title ?? "(no title)"}`);
+    if (!recs.length) console.log("  nothing off the board");
+    return;
+  }
   if (v.list) {
-    const recs = v.all ? allRecs(ws) : allRecs(ws).filter((r) => r.state !== "done");
+    const all = allRecs(ws);
+    const recs = v.all ? all : all.filter(onBoard);
     for (const r of recs) for (const l of showRec(ws, r)) console.log(l);
     if (!recs.length) console.log("  no open tickets");
+    const off = all.filter((r) => r.state === null).length;
+    if (off && !v.all) console.log(`  and ${off} off the board: factory state --off`);
     return;
   }
   if (!ticket) throw new FactoryError("state needs a ticket, or --list");
@@ -268,14 +301,16 @@ function cmdState(ws: Workspace, argv: string[]) {
 }
 
 function cmdDispatch(ws: Workspace, argv: string[]) {
-  const { v, p } = args("dispatch", argv, { repo: { type: "string" }, "prompt-file": { type: "string" }, force: { type: "boolean" } }, [2, 2]);
+  const { v, p } = args("dispatch", argv, { repo: { type: "string" }, "prompt-file": { type: "string" }, title: { type: "string" }, force: { type: "boolean" } }, [2, 2]);
   const [name, ticket] = p as [string, string];
   const force = !!v.force;
   const ag = agentOrDie(ws, name);
   if (!validKey(ws, ticket)) throw new FactoryError(`${pyRepr(ticket)} is ${KEY_HINT}`);
   if (ag.role === "designer") {
     if (str(v.repo)) throw new FactoryError(`a designer reads every repo and works in none, so it takes no --repo`);
-    return dispatchDesigner(ws, ag, ticket, force, str(v["prompt-file"]));
+    dispatchDesigner(ws, ag, ticket, force, str(v["prompt-file"]));
+    titled(ws, ticket, str(v.title));
+    return;
   }
   if (ag.role !== "builder") throw new FactoryError(`${name} is a ${ag.role}, not a builder or a designer. Reviewers are started per review with \`factory review\`.`);
   const allowed = ag.repos;
@@ -302,12 +337,35 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (t.alive(s)) {
     const on = basename((s.cwd ?? "").replace(/\/+$/, ""));
     if (on === ticket && !force) {
-      if (loadRec(ws, ticket)?.state !== "fixing")
+      // An item taken off the board while its session ran goes back on as building, as a fresh
+      // dispatch would put it; off the board it can go nowhere else (CodeRabbit on #129).
+      const kept = loadRec(ws, ticket);
+      const cur = kept?.state ?? null;
+      // The stack is the kept worktree's: the repo it is in, else what the record has. The repo this
+      // dispatch defaults to can be another (CodeRabbit on #129).
+      const at = (s.cwd ?? "").replace(/\/+$/, "");
+      const keptRepo = allowed.find((k) => worktreePath(ws.config.repos[k]!.path, ticket) === at);
+      const keptStack = ag.stack ?? keptRepo ?? kept?.stack ?? stack;
+      // A kept round stays where its worktree is, whatever --repo says; a --repo naming another repo
+      // is said, never dropped silently. --repo is a repo key, so it is checked against the
+      // worktree's repo, or, for a builder whose stack is a repo, the record's (Marie on #129).
+      const asked = str(v.repo);
+      if (asked) {
+        if (keptRepo) {
+          if (asked !== keptRepo) console.log(`--repo ${asked} ignored: ${name} is kept in ${keptRepo}'s worktree`);
+        } else if (ag.stack) console.log(`--repo ${asked} not checked: ${name}'s session is in no local worktree`);
+        else if (kept?.stack && asked !== kept.stack) console.log(`--repo ${asked} ignored: ${name} is kept on ${kept.stack}, the stack ${ticket}'s record has`);
+      }
+      if (cur === null)
+        transition(ws, ticket, "building", { agent: name, stack: keptStack, worktree: s.cwd, evidence: `back on the board on the live session ${s.id}, context kept` });
+      else if (cur !== "fixing")
         transition(ws, ticket, "fixing", { agent: name, evidence: `fix round sent to the live session ${s.id}, context kept` });
       console.log(`${name} is still on ${ticket} (${s.id}), so it keeps its context.`);
-      const noSlot = ag.host ? null : slotless(ws, stack, ticket, s.cwd ?? "");
+      const noSlot = ag.host ? null : slotless(ws, keptStack, ticket, s.cwd ?? "");
       if (noSlot) console.log(`  warning: ${noSlot}\n  Put that in the fix brief.`);
       console.log(`  next: SendMessage the fix brief to ${name}; no new session was started`);
+      // the session kept is no reason to drop a --title (CodeRabbit on #129)
+      titled(ws, ticket, str(v.title));
       return;
     }
     const onState = on ? loadRec(ws, on)?.state : null;
@@ -342,7 +400,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (noSlot) console.log(`  warning: ${noSlot}`);
   const prompt = (given ?? buildingPrompt(ws, ag, ticket)) + (noSlot ? `\n\n${noSlot}` : "");
   const started = launch(ws, ag, wt, prompt, appendix?.text ?? null, "build");
-  if (rec === null || cur === "queued") {
+  if (rec === null || cur === null) {
     transition(ws, ticket, "building", { agent: name, stack, worktree: wt, evidence: `building session ${started.id}` });
   } else {
     rec.agent = name;
@@ -350,6 +408,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
     saveRec(ws, rec);
     appendEvent(ws, { t: now(), ticket, from: cur, to: cur, agent: name, evidence: `re-dispatched (building session ${started.id})`, note: how, pr: rec.pr ?? null });
   }
+  titled(ws, ticket, str(v.title));
   console.log(`${name} started (${started.id}) for ${ticket} as a BUILDING session`);
   console.log(`  worktree ${wt} (${how})`);
   console.log(`  appendix ${appendix ? appendix.labels.join(", ") : "-"}`);
@@ -357,6 +416,19 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (d?.approved) console.log(`  design approved by ${ws.config.human.name} (${d.approved_at}): slides ${d.slides} canvas ${d.canvas}. The brief carries it.`);
   else if (d) console.log(`  warning: ${ticket} has a design ${ws.config.human.name} has not approved (${d.slides ?? d.canvas ?? "no link"})`);
   console.log(`  next: SendMessage to ${name}: what to build or fix, the scope, and notify_when_idle`);
+}
+
+// A dispatch titles its record: --title, else the tracker's title when the record has none, so no
+// card shows a bare key (Niilo on #129). LOCAL- work with no title says how to give it one.
+function titled(ws: Workspace, ticket: string, given: string | undefined) {
+  const rec = loadRec(ws, ticket);
+  if (!rec) return;
+  const title = given ?? (rec.title ? undefined : trackerTitle(ws, ticket));
+  if (title) {
+    rec.title = squash(title, 90);
+    saveRec(ws, rec);
+  }
+  if (!rec.title) console.log(`  warning: ${ticket} has no title; the card shows its bare key. Give it one: factory state ${ticket} --title "<what it is>"`);
 }
 
 // Reads the prompt and the appendix, and refuses on either, before anything is stopped; the launch
@@ -375,7 +447,7 @@ function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boole
   const rec = loadRec(ws, ticket);
   const cur = rec?.state ?? null;
   if (!DESIGN_DISPATCHABLE.has(cur) && !force)
-    throw new FactoryError(`${ticket} is ${cur}; a design starts from queued, or goes another round from design-review. ` +
+    throw new FactoryError(`${ticket} is ${cur}; a design starts from the backlog or off the board, or goes another round from design-review. ` +
       `Use \`factory state\` first, or --force if you mean it.`);
   for (const r of allRecs(ws))
     if (r.agent === name && r.state === "designing" && r.ticket !== ticket)
@@ -458,7 +530,11 @@ function cmdStop(ws: Workspace, argv: string[]) {
     const left = builderLeft(ws, ag, t, cwd);
     if (left) throw new FactoryError(left);
   }
-  stopSession(t, s);
+  // The row stays, so a wake resumes this conversation by its id (stopped.ts).
+  stopSession(t, s, false);
+  const after = rowsNow(t);
+  noteStopped(ws, name, s, after);
+  sweepStale(ws, name, t, after);
   console.log(`stopped ${name} (${s.id})`);
   const remove = !!v["remove-worktree"] && !v["keep-worktree"];
   // The worktree stays unless asked for: a worktree can hold a running stack and its database.
@@ -526,6 +602,7 @@ function cmdAssistant(ws: Workspace, argv: string[]) {
       console.log(`  next: send it the task by message, or pass --force for a fresh session`);
       return;
     }
+    if (w.is === "failed" && w.fresh) throw new FactoryError(`${want} was off and did not wake: ${w.why}.`);
     if (w.is === "failed" || w.is === "unknown") throw new FactoryError(`${want} was off and did not wake: ${w.why}. Nothing was started, so its conversation is kept; \`factory wake ${want}\` tries again, and --force starts a fresh session without it.`);
   }
   const ready = (name: string) => onDemand(ws, agentOrDie(ws, name), () => (promptFile ? readFileSync(promptFile, "utf8") : assistantPrompt(ws)));
@@ -584,6 +661,15 @@ function sayUnknown(rows: Iterable<Session[] | Unreachable>, so: string): number
   return code;
 }
 
+// The full listing for a stop's record, or none when it cannot be had (stopped.ts).
+function rowsNow(t: Pick<Transport, "sessions">): Session[] | undefined {
+  try {
+    return t.sessions(true);
+  } catch {
+    return undefined;
+  }
+}
+
 function cmdDown(ws: Workspace, argv: string[]) {
   args("down", argv, {}, [0, 0]);
   const rows = new Map(transports(ws).map((t) => [t.where, listing(t)]));
@@ -591,8 +677,37 @@ function cmdDown(ws: Workspace, argv: string[]) {
   for (const { t, hits } of agentSessions(ws, (where) => rows.get(where)))
     for (const s of hits) {
       console.log(`stopping ${s.name} (${s.id})`);
+      // only a row live at the stop is the one to bring back: a dead duplicate listed after it
+      // must not replace its record (CodeRabbit on #130)
+      const sid = s.id ?? "", sname = s.name ?? "";
+      const st = lastStopped(ws, sname);
+      const marked = !!sid && !!st?.failed?.includes(sid);
+      // what the row showed before the stop clears its pid (CodeRabbit on #130 at d1c64cc6)
+      const showed = ran(s, st);
+      const live = t.alive(s);
+      // a launch marked as never come up is stopped too, so one up late does not outlive the down,
+      // and keeps its mark: its "stopped" is ours, no evidence that it ran (Marie on #130 at f62a6b10).
+      // One that had shown it ran (a pid, though dead) is not unrun: its stop is read as it is.
+      if (marked && !live && !showed) noteUnrun(ws, sname, sid);
+      // and one a down before marked unrun that has shown it ran since leaves unrun before the stop
+      // clears its pid (CodeRabbit on #130 at 2f878288)
+      if (marked && showed && st?.unrun?.includes(sid)) noteRan(ws, sname, [s]);
       stopSession(t, s, false);
+      if (live) noteStopped(ws, s.name ?? "", s, hits);
     }
+  // rows a hook's wake left (stopped.ts), once every session is stopped
+  // One listing per host, taken only once an agent there has any, and kept when it fails: a host
+  // that does not answer costs one timeout, not one per agent (CodeRabbit on #130 at 2f878288).
+  const after = new Map<string, Session[] | undefined>();
+  for (const { agent, t } of agentSessions(ws, (where) => rows.get(where))) {
+    if (!staleIds(ws, agent.name).length) continue;
+    if (!after.has(t.where)) after.set(t.where, rowsNow(t));
+    // a host whose listing failed shows nothing: its ids are kept, and it is not asked again, which
+    // sweepStale would do given no rows (CodeRabbit on #130 at f10e2da)
+    const listed = after.get(t.where);
+    const removed = sweepStale(ws, agent.name, t, listed ?? []);
+    if (listed && removed.length) after.set(t.where, listed.filter((r) => !removed.includes(r.id ?? "")));
+  }
   stopBoard(ws, true);
   return code;
 }
@@ -604,6 +719,9 @@ function cmdRestartLead(ws: Workspace, argv: string[]) {
   const s = findSession(t, name);
   if (t.alive(s)) {
     stopSession(t, s, false);
+    const after = rowsNow(t);
+    noteStopped(ws, name, s, after);
+    sweepStale(ws, name, t, after);
     // wait for the supervisor to report it stopped, or up sees it as running
     for (let i = 0; i < 20 && t.alive(findSession(t, name)); i++) sleep(1000);
     console.log(`stopped ${name}`);
@@ -637,9 +755,9 @@ function cmdDrop(ws: Workspace, argv: string[]) {
     }
     if (rec.state && BUSY.has(rec.state) && !v.force)
       throw new FactoryError(`${ticket} is ${rec.state} with agent=${rec.agent ?? "None"}. Stop the teammate first, or pass --force.`);
-    appendEvent(ws, { ticket, at: now(), event: "dropped", from_state: rec.state, note: str(v.note) ?? null });
+    appendEvent(ws, { ticket, at: now(), event: "dropped", from_state: rec.state ?? OFF, note: str(v.note) ?? null });
     removeRec(ws, ticket);
-    console.log(`  dropped ${ticket} (was ${rec.state})`);
+    console.log(`  dropped ${ticket} (was ${rec.state ?? OFF})`);
   }
 }
 
@@ -845,8 +963,8 @@ function cmdSchedule(ws: Workspace, argv: string[]): number {
 
 // The board port check binds, which is asynchronous, so this one finishes after main returns.
 function cmdDoctor(ws: Workspace, argv: string[]) {
-  args("doctor", argv, {}, [0, 0]);
-  doctor(ws).then((code) => {
+  const { v } = args("doctor", argv, { "resume-probe": { type: "boolean" } }, [0, 0]);
+  doctor(ws, console.log, { resumeProbe: v["resume-probe"] === true }).then((code) => {
     if (code) console.error("factory: something is missing; each MISSING line says how to fix it");
     process.exitCode = code;
   }, (e: unknown) => {
@@ -899,6 +1017,7 @@ const HOOK_FNS: Record<HookName, (argv: string[], input: string, workspace?: str
   "no-side-channels": noSideChannelsHook,
   "marked-comments": markedCommentsHook,
   "wake": wakeHook,
+  "appendix": appendixHook,
 };
 
 // Runs before the workspace is opened: everything a hook needs is on its command line, and a

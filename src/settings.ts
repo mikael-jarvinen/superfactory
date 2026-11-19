@@ -7,11 +7,12 @@ import { isSettingsPath } from "./config.js";
 import { lead } from "./fleet.js";
 import { POLICIES, type Policy, TMP_ROOTS } from "./hooks/guard.js";
 import { WAKE_HOOK_TIMEOUT_S } from "./hooks/wake.js";
+import { currentAppendixPath } from "./transport.js";
 import type { Workspace } from "./workspace.js";
 import { die } from "./util.js";
 
 // wake is in every session's settings whatever the template says, so it is never listed in one.
-export const HOOKS = ["guard", "status", "no-dialogs", "no-side-channels", "marked-comments", "wake"] as const;
+export const HOOKS = ["guard", "status", "no-dialogs", "no-side-channels", "marked-comments", "wake", "appendix"] as const;
 export type HookName = (typeof HOOKS)[number];
 
 export interface HookResult {
@@ -211,8 +212,12 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
   add("PreToolUse", "SendMessage", wakeArgs, WAKE_HOOK_TIMEOUT_S);
   // a failed send from a host, to an agent it cannot wake, is explained
   if (s.host) for (const ev of ["PostToolUse", "PostToolUseFailure"]) add(ev, "SendMessage", wakeArgs, 10);
+  // A resumed or respawned session keeps the appendix it started with and reads no new one (Otto on
+  // Claude Code 2.1.327), so every role is handed its current one when it comes back
+  // (hooks/appendix.ts). The file is this machine's: a host renders its own agents' settings.
+  add("SessionStart", "resume", ["hook", "appendix", "--file", currentAppendixPath(ws.runDir, s.name)], 10);
   for (const h of names) {
-    if (h === "wake") continue;
+    if (h === "wake" || h === "appendix") continue;
     if (h === "guard") {
       const dirs = [...t.writeDirs.map((d) => WRITE_DIRS[d](ws)), ...(work ? [work] : [])].flatMap((d) => ["--write-dir", d]);
       const repos = t.guard === "protect" ? [...(org ? ["--org", org] : []), ...ws.config.github.ownRepos.flatMap((r) => ["--own-repo", r])] : [];

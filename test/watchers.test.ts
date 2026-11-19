@@ -135,7 +135,8 @@ test("the queue reads once more when its first run finds no tracker", () => {
 
 test("the queue says what is new once, and says it again when the note could not be left", () => {
   const { ws, run, read, notes, jam, unjam } = watcherWorkspace();
-  for (const [key, to] of [["WEB-2", "building"], ["WEB-3", "queued"]] as const) assert.equal(factory(ws, ["state", key, to]).status, 0);
+  // WEB-3 was dispatched once and taken off the board; WEB-4 has no record, so it waits in the backlog.
+  for (const [key, to] of [["WEB-2", "building"], ["WEB-3", "building"], ["WEB-3", "off"]] as const) assert.equal(factory(ws, ["state", key, to]).status, 0);
   const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
   const pr = (n: number, branch: string, min: number) => ({ number: n, title: "Change", headRefName: branch, mergedAt: ago(min), url: `https://github.com/acme/web/pull/${n}` });
   const routes = {
@@ -161,13 +162,15 @@ test("the queue says what is new once, and says it again when the note could not
   state = JSON.parse(read("queue.state"));
   assert.deepEqual([state.known, state.merged], [["WEB-2", "WEB-3", "WEB-4"], ["https://github.com/acme/web/pull/12"]]);
 
-  // The card carries the tracker summary as its title, stamped the moment the ticket is seen: an
-  // existing queued record gets it set, a ticket with no record gets a titled queued one, and a
-  // ticket already past queued is left as it is.
+  // A record off the board gets the tracker summary as its title, stamped the moment the ticket is
+  // seen. A ticket with no record gets none: waiting work stays in the backlog, and a dispatch makes
+  // the record. A ticket on the board is left as it is.
   const title = (k: string) => (JSON.parse(readFileSync(join(ws, "state", `${k}.json`), "utf8")) as { state: string; title?: string });
-  assert.equal(title("WEB-3").title, "Add the export");
-  assert.deepEqual([title("WEB-4").state, title("WEB-4").title], ["queued", "Retire the old page"]);
+  assert.deepEqual([title("WEB-3").state, title("WEB-3").title], [null, "Add the export"]);
+  assert.ok(!existsSync(join(ws, "state", "WEB-4.json")), "the watcher makes no record");
   assert.equal(title("WEB-2").title, undefined, "a ticket already building is not touched");
+  assert.deepEqual((JSON.parse(read("queue.state")) as { titles: Record<string, string> }).titles,
+    { "WEB-2": "Fix login", "WEB-3": "Add the export", "WEB-4": "Retire the old page" }, "every summary is kept, for the dispatch that makes WEB-4's record");
 
   r = run(["watch", "queue"], [reader], routes);
   assert.equal(r.status, 0);
@@ -199,7 +202,7 @@ test("a recorded PR that conflicts is reported once, when it starts to, and neve
   const { ws, run, read, notes, jam, unjam } = watcherWorkspace();
   // Records with their PRs written straight into the store: the state machine is not under test.
   const put = (key: string, state: string, prs: { repo: string; number: number }[], title?: string) => {
-    assert.equal(factory(ws, ["state", key, "queued"]).status, 0);
+    assert.equal(factory(ws, ["state", key, "building"]).status, 0);
     const file = join(ws, "state", `${key}.json`);
     writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state, pr: prs[0] ?? null, prs, ...(title ? { title } : {}) }));
   };
@@ -259,7 +262,7 @@ test("a recorded PR that conflicts is reported once, when it starts to, and neve
 
 test("the round: a merge the record moved after is judged, one it did not is owed", () => {
   const { ws, run } = watcherWorkspace();
-  assert.equal(factory(ws, ["state", "WEB-2", "queued"]).status, 0);
+  assert.equal(factory(ws, ["state", "WEB-2", "building"]).status, 0);
   const merged = (n: number, at: string) => ({ number: n, title: "WEB-2: part", headRefName: "WEB-2", state: "MERGED", isDraft: false, mergedAt: at, headRefOid: "abc1234" });
   const before = new Date(Date.now() - 3600_000).toISOString();
   const after = new Date(Date.now() + 3600_000).toISOString();
@@ -269,7 +272,7 @@ test("the round: a merge the record moved after is judged, one it did not is owe
   });
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.doesNotMatch(r.stdout, /acme\/web#5 is MERGED/);
-  assert.match(r.stdout, /WEB-2: acme\/web#6 is MERGED but the store says queued -- done judgement owed/);
+  assert.match(r.stdout, /WEB-2: acme\/web#6 is MERGED but the store says building -- done judgement owed/);
 });
 
 // Mikael, 2026-10-16: a PR is a draft in every column but colleague review, and open there. After
@@ -401,12 +404,12 @@ test("the round reads [[watchers.facts]] files: escalating lines, and a missing 
 test("the round: a blocked item whose named blocker has merged is flagged, once", () => {
   const { ws, run, read } = watcherWorkspace();
   // WEB-9 is merged (done); WEB-5 is still open. WEB-2 waits on WEB-9, WEB-3 waits on WEB-5.
-  assert.equal(factory(ws, ["state", "WEB-9", "queued"]).status, 0);
+  assert.equal(factory(ws, ["state", "WEB-9", "building"]).status, 0);
   const web9 = join(ws, "state", "WEB-9.json");
   writeFileSync(web9, JSON.stringify({ ...JSON.parse(readFileSync(web9, "utf8")), state: "done" }));
-  assert.equal(factory(ws, ["state", "WEB-5", "queued"]).status, 0);
+  assert.equal(factory(ws, ["state", "WEB-5", "building"]).status, 0);
   for (const [k, note] of [["WEB-2", "verify_site held behind WEB-9 merge"], ["WEB-3", "held behind WEB-5 merge"]] as const) {
-    assert.equal(factory(ws, ["state", k, "queued"]).status, 0);
+    assert.equal(factory(ws, ["state", k, "building"]).status, 0);
     assert.equal(factory(ws, ["state", k, "blocked", "--note", note]).status, 0);
   }
   const routes = { "pr list -R acme/web --state all": { stdout: [] }, "pr list -R acme/api --state all": { stdout: [] } };
@@ -427,7 +430,7 @@ test("the round: an item waiting on the lead over two hours is flagged, once", (
   const { ws, run } = watcherWorkspace();
   // WEB-2 has sat in pr-open for five days, WEB-3 for an hour.
   for (const [k, hours] of [["WEB-2", 5 * 24], ["WEB-3", 1]] as const) {
-    assert.equal(factory(ws, ["state", k, "queued"]).status, 0);
+    assert.equal(factory(ws, ["state", k, "building"]).status, 0);
     const f = join(ws, "state", `${k}.json`);
     const since = new Date(Date.now() - hours * 3600_000).toISOString();
     writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, "utf8")), state: "pr-open", since }));
@@ -569,7 +572,7 @@ test("the round: a failed CI check on a PR in review is told once per head, with
 // own replies and the bots that only report are not news, and a comment is told once.
 test("the review watcher tells the lead about new review comments, once, and not the factory's own", () => {
   const { ws, run, notes, read, logs, age } = watcherWorkspace();
-  assert.equal(factory(ws, ["state", "WEB-2", "queued", "--title", "Fix login"]).status, 0);
+  assert.equal(factory(ws, ["state", "WEB-2", "building", "--title", "Fix login"]).status, 0);
   const file = join(ws, "state", "WEB-2.json");
   const pr7 = { repo: "acme/web", number: 7 };
   writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
@@ -646,7 +649,7 @@ test("the review watcher tells the lead about new review comments, once, and not
 // the human's login, so its reply must not be told as the human's.
 test("the review watcher reads by id: a late-submitted review, a comment in the same second, a second page, and not its own replies", () => {
   const { ws, run, notes } = watcherWorkspace();
-  assert.equal(factory(ws, ["state", "WEB-2", "queued", "--title", "Fix login"]).status, 0);
+  assert.equal(factory(ws, ["state", "WEB-2", "building", "--title", "Fix login"]).status, 0);
   const file = join(ws, "state", "WEB-2.json");
   const pr7 = { repo: "acme/web", number: 7 };
   writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
@@ -719,7 +722,7 @@ test("the review watcher reads by id: a late-submitted review, a comment in the 
 // reply with errors and no node for a PR beat the heartbeat as if that PR had been read.
 test("the review watcher tells a colleague's comment above the factory's reply, and a PR GitHub did not return is not a clean read", () => {
   const { ws, run, notes } = watcherWorkspace();
-  assert.equal(factory(ws, ["state", "WEB-2", "queued", "--title", "Fix login"]).status, 0);
+  assert.equal(factory(ws, ["state", "WEB-2", "building", "--title", "Fix login"]).status, 0);
   const file = join(ws, "state", "WEB-2.json");
   const pr7 = { repo: "acme/web", number: 7 };
   writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
@@ -763,7 +766,7 @@ test("the review watcher tells a colleague's comment above the factory's reply, 
 // that output. A read with errors counted as read, and could move a cursor past what it did not get.
 test("the review watcher does not count a read with GraphQL errors or a failed exit as read", () => {
   const { ws, run, notes } = watcherWorkspace();
-  assert.equal(factory(ws, ["state", "WEB-2", "queued", "--title", "Fix login"]).status, 0);
+  assert.equal(factory(ws, ["state", "WEB-2", "building", "--title", "Fix login"]).status, 0);
   const file = join(ws, "state", "WEB-2.json");
   const pr7 = { repo: "acme/web", number: 7 };
   writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
@@ -841,7 +844,7 @@ test("the review watcher's query stays under GitHub's node limit for many PRs", 
 // The fake gh errors after a few repeats, so a regression fails on the call count rather than hangs.
 test("the review watcher does not follow a page cursor that does not move on", () => {
   const { ws, run, notes } = watcherWorkspace();
-  assert.equal(factory(ws, ["state", "WEB-2", "queued", "--title", "Fix login"]).status, 0);
+  assert.equal(factory(ws, ["state", "WEB-2", "building", "--title", "Fix login"]).status, 0);
   const file = join(ws, "state", "WEB-2.json");
   const pr7 = { repo: "acme/web", number: 7 };
   writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
@@ -892,7 +895,7 @@ test("the review watcher does not follow a page cursor that does not move on", (
 test("the review watcher reads the other repos when one cannot be read, and names it", () => {
   const { ws, run, notes } = watcherWorkspace();
   const watch = (key: string, p: { repo: string; number: number }) => {
-    assert.equal(factory(ws, ["state", key, "queued", "--title", key]).status, 0);
+    assert.equal(factory(ws, ["state", key, "building", "--title", key]).status, 0);
     const file = join(ws, "state", `${key}.json`);
     writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: p, prs: [p] }));
   };
@@ -923,7 +926,7 @@ test("the review watcher reads the other repos when one cannot be read, and name
 // A reviews.state from before the ids holds a time per PR: what came before it is read.
 test("the review watcher reads a time cursor from before the ids as everything up to it", () => {
   const { ws, run, notes } = watcherWorkspace();
-  assert.equal(factory(ws, ["state", "WEB-2", "queued"]).status, 0);
+  assert.equal(factory(ws, ["state", "WEB-2", "building"]).status, 0);
   const file = join(ws, "state", "WEB-2.json");
   const pr7 = { repo: "acme/web", number: 7 };
   writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
@@ -948,7 +951,7 @@ const CODERABBIT_FINDING = "<!-- coderabbit-ai-generated:v1 -->\n\n**<picture><i
 const CODERABBIT_SUMMARY = "<!-- coderabbit-ai-generated:v1 -->\n\n**Actionable comments posted: 3**\n\n---\n\n<!-- autofix_checkbox_start -->\n- [ ] <!-- {\"checkboxId\":\"4b0d0e0a-96d7-4f10-b296-3a18ea78f0b9\"} --> Fix comments: Fix CodeRabbit comments on this PR\n<!-- autofix_checkbox_end -->\n\n<details>\n<summary><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://storage.googleapis.com/coderabbit_public_assets/revie";
 test("the review watcher reads a CodeRabbit finding as words and skips its review summary", () => {
   const { ws, run, notes } = watcherWorkspace();
-  assert.equal(factory(ws, ["state", "WEB-2", "queued"]).status, 0);
+  assert.equal(factory(ws, ["state", "WEB-2", "building"]).status, 0);
   const file = join(ws, "state", "WEB-2.json");
   const pr7 = { repo: "acme/web", number: 7 };
   writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));

@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 import { agentOrDie, findSession, type Session } from "../src/fleet.js";
 import { claudeEnv, claudeScoped, JOB_ENV, SCOPE } from "../src/scope.js";
 import { procStat } from "../src/stacks/process.js";
-import { agentSessions, daemonAlive, local, pick, sessionAlive, STARTING_MS, type Transport } from "../src/transport.js";
+import { agentSessions, currentAppendixPath, daemonAlive, local, pick, sessionAlive, STARTING_MS, type Transport } from "../src/transport.js";
 import { runClaude } from "../src/watchers/job.js";
 import { run } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
@@ -72,8 +72,11 @@ echo "backgrounded · abc123 · rae"
   assert.equal(readFileSync(named(), "utf8"), "a new brief\n");
   assert.deepEqual(readdirSync(ws.runDir).filter((n) => n.endsWith(".tmp")), []);
   rmSync(join(dir, "appendix"));
+  assert.ok(existsSync(currentAppendixPath(ws.runDir, "bea")));
   local.start({ ...req, appendix: null, args });
   assert.equal(readFileSync(join(dir, "args"), "utf8"), "--bg P\n");
+  // and leaves no current copy for a later resume to be handed (Marie on #131)
+  assert.ok(!existsSync(currentAppendixPath(ws.runDir, "bea")));
 });
 
 // A reviewer here: `factory review` writes its brief to the file named on the command line.

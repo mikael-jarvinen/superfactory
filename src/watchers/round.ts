@@ -13,7 +13,7 @@ import { fleetLines, owedNote, type Session } from "../fleet.js";
 import { type CheckRun, checkRuns, json } from "../gate/github.js";
 import { readTail } from "../messages.js";
 import { loaded, scheduleFix } from "../scheduler/index.js";
-import { allRecs, BUSY, isLocal, recPrs, WAITING_ON_LEAD, WAITING_ON_YOU } from "../state.js";
+import { allRecs, BUSY, isLocal, OFF, onBoard, recPrs, WAITING_ON_LEAD, WAITING_ON_YOU } from "../state.js";
 import { trackerOf } from "../tracker/read.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
@@ -96,10 +96,13 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
   // ticket -> state across every record, done included, so a blocked item's named blocker can be
   // looked up even after it has reached done and left the open set below.
   const stateByTicket = new Map(allItems.map((r) => [r.ticket, r.state ?? ""]));
+  // Open items, those off the board among them: their PRs and worktrees are still checked below.
   const recs = allItems.filter((r) => r.state !== "done");
   section("state store", () => {
-    if (!recs.length) out.push("  no open items");
-    for (const r of recs) {
+    // Off the board is not a state the round reports: that work waits in the tracker.
+    const on = recs.filter(onBoard);
+    if (!on.length) out.push("  no open items");
+    for (const r of on) {
       const s = r.state ?? "?";
       const sinceMs = r.since ? Date.parse(r.since) : NaN;
       const age = Number.isNaN(sinceMs) ? null : Math.floor((at - sinceMs) / 1000);
@@ -109,8 +112,6 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
       // asking once is right and asking every hour is noise.
       if (BUSY.has(s) && age !== null && age > WORKING_S)
         flag = firstTime(r.ticket, s, r.since!) ? "  OVER 90 MIN in a working state -- probe" : "  over 90 min (already probed, not an escalation)";
-      if (s === "queued")
-        flag = firstTime(r.ticket, s, r.since ?? "") ? "  QUEUED -- not dispatched" : "  queued (already reported, not an escalation)";
       if (WAITING_ON_YOU.has(s) && age !== null && age > WAITING_S)
         flag = firstTime(r.ticket, s, r.since!) ? `  waiting on ${human} over a working day` : `  waiting on ${human} (already reported, not an escalation)`;
       if (WAITING_ON_LEAD.has(s) && age !== null && age > LEAD_WAITING_S)
@@ -164,13 +165,13 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
         for (const rec of recs) {
           const { known, match } = belongs(rec, repo.remote, pr);
           if (!match) continue;
-          const st = rec.state ?? "?";
+          const st = rec.state ?? OFF;
           const rp = recPrs(rec).find((p) => p.repo === repo.remote && p.number === pr.number);
           const where = `${rec.ticket}: ${repo.remote}#${pr.number}`;
           // A record that moved after the merge is the judgement already made: the ticket had more to do.
           const judged = !!pr.mergedAt && !!rec.since && Date.parse(rec.since) >= Date.parse(pr.mergedAt);
           if (pr.state === "MERGED") { if (!judged) out.push(`  ${where} is MERGED but the store says ${st} -- done judgement owed`); }
-          else if (pr.state === "OPEN" && (st === "queued" || st === "building") && !known)
+          else if (pr.state === "OPEN" && (st === OFF || st === "building") && !known)
             out.push(`  ${where} is OPEN (draft=${pr.isDraft}) but the store says ${st} -- unreported PR?`);
           else if (pr.state === "OPEN" && rp?.head && pr.headRefOid && !pr.headRefOid.startsWith(rp.head.slice(0, 7)) && ["gate", "your-review", "colleague-review"].includes(st))
             out.push(`  ${where} head moved to ${pr.headRefOid.slice(0, 7)} while ${st} (recorded ${rp.head.slice(0, 7)}) -- frozen PR pushed?`);
@@ -250,7 +251,7 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
       // so a served worktree is not an hourly false alarm.
       const d = worktreeDirty(r.worktree, ws.config.worktree.toolWritten);
       if (d.paths.length && !BUSY.has(r.state ?? ""))
-        out.push(`  ${r.ticket}: worktree has uncommitted changes while ${r.state}: ${d.paths.slice(0, 4).join(", ")}`);
+        out.push(`  ${r.ticket}: worktree has uncommitted changes while ${r.state ?? OFF}: ${d.paths.slice(0, 4).join(", ")}`);
     }
   }, () => true);
 
@@ -354,7 +355,7 @@ function standing(c: CheckRun | undefined, base: string): string {
 // Plumbing and the sessions: what says something is down.
 const ALARM = (l: string) => /CANNOT|MISSING|STALE|FAILED|NOT (LOADED|RUNNING|SCHEDULED|INSTALLED)|connector is failing/.test(l);
 // The store's own flags, each already said-once by its marker.
-const STORE_FLAG = /OVER 90 MIN|QUEUED -- not dispatched|over a working day|over 2 h --|NO SESSION:|UNKNOWN:|BLOCKER DONE:/;
+const STORE_FLAG = /OVER 90 MIN|over a working day|over 2 h --|NO SESSION:|UNKNOWN:|BLOCKER DONE:/;
 const REMIND_MS = 24 * 3600 * 1000;
 
 // What the lead was told, by the line with its times and durations taken out, so a line that only
