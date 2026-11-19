@@ -9,7 +9,7 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { json } from "../gate/github.js";
-import { allRecs, branchFor, isLocal, type Rec, recPrs, saveRec, transition } from "../state.js";
+import { allRecs, branchFor, isLocal, type Rec, recPrs, saveRec } from "../state.js";
 import { parseRead, trackerOf, UNAVAILABLE } from "../tracker/read.js";
 import { squash } from "../util.js";
 import type { Workspace } from "../workspace.js";
@@ -26,6 +26,9 @@ export interface QueueState {
   merged: string[];
   conflicting: string[];
   outcomes: string[];
+  // The summary of every ticket in the queue at its last read: a dispatch titles a new record from it,
+  // since waiting work has no record until then (Niilo on #129).
+  titles: Record<string, string>;
 }
 
 export const queueStateFile = (ws: Workspace) => join(ws.logsDir, "queue.state");
@@ -34,9 +37,12 @@ export function loadQueueState(ws: Workspace): QueueState {
   try {
     const d = JSON.parse(readFileSync(queueStateFile(ws), "utf8")) as Partial<QueueState>;
     const list = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
-    return { known: list(d.known), merged: list(d.merged), conflicting: list(d.conflicting), outcomes: list(d.outcomes) };
+    const titles = d.titles && typeof d.titles === "object" && !Array.isArray(d.titles)
+      ? Object.fromEntries(Object.entries(d.titles).filter((e): e is [string, string] => typeof e[1] === "string"))
+      : {};
+    return { known: list(d.known), merged: list(d.merged), conflicting: list(d.conflicting), outcomes: list(d.outcomes), titles };
   } catch {
-    return { known: [], merged: [], conflicting: [], outcomes: [] };
+    return { known: [], merged: [], conflicting: [], outcomes: [], titles: {} };
   }
 }
 
@@ -198,22 +204,18 @@ export function runQueue(ws: Workspace, out: (line: string) => void = console.lo
   const lines: string[] = [];
   let fresh: string[] = [];
   if (read?.outcome === "read") {
-    // New is a queue key with no record, or a record still queued, that no earlier run has seen. A
-    // key in any other state is handled.
+    // New is a queue key with no record, or a record off the board, that no earlier run has seen. A
+    // key on the board is handled. The watcher makes no record: waiting work stays in the tracker,
+    // and a dispatch makes the record. One off the board without a title gets the tracker's summary,
+    // which is only in reach while the ticket is still in the queue.
     fresh = read.keys.filter((k) => {
       const rec = byKey.get(k);
-      return (!rec || rec.state === "queued") && !prev.known.includes(k);
+      return (!rec || rec.state === null) && !prev.known.includes(k);
     });
-    // Give the card a title the moment the ticket appears, so the board never shows a bare key: the
-    // tracker summary is only in reach while the ticket is still in the queue, so stamp it now. A
-    // ticket with no record yet gets a queued one; one already recorded without a title gets it set.
     for (const k of fresh) {
       const summary = read.summaries[k];
-      if (summary) {
-        const rec = byKey.get(k);
-        if (!rec) transition(ws, k, "queued", { title: summary }, () => {});
-        else if (!rec.title) saveRec(ws, { ...rec, title: squash(summary, 90) });
-      }
+      const rec = byKey.get(k);
+      if (summary && rec && !rec.title) saveRec(ws, { ...rec, title: squash(summary, 90) });
       lines.push(`queued: ${k}${summary ? ` ${summary}` : ""}`);
     }
   }
@@ -235,6 +237,9 @@ export function runQueue(ws: Workspace, out: (line: string) => void = console.lo
     merged: delivered ? [...prev.merged, ...m.urls].slice(-50) : prev.merged,
     conflicting: delivered ? [...c.keep, ...c.fresh] : c.keep,
     outcomes: [...prev.outcomes, outcome].slice(-8),
+    titles: read?.outcome === "read"
+      ? Object.fromEntries(read.keys.filter((k) => read.summaries[k]).map((k) => [k, squash(read.summaries[k] as string, 90)]))
+      : prev.titles,
   };
   writeFileSync(queueStateFile(ws), JSON.stringify(state) + "\n");
   logTo(log, `outcome=${outcome}${lines.length ? ` delivered=${delivered}` : ""}`);

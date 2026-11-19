@@ -21,23 +21,12 @@ const FLEET: Agent[] = [
   reviewer("kepler"),
 ];
 
-test("queued work with a free builder of that stack is flagged", () => {
-  const work = idleWork([rec("CL-1", "queued", "events")], FLEET, new Set());
-  assert.equal(work.length, 1);
-  assert.match(work[0] as string, /^dispatch: CL-1 \(events\)/);
-});
-
-test("queued work is not flagged when that stack's builder is busy building or fixing", () => {
-  const recs = [rec("CL-1", "queued", "events"), rec("CL-2", "fixing", "events", "sanchez")];
-  const work = idleWork(recs, FLEET, new Set(["sanchez"]));
-  assert.deepEqual(work.filter((w) => w.startsWith("dispatch")), []);
-});
-
-test("a builder whose item is only in review still counts as free", () => {
-  const recs = [rec("CL-1", "queued", "classic"), rec("CL-2", "agent-review", "classic", "ramos")];
-  // One reviewer live so the agent-review rule does not also fire.
-  const work = idleWork(recs, FLEET, new Set(["ramos", "castro"]));
-  assert.ok(work.some((w) => w.startsWith("dispatch: CL-1 (classic)")));
+// Mikael, 2026-11-18: waiting work lives in the backlog, which the lead reads, so a free builder is
+// not flagged here, and an item off the board is no work for anyone.
+test("an item off the board is never flagged, a free builder of its stack or not", () => {
+  assert.deepEqual(idleWork([rec("CL-1", null as unknown as string, "events")], FLEET, new Set()), []);
+  const recs = [rec("CL-1", null as unknown as string, "classic"), rec("CL-2", "agent-review", "classic", "ramos")];
+  assert.deepEqual(idleWork(recs, FLEET, new Set(["ramos", "castro"])), []);
 });
 
 test("a blocked ticket is never flagged for dispatch", () => {
@@ -67,28 +56,21 @@ test("nothing actionable yields an empty list", () => {
   assert.deepEqual(work, []);
 });
 
-test("the same queued ticket is reported once", () => {
-  const work = idleWork([rec("CL-1", "queued", "events")], FLEET, new Set());
-  assert.equal(work.filter((w) => w.includes("CL-1")).length, 1);
-});
-
 test("an agent whose host could not be asked is unknown, not dropped, and counts as a reviewer", () => {
   const fleet = [...FLEET, { name: "rae", role: "builder", stack: "events", repos: [] } as unknown as Agent];
   const work = idleWork([rec("CL-1", "building", "events", "rae")], fleet, new Set(), new Map([["rae", "host far: ECONNREFUSED"]]));
-  assert.deepEqual(work.filter((w) => !w.startsWith("dispatch")), ["unknown: rae's host could not be asked (host far: ECONNREFUSED) while CL-1 is building"]);
+  assert.deepEqual(work, ["unknown: rae's host could not be asked (host far: ECONNREFUSED) while CL-1 is building"]);
   const recs = [rec("CL-2", "agent-review", "events", "sanchez"), rec("CL-3", "agent-review", "classic", "ramos")];
   assert.deepEqual(idleWork(recs, FLEET, new Set(["castro"]), new Map([["kepler", "host far: ECONNREFUSED"]])).filter((w) => w.startsWith("review")), []);
   assert.deepEqual(idleWork([...recs, rec("CL-4", "agent-review", "modules", "juarez")], FLEET, new Set(["castro"]), new Map([["kepler", "host far: ECONNREFUSED"]])).filter((w) => w.startsWith("review")),
     ["review: 3 PR(s) at agent-review, 1 reviewer(s) running, kepler unknown -- run factory review"]);
 });
 
-test("a builder is busy for idleWork exactly when its record owes it a session", () => {
+test("a builder is owed a session exactly when its record owes it a session", () => {
   assert.deepEqual(STATES.filter((s) => owesSession(rec("CL-1", s, "events", "sanchez"))).sort(), ["building", "designing", "fixing"]);
   assert.equal(owesSession(rec("CL-1", "building")), false, "no agent, no session owed");
   for (const state of STATES) {
     const mine = rec("CL-1", state, "events", "sanchez");
-    const free = idleWork([mine, rec("CL-2", "queued", "events")], FLEET, new Set()).some((w) => w.startsWith("dispatch: CL-2"));
-    assert.equal(free, !owesSession(mine), `${state}: free for new work only when it owes no session`);
     assert.equal(owed(mine, new Set(), new Map()) === null, !owesSession(mine), `${state}: owed agrees`);
   }
 });

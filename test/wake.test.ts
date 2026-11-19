@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { defaultLogsDir } from "../src/config.js";
@@ -10,7 +11,10 @@ import { settingsFile } from "../src/launch.js";
 import { recipient } from "../src/hooks/wake.js";
 import { ListingTimedOut, Unreachable } from "../src/remote.js";
 import { type Transport, transportFor } from "../src/transport.js";
+import * as T from "../src/tickets/store.js";
+import { trackerTitle } from "../src/tracker/title.js";
 import { wake } from "../src/wake.js";
+import { queueStateFile } from "../src/watchers/queue.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, fakeDaemon, TOML, tempWorkspace } from "./helpers.js";
 
@@ -190,7 +194,7 @@ test("every role's settings wake the recipient before SendMessage, inside the ho
 
 test("a fix round on an item whose session was stopped idle wakes that session instead of starting one", () => {
   const { ws, put, calls } = fakeFleet();
-  for (const args of [["queued", "--stack", "app"], ["building", "--agent", "bea"], ["pr-open", "--pr", "acme/web#1", "--head", "abc1234abc1234"],
+  for (const args of [["building", "--stack", "app", "--agent", "bea"], ["pr-open", "--pr", "acme/web#1", "--head", "abc1234abc1234"],
     ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "2 high"]]) {
     const st = factory(ws, ["state", "TEST-3", ...args]);
     assert.equal(st.status, 0, st.stderr);
@@ -513,4 +517,222 @@ test("only a hosted agent's settings explain a failed send", () => {
     assert.match(post("rae")[0]!, / hook wake --from-host far$/, ev);
     assert.deepEqual(post("bea"), [], ev);
   }
+});
+
+// Niilo on #129: waiting work has no record, so the dispatch that makes one titles it, and no card
+// shows a bare key. --title wins; else the summary the queue watcher last read; else it says how.
+test("a dispatch titles a new record: --title, else the queue's last read of the tracker", () => {
+  const { ws, put } = fakeFleet(TOML + `
+[roles.designer]
+cwd = "designers"
+model = "opus"
+settings = "designer"
+add_dirs = ["web"]
+
+[[agents]]
+name = "dee"
+role = "designer"
+`);
+  mkdirSync(join(ws, "designers"), { recursive: true });
+  mkdirSync(join(ws, "briefs"), { recursive: true });
+  writeFileSync(join(ws, "briefs", "app.md"), "the app stack's brief");
+  const web = join(ws, "repos", "web");
+  mkdirSync(web, { recursive: true });
+  writeFileSync(join(web, "AGENTS.md"), "the repo's brief");
+  const origin = join(ws, "web-origin.git");
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+  for (const a of [["init", "-q", "-b", "main"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
+    ["remote", "add", "origin", origin], ["push", "-q", "origin", "main"]])
+    execFileSync("git", ["-C", web, ...a]);
+  const qs = queueStateFile(openWorkspace(ws, {}));
+  mkdirSync(dirname(qs), { recursive: true });
+  writeFileSync(qs, JSON.stringify({ known: [], merged: [], conflicting: [], outcomes: ["read"],
+    titles: { "TEST-30": "Rename the export", "TEST-31": "Draw the export" } }));
+  const rec = (k: string) => JSON.parse(readFileSync(join(ws, "state", `${k}.json`), "utf8")) as { state: string; title?: string };
+
+  let r = factory(ws, ["dispatch", "bea", "TEST-30"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual([rec("TEST-30").state, rec("TEST-30").title], ["building", "Rename the export"], "the builder's record has the tracker's title");
+  assert.doesNotMatch(r.stdout, /no title/);
+  // a fix round on the live session keeps it, and takes --title all the same (CodeRabbit on #129)
+  const wt = (JSON.parse(readFileSync(join(ws, "state", "TEST-30.json"), "utf8")) as { worktree: string }).worktree;
+  put("live.json", [sess("new1", "bea", { state: "idle", cwd: wt })]);
+  for (const args of [["pr-open", "--pr", "acme/web#1", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "2 high"]])
+    assert.equal(factory(ws, ["state", "TEST-30", ...args]).status, 0);
+  r = factory(ws, ["dispatch", "bea", "TEST-30", "--title", "Rename the export, round two"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /bea is still on TEST-30 .*so it keeps its context/);
+  assert.equal(rec("TEST-30").title, "Rename the export, round two", "--title on the live session's round");
+  assert.equal(factory(ws, ["state", "TEST-30", "blocked", "--evidence", "parked for the next case"]).status, 0);
+  // taken off the board with its session left running, it goes back on as building, not fixing,
+  // which off the board cannot reach (CodeRabbit on #129)
+  assert.equal(factory(ws, ["state", "TEST-30", "off"]).status, 0);
+  r = factory(ws, ["dispatch", "bea", "TEST-30"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /bea is still on TEST-30 .*so it keeps its context/);
+  assert.equal(rec("TEST-30").state, "building");
+  assert.equal((JSON.parse(readFileSync(join(ws, "state", "TEST-30.json"), "utf8")) as { worktree: string }).worktree, wt);
+
+  r = factory(ws, ["dispatch", "dee", "TEST-31"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual([rec("TEST-31").state, rec("TEST-31").title], ["designing", "Draw the export"], "and so has the designer's");
+
+  r = factory(ws, ["dispatch", "dee", "TEST-31", "--title", "Draw the export, round two"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(rec("TEST-31").title, "Draw the export, round two", "--title wins over a title the record has");
+
+  assert.equal(factory(ws, ["state", "TEST-30", "off"]).status, 0);
+  r = factory(ws, ["dispatch", "bea", "TEST-32", "--force"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(rec("TEST-32").title, undefined, "a key the tracker read never saw gets no title");
+  assert.match(r.stdout, /warning: TEST-32 has no title; the card shows its bare key\. Give it one: factory state TEST-32 --title/);
+});
+
+// A local tracker's title is the ticket's own; a key it does not hold has none.
+test("the tracker's title on a local tracker is the ticket's", () => {
+  const LOCAL = `${TOML.replace(/\[tracker\][\s\S]*?done = "Done"\n/, "")}
+[tracker]
+kind = "local"
+
+[[tracker.projects]]
+key = "RPE"
+name = "RPE Training App"
+`;
+  const dir = tempWorkspace(LOCAL);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const ws = openWorkspace(dir, {});
+  T.create(ws, { project: "RPE", number: 1, t: "2026-11-18T10:00:00Z", title: "Log a set's RPE", state: "Backlog", source: { system: "plane" } },
+    { human: false, name: "plane", importer: true });
+  assert.equal(trackerTitle(ws, "RPE-1"), "Log a set's RPE");
+  assert.equal(trackerTitle(ws, "RPE-2"), undefined);
+  assert.equal(trackerTitle(ws, "LOCAL-gone"), undefined);
+});
+
+// Mikael, 2026-11-18: queued is no longer a state. A record written while it was one is off the board,
+// and the approval it carries is kept: a builder dispatched on it gets the approved design, and a
+// designer dispatched on it gets the last round's links.
+test("a queued record with an approval loads as off, approval intact, and a dispatch reads it back", () => {
+  const { ws } = fakeFleet(TOML + `
+[roles.designer]
+cwd = "designers"
+model = "opus"
+settings = "designer"
+add_dirs = ["web"]
+
+[[agents]]
+name = "dee"
+role = "designer"
+`);
+  mkdirSync(join(ws, "designers"), { recursive: true });
+  mkdirSync(join(ws, "briefs"), { recursive: true });
+  writeFileSync(join(ws, "briefs", "app.md"), "the app stack's brief");
+  // the builder's checkout, for its worktree: a repo with one commit and its brief
+  const web = join(ws, "repos", "web");
+  mkdirSync(web, { recursive: true });
+  writeFileSync(join(web, "AGENTS.md"), "the repo's brief");
+  const origin = join(ws, "web-origin.git");
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+  for (const a of [["init", "-q", "-b", "main"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
+    ["remote", "add", "origin", origin], ["push", "-q", "origin", "main"]])
+    execFileSync("git", ["-C", web, ...a]);
+  const design = { approved: "Approved, build it", approved_at: "2026-11-17T10:00:00+00:00", canvas: "https://claude.ai/artifact/c1", slides: "https://claude.ai/artifact/s1" };
+  const old = (ticket: string) => writeFileSync(join(ws, "state", `${ticket}.json`), JSON.stringify({
+    agent: "dee", asked_you: null, blocked_from: null, created: "2026-11-16T09:00:00+00:00", design, jira: "To Do",
+    pr: null, since: "2026-11-17T10:00:00+00:00", stack: "app", state: "queued", ticket, title: "Export the report", worktree: null,
+  }));
+  mkdirSync(join(ws, "state"), { recursive: true });
+  old("TEST-20");
+  old("TEST-21");
+
+  let r = factory(ws, ["state", "--off"]);
+  assert.equal(r.stdout, "  TEST-20      agent=dee      Export the report\n  TEST-21      agent=dee      Export the report\n");
+  r = factory(ws, ["state", "--list"]);
+  assert.equal(r.stdout, "  no open tickets\n  and 2 off the board: factory state --off\n");
+  r = factory(ws, ["state", "TEST-20"]);
+  assert.match(r.stdout, /^ {2}TEST-20 +off .*waiting on: the backlog\n.*design: slides https:\/\/claude\.ai\/artifact\/s1 canvas https:\/\/claude\.ai\/artifact\/c1 approved: Approved, build it/);
+
+  r = factory(ws, ["dispatch", "bea", "TEST-20"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /design approved by Alex \(2026-11-17T10:00:00\+00:00\): slides https:\/\/claude\.ai\/artifact\/s1 canvas https:\/\/claude\.ai\/artifact\/c1\. The brief carries it\./);
+  const built = JSON.parse(readFileSync(join(ws, "state", "TEST-20.json"), "utf8"));
+  assert.equal(built.state, "building");
+  assert.deepEqual(built.design, design, "building keeps the approved design");
+
+  r = factory(ws, ["dispatch", "dee", "TEST-21"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /the last round: canvas https:\/\/claude\.ai\/artifact\/c1 slides https:\/\/claude\.ai\/artifact\/s1/);
+  assert.equal(JSON.parse(readFileSync(join(ws, "state", "TEST-21.json"), "utf8")).state, "designing");
+});
+
+// CodeRabbit on #129 at 5b7ae81f: a builder with several repos and no stack, kept on its live
+// session by a dispatch without --repo, keeps the stack of the repo its worktree is in, not the
+// default repo's.
+test("a dispatch kept on the live session keeps its worktree's stack, not the default repo's", () => {
+  const { ws, put } = fakeFleet(TOML + `
+[[agents]]
+name = "kit"
+role = "builder"
+repos = ["web", "api"]
+`);
+  for (const name of ["web", "api"]) {
+    const dir = join(ws, "repos", name), origin = join(ws, `${name}-origin.git`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "README"), name);
+    writeFileSync(join(dir, "AGENTS.md"), "the repo's brief");
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+    for (const a of [["init", "-q", "-b", "main"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
+      ["remote", "add", "origin", origin], ["push", "-q", "origin", "main"]])
+      execFileSync("git", ["-C", dir, ...a]);
+  }
+  const rec = () => JSON.parse(readFileSync(join(ws, "state", "TEST-40.json"), "utf8")) as { state: string; stack: string | null; worktree: string };
+  let r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "api", "--title", "On the api"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(rec().stack, "api");
+  const wt = rec().worktree;
+  put("live.json", [sess("new1", "kit", { state: "idle", cwd: wt })]);
+  // off the board with its session running, then back on by a dispatch that names no repo
+  assert.equal(factory(ws, ["state", "TEST-40", "off"]).status, 0);
+  r = factory(ws, ["dispatch", "kit", "TEST-40"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /kit is still on TEST-40 .*so it keeps its context/);
+  assert.deepEqual([rec().state, rec().stack, rec().worktree], ["building", "api", wt], "api's stack, where the worktree is; not web's, the default");
+  assert.doesNotMatch(r.stdout, /ignored/, "no --repo given, nothing ignored");
+  // a fix round: a --repo that names another repo is said to be ignored; one naming the worktree's is not (Marie on #129)
+  for (const args of [["pr-open", "--pr", "acme/api#1", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "2 high"]])
+    assert.equal(factory(ws, ["state", "TEST-40", ...args]).status, 0);
+  r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "web"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^--repo web ignored: kit is kept in api's worktree$/m);
+  assert.equal(rec().stack, "api");
+  r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "api"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stdout, /ignored/);
+  // a session in no local repo's worktree (a hosted builder's path, say): the record's stack, and
+  // the --repo it overrides is said, with where the stack came from (Marie on #129)
+  put("live.json", [sess("new1", "kit", { state: "idle", cwd: "/far/worktrees/TEST-40" })]);
+  r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "web"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^--repo web ignored: kit is kept on api, the stack TEST-40's record has$/m);
+
+  // A builder with a stack of its own: --repo is checked against its worktree's repo, never against
+  // the stack's name (Marie on #129: bea in web's worktree with --repo web was told it was ignored).
+  mkdirSync(join(ws, "briefs"), { recursive: true });
+  writeFileSync(join(ws, "briefs", "app.md"), "the app stack's brief");
+  r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "web", "--title", "On the web"]);
+  assert.equal(r.status, 0, r.stderr);
+  const bwt = (JSON.parse(readFileSync(join(ws, "state", "TEST-41.json"), "utf8")) as { worktree: string }).worktree;
+  put("live.json", [sess("new1", "bea", { state: "idle", cwd: bwt })]);
+  for (const args of [["pr-open", "--pr", "acme/web#2", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "1 high"]])
+    assert.equal(factory(ws, ["state", "TEST-41", ...args]).status, 0);
+  r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "web"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /bea is still on TEST-41 .*so it keeps its context/);
+  assert.doesNotMatch(r.stdout, /--repo web/, "web is the worktree's repo: nothing ignored");
+  r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "api"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^--repo api ignored: bea is kept in web's worktree$/m);
+  put("live.json", [sess("new1", "bea", { state: "idle", cwd: "/far/worktrees/TEST-41" })]);
+  r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "api"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^--repo api not checked: bea's session is in no local worktree$/m);
 });

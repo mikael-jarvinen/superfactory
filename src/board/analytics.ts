@@ -14,7 +14,8 @@
 //   Its calls go to the item that agent was on at the time: an item whose record named the agent and
 //   was not done. Of several, one in a working state (designing, building, fixing) first, then the
 //   one that entered its state last. pr-open, agent-review and gate count as the agent's, as the
-//   fixes a review asks for are often made while the item sits there. queued (not started), and
+//   fixes a review asks for are often made while the item sits there. Off the board (not started, or
+//   put aside; queued in older events), and
 //   blocked, design-review, your-review and colleague-review (waiting on a human, the agent free
 //   for other work) do not: an agent with only such items is doing something else, and its calls are
 //   counted as no item's. A worktree's transcripts are its item's in any state.
@@ -25,7 +26,7 @@
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { roleOf } from "../launch.js";
-import { allRecs, BUSY, STATES } from "../state.js";
+import { allRecs, BUSY, OFF, STATES } from "../state.js";
 import { claudeConfigDir } from "../transport.js";
 import { realpathLoose } from "../util.js";
 import type { Workspace } from "../workspace.js";
@@ -363,7 +364,7 @@ export interface Report {
 const leftOut = (a: { role: string; host?: string | null }) => a.role === "lead" || a.role === "reviewer" || !!a.host;
 
 // States an item waits in while its agent is free: not started, or waiting on a human.
-const NOT_ON = new Set(["queued", "blocked", "design-review", "your-review", "colleague-review"]);
+const NOT_ON = new Set(["queued", OFF, "blocked", "design-review", "your-review", "colleague-review"]);
 
 const DAY = 86_400_000;
 // The Monday, UTC, of the week holding t.
@@ -522,7 +523,8 @@ export function report(ws: Workspace, usage: TranscriptUsage, now = Date.now()):
   const left_out = ws.config.agents.filter(leftOut).map((a) => a.name);
   const recs = new Map(allRecs(ws).map((r) => [r.ticket, r]));
   return {
-    states: [...STATES],
+    // queued was a state until 2026-11-18, and older events still name it.
+    states: ["queued", OFF, ...STATES],
     now,
     all: bucket(closed.values(), open),
     weeks: weeks.list(now, since, open).map(({ key, ...b }) => ({ week: key, ...b })),

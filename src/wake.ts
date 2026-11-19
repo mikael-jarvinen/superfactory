@@ -7,7 +7,7 @@
 import type { Agent } from "./config.js";
 import { findSession, pollForName, type Session } from "./fleet.js";
 import { currentAppendix, refreshSession } from "./launch.js";
-import { cameUp, forgetStopped, freshCommand, resumable } from "./stopped.js";
+import { cameUp, freshCommand, replaceStopped, resumable, sweepStale } from "./stopped.js";
 import { ask, Unreachable } from "./remote.js";
 import { isAgentSession, LISTING_TIMEOUT_MS, newest, type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
@@ -45,6 +45,8 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   if (live instanceof Unreachable) return { is: "unknown", why: live.brief };
   if (t.alive(live)) {
     cameUp(ws, agent.name, t, live);
+    // with no deadline, rows a hook's wake left are removed (stopped.ts)
+    if (o.deadline === undefined) sweepStale(ws, agent.name, t);
     return { is: "live", s: live };
   }
   if (left() < LISTING_TIMEOUT_MS) return late("the stopped sessions were listed");
@@ -53,7 +55,10 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   // Not findSession: it prefers a row alive() passes, and locally that is a host-wide check, so a
   // stale "done" row would beat the newest stopped session. The session the factory stopped is
   // resumed by its id, and never an older row in its place (stopped.ts).
-  const which = resumable(ws, agent.name, all.filter(isAgentSession(agent.name)), newest);
+  // with no deadline, rows a hook's wake left are removed first, and are no candidates after (Marie
+  // on #130 at 6544d8fd)
+  const swept = o.deadline === undefined ? sweepStale(ws, agent.name, t, all) : [];
+  const which = resumable(ws, agent.name, all.filter((r) => isAgentSession(agent.name)(r) && !swept.includes(r.id ?? "")), newest);
   if ("gone" in which)
     return { is: "failed", fresh: freshCommand(agent),
       why: `${which.gone}, the session stopped last, is no longer listed, and an older one is another conversation; \`${freshCommand(agent)}\` starts it fresh` };
@@ -87,14 +92,18 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   const s = pollForName(t, agent.name, waitS, o.pollMs ?? 1000, lastPollAt);
   // Respawned, and the last listing could not be had: most likely live, so not failed.
   if (s instanceof Unreachable) return { is: "unknown", why: `respawned ${old.id}, then ${s.brief}` };
-  // claude can bring a session back under a new id (Otto: barack 1f36afe6 came back as d7625a15). The
-  // conversation is the new row's now, so the stop record naming the old id is dropped, as up does:
-  // a later wake must not refuse it as gone, nor resume the old row.
-  if (s) {
-    if (s.id !== old.id) forgetStopped(ws, agent.name);
-    return { is: "woke", s, from: old.id };
-  }
-  return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };
+  if (!s) return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };
+  // the id that came back, which can differ from the one respawned (Marie on #130 at 2e89a7a4; Otto:
+  // barack 1f36afe6 came back as d7625a15). The record moves to it, so a later wake neither refuses
+  // the conversation as gone nor resumes the old row.
+  // A respawn that came back under a new id leaves the old row stopped; it goes (Marie at f62a6b10).
+  // No listing or stop starts that could run past the deadline. A stop has no bound of its own (a
+  // remote one runs to 35 s, a local one has none) and up to two rows can go, so with a deadline
+  // no cleanup starts at all: the record still moves, on the listing had before the respawn, and
+  // the old rows are left for a later step (CodeRabbit on #130 at d1c64cc6 and b77aae5c).
+  if (which.failed || (s.id && s.id !== old.id))
+    replaceStopped(ws, agent.name, t, s.id ?? old.id, old.id, o.deadline !== undefined ? all : undefined);
+  return { is: "woke", s, from: old.id };
 }
 
 export const wokeLine = (name: string, from: string) => `${name} was off; woke ${from} (its conversation kept)`;

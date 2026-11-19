@@ -3,10 +3,10 @@
 // just stopped, so wake respawned the newest row left: an older conversation, on its older command
 // line. A stop now keeps the row and records its id, and wake resumes that one or none.
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { freshCommand, lastStopped, noteStopped, replaceStopped, resumable } from "../src/stopped.js";
+import { freshCommand, lastStopped, noteStopped, noteUnrun, replaceStopped, resumable } from "../src/stopped.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, fakeDaemon, TOML, tempWorkspace } from "./helpers.js";
 
@@ -22,7 +22,8 @@ const [cmd, id] = process.argv.slice(2);
 const row = rows.find((r) => r.id === id);
 const shown = (r) => { const { args, ...rest } = r; return rest; };
 fs.appendFileSync(log, process.argv.slice(2).join(" ") + "\\n");
-if (cmd === "agents") {
+if (cmd === "agents" && process.argv.includes("--all") && fs.existsSync(path.join(D, "all-fails"))) process.exit(1);
+else if (cmd === "agents") {
   const all = process.argv.includes("--all");
   console.log(JSON.stringify(rows.filter((r) => all || r.state !== "stopped").map(shown)));
 } else if (cmd === "stop" && row) { row.state = "stopped"; row.pid = null; save(); }
@@ -142,4 +143,156 @@ test("down records the row that was live, not a dead duplicate listed after it (
   const r = run("down");
   assert.equal(r.status, 0, r.stderr);
   assert.equal(lastStopped(openWorkspace(ws, {}), "rae")?.id, "5e7a0b12", "the live one, which wake should bring back");
+});
+
+// CodeRabbit on #130 at 2e89a7a4: a stop wrote its record without the marks of launches that never
+// came up, so a dead launch whose host clock is ahead passed for newer than the stop.
+for (const how of ["stop", "down"] as const)
+  test(`a ${how} keeps the mark of a launch that never came up`, () => {
+    const { ws, run, calls } = fleet();
+    const w = openWorkspace(ws, {});
+    mkdirSync(w.runDir, { recursive: true });
+    writeFileSync(join(w.runDir, "stopped-rae.json"), JSON.stringify({ id: "91c86061", at: new Date(Date.now() - 7_200_000).toISOString(), failed: ["dead2"] }));
+    const db = join(ws, "db.json");
+    const all = JSON.parse(readFileSync(db, "utf8")) as Record<string, unknown>[];
+    all.push({ id: "dead2", name: "rae", kind: "background", state: "failed", status: "idle", pid: null,
+      startedAt: Date.now() + 7_200_000, cwd: "/w/rae", sessionId: "dead2-uuid", args: ["--bg", "--name", "rae", "never came up"] });
+    writeFileSync(db, JSON.stringify(all));
+    const r = how === "stop" ? run("stop", "rae") : run("down");
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(lastStopped(w, "rae")?.failed, ["dead2"]);
+    assert.deepEqual(lastStopped(w, "rae")?.unrun, how === "down" ? ["dead2"] : undefined);
+    assert.equal(run("wake", "rae").status, 0);
+    assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn 5e7a0b12"], "not dead2, the launch that never came up");
+    if (how === "stop") assert.ok(!calls().includes("stop dead2"), "a stop of rae is no stop of the launch that never came up");
+    // down stops it too, so one up late does not outlive the down; it stays marked, and its
+    // "stopped" is not read as having run (Marie on #130 at f62a6b10)
+    else assert.ok(calls().includes("stop dead2"), calls().join("\n"));
+  });
+
+// CodeRabbit on #130 at f62a6b10: a listing that failed at the stop, or when a new conversation took
+// the record, showed no rows, and every mark went with it.
+for (const how of ["a stop", "a launch that came up"] as const)
+  test(`${how} keeps every mark when the listing fails`, () => {
+    const ws = tempWorkspace(TOML);
+    after(() => rmSync(ws, { recursive: true, force: true }));
+    const w = openWorkspace(ws, {});
+    mkdirSync(w.runDir, { recursive: true });
+    writeFileSync(join(w.runDir, "stopped-rae.json"), JSON.stringify({ id: "old1", at: new Date(Date.now() - 7_200_000).toISOString(), failed: ["dead2"] }));
+    const failing = { sessions: () => { throw new Error("listing timed out"); }, alive: () => false, stop: () => assert.fail("nothing is removed without a listing") };
+    if (how === "a stop") noteStopped(w, "rae", { id: "cur1", name: "rae" }, undefined);
+    else replaceStopped(w, "rae", failing as never, "cur1");
+    assert.deepEqual(lastStopped(w, "rae")?.failed, ["dead2"]);
+    // the next wake: dead2, whose host clock is 2 h ahead, never came up; cur1 is the one to resume
+    const rows = [
+      { id: "cur1", name: "rae", kind: "background", state: "stopped", startedAt: Date.now() - 600_000 },
+      { id: "dead2", name: "rae", kind: "background", state: "failed", startedAt: Date.now() + 7_200_000 },
+    ];
+    const which = resumable(w, "rae", rows as never, (r) => r.reduce((a, b) => ((b.startedAt as number) > (a.startedAt as number) ? b : a)));
+    assert.equal("s" in which ? which.s?.id : "gone", "cur1");
+  });
+
+// Marie on #130 at b9d55a37: a launch down stopped unrun that came up late, seen by no factory
+// command while live, then ended by a raw `claude stop`, stayed unrun, and was never resumed.
+test("a launch down stopped unrun that shows a pid later reads as having run", () => {
+  const ws = tempWorkspace(TOML);
+  after(() => rmSync(ws, { recursive: true, force: true }));
+  const w = openWorkspace(ws, {});
+  mkdirSync(w.runDir, { recursive: true });
+  const t0 = Date.now();
+  writeFileSync(join(w.runDir, "stopped-rae.json"), JSON.stringify({ id: "old1", at: new Date(t0 - 7_200_000).toISOString(), failed: ["A"] }));
+  noteUnrun(w, "rae", "A"); // down stopped A while it had shown nothing
+  const newest = (r: Record<string, unknown>[]) => r.reduce((a, b) => ((b.startedAt as number) > (a.startedAt as number) ? b : a));
+  const old1 = { id: "old1", name: "rae", kind: "background", state: "stopped", startedAt: t0 - 9_000_000 };
+  // A came up late, with a pid, on a host whose clock is behind
+  resumable(w, "rae", [old1, { id: "A", name: "rae", kind: "background", state: "working", pid: 4242, startedAt: t0 - 10_000_000 }] as never, newest as never);
+  assert.equal(lastStopped(w, "rae")?.unrun, undefined, "A leaves unrun once a listing shows it ran");
+  // then a raw `claude stop` ends it; the wake resumes A, the conversation since the stop
+  const which = resumable(w, "rae", [old1, { id: "A", name: "rae", kind: "background", state: "stopped", startedAt: t0 - 10_000_000 }] as never, newest as never);
+  assert.equal("s" in which ? which.s?.id : "gone", "A");
+});
+
+// CodeRabbit on #130 at d1c64cc6: down marked a launch unrun though its row showed a pid, the
+// evidence it ran; the stop cleared the pid, and the wake resumed the recorded session instead.
+test("a down leaves a marked launch that showed a pid read as having run", () => {
+  const { ws, run, calls } = fleet();
+  const w = openWorkspace(ws, {});
+  mkdirSync(w.runDir, { recursive: true });
+  writeFileSync(join(w.runDir, "stopped-rae.json"), JSON.stringify({ id: "5e7a0b12", at: new Date(Date.now() - 1_800_000).toISOString(), failed: ["runA"] }));
+  const db = join(ws, "db.json");
+  const all = JSON.parse(readFileSync(db, "utf8")) as Record<string, unknown>[];
+  // the recorded session is already stopped, so no live row rewrites the record at the down
+  Object.assign(all.find((r) => r.id === "5e7a0b12") as object, { state: "stopped", pid: null });
+  // runA came up (a pid, beyond pid_max so surely gone now) and has not been seen since
+  all.push({ id: "runA", name: "rae", kind: "background", state: "idle", status: "idle", pid: 4_194_305,
+    startedAt: Date.now() - 600_000, cwd: "/w/rae", sessionId: "runA-uuid", args: ["--bg", "--name", "rae", "ran"] });
+  writeFileSync(db, JSON.stringify(all));
+  const r = run("down");
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(calls().includes("stop runA"), calls().join("\n"));
+  assert.equal(lastStopped(w, "rae")?.unrun, undefined);
+  assert.equal(run("wake", "rae").status, 0);
+  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn runA"], "the conversation since the stop");
+});
+
+// CodeRabbit on #130 at 2f878288: a launch an earlier down marked unrun that has run since, its pid
+// seen by this down, stayed unrun; the stop cleared the pid, and the wake took it as never run.
+test("a down clears the unrun mark of a launch that has shown a pid since", () => {
+  const { ws, run, calls } = fleet();
+  const w = openWorkspace(ws, {});
+  mkdirSync(w.runDir, { recursive: true });
+  writeFileSync(join(w.runDir, "stopped-rae.json"), JSON.stringify({ id: "5e7a0b12", at: new Date(Date.now() - 1_800_000).toISOString(), failed: ["runA"], unrun: ["runA"] }));
+  const db = join(ws, "db.json");
+  const all = JSON.parse(readFileSync(db, "utf8")) as Record<string, unknown>[];
+  Object.assign(all.find((r) => r.id === "5e7a0b12") as object, { state: "stopped", pid: null });
+  all.push({ id: "runA", name: "rae", kind: "background", state: "idle", status: "idle", pid: 4_194_305,
+    startedAt: Date.now() - 600_000, cwd: "/w/rae", sessionId: "runA-uuid", args: ["--bg", "--name", "rae", "ran"] });
+  writeFileSync(db, JSON.stringify(all));
+  assert.equal(run("down").status, 0);
+  assert.equal(lastStopped(w, "rae")?.unrun, undefined);
+  assert.equal(run("wake", "rae").status, 0);
+  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn runA"], "the conversation since the stop");
+});
+
+// CodeRabbit on #130 at 2f878288: down's stale sweep listed each host once per agent.
+test("down lists a host once to remove the rows a hook's wake left", () => {
+  const { ws, run, calls } = fleet();
+  const w = openWorkspace(ws, {});
+  mkdirSync(w.runDir, { recursive: true });
+  writeFileSync(join(w.runDir, "stale-rae.json"), JSON.stringify(["91c86061"]));
+  assert.equal(run("down").status, 0);
+  assert.ok(calls().includes("rm 91c86061"), calls().join("\n"));
+  assert.ok(calls().filter((c) => c.startsWith("agents")).length <= 2, calls().join("\n"));
+});
+
+// CodeRabbit on #130 at f10e2da: a host whose listing failed was asked again for each agent.
+test("down asks a host whose listing failed once, and keeps the rows a hook's wake left", () => {
+  const { ws, run, calls } = fleet();
+  const w = openWorkspace(ws, {});
+  mkdirSync(w.runDir, { recursive: true });
+  writeFileSync(join(w.runDir, "stale-rae.json"), JSON.stringify(["91c86061"]));
+  writeFileSync(join(w.runDir, "stale-cal.json"), JSON.stringify(["c1"]));
+  writeFileSync(join(ws, "all-fails"), "");
+  run("down");
+  assert.equal(calls().filter((c) => c.startsWith("agents --json --all")).length, 1, calls().join("\n"));
+  assert.deepEqual(JSON.parse(readFileSync(join(w.runDir, "stale-rae.json"), "utf8")), ["91c86061"]);
+  assert.deepEqual(JSON.parse(readFileSync(join(w.runDir, "stale-cal.json"), "utf8")), ["c1"]);
+});
+
+// Marie on #130 at ed2b9911: a session the daemon retired idle ends "done" with no pid, and down kept
+// its unrun mark, as seen() took only a pid or alive as evidence; it was never resumed.
+test("a down clears the unrun mark of a launch that has ended done, with no pid", () => {
+  const { ws, run, calls } = fleet();
+  const w = openWorkspace(ws, {});
+  mkdirSync(w.runDir, { recursive: true });
+  writeFileSync(join(w.runDir, "stopped-rae.json"), JSON.stringify({ id: "91c86061", at: new Date(Date.now() - 1_800_000).toISOString(), failed: ["runA"], unrun: ["runA"] }));
+  const db = join(ws, "db.json");
+  const all = (JSON.parse(readFileSync(db, "utf8")) as Record<string, unknown>[]).filter((r) => r.id !== "5e7a0b12");
+  all.push({ id: "runA", name: "rae", kind: "background", state: "done", status: "done", pid: null,
+    startedAt: Date.now() - 600_000, cwd: "/w/rae", sessionId: "runA-uuid", args: ["--bg", "--name", "rae", "ran"] });
+  writeFileSync(db, JSON.stringify(all));
+  assert.equal(run("down").status, 0);
+  assert.equal(lastStopped(w, "rae")?.unrun, undefined);
+  assert.equal(run("wake", "rae").status, 0);
+  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn runA"], "the conversation the daemon retired");
 });
