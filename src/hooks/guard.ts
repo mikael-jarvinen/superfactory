@@ -2172,34 +2172,48 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
   }
 }
 
-// The wrappers a command can run behind, and their options that take a value (`sudo -u x`).
-// --replace takes its value only as --replace=R, so it is not here: `xargs --replace bash -c {}` runs
-// bash (Marie on #128).
-// GNU findutils xargs' long options, by how each takes a value: req as --o=V or --o V, opt only as
-// --o=V (--eof, --max-lines and --replace: `xargs --max-lines gh` runs gh, Marie on #128), none not
-// at all. Like getopt_long, xargsLong reads a unique prefix as its option (--max-a is --max-args).
-const XARGS_LONG: Record<string, "req" | "opt" | "none"> = {
-  "--arg-file": "req", "--delimiter": "req", "--max-args": "req", "--max-chars": "req", "--max-procs": "req",
-  "--process-slot-var": "req", "--eof": "opt", "--max-lines": "opt", "--replace": "opt", "--null": "none",
-  "--interactive": "none", "--no-run-if-empty": "none", "--exit": "none", "--verbose": "none",
-  "--show-limits": "none", "--open-tty": "none", "--help": "none", "--version": "none",
+// The wrappers a command can run behind, and their short options that take a value (`sudo -u x`).
+// Long options are in WRAPPER_LONG.
+const WRAPPER_VALUES: Record<string, string[]> = {
+  sudo: ["-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T"],
+  xargs: ["-I", "-n", "-L", "-P", "-d", "-E", "-s", "-a"],
+  env: ["-u", "-C", "-S", "-a"],
+  timeout: ["-s", "-k"],
+  nice: ["-n"],
+  nohup: [], time: ["-f", "-o"], exec: ["-a"], command: [], builtin: [],
+  stdbuf: ["-i", "-o", "-e"],
 };
-function xargsLong(o: string): string {
+
+// Each wrapper's long options, from the tools themselves (GNU coreutils, findutils and time, sudo
+// 1.9; env's --argv0 is coreutils 9's), by how each takes a value: req as --o=V or --o V, opt only as
+// --o=V (`xargs --max-lines gh` runs gh, Marie on #128), none not at all. exec, command and builtin
+// are bash's and have none. Like getopt_long, longOption reads a unique prefix as its option
+// (--max-a is --max-args, timeout --sig is --signal); one it cannot read, unknown or ambiguous, is null.
+type Takes = "req" | "opt" | "none";
+const longs = (req: string[], opt: string[], none: string[]): Record<string, Takes> =>
+  Object.fromEntries([...req.map((o) => [o, "req"]), ...opt.map((o) => [o, "opt"]), ...[...none, "help", "version"].map((o) => [o, "none"])].map(([o, t]) => [`--${o}`, t as Takes]));
+const WRAPPER_LONG: Record<string, Record<string, Takes>> = {
+  sudo: longs(["chdir", "chroot", "close-from", "command-timeout", "group", "host", "other-user", "prompt", "role", "type", "user"], ["preserve-env"],
+    ["askpass", "background", "bell", "edit", "list", "login", "non-interactive", "preserve-groups", "remove-timestamp", "reset-timestamp", "set-home", "shell", "stdin", "validate"]),
+  xargs: longs(["arg-file", "delimiter", "max-args", "max-chars", "max-procs", "process-slot-var"], ["eof", "max-lines", "replace"],
+    ["null", "interactive", "no-run-if-empty", "exit", "verbose", "show-limits", "open-tty"]),
+  env: longs(["unset", "chdir", "split-string", "argv0"], ["block-signal", "default-signal", "ignore-signal"], ["ignore-environment", "null", "list-signal-handling", "debug"]),
+  timeout: longs(["kill-after", "signal"], [], ["foreground", "preserve-status", "verbose"]),
+  nice: longs(["adjustment"], [], []),
+  nohup: longs([], [], []),
+  time: longs(["format", "output"], [], ["append", "portability", "quiet", "verbose"]),
+  stdbuf: longs(["input", "output", "error"], [], []),
+  exec: {}, command: {}, builtin: {},
+};
+function longOption(name: string, o: string): string | null {
+  const table = WRAPPER_LONG[name] ?? {};
   const eq = o.indexOf("=");
   const k = eq < 0 ? o : o.slice(0, eq);
-  const hits = k in XARGS_LONG ? [k] : Object.keys(XARGS_LONG).filter((n) => n.startsWith(k));
-  return hits.length === 1 ? (hits[0] as string) + (eq < 0 ? "" : o.slice(eq)) : o;
+  const hits = k in table ? [k] : Object.keys(table).filter((n) => n.startsWith(k));
+  return hits.length === 1 ? (hits[0] as string) + (eq < 0 ? "" : o.slice(eq)) : null;
 }
-
-const WRAPPER_VALUES: Record<string, string[]> = {
-  sudo: ["-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T", "--user", "--group", "--host", "--prompt", "--chdir"],
-  xargs: ["-I", "-n", "-L", "-P", "-d", "-E", "-s", "-a", "--max-args", "--max-procs", "--delimiter", "--max-chars", "--arg-file", "--process-slot-var"],
-  env: ["-u", "-C", "-S", "--unset", "--chdir", "--split-string"],
-  timeout: ["-s", "-k", "--signal", "--kill-after"],
-  nice: ["-n", "--adjustment"],
-  nohup: [], time: ["-f", "-o", "--format", "--output"], exec: ["-a"], command: [], builtin: [],
-  stdbuf: ["-i", "-o", "-e", "--input", "--output", "--error"],
-};
+// Whether a wrapper's long option, read whole by longOption, takes the next word as its value.
+const takesNext = (name: string, o: string): boolean => WRAPPER_LONG[name]?.[o] === "req";
 
 // An env option as getopt reads it: the -S/--split-string value it carries (taking the next word when
 // none is attached), null for another option it has read whole (-u NAME, -iC dir), undefined for
@@ -2237,7 +2251,15 @@ function commandWords(words: string[], via: { name: string; opts: string[] }[] =
     via.push({ name, opts: seen });
     i++;
     while (i < words.length && (words[i] as string).startsWith("-") && words[i] !== "-") {
-      const o = name === "xargs" && words[i] !== "--" && (words[i] as string).startsWith("--") ? xargsLong(words[i] as string) : (words[i] as string);
+      let o = words[i] as string;
+      if (o.startsWith("--") && o !== "--") {
+        // a long option this cannot read might take the next word or not, so what runs after it is
+        // not known: refused if gh or a shell may (Marie on #128: timeout --sig KILL 5 gh, sudo --us)
+        const read = longOption(name, o);
+        if (read === null && words.slice(i + 1).some((x) => x === "gh" || SHELLS.has(posix.basename(x.replace(/^\\/, "")).toLowerCase()) || namesGh(x)))
+          refuse(`${name} ${o}: an option this cannot read, so whether it runs gh cannot be checked`);
+        o = read ?? o;
+      }
       seen.push(o);
       i++;
       if (o === "--") break;
@@ -2249,7 +2271,7 @@ function commandWords(words: string[], via: { name: string; opts: string[] }[] =
       }
       // `command -v gh` and `command -V gh` look a name up and run nothing (Marie on #128)
       if (name === "command" && /^-[pvV]*[vV][pvV]*$/.test(o)) return [];
-      if (name === "xargs" && !o.startsWith("--") ? xargsShort(o).next : opts.includes(o)) seen.push(words[i++] as string);
+      if (o.startsWith("--") ? takesNext(name, o) : name === "xargs" ? xargsShort(o).next : opts.includes(o)) seen.push(words[i++] as string);
     }
     if (name === "timeout") i++;
     while ((name === "env" || name === "sudo") && assignment(words[i])) i++;
@@ -2334,7 +2356,7 @@ function xargsSplit(opts: string[]): { delim: string | null; args?: number; line
     const o = opts[i] as string;
     if (o.startsWith("--")) {
       const [k, eq] = o.includes("=") ? [o.slice(0, o.indexOf("=")), o.slice(o.indexOf("=") + 1)] : [o, undefined];
-      const v = eq ?? (WRAPPER_VALUES.xargs?.includes(o) ? opts[++i] : undefined);
+      const v = eq ?? (takesNext("xargs", o) ? opts[++i] : undefined);
       const c = ({ "--null": "0", "--delimiter": "d", "--max-args": "n", "--max-lines": "L", "--max-chars": "s", "--arg-file": "a", "--eof": "E" } as Record<string, string>)[k];
       if (c) set(c, v);
       continue;
@@ -2407,7 +2429,7 @@ function replaceString(opts: string[]): string | null {
     if (o === "--replace") r = "{}";
     else if (o.startsWith("--replace=")) r = o.slice("--replace=".length) || "{}";
     else if (o.startsWith("--")) {
-      if (WRAPPER_VALUES.xargs?.includes(o)) i++;
+      if (takesNext("xargs", o)) i++;
     } else {
       const x = xargsShort(o);
       const v = x.next ? (opts[++i] ?? "") : undefined;

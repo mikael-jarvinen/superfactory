@@ -1324,6 +1324,23 @@ const ROUND_128: [string, string, string][] = [
   [NO, "xargs -E END hides a marked --body after END", "echo \"5 END --body '> Written by agent. ok'\" | xargs -E END gh pr comment -R acme/api --body hi"],
   [NO, "xargs -eEND hides a marked --body after END", "echo \"5 END --body '> Written by agent. ok'\" | xargs -eEND gh pr comment -R acme/api --body hi"],
   [NO, "xargs --eof=END hides a marked --body after END", "echo \"5 END --body '> Written by agent. ok'\" | xargs --eof=END gh pr comment -R acme/api --body hi"],
+  // Marie on #128 at ca970dec: every wrapper's long options as getopt_long reads them, and one
+  // none of them has refuses a line that may run gh after it
+  [NO, "timeout --sig, a prefix of --signal", "timeout --sig KILL 5 gh pr comment 5 -R acme/api --body hi"],
+  [NO, "timeout --k, a prefix of --kill-after", "timeout --k 1 5 gh pr comment 5 -R acme/api --body hi"],
+  [NO, "nice --adj, a prefix of --adjustment", "nice --adj 5 gh pr comment 5 -R acme/api --body hi"],
+  [NO, "env --spl, a prefix of --split-string", "env --spl 'gh pr comment 5 -R acme/api --body hi'"],
+  [NO, "env --ch, a prefix of --chdir", "env --ch /tmp gh pr comment 5 -R acme/api --body hi"],
+  [NO, "env --un, a prefix of --unset", "env --un X gh pr comment 5 -R acme/api --body hi"],
+  [NO, "env --argv0 takes the next word", "env --argv0 x gh pr comment 5 -R acme/api --body hi"],
+  [NO, "sudo --us, a prefix of --user", "sudo --us root gh pr comment 5 -R acme/api --body hi"],
+  [NO, "stdbuf --outp, a prefix of --output", "stdbuf --outp L gh pr comment 5 -R acme/api --body hi"],
+  [NO, "time --form, a prefix of --format", "/usr/bin/time --form x gh pr comment 5 -R acme/api --body hi"],
+  [NO, "an option sudo has not, before gh", "sudo --frob x gh pr comment 5 -R acme/api --body hi"],
+  [NO, "an option exec has not, before gh", "exec --frob x gh pr comment 5 -R acme/api --body hi"],
+  [OK, "timeout --signal=KILL on a gh read", "timeout --signal=KILL 5 gh pr view 5"],
+  [OK, "sudo --us root on a marked comment", "sudo --us root gh pr comment 5 -R acme/api --body '> Written by agent. ok'"],
+  [OK, "an option nice has not, with no gh after it", "nice --frob x ls; gh pr view 5"],
   [NO, "xargs -d with a delimiter this cannot read", "echo 5 | xargs -d ab gh pr comment -R acme/api --body '> Written by agent. ok'"],
 ];
 
