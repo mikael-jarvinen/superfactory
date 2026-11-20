@@ -34,6 +34,8 @@ const rec = (ws: Workspace, ticket: string, state: string, asked: { question: st
   writeFileSync(join(ws.stateDir, `${ticket}.json`), JSON.stringify({ ticket, state, asked_you: asked, since: asked?.at ?? null }));
 const unblock = (ws: Workspace, t: string, ticket: string, to = "building") =>
   appendFileSync(ws.events, pyDumps({ t, ticket, from: "blocked", to }) + "\n");
+const move = (ws: Workspace, t: string, ticket: string, from: string, to: string) =>
+  appendFileSync(ws.events, pyDumps({ t, ticket, from, to }) + "\n");
 const T = (m: number) => `2026-11-16T12:${String(m).padStart(2, "0")}:00+00:00`;
 
 test("queue: the lead's decision and blocked rows, oldest first, older than the thread shows too", () => {
@@ -53,16 +55,50 @@ test("queue: the lead's decision and blocked rows, oldest first, older than the 
   assert.equal(new Set(q.map((i) => i.id)).size, 3);
 });
 
-test("queue: a blocked question leaves once its ticket leaves blocked after it, a decision does not", () => {
+test("queue: a blocked question leaves once its ticket leaves blocked after it, and so does a decision", () => {
   const ws = workspace();
   unblock(ws, T(0), "LOCAL-a"); // an earlier episode: the question after it is still open
   row(ws, T(1), "blocked", "a?", "LOCAL-a");
   row(ws, T(2), "blocked", "b?", "LOCAL-b");
   row(ws, T(3), "decision", "c?", "LOCAL-b");
+  row(ws, T(3), "decision", "d?", "LOCAL-a");
   rec(ws, "LOCAL-a", "blocked", { question: "a?", at: T(1) });
   rec(ws, "LOCAL-b", "building");
   unblock(ws, T(4), "LOCAL-b");
-  assert.deepEqual(queue(ws).map((i) => i.text), ["a?", "c?"]);
+  assert.deepEqual(queue(ws).map((i) => i.text), ["a?", "d?"]);
+});
+
+// Mikael, 2026-11-20: seven items waiting, five of them decisions on CL-2446 answered on 16 Nov,
+// back the moment the lead blocked the ticket.
+test("queue: a decision leaves once its ticket moves past it, and blocking the ticket later never brings it back", () => {
+  const ws = workspace();
+  row(ws, T(1), "decision", "design A or B?", "LOCAL-d");
+  move(ws, T(2), "LOCAL-d", "designing", "design-review"); // parked to wait for the answer
+  move(ws, T(3), "LOCAL-d", "design-review", "design-review"); // recorded again: no move
+  assert.deepEqual(queue(ws).map((i) => i.text), ["design A or B?"], "a move to where it waits on the human keeps it");
+  move(ws, T(4), "LOCAL-d", "design-review", "building");
+  assert.deepEqual(queue(ws), [], "the ticket moved on past it");
+  move(ws, T(5), "LOCAL-d", "building", "blocked");
+  rec(ws, "LOCAL-d", "blocked", { question: "which API key?", at: T(5) });
+  assert.deepEqual(queue(ws).map((i) => [i.from, i.text]), [["board", "which API key?"]]);
+
+  row(ws, T(6), "decision", "ship it friday?", "LOCAL-e");
+  row(ws, T(7), "answer", "an answer on another ticket", "LOCAL-other");
+  row(ws, T(7), "answer", "an answer on no ticket");
+  assert.deepEqual(queue(ws).map((i) => i.text), ["which API key?", "ship it friday?"]);
+  row(ws, T(8), "answer", "Done: shipping friday, as you said.", "LOCAL-e");
+  assert.deepEqual(queue(ws).map((i) => i.text), ["which API key?"], "the lead answered on its ticket");
+});
+
+test("queue: turned on with history, an old decision stays out when its ticket is blocked, and the row a block was asked with comes in", () => {
+  const ws = workspace({ since: false });
+  // Never moved on in the events log, so only the start keeps it out.
+  row(ws, "2026-01-01T09:00:00+00:00", "decision", "an old decision", "LOCAL-old");
+  rec(ws, "LOCAL-old", "blocked", { question: "a new block", at: "2026-01-05T09:00:00+00:00" });
+  // The block's question was posted as a decision, a few minutes before the block was recorded.
+  row(ws, "2026-01-03T08:58:00+00:00", "decision", "posted with its block", "LOCAL-asked");
+  rec(ws, "LOCAL-asked", "blocked", { question: "posted with its block", at: "2026-01-03T09:00:00+00:00" });
+  assert.deepEqual(queue(ws).map((i) => [i.from, i.text]), [["message", "posted with its block"], ["board", "a new block"]]);
 });
 
 test("queue: a blocked record whose question never reached the thread is on it, once", () => {
@@ -76,10 +112,11 @@ test("queue: a blocked record whose question never reached the thread is on it, 
     ["message", "LOCAL-said", "said in the thread", T(1), T(1)],
     ["board", "LOCAL-quiet", "only on the board", null, T(2)],
   ]);
-  // Blocked again after it was answered: the old row is the earlier episode's, the record is new.
+  // Blocked again after it was answered: the old row was answered when the ticket left blocked, and
+  // the record is the new question.
   unblock(ws, T(4), "LOCAL-said");
   rec(ws, "LOCAL-said", "blocked", { question: "a second question", at: T(5) });
-  assert.deepEqual(queue(ws).map((i) => i.text), ["said in the thread", "only on the board", "a second question"]);
+  assert.deepEqual(queue(ws).map((i) => i.text), ["only on the board", "a second question"]);
 });
 
 test("queue: the page marks an item handled; reading the thread or writing in it does not", { skip: noInboxLock }, async () => {
