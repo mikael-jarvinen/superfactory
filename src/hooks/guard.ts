@@ -59,7 +59,7 @@ import { MARKER } from "../gate/comment.js";
 import type { HookResult } from "../settings.js";
 import { chars, run } from "../util.js";
 import { type ReviewState, undrafting } from "../state.js";
-import { openWorkspace, resolveWorkspace } from "../workspace.js";
+import { openWorkspace, resolveWorkspace, type Workspace } from "../workspace.js";
 
 export const POLICIES = ["readonly", "protect"] as const;
 export type Policy = (typeof POLICIES)[number];
@@ -875,19 +875,31 @@ function ghCloseNumber(args: string[], repo: string): number | null {
   return m && (m[1] as string).toLowerCase() === repo.toLowerCase() ? Number(m[2]) : null;
 }
 
-// The allow-close list of the workspace this session works in: --workspace, then FACTORY_WORKSPACE,
-// then the nearest factory.toml above the session's project directory or the cwd. Read only when a
-// product PR is closed; undefined when there is no workspace or its config does not load.
+// The workspace this session works in: --workspace, then FACTORY_WORKSPACE, then the nearest
+// factory.toml above the session's project directory or the cwd. Null when there is no workspace or
+// its config does not load, so the guard refuses with what it knows instead of throwing.
+function sessionWorkspace(flag: string | undefined): Workspace | null {
+  try {
+    return openWorkspace(resolveWorkspace({ flag, cwd: process.env.CLAUDE_PROJECT_DIR || process.cwd() }));
+  } catch {
+    return null;
+  }
+}
+
+// The allow-close list of the session's workspace. Read only when a product PR is closed; undefined
+// when there is no workspace or its config does not load.
+function workspaceAllowClose(flag: string | undefined): string | undefined {
+  const ws = sessionWorkspace(flag);
+  return ws === null ? undefined : allowClosePath(ws.stateDir);
+}
+
 // How the lead undrafts a product PR. Where PRs leave draft in colleague-review, that is
 // `factory pr-open-for-review`, which records the move; with [gate] colleague_review = false it
 // refuses, and the human's your-review is undrafted by hand. With no workspace found, only what works
 // in both.
 function workspaceUndrafting(flag: string | undefined): ReviewState | null {
-  try {
-    return undrafting(openWorkspace(resolveWorkspace({ flag, cwd: process.env.CLAUDE_PROJECT_DIR || process.cwd() })));
-  } catch {
-    return null;
-  }
+  const ws = sessionWorkspace(flag);
+  return ws === null ? null : undrafting(ws);
 }
 function howToUndraft(ctx: GuardContext): string {
   const where = ctx.undrafting !== undefined ? ctx.undrafting : workspaceUndrafting(ctx.workspace);
@@ -895,14 +907,6 @@ function howToUndraft(ctx: GuardContext): string {
   if (where === "colleague-review") return `the lead's, by \`factory pr-open-for-review <TICKET>\` or ${byHand}`;
   if (where === "your-review") return `the lead's, by ${byHand} once its item is in your-review (colleague review is off here, so pr-open-for-review refuses)`;
   return `the lead's, by ${byHand}`;
-}
-
-function workspaceAllowClose(flag: string | undefined): string | undefined {
-  try {
-    return allowClosePath(openWorkspace(resolveWorkspace({ flag, cwd: process.env.CLAUDE_PROJECT_DIR || process.cwd() })).stateDir);
-  } catch {
-    return undefined;
-  }
 }
 
 // The flags `gh pr merge` takes on a lead_merges repo, and whether each takes a value. Anything else is

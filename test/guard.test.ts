@@ -159,11 +159,35 @@ test("the undraft refusal names pr-open-for-review only where colleague review i
     assert.match(r, /by `gh pr ready <n> -R owner\/repo`/, r);
     assert.doesNotMatch(r, /pr-open-for-review|pr-send/, r);
   }
-  // Unstubbed, the guard reads the workspace it is given.
-  const off = tempWorkspace(`${TOML}\n[gate]\ncolleague_review = false\n`);
-  assert.match(verdict("gh pr ready 8250 -R acme/api", { ...builder, workspace: off }) ?? "", /colleague review is off here/);
-  const on = tempWorkspace(TOML);
-  assert.match(verdict("gh pr ready 8250 -R acme/api", { ...builder, workspace: on }) ?? "", /by `factory pr-open-for-review <TICKET>`/);
+});
+
+// Unstubbed, the guard reads the workspace it is given, for both refusals: a builder's undraft with
+// -R, and the lead's without --repo. A workspace that cannot be found or does not load is no throw:
+// the guard refuses with the text that holds in both modes.
+test("the undraft refusal reads the session's workspace, and refuses plainly without one", () => {
+  const refusals = (workspace: string) => {
+    const r = [verdict("gh pr ready 8250 -R acme/api", { ...pr, role: "builder", workspace }), verdict("gh pr ready 8250", { ...pr, role: "lead", workspace })];
+    for (const v of r) assert.notEqual(v, null);
+    return r as string[];
+  };
+  for (const r of refusals(tempWorkspace(`${TOML}\n[gate]\ncolleague_review = false\n`))) {
+    assert.match(r, /by `gh pr ready <n> -R owner\/repo` once its item is in your-review \(colleague review is off here, so pr-open-for-review refuses\)/, r);
+    assert.doesNotMatch(r, /by `factory pr-open-for-review|pr-send/, r);
+  }
+  for (const r of refusals(tempWorkspace(TOML))) {
+    assert.match(r, /by `factory pr-open-for-review <TICKET>` or `gh pr ready <n> -R owner\/repo`/, r);
+    assert.doesNotMatch(r, /pr-send/, r);
+  }
+  const broken = tempWorkspace(TOML);
+  writeFileSync(join(broken, "factory.toml"), "[gate]\ncolleague_review = \"maybe\"\n");
+  for (const workspace of [join(broken, "no-such-dir"), broken]) {
+    let r: string[] = [];
+    assert.doesNotThrow(() => { r = refusals(workspace); }, workspace);
+    for (const v of r) {
+      assert.match(v, /undrafting a product-repo PR is the lead's, by `gh pr ready <n> -R owner\/repo`(;|$)/, v);
+      assert.doesNotMatch(v, /pr-open-for-review|your-review|pr-send/, v);
+    }
+  }
 });
 
 // A refspec with an empty source deletes the destination; every role is refused, by remote name or URL.

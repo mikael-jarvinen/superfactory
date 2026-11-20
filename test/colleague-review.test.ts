@@ -130,7 +130,8 @@ test("the board says where a PR is undrafted: colleague-review while the step is
   assert.match(on["your-review"]!, /It stays a draft until colleague-review\.$/);
   const off = await descriptions(OFF_TOML);
   assert.match(off.gate!, /It stays a draft until your-review\.$/);
-  assert.match(off["your-review"]!, /It stays a draft until your-review\.$/);
+  assert.match(off["your-review"]!, / undrafts it here to merge it\.$/);
+  assert.doesNotMatch(off["your-review"]!, /until your-review/);
   for (const d of [...Object.values(on), ...Object.values(off)]) assert.doesNotMatch(d, /\{/, d);
 });
 

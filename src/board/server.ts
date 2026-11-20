@@ -63,7 +63,7 @@ const DESCRIPTIONS: Record<string, string> = {
   "gate": "The gate is asking every question about the current head and treating any absence as a " +
     "failure. {draft until}",
   "your-review": "{human}'s. The PR is frozen at the sha that was reviewed, and nobody pushes over it " +
-    "without saying so first. {draft until}",
+    "without saying so first. {your-review draft}",
   "colleague-review": "{human} has asked the team, and the PR is open. {lead} watches GitHub and does nothing " +
     "until the merge lands.",
   "blocked": "{lead} asked {human} something and has no answer yet. The state underneath is kept, so " +
@@ -395,9 +395,12 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
   const columns = columnsOf(STATES.filter((s) => usesState(ws, s) || left.some((r) => r.state === s)));
   const idx = (s: string | null) => (s !== null && columns.includes(s) ? columns.indexOf(s) : 99);
   tickets.sort((a, b) => idx(a.column) - idx(b.column) || (b.age_min ?? 0) - (a.age_min ?? 0));
-  // Where the PR leaves draft is undrafting(ws), and one sentence says so wherever a column needs it.
+  // Where the PR leaves draft is undrafting(ws), and one sentence says so. Your-review uses it only while
+  // the PR leaves draft later; where it leaves draft in your-review, that column says the human does it.
+  const draftUntil = "It stays a draft until {undrafting}.";
   const descriptions = Object.fromEntries(Object.entries(DESCRIPTIONS).map(([k, v]) => [k, v
-    .replaceAll("{draft until}", "It stays a draft until {undrafting}.").replaceAll("{undrafting}", undrafting(ws))
+    .replaceAll("{your-review draft}", undrafting(ws) === "your-review" ? "{human} undrafts it here to merge it." : draftUntil)
+    .replaceAll("{draft until}", draftUntil).replaceAll("{undrafting}", undrafting(ws))
     .replaceAll("{human}", human).replaceAll("{lead}", leadName)]));
   return {
     at: clock(),
