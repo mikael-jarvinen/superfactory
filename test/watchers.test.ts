@@ -310,8 +310,8 @@ test("the round: a PR open outside colleague review, or a draft in it, is flagge
   assert.doesNotMatch(r.stdout, /WEB-7: /, "a draft stacked on another PR's branch keeps its draft");
 });
 
-// With [gate] colleague_review = false nothing opens a PR for colleagues, so in your-review its draft
-// state is the human's (undrafted to merge), and the round says nothing about it either way.
+// With [gate] colleague_review = false, undrafting(ws) is your-review: there the draft state is the
+// human's (undrafted to merge), and the round says nothing about it either way.
 test("the round: with colleague review off, an open PR in your-review is not flagged", () => {
   const { ws, run } = watcherWorkspace(`${JIRA}\n[gate]\ncolleague_review = false\n`);
   const state = (...a: string[]) => assert.equal(factory(ws, ["state", ...a]).status, 0, a.join(" "));

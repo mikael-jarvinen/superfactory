@@ -61,9 +61,9 @@ const DESCRIPTIONS: Record<string, string> = {
     "session that has seen nothing before it.",
   "fixing": "The builder is back on the same item, closing every finding the review reported.",
   "gate": "The gate is asking every question about the current head and treating any absence as a " +
-    "failure. The PR stays a draft until the item reaches {undrafting}.",
+    "failure. {draft until}",
   "your-review": "{human}'s. The PR is frozen at the sha that was reviewed, and nobody pushes over it " +
-    "without saying so first. {your-review draft}",
+    "without saying so first. {draft until}",
   "colleague-review": "{human} has asked the team, and the PR is open. {lead} watches GitHub and does nothing " +
     "until the merge lands.",
   "blocked": "{lead} asked {human} something and has no answer yet. The state underneath is kept, so " +
@@ -395,11 +395,9 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
   const columns = columnsOf(STATES.filter((s) => usesState(ws, s) || left.some((r) => r.state === s)));
   const idx = (s: string | null) => (s !== null && columns.includes(s) ? columns.indexOf(s) : 99);
   tickets.sort((a, b) => idx(a.column) - idx(b.column) || (b.age_min ?? 0) - (a.age_min ?? 0));
-  // Where the PR is undrafted is undrafting(ws): colleague-review, or your-review with the switch off.
-  const undraft = undrafting(ws);
-  const yourReviewDraft = undraft === "your-review" ? "{human} undrafts it here to merge it." : "It stays a draft until colleague-review.";
+  // Where the PR leaves draft is undrafting(ws), and one sentence says so wherever a column needs it.
   const descriptions = Object.fromEntries(Object.entries(DESCRIPTIONS).map(([k, v]) => [k, v
-    .replaceAll("{your-review draft}", yourReviewDraft).replaceAll("{undrafting}", undraft)
+    .replaceAll("{draft until}", "It stays a draft until {undrafting}.").replaceAll("{undrafting}", undrafting(ws))
     .replaceAll("{human}", human).replaceAll("{lead}", leadName)]));
   return {
     at: clock(),

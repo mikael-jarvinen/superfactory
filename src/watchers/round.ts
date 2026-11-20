@@ -146,8 +146,7 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
   const listed = new Map<string, GhPr>();
   section("gates: PRs on GitHub against the store", () => {
     if (!recs.length) return void out.push("  nothing open");
-    // A PR is a draft until its item reaches the review where a human undrafts it; keptOpen says
-    // which. An item left in colleague-review is stranded: said once, PR or not.
+    // A PR is a draft until its item reaches undrafting(ws), and keptOpen says whether it has. An item left in colleague-review is stranded: said once, PR or not.
     for (const rec of stranded(ws, recs))
       out.push(`  ${rec.ticket}: stranded in colleague-review -- ${COLLEAGUE_REVIEW_OFF}; see factory doctor`);
     for (const repo of Object.values(ws.config.repos)) {
@@ -177,7 +176,8 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
           else if (pr.baseRefName !== undefined && pr.baseRefName !== repo.base) continue;
           else if (pr.state === "OPEN" && pr.isDraft === false && !keptOpen(ws, rec))
             out.push(`  ${where} is open while ${st} -- should be a draft until ${undrafting(ws)}`);
-          else if (pr.state === "OPEN" && pr.isDraft === true && st === "colleague-review" && st === undrafting(ws))
+          // A draft in your-review is the human's to undraft, so only a later state is asked to be open.
+          else if (pr.state === "OPEN" && pr.isDraft === true && st !== "your-review" && st === undrafting(ws))
             out.push(`  ${where} is a draft while colleague-review -- should be open: factory pr-open-for-review ${rec.ticket}`);
         }
       }
