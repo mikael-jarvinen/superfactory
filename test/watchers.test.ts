@@ -363,6 +363,28 @@ test("the round: with colleague review off, an undraft before your-review is sti
   assert.doesNotMatch(gates, /WEB-5: acme/, "a stranded item's draft PR gets the stranded line only");
 });
 
+test("the round: with colleague review off, a PR the human undrafted in your-review stays unflagged after it", () => {
+  const { ws, run } = watcherWorkspace(`${JIRA}\n[gate]\ncolleague_review = false\n`);
+  const state = (...a: string[]) => assert.equal(factory(ws, ["state", ...a]).status, 0, a.join(" "));
+  // WEB-3: undrafted in your-review, then sent back. WEB-6: blocked from your-review, then off the board.
+  for (const t of ["WEB-3", "WEB-6"]) {
+    state(t, "building");
+    state(t, "pr-open", "--pr", `acme/web#${t.slice(4)}`, "--head", `aaa${t.slice(4).repeat(4)}`);
+    state(t, "your-review", "--reviewed", `aaa${t.slice(4).repeat(4)}`, "--force");
+  }
+  state("WEB-3", "fixing", "--evidence", "Alex: one more thing");
+  state("WEB-6", "blocked", "--note", "asked Alex");
+  state("WEB-6", "off", "--force");
+  const pr = (n: number) =>
+    ({ number: n, title: `WEB-${n}: x`, headRefName: `WEB-${n}`, state: "OPEN", isDraft: false, mergedAt: null, headRefOid: `aaa${String(n).repeat(4)}`, baseRefName: "main" });
+  const r = run(["watch", "round", "--facts"], [], {
+    "pr list -R acme/web --state all": { stdout: [pr(3), pr(6)] },
+    "pr list -R acme/api --state all": { stdout: [] },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /should be a draft/);
+});
+
 test("the round tells the lead what escalates in one note, once a day, and moves nothing it could not tell", () => {
   const { ws, run, logs, read, notes, jam, unjam } = watcherWorkspace();
   assert.equal(factory(ws, ["state", "WEB-2", "building", "--agent", "bea"]).status, 0);

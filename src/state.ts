@@ -29,11 +29,15 @@ export const TRANSITIONS: Record<State, ReadonlySet<Target>> = {
   "done": new Set(),
   "blocked": new Set([...STATES.filter((s) => s !== "blocked"), OFF]),
 };
-// The states this workspace uses: all of them, less colleague-review where [gate] colleague_review is
-// false. Nothing moves an item into a state the workspace has turned off, --force included.
+// Whether this workspace uses a state: every one, but colleague-review only where [gate]
+// colleague_review is true. Nothing moves an item into a state the workspace has turned off, --force
+// included.
 export const usesState = (ws: Workspace, s: State): boolean => s !== "colleague-review" || ws.config.gate.colleagueReview;
-export const statesOf = (ws: Workspace): readonly State[] => STATES.filter((s) => usesState(ws, s));
 const usable = (ws: Workspace, to: Target) => to === OFF || usesState(ws, to);
+// Items left in a state the workspace has turned off: in colleague-review with colleague_review false.
+// The board still shows them, the round names them, and doctor reports them.
+export const stranded = <R extends { state: State | null }>(ws: Workspace, recs: readonly R[]): R[] =>
+  recs.filter((r) => r.state !== null && !usesState(ws, r.state));
 export const COLLEAGUE_REVIEW_OFF =
   "colleague review is off in this workspace ([gate] colleague_review = false); from your-review an item goes to done";
 
