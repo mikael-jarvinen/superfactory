@@ -23,6 +23,7 @@ import { stackDoctor } from "./stacks/engine.js";
 import { trackerOf } from "./tracker/read.js";
 import { ask, probe, Unreachable } from "./remote.js";
 import { SCOPE } from "./scope.js";
+import { allRecs, COLLEAGUE_REVIEW_OFF, stranded, usesState } from "./state.js";
 import { repoTransport } from "./transport.js";
 import { local } from "./transport.js";
 import { promptPath } from "./watchers/job.js";
@@ -235,6 +236,21 @@ export function workspaceFiles(ws: Workspace): Check[] {
   return checks;
 }
 
+// ---------------------------------------------------------------- the state store
+
+// Turning colleague review off strands an item already in it: nothing moves anything into it, and
+// pr-open-for-review refuses. A real inconsistency, so MISSING, and doctor exits 1 (Niilo's call on
+// superfactory#135). One line, only where the switch is off.
+export function stateChecks(ws: Workspace): Check[] {
+  if (usesState(ws, "colleague-review")) return [];
+  const left = stranded(ws, allRecs(ws)).map((r) => r.ticket);
+  return [{
+    status: okIf(!left.length),
+    what: `no item in colleague-review: ${COLLEAGUE_REVIEW_OFF}${left.length ? `; in it: ${left.join(", ")}` : ""}`,
+    fix: "once merged, factory state <TICKET> done --evidence <merge sha>; else factory state <TICKET> fixing",
+  }];
+}
+
 // ---------------------------------------------------------------- demos
 
 // A workspace records demos when it holds demo.env, the file `factory demo` reads its sign-in and
@@ -392,6 +408,7 @@ export async function doctor(ws: Workspace, print: (l: string) => void = console
   emit(tools(ws));
   emit(checkouts(ws));
   emit(workspaceFiles(ws));
+  emit(stateChecks(ws));
   emit(demoTools(ws));
   emit([await boardPort(ws)]);
   emit(hostChecks(ws));

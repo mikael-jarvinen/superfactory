@@ -10,7 +10,7 @@ import { leadStatus } from "../hooks/status.js";
 import { Unreachable } from "../remote.js";
 import { agentSessions, pick, transportFor, transports } from "../transport.js";
 import { isHuman, readRecent, readTail } from "../messages.js";
-import { allRecs, IN_REVIEW, isLocal, onBoard, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
+import { allRecs, IN_REVIEW, isLocal, onBoard, type Rec, recPrs, STATES, stranded, undrafting, usesState, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { roster } from "../config.js";
 import { capitalize, run, sleep } from "../util.js";
@@ -61,9 +61,9 @@ const DESCRIPTIONS: Record<string, string> = {
     "session that has seen nothing before it.",
   "fixing": "The builder is back on the same item, closing every finding the review reported.",
   "gate": "The gate is asking every question about the current head and treating any absence as a " +
-    "failure. The PR stays a draft: it opens only when it goes to colleagues.",
-  "your-review": "{human}'s. The PR is a draft frozen at the sha that was reviewed, and nobody pushes over " +
-    "it without saying so first.",
+    "failure. {draft until}",
+  "your-review": "{human}'s. The PR is frozen at the sha that was reviewed, and nobody pushes over it " +
+    "without saying so first. {your-review draft}",
   "colleague-review": "{human} has asked the team, and the PR is open. {lead} watches GitHub and does nothing " +
     "until the merge lands.",
   "blocked": "{lead} asked {human} something and has no answer yet. The state underneath is kept, so " +
@@ -74,7 +74,7 @@ const DESCRIPTIONS: Record<string, string> = {
 // between a builder opening its PR and the review starting, which shows in agent-review. The state
 // machine keeps pr-open; only the picture folds it in.
 const FOLDED: Record<string, string> = { "pr-open": "agent-review" };
-const COLUMNS: readonly string[] = STATES.filter((s) => s !== "done" && !(s in FOLDED));
+const columnsOf = (states: readonly string[]): readonly string[] => states.filter((s) => s !== "done" && !(s in FOLDED));
 const columnOf = (s: string | null): string | null => (s !== null && FOLDED[s]) || s;
 
 const ageMinutes = (iso: string | null | undefined): number | null => {
@@ -388,14 +388,25 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
     // in building or fixing it read as if the PR were approved.
     design: r.design?.slides ? { slides: r.design.slides, canvas: r.design.canvas } : null,
   }));
-  const idx = (s: string | null) => (s !== null && COLUMNS.includes(s) ? COLUMNS.indexOf(s) : 99);
+  // A state the workspace has turned off (colleague-review, with colleague_review false) has no
+  // column, unless an item is stranded in it: then the column stays so the item is seen, and doctor
+  // and the round say how to move it.
+  const left = stranded(ws, recs);
+  const columns = columnsOf(STATES.filter((s) => usesState(ws, s) || left.some((r) => r.state === s)));
+  const idx = (s: string | null) => (s !== null && columns.includes(s) ? columns.indexOf(s) : 99);
   tickets.sort((a, b) => idx(a.column) - idx(b.column) || (b.age_min ?? 0) - (a.age_min ?? 0));
-  const descriptions = Object.fromEntries(Object.entries(DESCRIPTIONS).map(([k, v]) => [k, v.replaceAll("{human}", human).replaceAll("{lead}", leadName)]));
+  // Where the PR leaves draft is undrafting(ws), and one sentence says so. Your-review uses it only while
+  // the PR leaves draft later; where it leaves draft in your-review, that column says the human does it.
+  const draftUntil = "It stays a draft until {undrafting}.";
+  const descriptions = Object.fromEntries(Object.entries(DESCRIPTIONS).map(([k, v]) => [k, v
+    .replaceAll("{your-review draft}", undrafting(ws) === "your-review" ? "{human} undrafts it here to merge it." : draftUntil)
+    .replaceAll("{draft until}", draftUntil).replaceAll("{undrafting}", undrafting(ws))
+    .replaceAll("{human}", human).replaceAll("{lead}", leadName)]));
   return {
     at: clock(),
     human,
     lead: lead(ws).name,
-    columns: COLUMNS,
+    columns,
     descriptions,
     waiting_on_you: [...WAITING_ON_YOU].sort(),
     teams: teams(ws, recs, sessions.background(), (n, s) => sessions.alive(n, s), (n) => sessions.unknown(n)),

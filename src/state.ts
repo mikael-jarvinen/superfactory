@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type State, STATES } from "./config.js";
 import type { Workspace } from "./workspace.js";
@@ -29,6 +29,30 @@ export const TRANSITIONS: Record<State, ReadonlySet<Target>> = {
   "done": new Set(),
   "blocked": new Set([...STATES.filter((s) => s !== "blocked"), OFF]),
 };
+// Whether this workspace uses a state: every one, but colleague-review only where [gate]
+// colleague_review is true. Nothing moves an item into a state the workspace has turned off, --force
+// included.
+export const usesState = (ws: Workspace, s: State): boolean => s !== "colleague-review" || ws.config.gate.colleagueReview;
+const usable = (ws: Workspace, to: Target) => to === OFF || usesState(ws, to);
+// Items left in a state the workspace has turned off: in colleague-review with colleague_review false.
+// The board still shows them, the round names them, and doctor reports them.
+export const stranded = <R extends { state: State | null }>(ws: Workspace, recs: readonly R[]): R[] =>
+  recs.filter((r) => r.state !== null && !usesState(ws, r.state));
+// Where a human reads the PR: an item that has been in one keeps its PR open from then on.
+const REVIEW_STATES = ["your-review", "colleague-review"] as const;
+export type ReviewState = (typeof REVIEW_STATES)[number];
+const isReview = (s: unknown): s is ReviewState => REVIEW_STATES.includes(s as ReviewState);
+// Mikael, 2026-10-16: a PR is a draft in every column but colleague review, and open there; once an
+// item has been with colleagues its PR stays open through the fix rounds after. With colleague
+// review off, your-review is where the human undrafts a PR to merge.
+export const undrafting = (ws: Workspace): ReviewState => (usesState(ws, "colleague-review") ? "colleague-review" : "your-review");
+// An item that has been where its PR is undrafted keeps it open from then on. Colleague-review counts
+// with the switch off too: an item there before the switch went off has had its PR opened.
+export const keptOpen = (ws: Workspace, rec: Rec): boolean =>
+  (rec.reached ?? []).some((s) => s === "colleague-review" || s === undrafting(ws));
+export const COLLEAGUE_REVIEW_OFF =
+  "colleague review is off in this workspace ([gate] colleague_review = false); from your-review an item goes to done";
+
 // Where an item off the board goes back on, and where a new one starts.
 export const FROM_OFF: ReadonlySet<Target> = new Set(["designing", "building", "blocked"]);
 const FIRST: ReadonlySet<Target> = new Set(["designing", "building"]);
@@ -80,6 +104,9 @@ export interface Rec {
   design?: Design;
   // the designer session this item was last dispatched to, so a second round can keep its context
   session?: string;
+  // The review states this item has ever entered, set as it enters one and never cleared. A PR is
+  // kept open from then on (keptOpen). Records older than the field are given it on load (migrated).
+  reached?: ReviewState[];
   [k: string]: unknown;
 }
 
@@ -111,15 +138,46 @@ export const recPath = (ws: Workspace, ticket: string) => join(ws.stateDir, `${t
 
 export function loadRec(ws: Workspace, ticket: string): Rec | null {
   const p = recPath(ws, ticket);
-  return existsSync(p) ? migrated(JSON.parse(readFileSync(p, "utf8")) as Rec) : null;
+  return existsSync(p) ? migrated(ws, JSON.parse(readFileSync(p, "utf8")) as Rec) : null;
 }
 
 // A record written while queued was a state is off the board, with everything else it carries kept:
-// an approved design above all, which a builder's brief reads. The file is rewritten at its next save.
-function migrated(rec: Rec): Rec {
+// an approved design above all, which a builder's brief reads. A record written before `reached`
+// gets it from the whole events log and its own state. The file is rewritten at its next save.
+function migrated(ws: Workspace, rec: Rec): Rec {
   if ((rec.state as string) === "queued") rec.state = null;
   if ((rec.blocked_from as string | null) === "queued") rec.blocked_from = null;
+  if (!Array.isArray(rec.reached)) {
+    const seen = new Set(reachedByEvents(ws).get(rec.ticket));
+    if (isReview(rec.state)) seen.add(rec.state);
+    rec.reached = REVIEW_STATES.filter((s) => seen.has(s));
+  }
   return rec;
+}
+
+// Each ticket's review states by the whole events log, not a tail of it: the log is never rotated,
+// so a tail loses the oldest entries. Only records written before `reached` ask, and a record that
+// never moves again is never saved with the field, so this asks on every load. The log is stat'd
+// first and read only when its inode, size or mtime has changed since the last read in this process.
+let reachedMemo: { key: string; map: Map<string, Set<ReviewState>> } | null = null;
+function reachedByEvents(ws: Workspace): Map<string, Set<ReviewState>> {
+  let key: string;
+  try {
+    const s = statSync(ws.events);
+    key = `${ws.events}\0${s.ino}\0${s.size}\0${s.mtimeMs}`;
+  } catch {
+    return new Map(); // no events yet
+  }
+  if (reachedMemo?.key === key) return reachedMemo.map;
+  const map = new Map<string, Set<ReviewState>>();
+  eachEvent(readFileSync(ws.events, "utf8"), (e) => {
+    if (typeof e.ticket !== "string" || !isReview(e.to)) return;
+    const s = map.get(e.ticket) ?? new Set<ReviewState>();
+    s.add(e.to);
+    map.set(e.ticket, s);
+  });
+  reachedMemo = { key, map };
+  return map;
 }
 
 // An item on the board: one with a state, done aside.
@@ -141,12 +199,26 @@ export function appendEvent(ws: Workspace, ev: Record<string, unknown>): void {
   appendFileSync(ws.events, pyDumps(ev, { sortKeys: true }) + "\n");
 }
 
+// Each event in the text of an events log, in order. A line torn by a crash costs that event only.
+export function eachEvent(text: string, f: (e: Record<string, unknown>) => void): void {
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let e: unknown;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (e && typeof e === "object" && !Array.isArray(e)) f(e as Record<string, unknown>);
+  }
+}
+
 export function allRecs(ws: Workspace): Rec[] {
   if (!existsSync(ws.stateDir)) return [];
   return readdirSync(ws.stateDir)
     .filter((f) => f.endsWith(".json"))
     .sort()
-    .map((f) => migrated(JSON.parse(readFileSync(join(ws.stateDir, f), "utf8")) as Rec));
+    .map((f) => migrated(ws, JSON.parse(readFileSync(join(ws.stateDir, f), "utf8")) as Rec));
 }
 
 export interface Change {
@@ -174,6 +246,7 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   if (next !== OFF && !(STATES as readonly string[]).includes(next))
     die(`unknown state ${pyRepr(next)}; states: ${STATES.join(", ")}, or ${OFF} to take it off the board`);
   const to = next as Target;
+  if (!usable(ws, to)) die(`${ticket}: ${to} refused -- ${COLLEAGUE_REVIEW_OFF}`);
   let rec = loadRec(ws, ticket);
   const isNew = rec === null;
   if (rec === null) {
@@ -186,17 +259,17 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
         `that waits with no backlog to wait in. A ticket nobody is doing yet waits in the backlog.`);
     rec = {
       ticket, state: null, stack: c.stack ?? null, agent: c.agent ?? null, jira: null,
-      worktree: null, pr: null, asked_you: null, since: null, created: now(), blocked_from: null,
+      worktree: null, pr: null, asked_you: null, since: null, created: now(), blocked_from: null, reached: [],
     };
   }
   const old = rec.state;
   // How the item stood: an old state, off the board, or nothing yet.
   const was = isNew ? null : old ?? OFF;
   if (!isNew && !c.force) {
-    const allowed = old === null ? FROM_OFF : TRANSITIONS[old];
-    if (!allowed.has(to))
+    const allowed = [...(old === null ? FROM_OFF : TRANSITIONS[old])].filter((s) => usable(ws, s));
+    if (!allowed.includes(to))
       die(`${ticket}: ${old ?? OFF} -> ${to} is not a valid transition. From ${old ?? OFF} you can go to: ` +
-        `${[...allowed].sort().join(", ") || "nowhere, it is terminal"}. Use --force if you mean it.`);
+        `${allowed.sort().join(", ") || "nowhere, it is terminal"}. Use --force if you mean it.`);
   }
   const warnings: string[] = [];
   // Evidence rules. Refuse where a wrong claim reaches the human; warn elsewhere.
@@ -283,6 +356,7 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   if (rec.design || to === "designing" || c.canvas || c.slides) rec.design = design;
   rec.state = to === OFF ? null : to;
   rec.since = now();
+  if (isReview(to) && !rec.reached?.includes(to)) rec.reached = REVIEW_STATES.filter((s) => s === to || rec.reached?.includes(s));
   saveRec(ws, rec);
   appendEvent(ws, {
     t: now(), ticket, from: was, to, agent: rec.agent ?? left,

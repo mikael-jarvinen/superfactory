@@ -152,6 +152,9 @@ isolate_machines = true                   # a message to a session on another ma
 
 [gate]
 prose_remark = 30                         # added comment lines at which the gate remarks on prose volume
+colleague_review = true                   # false where nobody reviews as a colleague: your-review goes
+                                          # straight to done, and there is no colleague-review column,
+                                          # transition, pr-open-for-review or tracker status for it
 
 [watchers]                                # scheduled by `factory schedule install`, as launchd jobs
                                           # named superfactory.<lead>.<job>. The queue watcher's

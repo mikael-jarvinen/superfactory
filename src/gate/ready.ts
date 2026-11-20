@@ -83,7 +83,7 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
   const fail = (text: string, kind: FailureKind = "fatal") => failures.push({ text, kind });
 
   if (pr.state !== "OPEN") fail(`state is ${pr.state}, not OPEN`);
-  // A draft is no failure: Mikael, 2026-10-16, every PR stays one until it goes to colleagues.
+  // A draft is no failure: Mikael, 2026-10-16, every PR stays one until its item reaches undrafting(ws).
   if (base !== repo.base) fail(`base branch is ${base}, expected ${repo.base}`);
 
   let unstable = false;
@@ -183,8 +183,8 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
       if (isBot(s)) continue;
       const desc = s.description ?? "-";
       if (s.state === "success") {
-        // A review bot that skips drafts reports the skip as a success. Every PR is a draft until
-        // colleague review now, so its review has to be asked for by hand.
+        // A review bot that skips drafts reports the skip as a success. Every PR is a draft until its
+        // item reaches undrafting(ws) in state.ts, so its review has to be asked for by hand.
         if (/skipped/i.test(desc) && /draft/i.test(desc)) {
           const ask = /coderabbit/i.test(s.context) ? 'comment "@coderabbitai review" on the PR' : "ask it for a review by hand";
           remarks.push(`status '${s.context}' is green only because it skipped a draft and reviewed nothing -- ${ask}`);
@@ -197,8 +197,9 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
 
   // THE REVIEW BOT AT THIS HEAD. Mikael, 2026-10-20, after a PR reached him with CodeRabbit never
   // having reviewed its final head: "Coderabbit should review before you even give the PR to me?"
-  // Every PR is a draft until colleague review, and the bot skips drafts, so it reviews only when
-  // asked; a green status from it is no evidence until it says it reviewed this sha.
+  // Every PR is a draft until its item reaches undrafting(ws) in state.ts (colleague-review, or
+  // your-review with [gate] colleague_review = false), and the bot skips drafts, so it reviews only
+  // when asked; a green status from it is no evidence until it says it reviewed this sha.
   if (botLogin && bot && sts !== undefined) {
     const short = sha.slice(0, 7);
     const st = sts.find(isBot);

@@ -26,7 +26,7 @@
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { roleOf } from "../launch.js";
-import { allRecs, BUSY, OFF, STATES } from "../state.js";
+import { allRecs, BUSY, eachEvent, OFF, STATES } from "../state.js";
 import { claudeConfigDir } from "../transport.js";
 import { realpathLoose } from "../util.js";
 import type { Workspace } from "../workspace.js";
@@ -73,20 +73,13 @@ export function timelines(ws: Workspace): Timeline[] {
   } catch {
     // no events yet
   }
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    let e: { t?: unknown; ticket?: unknown; to?: unknown; agent?: unknown };
-    try {
-      e = JSON.parse(line);
-    } catch {
-      continue; // a line torn by a crash costs that event only
-    }
+  eachEvent(text, (e) => {
     const at = time(e.t);
-    if (typeof e.ticket !== "string" || typeof e.to !== "string" || Number.isNaN(at)) continue;
+    if (typeof e.ticket !== "string" || typeof e.to !== "string" || Number.isNaN(at)) return;
     const steps = by.get(e.ticket) ?? [];
     steps.push({ state: e.to, at, agent: typeof e.agent === "string" ? e.agent : null });
     by.set(e.ticket, steps);
-  }
+  });
   const recs = new Map(allRecs(ws).map((r) => [r.ticket, r]));
   // A record with no events, written before the log or by hand, counts from its own `since`.
   for (const r of recs.values()) {

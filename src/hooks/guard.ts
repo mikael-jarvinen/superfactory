@@ -58,7 +58,8 @@ import { allowClosePath, closable } from "../allow-close.js";
 import { MARKER } from "../gate/comment.js";
 import type { HookResult } from "../settings.js";
 import { chars, run } from "../util.js";
-import { openWorkspace, resolveWorkspace } from "../workspace.js";
+import { type ReviewState, undrafting } from "../state.js";
+import { openWorkspace, resolveWorkspace, type Workspace } from "../workspace.js";
 
 export const POLICIES = ["readonly", "protect"] as const;
 export type Policy = (typeof POLICIES)[number];
@@ -92,6 +93,8 @@ export interface GuardContext {
   allowClose?: string;
   // The workspace `factory --workspace` named, if any.
   workspace?: string;
+  // Where the workspace's PRs leave draft, undrafting(ws). Tests stub it; the hook reads the workspace.
+  undrafting?: ReviewState | null;
 }
 
 export const PROTECTED = new Set(["main", "master", "staging", "production", "dev"]);
@@ -872,15 +875,38 @@ function ghCloseNumber(args: string[], repo: string): number | null {
   return m && (m[1] as string).toLowerCase() === repo.toLowerCase() ? Number(m[2]) : null;
 }
 
-// The allow-close list of the workspace this session works in: --workspace, then FACTORY_WORKSPACE,
-// then the nearest factory.toml above the session's project directory or the cwd. Read only when a
-// product PR is closed; undefined when there is no workspace or its config does not load.
-function workspaceAllowClose(flag: string | undefined): string | undefined {
+// The workspace this session works in: --workspace, then FACTORY_WORKSPACE, then the nearest
+// factory.toml above the session's project directory or the cwd. Null when there is no workspace or
+// its config does not load, so the guard refuses with what it knows instead of throwing.
+function sessionWorkspace(flag: string | undefined): Workspace | null {
   try {
-    return allowClosePath(openWorkspace(resolveWorkspace({ flag, cwd: process.env.CLAUDE_PROJECT_DIR || process.cwd() })).stateDir);
+    return openWorkspace(resolveWorkspace({ flag, cwd: process.env.CLAUDE_PROJECT_DIR || process.cwd() }));
   } catch {
-    return undefined;
+    return null;
   }
+}
+
+// The allow-close list of the session's workspace. Read only when a product PR is closed; undefined
+// when there is no workspace or its config does not load.
+function workspaceAllowClose(flag: string | undefined): string | undefined {
+  const ws = sessionWorkspace(flag);
+  return ws === null ? undefined : allowClosePath(ws.stateDir);
+}
+
+// How the lead undrafts a product PR. Where PRs leave draft in colleague-review, that is
+// `factory pr-open-for-review`, which records the move; with [gate] colleague_review = false it
+// refuses, and the human's your-review is undrafted by hand. With no workspace found, only what works
+// in both.
+function workspaceUndrafting(flag: string | undefined): ReviewState | null {
+  const ws = sessionWorkspace(flag);
+  return ws === null ? null : undrafting(ws);
+}
+function howToUndraft(ctx: GuardContext): string {
+  const where = ctx.undrafting !== undefined ? ctx.undrafting : workspaceUndrafting(ctx.workspace);
+  const byHand = "`gh pr ready <n> -R owner/repo`";
+  if (where === "colleague-review") return `the lead's, by \`factory pr-open-for-review <TICKET>\` or ${byHand}`;
+  if (where === "your-review") return `the lead's, by ${byHand} once its item is in your-review (colleague review is off here, so pr-open-for-review refuses)`;
+  return `the lead's, by ${byHand}`;
 }
 
 // The flags `gh pr merge` takes on a lead_merges repo, and whether each takes a value. Anything else is
@@ -1341,12 +1367,12 @@ function checkGhProtect(words: string[], ctx: GuardContext): void {
   }
   if (args[0] === "pr" && args[1] === "ready" && !args.includes("--undo")) {
     const repo = ghPrRepo(args);
-    if (repo === null) refuse("undrafting a PR needs an explicit --repo owner/name (or a PR URL) so the guard can confirm whose repo it is; otherwise undrafting is `factory pr-send`'s job");
+    if (repo === null) refuse(`undrafting a PR needs an explicit --repo owner/name (or a PR URL) so the guard can confirm whose repo it is; undrafting a product-repo PR is ${howToUndraft(ctx)}`);
     const target = (repo as string).toLowerCase();
     // The human, 2026-10-15: "You should be able to undraft". The lead may, on a product repo of the
     // --org; a builder or reviewer still goes through the lead.
     const lead = ctx.role === "lead" && ctx.org !== undefined && target.split("/")[0] === ctx.org.toLowerCase();
-    if (!lead && !ctx.ownRepos.some((r) => r.toLowerCase() === target)) refuse("undrafting a product-repo PR is the lead's, by `factory pr-open-for-review` or `gh pr ready <n> -R owner/repo`; gh pr ready --undo is fine");
+    if (!lead && !ctx.ownRepos.some((r) => r.toLowerCase() === target)) refuse(`undrafting a product-repo PR is ${howToUndraft(ctx)}; gh pr ready --undo is fine`);
     // a factory-own repo (lyyti-factory / superfactory): the lead and its assistants may undraft it to merge it.
   }
   if (args[0] === "api" && ghApiWrites(args.slice(1)) && /(pulls\/\d+\/merge|git\/refs|branches\/\S+\/(protection|rename))/.test(args.join(" "))) {

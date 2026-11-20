@@ -1,11 +1,12 @@
 // `factory pr-open-for-review <TICKET>`: open the item's PRs for colleague review, then record it.
 //
 // Mikael, 2026-10-16: "Only when they are in my colleagues review column should they be open PRs."
-// Every PR stays a draft through the factory's rounds and his own review, and this is where it
-// leaves draft. Every open PR on the record is checked before any is opened: its head must still be
+// A PR stays a draft until its item reaches undrafting(ws). Where that is colleague-review, this is
+// where it leaves draft; with [gate] colleague_review = false it is your-review, undrafted by hand, and
+// this refuses. Every open PR on the record is checked before any is opened: its head must still be
 // the sha that was reviewed. The record moves to colleague-review only once all of them are open.
 import { releaseForReview } from "../stacks/engine.js";
-import { loadRec, recPrs, transition } from "../state.js";
+import { COLLEAGUE_REVIEW_OFF, loadRec, recPrs, transition, undrafting } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
 import { api, gh, prView, resolveRepo } from "./github.js";
@@ -14,6 +15,7 @@ import { translationsAt } from "./translations.js";
 const refused = (msg: string) => new FactoryError(`pr-open-for-review: REFUSED -- ${msg}`);
 
 export function openForReview(ws: Workspace, ticket: string, out: (line: string) => void = console.log): void {
+  if (undrafting(ws) !== "colleague-review") throw refused(`${COLLEAGUE_REVIEW_OFF}; nothing opened`);
   const rec = loadRec(ws, ticket);
   if (!rec) throw refused(`no record for ${ticket}`);
   if (rec.state !== "your-review" && rec.state !== "colleague-review")

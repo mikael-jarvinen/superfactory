@@ -142,7 +142,9 @@ export interface Config {
   board: { host: string; port: number };
   // false lets a session message a session on another machine with nobody approving each send
   peers: { isolateMachines: boolean };
-  gate: { proseRemark?: number; reviewBot?: string };
+  // colleagueReview: false where nobody reviews as a colleague. your-review then goes straight to
+  // done, and colleague-review is no column, no transition and no tracker status.
+  gate: { proseRemark?: number; reviewBot?: string; colleagueReview: boolean };
   watchers: { queueEveryMinutes?: number; reviewsEveryMinutes?: number; roundMinute?: number; model?: string; facts: FactsFile[] };
   worktree: { toolWritten: string[] };
 }
@@ -569,6 +571,10 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
       if (!a || a.role !== "builder" || a.stack !== s.key) problems.push(`stacks.${s.key}.pin.${name}: no builder ${show(name)} on stack ${show(s.key)}`);
     }
 
+  const g = reader(problems, "gate", top.table("gate") ?? {});
+  const gate = { proseRemark: g.int("prose_remark", false, 1), reviewBot: g.str("review_bot"), colleagueReview: g.bool("colleague_review") ?? true };
+  g.done();
+
   const t = reader(problems, "tracker", top.table("tracker") ?? {});
   const kind = t.str("kind") ?? "none";
   if (kind !== "jira" && kind !== "none" && kind !== "local") t.bad("kind", `must be "jira", "local" or "none", got ${show(kind)}`);
@@ -589,7 +595,7 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     else status[s as StatusKey] = v;
   }
   if (kind === "jira")
-    for (const s of ["building", "colleague-review", "done"] as const)
+    for (const s of ["building", ...(gate.colleagueReview ? ["colleague-review"] as const : []), "done"] as const)
       if (statusT[s] === undefined) problems.push(`tracker.status.${s}: missing; the tracker needs a status for it`);
   const projects: TrackerProject[] = [];
   const projectsV = t.raw("projects");
@@ -660,10 +666,6 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   const pe = reader(problems, "peers", top.table("peers") ?? {});
   const peers = { isolateMachines: pe.bool("isolate_machines") ?? true };
   pe.done();
-
-  const g = reader(problems, "gate", top.table("gate") ?? {});
-  const gate = { proseRemark: g.int("prose_remark", false, 1), reviewBot: g.str("review_bot") };
-  g.done();
 
   const w = reader(problems, "watchers", top.table("watchers") ?? {});
   const watchers = {

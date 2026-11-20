@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -276,7 +276,8 @@ test("the round: a merge the record moved after is judged, one it did not is owe
 });
 
 // Mikael, 2026-10-16: a PR is a draft in every column but colleague review, and open there. After
-// colleague review it stays open through the fix rounds (2026-10-15).
+// colleague review it stays open through the fix rounds (2026-10-15). That is undrafting(ws) with the
+// switch on, as here; the tests below turn it off.
 test("the round: a PR open outside colleague review, or a draft in it, is flagged", () => {
   const { ws, run } = watcherWorkspace();
   const state = (...a: string[]) => assert.equal(factory(ws, ["state", ...a]).status, 0, a.join(" "));
@@ -301,12 +302,116 @@ test("the round: a PR open outside colleague review, or a draft in it, is flagge
     "pr list -R acme/api --state all": { stdout: [] },
   });
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /WEB-2: acme\/web#2 is open while pr-open -- should be a draft until colleague review/);
-  assert.match(r.stdout, /WEB-3: acme\/web#3 is open while your-review -- should be a draft until colleague review/);
+  assert.match(r.stdout, /WEB-2: acme\/web#2 is open while pr-open -- should be a draft until colleague-review/);
+  assert.match(r.stdout, /WEB-3: acme\/web#3 is open while your-review -- should be a draft until colleague-review/);
   assert.doesNotMatch(r.stdout, /WEB-4: /, "open in a fix round after colleague review");
   assert.match(r.stdout, /WEB-5: acme\/web#5 is a draft while colleague-review -- should be open: factory pr-open-for-review WEB-5/);
   assert.doesNotMatch(r.stdout, /WEB-6: /, "a draft before colleague review");
   assert.doesNotMatch(r.stdout, /WEB-7: /, "a draft stacked on another PR's branch keeps its draft");
+});
+
+// With [gate] colleague_review = false, undrafting(ws) is your-review: there the draft state is the
+// human's (undrafted to merge), and the round says nothing about it either way.
+test("the round: with colleague review off, an open PR in your-review is not flagged", () => {
+  const { ws, run } = watcherWorkspace(`${JIRA}\n[gate]\ncolleague_review = false\n`);
+  const state = (...a: string[]) => assert.equal(factory(ws, ["state", ...a]).status, 0, a.join(" "));
+  state("WEB-3", "building");
+  state("WEB-3", "pr-open", "--pr", "acme/web#3", "--head", "aaa3333");
+  state("WEB-3", "your-review", "--reviewed", "aaa3333", "--force");
+  const pr = { number: 3, title: "WEB-3: x", headRefName: "WEB-3", state: "OPEN", isDraft: false, mergedAt: null, headRefOid: "aaa3333", baseRefName: "main" };
+  const r = run(["watch", "round", "--facts"], [], {
+    "pr list -R acme/web --state all": { stdout: [pr] },
+    "pr list -R acme/api --state all": { stdout: [] },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /-- gates: PRs on GitHub against the store --\n-- CI/, "nothing under gates");
+  assert.doesNotMatch(r.stdout, /colleague review/);
+});
+
+test("the round: with colleague review off, an undraft before your-review is still flagged, and a stranded item is named", () => {
+  const { ws, run } = watcherWorkspace(`${JIRA}\n[gate]\ncolleague_review = true\n`);
+  const state = (...a: string[]) => assert.equal(factory(ws, ["state", ...a]).status, 0, a.join(" "));
+  state("WEB-2", "building");
+  state("WEB-2", "pr-open", "--pr", "acme/web#2", "--head", "aaa2222");
+  state("WEB-2", "blocked", "--note", "x");
+  state("WEB-2", "building");
+  state("WEB-4", "building");
+  state("WEB-4", "pr-open", "--pr", "acme/web#4", "--head", "aaa4444");
+  state("WEB-4", "agent-review");
+  state("WEB-4", "fixing", "--evidence", "1 high");
+  state("WEB-5", "building");
+  state("WEB-5", "pr-open", "--pr", "acme/web#5", "--head", "aaa5555");
+  state("WEB-5", "your-review", "--reviewed", "aaa5555", "--force");
+  state("WEB-5", "colleague-review");
+  state("WEB-8", "building");
+  state("WEB-8", "colleague-review", "--force");
+  // Turned off after WEB-5 and WEB-8 went to colleagues.
+  const toml = join(ws, "factory.toml");
+  writeFileSync(toml, readFileSync(toml, "utf8").replace("colleague_review = true", "colleague_review = false"));
+  const pr = (n: number, isDraft: boolean) =>
+    ({ number: n, title: `WEB-${n}: x`, headRefName: `WEB-${n}`, state: "OPEN", isDraft, mergedAt: null, headRefOid: `aaa${String(n).repeat(4)}`, baseRefName: "main" });
+  const r = run(["watch", "round", "--facts"], [], {
+    "pr list -R acme/web --state all": { stdout: [pr(2, false), pr(4, false), pr(5, true)] },
+    "pr list -R acme/api --state all": { stdout: [] },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /WEB-2: acme\/web#2 is open while building -- should be a draft until your-review/);
+  assert.match(r.stdout, /WEB-4: acme\/web#4 is open while fixing -- should be a draft until your-review/);
+  for (const t of ["WEB-5", "WEB-8"])
+    assert.match(r.stdout, new RegExp(`  ${t}: stranded in colleague-review -- colleague review is off in this workspace .*; see factory doctor`));
+  assert.doesNotMatch(r.stdout, /pr-open-for-review/, "no pointer to a command that refuses");
+  const gates = r.stdout.split("-- gates:")[1]!.split("\n-- ")[0]!;
+  assert.doesNotMatch(gates, /WEB-5: acme/, "a stranded item's draft PR gets the stranded line only");
+});
+
+test("the round: with colleague review off, a PR the human undrafted in your-review stays unflagged after it", () => {
+  const { ws, run } = watcherWorkspace(`${JIRA}\n[gate]\ncolleague_review = false\n`);
+  const state = (...a: string[]) => assert.equal(factory(ws, ["state", ...a]).status, 0, a.join(" "));
+  // WEB-3: undrafted in your-review, then sent back. WEB-6: blocked from your-review, then off the board.
+  for (const t of ["WEB-3", "WEB-6"]) {
+    state(t, "building");
+    state(t, "pr-open", "--pr", `acme/web#${t.slice(4)}`, "--head", `aaa${t.slice(4).repeat(4)}`);
+    state(t, "your-review", "--reviewed", `aaa${t.slice(4).repeat(4)}`, "--force");
+  }
+  state("WEB-3", "fixing", "--evidence", "Alex: one more thing");
+  state("WEB-6", "blocked", "--note", "asked Alex");
+  state("WEB-6", "off", "--force");
+  const pr = (n: number) =>
+    ({ number: n, title: `WEB-${n}: x`, headRefName: `WEB-${n}`, state: "OPEN", isDraft: false, mergedAt: null, headRefOid: `aaa${String(n).repeat(4)}`, baseRefName: "main" });
+  const r = run(["watch", "round", "--facts"], [], {
+    "pr list -R acme/web --state all": { stdout: [pr(3), pr(6)] },
+    "pr list -R acme/api --state all": { stdout: [] },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /should be a draft/);
+});
+
+test("the round: an item that was in your-review keeps its PR open after its event leaves the events tail", () => {
+  const { ws, run } = watcherWorkspace(`${JIRA}\n[gate]\ncolleague_review = false\n`);
+  const state = (...a: string[]) => assert.equal(factory(ws, ["state", ...a]).status, 0, a.join(" "));
+  // WEB-3 carries `reached` from its own move into your-review. WEB-6 is a record written before
+  // the field, so it gets it from the whole events log.
+  for (const t of ["WEB-3", "WEB-6"]) {
+    state(t, "building");
+    state(t, "pr-open", "--pr", `acme/web#${t.slice(4)}`, "--head", `aaa${t.slice(4).repeat(4)}`);
+    state(t, "your-review", "--reviewed", `aaa${t.slice(4).repeat(4)}`, "--force");
+    state(t, "fixing", "--evidence", "Alex: one more thing");
+  }
+  const recFile = join(ws, "state", "WEB-6.json");
+  const { reached, ...old } = JSON.parse(readFileSync(recFile, "utf8")) as Record<string, unknown>;
+  assert.deepEqual(reached, ["your-review"]);
+  writeFileSync(recFile, JSON.stringify(old));
+  // 300 KB of later events, more than the 256 KB tail the board reads.
+  const filler = JSON.stringify({ t: "2026-11-20T00:00:00Z", ticket: "WEB-9", from: "building", to: "building", note: "x".repeat(200) });
+  appendFileSync(join(ws, "state", "events.jsonl"), `${filler}\n`.repeat(1500));
+  const pr = (n: number) =>
+    ({ number: n, title: `WEB-${n}: x`, headRefName: `WEB-${n}`, state: "OPEN", isDraft: false, mergedAt: null, headRefOid: `aaa${String(n).repeat(4)}`, baseRefName: "main" });
+  const r = run(["watch", "round", "--facts"], [], {
+    "pr list -R acme/web --state all": { stdout: [pr(3), pr(6)] },
+    "pr list -R acme/api --state all": { stdout: [] },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /should be a draft/);
 });
 
 test("the round tells the lead what escalates in one note, once a day, and moves nothing it could not tell", () => {
