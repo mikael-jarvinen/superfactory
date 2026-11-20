@@ -11,9 +11,8 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { basename, join } from "node:path";
 import { fleetLines, owedNote, type Session } from "../fleet.js";
 import { type CheckRun, checkRuns, json } from "../gate/github.js";
-import { readTail } from "../messages.js";
 import { loaded, scheduleFix } from "../scheduler/index.js";
-import { allRecs, BUSY, COLLEAGUE_REVIEW_OFF, isLocal, OFF, onBoard, recPrs, stranded, usesState, WAITING_ON_LEAD, WAITING_ON_YOU } from "../state.js";
+import { allRecs, BUSY, COLLEAGUE_REVIEW_OFF, isLocal, keptOpen, OFF, onBoard, recPrs, stranded, usesState, WAITING_ON_LEAD, WAITING_ON_YOU } from "../state.js";
 import { trackerOf } from "../tracker/read.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
@@ -147,19 +146,11 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
   const listed = new Map<string, GhPr>();
   section("gates: PRs on GitHub against the store", () => {
     if (!recs.length) return void out.push("  nothing open");
-    // Mikael, 2026-10-16: a PR is a draft in every column but colleague review, and open there. Once
-    // an item has been with colleagues its PR stays open through the fix rounds after (2026-10-15:
-    // "they can be open, don't put to draft").
-    // With colleague review off, your-review is where the human undrafts a PR to merge. So an item
-    // that has ever been in your-review (or, before the switch went off, colleague-review) keeps its
-    // PR open from then on, as one that has been with colleagues does; it is not checked again. Any
-    // other open PR is flagged. An item left in colleague-review is stranded: said once, PR or not.
+    // A PR is a draft until its item reaches the review where a human undrafts it; keptOpen says
+    // which. An item left in colleague-review is stranded: said once, PR or not.
     const colleagues = usesState(ws, "colleague-review");
     for (const rec of stranded(ws, recs))
       out.push(`  ${rec.ticket}: stranded in colleague-review -- ${COLLEAGUE_REVIEW_OFF}; see factory doctor`);
-    const opened = new Set<unknown>(colleagues ? ["colleague-review"] : ["colleague-review", "your-review"]);
-    const withColleagues = new Set((readTail(ws.events) as Record<string, unknown>[])
-      .filter((e) => opened.has(e.to)).map((e) => e.ticket));
     for (const repo of Object.values(ws.config.repos)) {
       const fields = "number,title,headRefName,state,isDraft,mergedAt,headRefOid,baseRefName";
       const r = watcherGh(["pr", "list", "-R", repo.remote, "--state", "all", "--limit", "40", "--json", fields]);
@@ -185,11 +176,9 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
             out.push(`  ${where} head moved to ${pr.headRefOid.slice(0, 7)} while ${st} (recorded ${rp.head.slice(0, 7)}) -- frozen PR pushed?`);
           // A PR stacked on another branch waits on that one and keeps its own draft state.
           else if (pr.baseRefName !== undefined && pr.baseRefName !== repo.base) continue;
-          // Off: your-review is the human's, and a stranded item has its line above.
-          else if (!colleagues && (st === "your-review" || st === "colleague-review")) continue;
-          else if (pr.state === "OPEN" && pr.isDraft === false && st !== "colleague-review" && !withColleagues.has(rec.ticket))
+          else if (pr.state === "OPEN" && pr.isDraft === false && !keptOpen(ws, rec))
             out.push(`  ${where} is open while ${st} -- should be a draft until ${colleagues ? "colleague review" : "your-review"}`);
-          else if (pr.state === "OPEN" && pr.isDraft === true && st === "colleague-review")
+          else if (pr.state === "OPEN" && pr.isDraft === true && st === "colleague-review" && colleagues)
             out.push(`  ${where} is a draft while colleague-review -- should be open: factory pr-open-for-review ${rec.ticket}`);
         }
       }
