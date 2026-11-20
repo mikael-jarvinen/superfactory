@@ -5,7 +5,7 @@
 // leaves draft. Every open PR on the record is checked before any is opened: its head must still be
 // the sha that was reviewed. The record moves to colleague-review only once all of them are open.
 import { releaseForReview } from "../stacks/engine.js";
-import { COLLEAGUE_REVIEW_OFF, loadRec, recPrs, transition } from "../state.js";
+import { COLLEAGUE_REVIEW_OFF, loadRec, recPrs, transition, usesState } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
 import { api, gh, prView, resolveRepo } from "./github.js";
@@ -14,7 +14,7 @@ import { translationsAt } from "./translations.js";
 const refused = (msg: string) => new FactoryError(`pr-open-for-review: REFUSED -- ${msg}`);
 
 export function openForReview(ws: Workspace, ticket: string, out: (line: string) => void = console.log): void {
-  if (!ws.config.gate.colleagueReview) throw refused(`${COLLEAGUE_REVIEW_OFF}; nothing opened`);
+  if (!usesState(ws, "colleague-review")) throw refused(`${COLLEAGUE_REVIEW_OFF}; nothing opened`);
   const rec = loadRec(ws, ticket);
   if (!rec) throw refused(`no record for ${ticket}`);
   if (rec.state !== "your-review" && rec.state !== "colleague-review")

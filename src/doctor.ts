@@ -23,7 +23,7 @@ import { stackDoctor } from "./stacks/engine.js";
 import { trackerOf } from "./tracker/read.js";
 import { ask, probe, Unreachable } from "./remote.js";
 import { SCOPE } from "./scope.js";
-import { allRecs } from "./state.js";
+import { allRecs, COLLEAGUE_REVIEW_OFF, usesState } from "./state.js";
 import { repoTransport } from "./transport.js";
 import { local } from "./transport.js";
 import { promptPath } from "./watchers/job.js";
@@ -226,19 +226,6 @@ export function workspaceFiles(ws: Workspace): Check[] {
   for (const ff of cfg.watchers.facts)
     checks.push({ status: okIf(existsSync(ff.file)), what: `${shown(ws, ff.file)}, facts the round reads`, fix: "run whatever writes it, or take it out of [[watchers.facts]]" });
 
-  // Turning colleague review off strands an item already in it: no column shows it, and nothing
-  // moves anything into it. One line, only where the switch is off.
-  if (!cfg.gate.colleagueReview) {
-    const stranded = allRecs(ws).filter((r) => r.state === "colleague-review").map((r) => r.ticket);
-    checks.push({
-      status: okIf(!stranded.length),
-      what: stranded.length
-        ? `no item in colleague-review, which [gate] colleague_review = false turned off; in it: ${stranded.join(", ")}`
-        : "no item in colleague-review, which [gate] colleague_review = false turned off",
-      fix: "move each to done once merged, or to fixing: factory state <TICKET> done --evidence <merge sha>",
-    });
-  }
-
   for (const s of Object.values(cfg.stacks))
     if (s.script)
       checks.push({
@@ -247,6 +234,21 @@ export function workspaceFiles(ws: Workspace): Check[] {
         fix: existsSync(s.script) ? `chmod +x ${shown(ws, s.script)}` : "write it to the stack contract in the program's docs/design.md",
       });
   return checks;
+}
+
+// ---------------------------------------------------------------- the state store
+
+// Turning colleague review off strands an item already in it: nothing moves anything into it, and
+// pr-open-for-review refuses. A real inconsistency, so MISSING, and doctor exits 1 (Niilo's call on
+// superfactory#135). One line, only where the switch is off.
+export function stateChecks(ws: Workspace): Check[] {
+  if (usesState(ws, "colleague-review")) return [];
+  const stranded = allRecs(ws).filter((r) => r.state === "colleague-review").map((r) => r.ticket);
+  return [{
+    status: okIf(!stranded.length),
+    what: `no item in colleague-review: ${COLLEAGUE_REVIEW_OFF}${stranded.length ? `; in it: ${stranded.join(", ")}` : ""}`,
+    fix: "once merged, factory state <TICKET> done --evidence <merge sha>; else factory state <TICKET> fixing",
+  }];
 }
 
 // ---------------------------------------------------------------- demos
@@ -406,6 +408,7 @@ export async function doctor(ws: Workspace, print: (l: string) => void = console
   emit(tools(ws));
   emit(checkouts(ws));
   emit(workspaceFiles(ws));
+  emit(stateChecks(ws));
   emit(demoTools(ws));
   emit([await boardPort(ws)]);
   emit(hostChecks(ws));

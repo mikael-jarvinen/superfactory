@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { serve } from "../src/board/server.js";
 import { ConfigError, loadConfig } from "../src/config.js";
-import { workspaceFiles } from "../src/doctor.js";
+import { stateChecks } from "../src/doctor.js";
 import { openForReview } from "../src/gate/open.js";
 import { transition } from "../src/state.js";
 import { openWorkspace } from "../src/workspace.js";
@@ -118,36 +118,44 @@ test("the board has a colleague-review column only while the step is on", async 
   assert.deepEqual(await columns(OFF_TOML), all.filter((c) => c !== "colleague-review"));
 });
 
-test("doctor: off with an item left in colleague-review is MISSING, naming it; off and empty is ok; on says nothing", () => {
-  const line = (ws: ReturnType<typeof openWorkspace>) => workspaceFiles(ws).filter((c) => /colleague-review/.test(c.what));
-
+// An item that went into colleague-review while the switch was on, with the switch then turned off
+// in factory.toml, as a human would.
+function stranded(): string {
   const dir = tempWorkspace(ON_TOML);
   const on = openWorkspace(dir);
   transition(on, "WEB-1", "building", { agent: "bea", stack: "app" }, quiet);
   transition(on, "WEB-1", "colleague-review", { force: true }, quiet);
-  assert.deepEqual(line(on), [], "on: no line, whatever sits in colleague-review");
+  const toml = join(dir, "factory.toml");
+  writeFileSync(toml, readFileSync(toml, "utf8").replace("colleague_review = true", "colleague_review = false"));
+  return dir;
+}
 
-  // The same store, with the switch turned off after the item went in.
-  const off = openWorkspace(dir, {});
-  off.config.gate.colleagueReview = false;
-  const [stranded] = line(off);
-  assert.equal(stranded?.status, "missing");
-  assert.match(stranded?.what ?? "", /turned off; in it: WEB-1$/);
-  assert.match(stranded?.fix ?? "", /factory state <TICKET> done/);
+test("doctor: off with an item left in colleague-review is MISSING, naming it; off and empty is ok; on says nothing", () => {
+  const on = openWorkspace(tempWorkspace(ON_TOML));
+  transition(on, "WEB-1", "building", { agent: "bea", stack: "app" }, quiet);
+  transition(on, "WEB-1", "colleague-review", { force: true }, quiet);
+  assert.deepEqual(stateChecks(on), [], "on: no line, whatever sits in colleague-review");
 
-  const empty = openWorkspace(tempWorkspace(OFF_TOML));
-  const [ok] = line(empty);
+  const [left] = stateChecks(openWorkspace(stranded()));
+  assert.equal(left?.status, "missing");
+  assert.match(left?.what ?? "", /^no item in colleague-review: colleague review is off in this workspace .*; in it: WEB-1$/);
+  assert.equal(left?.fix, "once merged, factory state <TICKET> done --evidence <merge sha>; else factory state <TICKET> fixing");
+
+  const [ok] = stateChecks(openWorkspace(tempWorkspace(OFF_TOML)));
   assert.equal(ok?.status, "ok");
-  assert.equal(ok?.what, "no item in colleague-review, which [gate] colleague_review = false turned off");
+  assert.match(ok?.what ?? "", /^no item in colleague-review: colleague review is off in this workspace \(\[gate\] colleague_review = false\); from your-review an item goes to done$/);
 });
 
 test("doctor run on the command line: off with an item in colleague-review exits 1 with the MISSING line", () => {
-  const dir = tempWorkspace(ON_TOML);
-  const on = openWorkspace(dir);
-  transition(on, "WEB-1", "building", { agent: "bea", stack: "app" }, quiet);
-  transition(on, "WEB-1", "colleague-review", { force: true }, quiet);
-  writeFileSync(join(dir, "factory.toml"), readFileSync(join(dir, "factory.toml"), "utf8").replace("colleague_review = true", "colleague_review = false"));
-  const r = factory(dir, ["doctor"]);
-  assert.match(r.stdout, /^MISSING no item in colleague-review, which \[gate\] colleague_review = false turned off; in it: WEB-1 \[fix: /m);
+  const r = factory(stranded(), ["doctor"]);
+  assert.match(r.stdout, /^MISSING no item in colleague-review: colleague review is off in this workspace .*; in it: WEB-1 \[fix: once merged, /m);
   assert.equal(r.status, 1);
+});
+
+test("the board keeps a colleague-review column while an item is stranded in it", async () => {
+  const board = await serve(openWorkspace(stranded()), { host: "127.0.0.1", port: 0 });
+  after(() => board.close());
+  const snap = (await (await fetch(board.url + "/api")).json()) as { columns: string[]; tickets: { ticket: string; column: string }[] };
+  assert.ok(snap.columns.includes("colleague-review"), snap.columns.join(", "));
+  assert.deepEqual(snap.tickets.map((t) => `${t.ticket} ${t.column}`), ["WEB-1 colleague-review"]);
 });

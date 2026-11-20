@@ -10,7 +10,7 @@ import { leadStatus } from "../hooks/status.js";
 import { Unreachable } from "../remote.js";
 import { agentSessions, pick, transportFor, transports } from "../transport.js";
 import { isHuman, readRecent, readTail } from "../messages.js";
-import { allRecs, IN_REVIEW, isLocal, onBoard, type Rec, recPrs, statesOf, WAITING_ON_YOU } from "../state.js";
+import { allRecs, IN_REVIEW, isLocal, onBoard, type Rec, recPrs, STATES, statesOf, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { roster } from "../config.js";
 import { capitalize, run, sleep } from "../util.js";
@@ -389,7 +389,9 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
     // in building or fixing it read as if the PR were approved.
     design: r.design?.slides ? { slides: r.design.slides, canvas: r.design.canvas } : null,
   }));
-  const columns = columnsOf(statesOf(ws));
+  // An item left in colleague-review after the switch went off keeps its column, so it is seen;
+  // doctor and the round say how to move it.
+  const columns = columnsOf(STATES.filter((s) => statesOf(ws).includes(s) || recs.some((r) => r.state === s)));
   const idx = (s: string | null) => (s !== null && columns.includes(s) ? columns.indexOf(s) : 99);
   tickets.sort((a, b) => idx(a.column) - idx(b.column) || (b.age_min ?? 0) - (a.age_min ?? 0));
   const descriptions = Object.fromEntries(Object.entries(DESCRIPTIONS).map(([k, v]) => [k, v.replaceAll("{human}", human).replaceAll("{lead}", leadName)]));

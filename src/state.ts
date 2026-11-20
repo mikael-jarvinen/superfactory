@@ -31,9 +31,9 @@ export const TRANSITIONS: Record<State, ReadonlySet<Target>> = {
 };
 // The states this workspace uses: all of them, less colleague-review where [gate] colleague_review is
 // false. Nothing moves an item into a state the workspace has turned off, --force included.
-export const statesOf = (ws: Workspace): readonly State[] =>
-  ws.config.gate.colleagueReview ? STATES : STATES.filter((s) => s !== "colleague-review");
-const usable = (ws: Workspace, to: Target) => to === OFF || statesOf(ws).includes(to);
+export const usesState = (ws: Workspace, s: State): boolean => s !== "colleague-review" || ws.config.gate.colleagueReview;
+export const statesOf = (ws: Workspace): readonly State[] => STATES.filter((s) => usesState(ws, s));
+const usable = (ws: Workspace, to: Target) => to === OFF || usesState(ws, to);
 export const COLLEAGUE_REVIEW_OFF =
   "colleague review is off in this workspace ([gate] colleague_review = false); from your-review an item goes to done";
 

@@ -309,8 +309,8 @@ test("the round: a PR open outside colleague review, or a draft in it, is flagge
   assert.doesNotMatch(r.stdout, /WEB-7: /, "a draft stacked on another PR's branch keeps its draft");
 });
 
-// With [gate] colleague_review = false nothing opens a PR for colleagues, so its draft state is the
-// human's (undrafted to merge), and the round says nothing about it either way.
+// With [gate] colleague_review = false nothing opens a PR for colleagues, so in your-review its draft
+// state is the human's (undrafted to merge), and the round says nothing about it either way.
 test("the round: with colleague review off, an open PR in your-review is not flagged", () => {
   const { ws, run } = watcherWorkspace(`${JIRA}\n[gate]\ncolleague_review = false\n`);
   const state = (...a: string[]) => assert.equal(factory(ws, ["state", ...a]).status, 0, a.join(" "));
@@ -325,6 +325,42 @@ test("the round: with colleague review off, an open PR in your-review is not fla
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /-- gates: PRs on GitHub against the store --\n-- CI/, "nothing under gates");
   assert.doesNotMatch(r.stdout, /colleague review/);
+});
+
+test("the round: with colleague review off, an undraft before your-review is still flagged, and a stranded item is named", () => {
+  const { ws, run } = watcherWorkspace(`${JIRA}\n[gate]\ncolleague_review = true\n`);
+  const state = (...a: string[]) => assert.equal(factory(ws, ["state", ...a]).status, 0, a.join(" "));
+  state("WEB-2", "building");
+  state("WEB-2", "pr-open", "--pr", "acme/web#2", "--head", "aaa2222");
+  state("WEB-2", "blocked", "--note", "x");
+  state("WEB-2", "building");
+  state("WEB-4", "building");
+  state("WEB-4", "pr-open", "--pr", "acme/web#4", "--head", "aaa4444");
+  state("WEB-4", "agent-review");
+  state("WEB-4", "fixing", "--evidence", "1 high");
+  state("WEB-5", "building");
+  state("WEB-5", "pr-open", "--pr", "acme/web#5", "--head", "aaa5555");
+  state("WEB-5", "your-review", "--reviewed", "aaa5555", "--force");
+  state("WEB-5", "colleague-review");
+  state("WEB-8", "building");
+  state("WEB-8", "colleague-review", "--force");
+  // Turned off after WEB-5 and WEB-8 went to colleagues.
+  const toml = join(ws, "factory.toml");
+  writeFileSync(toml, readFileSync(toml, "utf8").replace("colleague_review = true", "colleague_review = false"));
+  const pr = (n: number, isDraft: boolean) =>
+    ({ number: n, title: `WEB-${n}: x`, headRefName: `WEB-${n}`, state: "OPEN", isDraft, mergedAt: null, headRefOid: `aaa${String(n).repeat(4)}`, baseRefName: "main" });
+  const r = run(["watch", "round", "--facts"], [], {
+    "pr list -R acme/web --state all": { stdout: [pr(2, false), pr(4, false), pr(5, true)] },
+    "pr list -R acme/api --state all": { stdout: [] },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /WEB-2: acme\/web#2 is open while building -- should be a draft until your-review/);
+  assert.match(r.stdout, /WEB-4: acme\/web#4 is open while fixing -- should be a draft until your-review/);
+  for (const t of ["WEB-5", "WEB-8"])
+    assert.match(r.stdout, new RegExp(`  ${t}: stranded in colleague-review -- colleague review is off in this workspace .*; see factory doctor`));
+  assert.doesNotMatch(r.stdout, /pr-open-for-review/, "no pointer to a command that refuses");
+  const gates = r.stdout.split("-- gates:")[1]!.split("\n-- ")[0]!;
+  assert.doesNotMatch(gates, /WEB-5: acme/, "a stranded item's draft PR gets the stranded line only");
 });
 
 test("the round tells the lead what escalates in one note, once a day, and moves nothing it could not tell", () => {
