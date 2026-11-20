@@ -16,6 +16,7 @@ import { splitlines } from "../util.js";
 import { api, type CheckRun, checkRuns, commitPulls, type CommitStatus, gh, json, prCommits, prView, type Review, reviewComments, reviews, statuses, Unreadable } from "./github.js";
 import { MEDIA_BEGIN } from "./media.js";
 import { seconds } from "./send.js";
+import { translationsAt } from "./translations.js";
 
 export type FailureKind = "fatal" | "waits" | "unreadable";
 
@@ -105,7 +106,7 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
     fail(`mergeable=${pr.mergeable} mergeStateStatus=${pr.mergeStateStatus}`);
   }
 
-  const cmp = api<{ behind_by?: number }>(`repos/${repo.remote}/compare/${base}...${sha}`);
+  const cmp = api<{ behind_by?: number; merge_base_commit?: { sha?: string } }>(`repos/${repo.remote}/compare/${base}...${sha}`);
   if (typeof cmp?.behind_by !== "number") fail(`COULD NOT READ how far ${sha} is behind ${base} -- not the same thing as up to date`, "unreadable");
   // Behind is a remark, not a failure: on a busy base the branch falls behind while its own checks
   // run, and the human rebases before merging. A conflict still fails, through mergeable above.
@@ -287,6 +288,12 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
     else if (p >= volume) prose = `${p} added prose/comment lines (against ${c} of code), at or over [gate] prose_remark = ${volume}`;
   }
   if (prose) remarks.push(prose);
+
+  // TRANSLATIONS. Every text the PR adds or starts using has a text in every language at the head.
+  const t = translationsAt(repo, sha, cmp?.merge_base_commit?.sha ?? base, diff.status === 0 ? diff.stdout : undefined);
+  for (const f of t.failures) fail(f);
+  for (const u of t.unreadable) fail(u, "unreadable");
+  if (t.remark) remarks.push(t.remark);
 
   // MEDIA. A PR that changes what the app shows carries screenshots; one that does not says so.
   if (!(pr.body ?? "").includes(MEDIA_BEGIN))

@@ -8,7 +8,8 @@ import { releaseForReview } from "../stacks/engine.js";
 import { loadRec, recPrs, transition } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
-import { gh, prView, resolveRepo } from "./github.js";
+import { api, gh, prView, resolveRepo } from "./github.js";
+import { translationsAt } from "./translations.js";
 
 const refused = (msg: string) => new FactoryError(`pr-open-for-review: REFUSED -- ${msg}`);
 
@@ -38,7 +39,19 @@ export function openForReview(ws: Workspace, ticket: string, out: (line: string)
     if (!p.reviewed_sha) bad.push(`${where}: the record has no reviewed sha for it`);
     else if (!pr.headRefOid.startsWith(p.reviewed_sha))
       bad.push(`${where}: head ${pr.headRefOid.slice(0, 7)} is not the reviewed sha ${p.reviewed_sha.slice(0, 7)}`);
-    else open.push({ remote: p.repo, n: p.number, draft: pr.isDraft });
+    else {
+      // The same translations check as pr-ready, asked again here, so a PR that never went through
+      // pr-send cannot reach colleagues without its texts either.
+      const diff = gh("pr", "diff", String(p.number), "--repo", repo.remote);
+      const cmp = api<{ merge_base_commit?: { sha?: string } }>(`repos/${repo.remote}/compare/${pr.baseRefName}...${pr.headRefOid}`);
+      const t = translationsAt(repo, pr.headRefOid, cmp?.merge_base_commit?.sha ?? pr.baseRefName, diff.status === 0 ? diff.stdout : undefined);
+      const problems = [...t.failures, ...t.unreadable];
+      if (problems.length) bad.push(`${where}: ${problems.join("; ")}`);
+      else {
+        out(`${where}: ${t.remark}`);
+        open.push({ remote: p.repo, n: p.number, draft: pr.isDraft });
+      }
+    }
   }
   if (bad.length) throw refused(`nothing opened:\n${bad.map((b) => `  ${b}`).join("\n")}`);
   if (!open.length) throw refused(`${ticket} has no open PR on its record`);
