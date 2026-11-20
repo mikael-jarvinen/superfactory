@@ -12,7 +12,7 @@ import { basename, join } from "node:path";
 import { fleetLines, owedNote, type Session } from "../fleet.js";
 import { type CheckRun, checkRuns, json } from "../gate/github.js";
 import { loaded, scheduleFix } from "../scheduler/index.js";
-import { allRecs, BUSY, COLLEAGUE_REVIEW_OFF, isLocal, keptOpen, OFF, onBoard, recPrs, stranded, usesState, WAITING_ON_LEAD, WAITING_ON_YOU } from "../state.js";
+import { allRecs, BUSY, COLLEAGUE_REVIEW_OFF, isLocal, keptOpen, OFF, onBoard, recPrs, stranded, undrafting, WAITING_ON_LEAD, WAITING_ON_YOU } from "../state.js";
 import { trackerOf } from "../tracker/read.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
@@ -148,7 +148,6 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
     if (!recs.length) return void out.push("  nothing open");
     // A PR is a draft until its item reaches the review where a human undrafts it; keptOpen says
     // which. An item left in colleague-review is stranded: said once, PR or not.
-    const colleagues = usesState(ws, "colleague-review");
     for (const rec of stranded(ws, recs))
       out.push(`  ${rec.ticket}: stranded in colleague-review -- ${COLLEAGUE_REVIEW_OFF}; see factory doctor`);
     for (const repo of Object.values(ws.config.repos)) {
@@ -177,8 +176,8 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
           // A PR stacked on another branch waits on that one and keeps its own draft state.
           else if (pr.baseRefName !== undefined && pr.baseRefName !== repo.base) continue;
           else if (pr.state === "OPEN" && pr.isDraft === false && !keptOpen(ws, rec))
-            out.push(`  ${where} is open while ${st} -- should be a draft until ${colleagues ? "colleague review" : "your-review"}`);
-          else if (pr.state === "OPEN" && pr.isDraft === true && st === "colleague-review" && colleagues)
+            out.push(`  ${where} is open while ${st} -- should be a draft until ${undrafting(ws)}`);
+          else if (pr.state === "OPEN" && pr.isDraft === true && st === "colleague-review" && st === undrafting(ws))
             out.push(`  ${where} is a draft while colleague-review -- should be open: factory pr-open-for-review ${rec.ticket}`);
         }
       }

@@ -301,8 +301,8 @@ test("the round: a PR open outside colleague review, or a draft in it, is flagge
     "pr list -R acme/api --state all": { stdout: [] },
   });
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /WEB-2: acme\/web#2 is open while pr-open -- should be a draft until colleague review/);
-  assert.match(r.stdout, /WEB-3: acme\/web#3 is open while your-review -- should be a draft until colleague review/);
+  assert.match(r.stdout, /WEB-2: acme\/web#2 is open while pr-open -- should be a draft until colleague-review/);
+  assert.match(r.stdout, /WEB-3: acme\/web#3 is open while your-review -- should be a draft until colleague-review/);
   assert.doesNotMatch(r.stdout, /WEB-4: /, "open in a fix round after colleague review");
   assert.match(r.stdout, /WEB-5: acme\/web#5 is a draft while colleague-review -- should be open: factory pr-open-for-review WEB-5/);
   assert.doesNotMatch(r.stdout, /WEB-6: /, "a draft before colleague review");

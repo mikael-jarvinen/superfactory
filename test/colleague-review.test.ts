@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import fs, { readFileSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { serve } from "../src/board/server.js";
 import { ConfigError, loadConfig } from "../src/config.js";
 import { stateChecks } from "../src/doctor.js";
 import { openForReview } from "../src/gate/open.js";
-import { transition } from "../src/state.js";
+import { allRecs, appendEvent, loadRec, transition } from "../src/state.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, TOML, tempWorkspace } from "./helpers.js";
 
@@ -158,4 +159,46 @@ test("the board keeps a colleague-review column while an item is stranded in it"
   const snap = (await (await fetch(board.url + "/api")).json()) as { columns: string[]; tickets: { ticket: string; column: string }[] };
   assert.ok(snap.columns.includes("colleague-review"), snap.columns.join(", "));
   assert.deepEqual(snap.tickets.map((t) => `${t.ticket} ${t.column}`), ["WEB-1 colleague-review"]);
+});
+
+test("records written before `reached` get it from the events log, read once until the log changes", () => {
+  const dir = tempWorkspace(OFF_TOML);
+  for (const t of ["WEB-1", "WEB-2", "WEB-3", "WEB-4"]) {
+    assert.equal(factory(dir, ["state", t, "building"]).status, 0);
+    assert.equal(factory(dir, ["state", t, "pr-open", "--pr", `acme/web#${t.slice(4)}`, "--head", "aaa1111"]).status, 0);
+  }
+  for (const t of ["WEB-1", "WEB-2"]) {
+    assert.equal(factory(dir, ["state", t, "your-review", "--reviewed", "aaa1111", "--force"]).status, 0);
+    assert.equal(factory(dir, ["state", t, "off", "--force"]).status, 0);
+  }
+  // Four records as written before the field: two have been in your-review, by the log only.
+  for (const t of ["WEB-1", "WEB-2", "WEB-3", "WEB-4"]) {
+    const f = join(dir, "state", `${t}.json`);
+    const { reached, ...old } = JSON.parse(readFileSync(f, "utf8")) as Record<string, unknown>;
+    assert.ok(Array.isArray(reached), t);
+    writeFileSync(f, JSON.stringify(old));
+  }
+  const ws = openWorkspace(dir);
+  const real = fs.readFileSync;
+  let reads = 0;
+  fs.readFileSync = ((p: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+    if (p === ws.events) reads++;
+    return (real as (...a: unknown[]) => unknown)(p, ...rest);
+  }) as typeof fs.readFileSync;
+  syncBuiltinESMExports();
+  try {
+    const reachedOf = () => Object.fromEntries(allRecs(ws).map((r) => [r.ticket, r.reached]));
+    const want = { "WEB-1": ["your-review"], "WEB-2": ["your-review"], "WEB-3": [], "WEB-4": [] };
+    for (let i = 0; i < 3; i++) assert.deepEqual(reachedOf(), want);
+    assert.deepEqual(loadRec(ws, "WEB-3")?.reached, []);
+    assert.equal(reads, 1, "four old records over three snapshots and a load read the log once");
+    appendEvent(ws, { t: new Date().toISOString(), ticket: "WEB-3", from: "pr-open", to: "your-review" });
+    assert.deepEqual(reachedOf(), { ...want, "WEB-3": ["your-review"] });
+    assert.equal(reads, 2, "a changed log is read again, once");
+    // Nothing is written on a read.
+    assert.equal((JSON.parse(readFileSync(join(dir, "state", "WEB-1.json"), "utf8")) as Record<string, unknown>).reached, undefined);
+  } finally {
+    fs.readFileSync = real;
+    syncBuiltinESMExports();
+  }
 });

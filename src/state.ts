@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type State, STATES } from "./config.js";
 import type { Workspace } from "./workspace.js";
@@ -44,9 +44,12 @@ export type ReviewState = (typeof REVIEW_STATES)[number];
 const isReview = (s: unknown): s is ReviewState => REVIEW_STATES.includes(s as ReviewState);
 // Mikael, 2026-10-16: a PR is a draft in every column but colleague review, and open there; once an
 // item has been with colleagues its PR stays open through the fix rounds after. With colleague
-// review off, your-review is where the human undrafts a PR to merge, so it counts as well.
+// review off, your-review is where the human undrafts a PR to merge.
+export const undrafting = (ws: Workspace): ReviewState => (usesState(ws, "colleague-review") ? "colleague-review" : "your-review");
+// An item that has been where its PR is undrafted keeps it open from then on. Colleague-review counts
+// with the switch off too: an item there before the switch went off has had its PR opened.
 export const keptOpen = (ws: Workspace, rec: Rec): boolean =>
-  (rec.reached ?? []).some((s) => s === "colleague-review" || !usesState(ws, "colleague-review"));
+  (rec.reached ?? []).some((s) => s === "colleague-review" || s === undrafting(ws));
 export const COLLEAGUE_REVIEW_OFF =
   "colleague review is off in this workspace ([gate] colleague_review = false); from your-review an item goes to done";
 
@@ -153,24 +156,26 @@ function migrated(ws: Workspace, rec: Rec): Rec {
 }
 
 // Each ticket's review states by the whole events log, not a tail of it: the log is never rotated,
-// so a tail loses the oldest entries. Read once per process and size of the log, and only for
-// records written before `reached`.
+// so a tail loses the oldest entries. Only records written before `reached` ask, and a record that
+// never moves again is never saved with the field, so this asks on every load. The log is stat'd
+// first and read only when its inode, size or mtime has changed since the last read in this process.
 let reachedMemo: { key: string; map: Map<string, Set<ReviewState>> } | null = null;
 function reachedByEvents(ws: Workspace): Map<string, Set<ReviewState>> {
-  let text = "";
-  try { text = readFileSync(ws.events, "utf8"); } catch { /* no events yet */ }
-  const key = `${ws.events}\0${text.length}`;
+  let key: string;
+  try {
+    const s = statSync(ws.events);
+    key = `${ws.events}\0${s.ino}\0${s.size}\0${s.mtimeMs}`;
+  } catch {
+    return new Map(); // no events yet
+  }
   if (reachedMemo?.key === key) return reachedMemo.map;
   const map = new Map<string, Set<ReviewState>>();
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    let e: Record<string, unknown>;
-    try { e = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
-    if (typeof e.ticket !== "string" || !isReview(e.to)) continue;
+  eachEvent(readFileSync(ws.events, "utf8"), (e) => {
+    if (typeof e.ticket !== "string" || !isReview(e.to)) return;
     const s = map.get(e.ticket) ?? new Set<ReviewState>();
     s.add(e.to);
     map.set(e.ticket, s);
-  }
+  });
   reachedMemo = { key, map };
   return map;
 }
@@ -192,6 +197,20 @@ export function removeRec(ws: Workspace, ticket: string): void {
 export function appendEvent(ws: Workspace, ev: Record<string, unknown>): void {
   mkdirSync(ws.stateDir, { recursive: true });
   appendFileSync(ws.events, pyDumps(ev, { sortKeys: true }) + "\n");
+}
+
+// Each event in the text of an events log, in order. A line torn by a crash costs that event only.
+export function eachEvent(text: string, f: (e: Record<string, unknown>) => void): void {
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let e: unknown;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (e && typeof e === "object" && !Array.isArray(e)) f(e as Record<string, unknown>);
+  }
 }
 
 export function allRecs(ws: Workspace): Rec[] {
