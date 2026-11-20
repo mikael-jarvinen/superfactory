@@ -29,6 +29,14 @@ export const TRANSITIONS: Record<State, ReadonlySet<Target>> = {
   "done": new Set(),
   "blocked": new Set([...STATES.filter((s) => s !== "blocked"), OFF]),
 };
+// The states this workspace uses: all of them, less colleague-review where [gate] colleague_review is
+// false. Nothing moves an item into a state the workspace has turned off, --force included.
+export const statesOf = (ws: Workspace): readonly State[] =>
+  ws.config.gate.colleagueReview ? STATES : STATES.filter((s) => s !== "colleague-review");
+const usable = (ws: Workspace, to: Target) => to === OFF || statesOf(ws).includes(to);
+export const COLLEAGUE_REVIEW_OFF =
+  "colleague review is off in this workspace ([gate] colleague_review = false); from your-review an item goes to done";
+
 // Where an item off the board goes back on, and where a new one starts.
 export const FROM_OFF: ReadonlySet<Target> = new Set(["designing", "building", "blocked"]);
 const FIRST: ReadonlySet<Target> = new Set(["designing", "building"]);
@@ -174,6 +182,7 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   if (next !== OFF && !(STATES as readonly string[]).includes(next))
     die(`unknown state ${pyRepr(next)}; states: ${STATES.join(", ")}, or ${OFF} to take it off the board`);
   const to = next as Target;
+  if (!usable(ws, to)) die(`${ticket}: ${to} refused -- ${COLLEAGUE_REVIEW_OFF}`);
   let rec = loadRec(ws, ticket);
   const isNew = rec === null;
   if (rec === null) {
@@ -193,10 +202,10 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   // How the item stood: an old state, off the board, or nothing yet.
   const was = isNew ? null : old ?? OFF;
   if (!isNew && !c.force) {
-    const allowed = old === null ? FROM_OFF : TRANSITIONS[old];
-    if (!allowed.has(to))
+    const allowed = [...(old === null ? FROM_OFF : TRANSITIONS[old])].filter((s) => usable(ws, s));
+    if (!allowed.includes(to))
       die(`${ticket}: ${old ?? OFF} -> ${to} is not a valid transition. From ${old ?? OFF} you can go to: ` +
-        `${[...allowed].sort().join(", ") || "nowhere, it is terminal"}. Use --force if you mean it.`);
+        `${allowed.sort().join(", ") || "nowhere, it is terminal"}. Use --force if you mean it.`);
   }
   const warnings: string[] = [];
   // Evidence rules. Refuse where a wrong claim reaches the human; warn elsewhere.

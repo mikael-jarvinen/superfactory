@@ -177,6 +177,8 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
             out.push(`  ${where} head moved to ${pr.headRefOid.slice(0, 7)} while ${st} (recorded ${rp.head.slice(0, 7)}) -- frozen PR pushed?`);
           // A PR stacked on another branch waits on that one and keeps its own draft state.
           else if (pr.baseRefName !== undefined && pr.baseRefName !== repo.base) continue;
+          // With colleague review off there is no column a PR opens in, so its draft state is the human's.
+          else if (!ws.config.gate.colleagueReview) continue;
           else if (pr.state === "OPEN" && pr.isDraft === false && st !== "colleague-review" && !withColleagues.has(rec.ticket))
             out.push(`  ${where} is open while ${st} -- should be a draft until colleague review`);
           else if (pr.state === "OPEN" && pr.isDraft === true && st === "colleague-review")

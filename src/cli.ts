@@ -141,7 +141,7 @@ usage: factory [--workspace <dir>] <command> [options]
                                   the link and the push text. It leaves the PR a draft.
   pr-open-for-review <TICKET>     open the item's draft PRs for colleague review, each only while its
                                   head is the reviewed sha, then record colleague-review. The one
-                                  undraft there is.
+                                  undraft there is. Refused where [gate] colleague_review = false.
   pr-wait <repo> <n> <reviewed-sha>
                                   wait while what is left is running or pending, then pr-send. Stops
                                   at once on anything waiting cannot clear, and before sending when
@@ -193,6 +193,7 @@ The workspace is --workspace, else $FACTORY_WORKSPACE, else the nearest factory.
 current directory. Only this program writes the state store.
 
 states: designing design-review building pr-open agent-review fixing gate your-review colleague-review done blocked
+colleague-review only where [gate] colleague_review is true, the default.
 Waiting work lives in the backlog. off takes an item off the board and keeps its record.`;
 
 class UsageError extends FactoryError {

@@ -309,6 +309,24 @@ test("the round: a PR open outside colleague review, or a draft in it, is flagge
   assert.doesNotMatch(r.stdout, /WEB-7: /, "a draft stacked on another PR's branch keeps its draft");
 });
 
+// With [gate] colleague_review = false nothing opens a PR for colleagues, so its draft state is the
+// human's (undrafted to merge), and the round says nothing about it either way.
+test("the round: with colleague review off, an open PR in your-review is not flagged", () => {
+  const { ws, run } = watcherWorkspace(`${JIRA}\n[gate]\ncolleague_review = false\n`);
+  const state = (...a: string[]) => assert.equal(factory(ws, ["state", ...a]).status, 0, a.join(" "));
+  state("WEB-3", "building");
+  state("WEB-3", "pr-open", "--pr", "acme/web#3", "--head", "aaa3333");
+  state("WEB-3", "your-review", "--reviewed", "aaa3333", "--force");
+  const pr = { number: 3, title: "WEB-3: x", headRefName: "WEB-3", state: "OPEN", isDraft: false, mergedAt: null, headRefOid: "aaa3333", baseRefName: "main" };
+  const r = run(["watch", "round", "--facts"], [], {
+    "pr list -R acme/web --state all": { stdout: [pr] },
+    "pr list -R acme/api --state all": { stdout: [] },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /-- gates: PRs on GitHub against the store --\n-- CI/, "nothing under gates");
+  assert.doesNotMatch(r.stdout, /colleague review/);
+});
+
 test("the round tells the lead what escalates in one note, once a day, and moves nothing it could not tell", () => {
   const { ws, run, logs, read, notes, jam, unjam } = watcherWorkspace();
   assert.equal(factory(ws, ["state", "WEB-2", "building", "--agent", "bea"]).status, 0);

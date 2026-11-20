@@ -10,7 +10,7 @@ import { leadStatus } from "../hooks/status.js";
 import { Unreachable } from "../remote.js";
 import { agentSessions, pick, transportFor, transports } from "../transport.js";
 import { isHuman, readRecent, readTail } from "../messages.js";
-import { allRecs, IN_REVIEW, isLocal, onBoard, type Rec, recPrs, STATES, WAITING_ON_YOU } from "../state.js";
+import { allRecs, IN_REVIEW, isLocal, onBoard, type Rec, recPrs, statesOf, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { roster } from "../config.js";
 import { capitalize, run, sleep } from "../util.js";
@@ -74,7 +74,8 @@ const DESCRIPTIONS: Record<string, string> = {
 // between a builder opening its PR and the review starting, which shows in agent-review. The state
 // machine keeps pr-open; only the picture folds it in.
 const FOLDED: Record<string, string> = { "pr-open": "agent-review" };
-const COLUMNS: readonly string[] = STATES.filter((s) => s !== "done" && !(s in FOLDED));
+// A workspace with colleague review off has no colleague-review column (statesOf).
+const columnsOf = (states: readonly string[]): readonly string[] => states.filter((s) => s !== "done" && !(s in FOLDED));
 const columnOf = (s: string | null): string | null => (s !== null && FOLDED[s]) || s;
 
 const ageMinutes = (iso: string | null | undefined): number | null => {
@@ -388,14 +389,15 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
     // in building or fixing it read as if the PR were approved.
     design: r.design?.slides ? { slides: r.design.slides, canvas: r.design.canvas } : null,
   }));
-  const idx = (s: string | null) => (s !== null && COLUMNS.includes(s) ? COLUMNS.indexOf(s) : 99);
+  const columns = columnsOf(statesOf(ws));
+  const idx = (s: string | null) => (s !== null && columns.includes(s) ? columns.indexOf(s) : 99);
   tickets.sort((a, b) => idx(a.column) - idx(b.column) || (b.age_min ?? 0) - (a.age_min ?? 0));
   const descriptions = Object.fromEntries(Object.entries(DESCRIPTIONS).map(([k, v]) => [k, v.replaceAll("{human}", human).replaceAll("{lead}", leadName)]));
   return {
     at: clock(),
     human,
     lead: lead(ws).name,
-    columns: COLUMNS,
+    columns,
     descriptions,
     waiting_on_you: [...WAITING_ON_YOU].sort(),
     teams: teams(ws, recs, sessions.background(), (n, s) => sessions.alive(n, s), (n) => sessions.unknown(n)),

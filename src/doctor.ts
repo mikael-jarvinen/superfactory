@@ -23,6 +23,7 @@ import { stackDoctor } from "./stacks/engine.js";
 import { trackerOf } from "./tracker/read.js";
 import { ask, probe, Unreachable } from "./remote.js";
 import { SCOPE } from "./scope.js";
+import { allRecs } from "./state.js";
 import { repoTransport } from "./transport.js";
 import { local } from "./transport.js";
 import { promptPath } from "./watchers/job.js";
@@ -224,6 +225,19 @@ export function workspaceFiles(ws: Workspace): Check[] {
   if (trackerOf(ws).reads) prompt("queue", "the queue watcher's prompt");
   for (const ff of cfg.watchers.facts)
     checks.push({ status: okIf(existsSync(ff.file)), what: `${shown(ws, ff.file)}, facts the round reads`, fix: "run whatever writes it, or take it out of [[watchers.facts]]" });
+
+  // Turning colleague review off strands an item already in it: no column shows it, and nothing
+  // moves anything into it. One line, only where the switch is off.
+  if (!cfg.gate.colleagueReview) {
+    const stranded = allRecs(ws).filter((r) => r.state === "colleague-review").map((r) => r.ticket);
+    checks.push({
+      status: okIf(!stranded.length),
+      what: stranded.length
+        ? `no item in colleague-review, which [gate] colleague_review = false turned off; in it: ${stranded.join(", ")}`
+        : "no item in colleague-review, which [gate] colleague_review = false turned off",
+      fix: "move each to done once merged, or to fixing: factory state <TICKET> done --evidence <merge sha>",
+    });
+  }
 
   for (const s of Object.values(cfg.stacks))
     if (s.script)
