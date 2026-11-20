@@ -17,6 +17,22 @@ import { api, gh, json } from "./github.js";
 
 export const MARKER = "> Written by agent.";
 
+// Aikido acts on `@AikidoSec ignore: <reason>` only when the comment starts with it: a reply that
+// starts with the marker is never read as the command (portal#3468, 2026-11-20). So in Aikido's own
+// threads, and only for that command, the reply is the command on its first line with the marker
+// straight after it. Mikael, 2026-11-20: "Do the second."
+export const AIKIDO_BOT = "aikido-pr-checks";
+const AIKIDO_IGNORE = /^@AikidoSec ignore: \S[^\n]*$/;
+
+// A body the factory posted: the marker first, or Aikido's ignore command with the marker on the
+// next line. The review watcher reads a body this way to tell the factory's from the human's own.
+export const isMarked = (body: string): boolean => {
+  const b = body.trimStart();
+  if (b.startsWith(MARKER)) return true;
+  const [first = "", second = ""] = b.split("\n");
+  return AIKIDO_IGNORE.test(first.trimEnd()) && second.trimEnd() === MARKER;
+};
+
 // A configured bot, as GitHub spells its login: an app account carries a [bot] suffix.
 export function isBot(bots: string[], login: string): boolean {
   const bare = login.replace(/\[bot\]$/, "");
@@ -37,7 +53,11 @@ export function comment(ws: Workspace, repo: Repo, n: number, a: CommentArgs, ou
   if (!ws.config.agents.some((x) => x.name === a.agent)) throw no(`${pyRepr(a.agent)} is not a fleet agent`);
   if (!existsSync(a.bodyFile)) throw no(`no such body file: ${a.bodyFile}`);
   if (statSync(a.bodyFile).size === 0) throw no(`body file is empty: ${a.bodyFile}`);
-  const text = `${MARKER}\n\n${readFileSync(a.bodyFile, "utf8")}`;
+  const given = readFileSync(a.bodyFile, "utf8");
+  const command = given.trimStart().startsWith("@AikidoSec");
+  if (command && !AIKIDO_IGNORE.test(given.trim()))
+    throw no(`a reply to Aikido may start with exactly one line, "@AikidoSec ignore: <reason>", and nothing else; any other reply starts with the marker`);
+  const text = command ? `${given.trim()}\n${MARKER}` : `${MARKER}\n\n${given}`;
 
   // Refuse to answer a human. A colleague's point goes to the human, who answers it.
   const author = api<{ user?: { login?: string } }>(`repos/${repo.remote}/pulls/comments/${a.replyTo}`)?.user?.login;
@@ -46,6 +66,8 @@ export function comment(ws: Workspace, repo: Repo, n: number, a: CommentArgs, ou
   if (!isBot(bots, author))
     throw no(`comment ${a.replyTo} is by '${author}', who is not one of the bots in github.bots (${bots.join(", ") || "none"}). ` +
       "Reply to bot review threads only; take a colleague's point to the human instead.");
+  if (command && author.replace(/\[bot\]$/, "") !== AIKIDO_BOT)
+    throw no(`"@AikidoSec ignore:" goes only in Aikido's own threads; comment ${a.replyTo} is by '${author}'`);
 
   if (a.dryRun) {
     out(`would reply to ${author} in ${repo.remote}#${n} thread ${a.replyTo} as ${a.agent}:`);

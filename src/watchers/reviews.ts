@@ -10,7 +10,7 @@
 // and rules for who wrote a comment and what it asks.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { MARKER } from "../gate/comment.js";
+import { isMarked } from "../gate/comment.js";
 import { allRecs, type Rec, recPrs } from "../state.js";
 import { squash } from "../util.js";
 import type { Workspace } from "../workspace.js";
@@ -183,7 +183,7 @@ export function prose(body: string): string {
 // factory's marker). null is a comment that is not news: the factory's own, a bot trigger the gate
 // posted, or a bot that only reports.
 // The factory's own: its sessions post under the human's login, marked (the guard holds them to it).
-export const isAgents = (body: string) => body.trimStart().startsWith(MARKER);
+export const isAgents = isMarked;
 
 export function kindOf(author: Author | null, body: string, viewer: string): Kind | null {
   if (isAgents(body) || /^@coderabbitai\b/.test(body.trim())) return null;

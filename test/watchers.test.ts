@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { run } from "../src/util.js";
 import { claudeArgs, type ClaudeRun, runFailure, TIMED_OUT, watcherGh } from "../src/watchers/job.js";
-import { reviewQuery } from "../src/watchers/reviews.js";
+import { isAgents, reviewQuery } from "../src/watchers/reviews.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, TOML, tempWorkspace } from "./helpers.js";
 
@@ -973,4 +973,12 @@ test("the review watcher reads a CodeRabbit finding as words and skips its revie
     "review: WEB-2 web#7 (colleague-review) https://github.com/acme/web/pull/7",
     '  - bot coderabbitai, finding, .claude/skills/teaching-deck/SKILL.md:40: "Minor · Functional Correctness · Quick win Resolve the PR head before reading its files. For a fork PR, the branch may not exist under `origin`. The prescribed `git show` command then fails, even t..." [thread PRRT_cr, comment 4599127982]',
   ].join("\n")]);
+});
+
+test("the review watcher reads Aikido's ignore command with the marker after it as the factory's, and nothing looser", () => {
+  assert.ok(isAgents("> Written by agent.\n\nFixed in abc1234."));
+  assert.ok(isAgents("@AikidoSec ignore: a dev script; its paths come from a fixed list.\n> Written by agent."));
+  assert.ok(!isAgents("@AikidoSec ignore: the human typed this"), "no marker: the human's own");
+  assert.ok(!isAgents("@AikidoSec ignore: two lines\nthen\n> Written by agent."), "the marker straight after, nowhere later");
+  assert.ok(!isAgents("Looks fine.\n> Written by agent."), "any other first line keeps the marker first");
 });
