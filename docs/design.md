@@ -48,7 +48,9 @@ src/
   messages.ts     say, messages, rotation
   notify.ts       desktop notification on macOS, nothing elsewhere
   board/          server.ts, inbox.ts, static/ (the page's HTML, CSS and JS as real files)
-  gate/           ready.ts, send.ts, wait.ts, delta.ts, comment.ts, media.ts, demo.ts
+  gate/           ready.ts, send.ts, wait.ts, delta.ts, comment.ts, media.ts, demo.ts,
+                  translations.ts (every new text has every language; by repo key: classic,
+                  portal, public, api, events; pr-ready and pr-open-for-review both ask it)
   stacks/         engine.ts (slot registry, allocation, placement), contract.ts (calling scripts)
   tracker/        jira.ts (driven by config), none.ts
   watchers/       queue.ts, round.ts, relay.ts; prompts come from the workspace

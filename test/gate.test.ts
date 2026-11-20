@@ -49,8 +49,8 @@ function green(over: Routes = {}, head = HEAD, draft = true): Routes {
 }
 
 // A workspace whose gh is the fake, with a record for the PR that is past its working states.
-function gateWorkspace(gate = "") {
-  const ws = tempWorkspace(`${TOML}\n[github]\nbots = ["coderabbitai", "Copilot"]\n\n[gate]\nprose_remark = 30\n${gate}`);
+function gateWorkspace(gate = "", toml = TOML) {
+  const ws = tempWorkspace(`${toml}\n[github]\nbots = ["coderabbitai", "Copilot"]\n\n[gate]\nprose_remark = 30\n${gate}`);
   after(() => rmSync(ws, { recursive: true, force: true }));
   const gh = join(ws, "bin", "gh");
   writeFileSync(gh, `#!/bin/sh\nexec "${process.execPath}" "${FAKE}" "$@"\n`);
@@ -625,6 +625,44 @@ test("pr-open-for-review opens the item's PRs at the reviewed sha, then records 
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /acme\/web#7 is already open/);
   assert.deepEqual(opens(r.calls), []);
+});
+
+// Mikael, 2026-11-20: "nothing should reach me in my review or colleagues review if it does not have
+// translations." Both doors ask: pr-ready, and pr-open-for-review for a PR that skipped pr-send.
+test("a new text missing a language is refused by pr-ready and by pr-open-for-review", () => {
+  // The same workspace with its repo keyed portal, which has the modules' text conventions.
+  assert.ok(TOML.includes("[repos.web]"), "the test config still names its repo web");
+  const toml = TOML.replace("[repos.web]", "[repos.portal]").replaceAll('"web"', '"portal"');
+  const { ws, run } = gateWorkspace("", toml);
+  const BASE = "b".repeat(40);
+  const diff = ["diff --git a/src/a.tsx b/src/a.tsx", "--- a/src/a.tsx", "+++ b/src/a.tsx", "@@ -1 +1,2 @@", "+<p>{t('show_more')}</p>"].join("\n") + "\n";
+  const file = (path: string) => `api repos/${REMOTE}/contents/${path}?ref=${HEAD}`;
+  const routes = (fi: string) => green({
+    [`pr diff ${N} --repo ${REMOTE}`]: { stdout: diff },
+    [`api repos/${REMOTE}/compare/main...${HEAD}`]: { stdout: { behind_by: 0, merge_base_commit: { sha: BASE } } },
+    [`api repos/${REMOTE}/contents/src/a.tsx?ref=${BASE}`]: { status: 1, stderr: "gh: Not Found (HTTP 404)" },
+    [file("locales")]: { stdout: [{ name: "en-GB" }, { name: "fi" }] },
+    [file("locales/en-GB/portal.json")]: { stdout: JSON.stringify({ show_more: "Show more" }) },
+    [file("locales/fi/portal.json")]: { stdout: JSON.stringify(fi ? { show_more: fi } : {}) },
+  });
+
+  let r = run(routes(""), ["pr-ready", "portal", String(N)]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /translations: show_more has no text in fi \(portal\)/);
+
+  r = run(routes("Näytä lisää"), ["pr-ready", "portal", String(N)]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /translations: 1 new key\(s\), each with a text in every language/);
+
+  assert.equal(factory(ws, ["state", "WEB-1", "your-review", "--reviewed", HEAD]).status, 0);
+  r = run(routes(""), ["pr-open-for-review", "WEB-1"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /acme\/web#7: translations: show_more has no text in fi \(portal\)/);
+  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [], "nothing opened");
+
+  r = run(routes("Näytä lisää"), ["pr-open-for-review", "WEB-1"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [`pr ready ${N} --repo ${REMOTE}`]);
 });
 
 // A PR stacked on another PR's branch waits for that one: CL-2284's #8351 sits on #8315's branch.
