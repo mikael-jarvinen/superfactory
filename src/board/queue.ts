@@ -15,11 +15,15 @@ import type { Workspace } from "../workspace.js";
 //   reply is posted);
 // - the lead marks it, with `factory handled` or `factory say --answers`, once an answer settles it;
 // - it is a `blocked` row or a blocked record, and the ticket has left `blocked` since (the state
-//   events log says when): the lead moved the ticket on, so the question was answered.
+//   events log says when): the lead moved the ticket on, so the question was answered;
+// - it is a `decision` row, and since it was posted the ticket has moved to another state, other
+//   than one where it waits on the human (blocked, design-review, your-review), or the lead has
+//   posted an `answer` on the ticket: the ticket has moved past the decision. Mikael, 2026-11-20:
+//   five decisions answered days before came back the moment their ticket was blocked.
 // Reading it never does, and neither does a message typed in the thread: a message has no reply-to,
 // so nothing here can tell which question it answers; the lead, who reads it, marks what it settles.
 // Questions asked before the queue was first read in
-// a workspace are left out unless their ticket is blocked now (see queue()).
+// a workspace are left out unless they are the question their ticket is blocked on now (see queue()).
 
 export const WAITING_KINDS: ReadonlySet<string> = new Set(["decision", "blocked"]);
 
@@ -125,25 +129,34 @@ function records(ws: Workspace): Map<string, Rec> {
   }
 }
 
-// When each ticket left blocked, from the state events log. That log is never rolled and grows for
-// the life of the workspace, so it is read once from the top and then only what was appended since,
-// and only the blocked exits are kept. A file replaced or cut short is read again from the top.
+// When each ticket left blocked, and when it moved past a decision, from the state events log. That
+// log is never rolled and grows for the life of the workspace, so it is read once from the top and
+// then only what was appended since, and only those times are kept. A file replaced or cut short is read again from the top.
 // Nothing rotates events.jsonl. A copytruncate that cut it and let it grow back past the offset
 // before the next read would go unseen, since the inode stays the same.
-const exits = new Map<string, { ino: number; offset: number; left: Map<string, number[]> }>();
+// States where a ticket waits on the human: the lead moves a ticket there to wait for the answer to
+// a decision it has just posted, so a move into one is not a move past the decision.
+const WAITS_ON_HUMAN: ReadonlySet<string> = new Set(["blocked", "design-review", "your-review"]);
+interface Moves {
+  // ticket -> when it left blocked
+  left: Map<string, number[]>;
+  // ticket -> when it moved to another state that does not wait on the human
+  moved: Map<string, number[]>;
+}
+const exits = new Map<string, { ino: number; offset: number } & Moves>();
 const CHUNK = 1024 * 1024;
-function unblocked(ws: Workspace): Map<string, number[]> {
+function moves(ws: Workspace): Moves {
   const path = ws.events;
   let st: { ino: number; size: number };
   try {
     const s = statSync(path);
     st = { ino: s.ino, size: s.size };
   } catch {
-    return new Map(); // no events yet
+    return { left: new Map(), moved: new Map() }; // no events yet
   }
   let c = exits.get(path);
-  if (!c || c.ino !== st.ino || st.size < c.offset) exits.set(path, (c = { ino: st.ino, offset: 0, left: new Map() }));
-  if (st.size === c.offset) return c.left;
+  if (!c || c.ino !== st.ino || st.size < c.offset) exits.set(path, (c = { ino: st.ino, offset: 0, left: new Map(), moved: new Map() }));
+  if (st.size === c.offset) return c;
   let fd: number | undefined;
   try {
     fd = openSync(path, "r");
@@ -156,11 +169,19 @@ function unblocked(ws: Workspace): Map<string, number[]> {
         c.offset += n; // a line longer than a chunk is no event of ours
         continue;
       }
+      const add = (m: Map<string, number[]>, ticket: string, t: number) => {
+        const ts = m.get(ticket);
+        if (ts) ts.push(t);
+        else m.set(ticket, [t]);
+      };
       for (const line of buf.subarray(0, end).toString("utf8").split("\n")) {
-        if (!line.includes('"blocked"')) continue;
+        if (!line.includes('"from"')) continue;
         try {
-          const e = JSON.parse(line) as { t?: string; ticket?: string; from?: string };
-          if (e.from === "blocked" && e.ticket && Number.isFinite(time(e.t))) c.left.set(e.ticket, [...(c.left.get(e.ticket) ?? []), time(e.t)]);
+          const e = JSON.parse(line) as { t?: string; ticket?: string; from?: string; to?: string };
+          const t = time(e.t);
+          if (!e.ticket || !Number.isFinite(t)) continue;
+          if (e.from === "blocked") add(c.left, e.ticket, t);
+          if (e.from !== e.to && !WAITS_ON_HUMAN.has(e.to ?? "")) add(c.moved, e.ticket, t);
         } catch {
           // a torn or foreign line
         }
@@ -172,7 +193,7 @@ function unblocked(ws: Workspace): Map<string, number[]> {
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
-  return c.left;
+  return c;
 }
 
 // How long before a ticket was blocked a row on it may be posted and still be the question the
@@ -187,14 +208,19 @@ function open(ws: Workspace, recs = records(ws)): { items: QueueItem[]; read: bo
   let rows = wholeLog(ws.messages);
   const read = rows !== null || !existsSync(ws.messages);
   rows ??= [];
-  const left = unblocked(ws);
+  const { left, moved } = moves(ws);
   const covers = new Map<string, string>();
   // A blocked row is answered once its ticket has left blocked since it was posted.
   const movedOn = (ticket: string, t: number) => (left.get(ticket) ?? []).some((u) => u >= t);
+  // A decision is passed once, after it, the ticket moved on or the lead answered on it.
+  const answers = new Map<string, number[]>();
+  for (const r of rows) if (r.kind === "answer" && r.ticket) answers.set(r.ticket, [...(answers.get(r.ticket) ?? []), time(r.t)]);
+  const passed = (ticket: string, t: number) => [moved, answers].some((m) => (m.get(ticket) ?? []).some((u) => u > t));
   const items: QueueItem[] = [];
   for (const r of rows) {
     if (isHuman(ws, r.kind) || !WAITING_KINDS.has(r.kind ?? "")) continue;
     if (r.kind === "blocked" && r.ticket && movedOn(r.ticket, time(r.t))) continue;
+    if (r.kind === "decision" && r.ticket && passed(r.ticket, time(r.t))) continue;
     items.push({ id: messageId(r), t: r.t ?? null, at: r.t ?? null, kind: r.kind!, ticket: r.ticket ?? null, text: r.text ?? "", link: r.link ?? null, from: "message" });
   }
   // A ticket blocked with a question that never reached the thread still waits on the human. A row
@@ -229,7 +255,10 @@ export function queue(ws: Workspace): QueueItem[] {
   const { items, covers } = open(ws, recs);
   if (h === "unreadable") return items; // everything, rather than hide a question behind a broken file
   const { start, handled } = h;
-  const blockedNow = (i: QueueItem) => !!i.ticket && recs.get(i.ticket)?.state === "blocked";
+  // History before the start shows only when it is what its ticket is blocked on now: a blocked
+  // row or record, or the row a blocked record was asked with. An older decision on a ticket that
+  // is blocked later does not come back with it.
+  const blockedNow = (i: QueueItem) => !!i.ticket && recs.get(i.ticket)?.state === "blocked" && (i.kind === "blocked" || covers.has(i.id));
   // Rows carry whole seconds, so a row posted in the second the start was set is after it.
   const from = start === null ? -Infinity : Math.floor(time(start) / 1000) * 1000;
   const done = (i: QueueItem) => i.id in handled || (covers.get(i.id) ?? "") in handled;
