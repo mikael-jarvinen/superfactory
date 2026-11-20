@@ -49,8 +49,8 @@ function green(over: Routes = {}, head = HEAD, draft = true): Routes {
 }
 
 // A workspace whose gh is the fake, with a record for the PR that is past its working states.
-function gateWorkspace(gate = "", toml = TOML) {
-  const ws = tempWorkspace(`${toml}\n[github]\nbots = ["coderabbitai", "Copilot"]\n\n[gate]\nprose_remark = 30\n${gate}`);
+function gateWorkspace(gate = "", toml = TOML, bots = ["coderabbitai", "Copilot"]) {
+  const ws = tempWorkspace(`${toml}\n[github]\nbots = ${JSON.stringify(bots)}\n\n[gate]\nprose_remark = 30\n${gate}`);
   after(() => rmSync(ws, { recursive: true, force: true }));
   const gh = join(ws, "bin", "gh");
   writeFileSync(gh, `#!/bin/sh\nexec "${process.execPath}" "${FAKE}" "$@"\n`);
@@ -762,6 +762,44 @@ test("pr-comment replies only inside a configured bot's thread", () => {
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout.trim(), "https://github.com/acme/web/pull/7#discussion_r13");
   assert.ok(r.calls.some((c) => c.startsWith(`api repos/${REMOTE}/pulls/${N}/comments/11/replies -f body=> Written by agent.`)));
+});
+
+// Aikido reads its ignore command only at the start of a comment (portal#3468, 2026-11-20).
+test("pr-comment puts Aikido's ignore command first, with the marker after it, only in Aikido's threads", () => {
+  const { ws, run } = gateWorkspace("", TOML, ["coderabbitai", "aikido-pr-checks"]);
+  const body = join(ws, "ignore.md");
+  const routes = {
+    [`api repos/${REMOTE}/pulls/comments/21`]: { stdout: { id: 21, user: { login: "aikido-pr-checks[bot]" } } },
+    [`api repos/${REMOTE}/pulls/comments/22`]: { stdout: { id: 22, user: { login: "coderabbitai[bot]" } } },
+    [`api repos/${REMOTE}/pulls/${N}/comments/21/replies`]: { stdout: { html_url: "https://github.com/acme/web/pull/7#discussion_r23" } },
+  };
+  const comment = (text: string, id: string, ...more: string[]) => {
+    writeFileSync(body, text);
+    return run(routes, ["pr-comment", "web", String(N), "bea", body, id, ...more]);
+  };
+
+  let r = comment("@AikidoSec ignore: a dev script; its paths come from a fixed list.\n", "21");
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.calls.some((c) => c === `api repos/${REMOTE}/pulls/${N}/comments/21/replies -f body=@AikidoSec ignore: a dev script; its paths come from a fixed list.\n> Written by agent.`),
+    r.calls.join("\n"));
+
+  // Only in Aikido's thread, only that command, only one line; anything else is refused before it posts.
+  for (const [text, id, why] of [
+    ["@AikidoSec ignore: fine\n", "22", /goes only in Aikido's own threads; comment 22 is by 'coderabbitai\[bot\]'/],
+    ["@AikidoSec snooze: later\n", "21", /exactly one line, "@AikidoSec ignore: <reason>"/],
+    ["@AikidoSec ignore: fine\nand a second line\n", "21", /exactly one line/],
+    ["@AikidoSec ignore:\n", "21", /exactly one line/],
+  ] as [string, string, RegExp][]) {
+    r = comment(text, id);
+    assert.equal(r.status, 1, text);
+    assert.match(r.stderr, why);
+    assert.ok(!r.calls.some((c) => c.includes("/replies")), text);
+  }
+
+  // Any other reply in Aikido's thread keeps the marker first.
+  r = comment("Not applicable: a dev script.\n", "21", "--dry-run");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /---\n> Written by agent\.\n\nNot applicable: a dev script\./);
 });
 
 // pr-media: media stamped at the head is the after set, exactly as it always was; media stamped at
