@@ -276,7 +276,8 @@ test("the round: a merge the record moved after is judged, one it did not is owe
 });
 
 // Mikael, 2026-10-16: a PR is a draft in every column but colleague review, and open there. After
-// colleague review it stays open through the fix rounds (2026-10-15).
+// colleague review it stays open through the fix rounds (2026-10-15). That is undrafting(ws) with the
+// switch on, as here; the tests below turn it off.
 test("the round: a PR open outside colleague review, or a draft in it, is flagged", () => {
   const { ws, run } = watcherWorkspace();
   const state = (...a: string[]) => assert.equal(factory(ws, ["state", ...a]).status, 0, a.join(" "));

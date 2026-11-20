@@ -119,6 +119,21 @@ test("the board has a colleague-review column only while the step is on", async 
   assert.deepEqual(await columns(OFF_TOML), all.filter((c) => c !== "colleague-review"));
 });
 
+test("the board says where a PR is undrafted: colleague-review while the step is on, your-review while off", async () => {
+  const descriptions = async (toml: string) => {
+    const board = await serve(openWorkspace(tempWorkspace(toml)), { host: "127.0.0.1", port: 0 });
+    after(() => board.close());
+    return (await (await fetch(board.url + "/api")).json()).descriptions as Record<string, string>;
+  };
+  const on = await descriptions(ON_TOML);
+  assert.match(on.gate!, /The PR stays a draft until the item reaches colleague-review\.$/);
+  assert.match(on["your-review"]!, /It stays a draft until colleague-review\.$/);
+  const off = await descriptions(OFF_TOML);
+  assert.match(off.gate!, /The PR stays a draft until the item reaches your-review\.$/);
+  assert.match(off["your-review"]!, / undrafts it here to merge it\.$/);
+  for (const d of [...Object.values(on), ...Object.values(off)]) assert.doesNotMatch(d, /\{/, d);
+});
+
 // An item that went into colleague-review while the switch was on, with the switch then turned off
 // in factory.toml, as a human would.
 function stranded(): string {

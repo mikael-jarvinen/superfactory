@@ -10,7 +10,7 @@ import { leadStatus } from "../hooks/status.js";
 import { Unreachable } from "../remote.js";
 import { agentSessions, pick, transportFor, transports } from "../transport.js";
 import { isHuman, readRecent, readTail } from "../messages.js";
-import { allRecs, IN_REVIEW, isLocal, onBoard, type Rec, recPrs, STATES, stranded, usesState, WAITING_ON_YOU } from "../state.js";
+import { allRecs, IN_REVIEW, isLocal, onBoard, type Rec, recPrs, STATES, stranded, undrafting, usesState, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { roster } from "../config.js";
 import { capitalize, run, sleep } from "../util.js";
@@ -61,9 +61,9 @@ const DESCRIPTIONS: Record<string, string> = {
     "session that has seen nothing before it.",
   "fixing": "The builder is back on the same item, closing every finding the review reported.",
   "gate": "The gate is asking every question about the current head and treating any absence as a " +
-    "failure. The PR stays a draft: it opens only when it goes to colleagues.",
-  "your-review": "{human}'s. The PR is a draft frozen at the sha that was reviewed, and nobody pushes over " +
-    "it without saying so first.",
+    "failure. The PR stays a draft until the item reaches {undrafting}.",
+  "your-review": "{human}'s. The PR is frozen at the sha that was reviewed, and nobody pushes over it " +
+    "without saying so first. {your-review draft}",
   "colleague-review": "{human} has asked the team, and the PR is open. {lead} watches GitHub and does nothing " +
     "until the merge lands.",
   "blocked": "{lead} asked {human} something and has no answer yet. The state underneath is kept, so " +
@@ -395,7 +395,12 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
   const columns = columnsOf(STATES.filter((s) => usesState(ws, s) || left.some((r) => r.state === s)));
   const idx = (s: string | null) => (s !== null && columns.includes(s) ? columns.indexOf(s) : 99);
   tickets.sort((a, b) => idx(a.column) - idx(b.column) || (b.age_min ?? 0) - (a.age_min ?? 0));
-  const descriptions = Object.fromEntries(Object.entries(DESCRIPTIONS).map(([k, v]) => [k, v.replaceAll("{human}", human).replaceAll("{lead}", leadName)]));
+  // Where the PR is undrafted is undrafting(ws): colleague-review, or your-review with the switch off.
+  const undraft = undrafting(ws);
+  const yourReviewDraft = undraft === "your-review" ? "{human} undrafts it here to merge it." : "It stays a draft until colleague-review.";
+  const descriptions = Object.fromEntries(Object.entries(DESCRIPTIONS).map(([k, v]) => [k, v
+    .replaceAll("{your-review draft}", yourReviewDraft).replaceAll("{undrafting}", undraft)
+    .replaceAll("{human}", human).replaceAll("{lead}", leadName)]));
   return {
     at: clock(),
     human,

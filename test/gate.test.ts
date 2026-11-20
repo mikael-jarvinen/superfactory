@@ -83,7 +83,7 @@ test("pr-ready asks about the head sha, and a missing answer is a failure", () =
   assert.match(r.stdout, /^SENDABLE/m);
   assert.ok(r.calls.includes(`api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`), "check-runs are read at the head sha");
 
-  // A draft is no failure: every PR is one until colleague review.
+  // A draft is no failure: every PR is one until its item reaches undrafting(ws).
   r = ready(green());
   assert.equal(r.status, 0, r.stdout);
   assert.doesNotMatch(r.stdout, /DRAFT/);
@@ -174,7 +174,7 @@ test("pr-wait waits on a running check, then stops before sending on prose volum
   assert.equal(r.calls.filter((c) => c === cr).length, 1);
 });
 
-// Mikael, 2026-10-16: a PR is a draft until it goes to colleagues. pr-send gates it as it is, checks the
+// Mikael, 2026-10-16: a PR is a draft until its item reaches undrafting(ws). pr-send gates it as it is, checks the
 // head is the reviewed sha before and after, and opens nothing.
 test("pr-send gates the PR as it is and refuses a head that is not the reviewed sha", () => {
   const { run } = gateWorkspace();
@@ -222,7 +222,7 @@ test("pr-send's gate read waits out what time clears, and stops at once on what 
   assert.match(r.stdout, /mergeability not computed yet/);
 });
 
-// Every PR is a draft until colleague review, and CodeRabbit skips drafts with a green status. With
+// Every PR is a draft until its item reaches undrafting(ws), and CodeRabbit skips drafts with a green status. With
 // no review bot required, that is only named.
 test("a review bot that skipped the draft is named as having reviewed nothing", () => {
   const { run } = gateWorkspace();
