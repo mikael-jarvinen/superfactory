@@ -17,6 +17,7 @@ import type { Workspace } from "../workspace.js";
 import { beat, logTo, openLog, watcherGh } from "./job.js";
 import { CONFLICT_WATCHED } from "./queue.js";
 import { deliver } from "./relay.js";
+import { DARK_WAKE, darkWake, markAsleep } from "./power.js";
 
 // What the watcher has read on each PR (owner/repo#n): the id of every comment and review in it,
 // told or not. Ids, not a time: a review is published when it is submitted, its inline comments keep
@@ -385,6 +386,12 @@ const graphqlErrors = (d: unknown): string => {
 // note is left. The heartbeat says GitHub was read; the round reads it.
 export function runReviews(ws: Workspace, out: (line: string) => void = console.log): number {
   const log = openLog(ws, "reviews");
+  if (darkWake()) {
+    logTo(log, `outcome=${DARK_WAKE}`);
+    markAsleep(ws, "reviews");
+    out("reviews: dark-wake");
+    return 0;
+  }
   const t0 = Date.now();
   const r = reviewComments(ws, allRecs(ws), log);
   const delivered = r.lines.length ? deliver(ws, ["[review watcher]", ...r.lines].join("\n")) : true;

@@ -21,6 +21,7 @@ import { failure, failuresLog } from "../failures.js";
 import { beat, heartbeatAge, logTo, openLog, watcherGh } from "./job.js";
 import { belongs, type GhPr, loadQueueState, withRecorded } from "./queue.js";
 import { deliver } from "./relay.js";
+import { asleepAge, DARK_WAKE, darkWake, lastSleep, markAsleep } from "./power.js";
 
 export interface Facts {
   text: string;
@@ -196,6 +197,12 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
   try { ciTold = JSON.parse(readFileSync(ciFile, "utf8")) as typeof ciTold; } catch { /* none told yet */ }
   const ciNext: typeof ciTold = {};
   const read = <T>(path: string) => json<T>(watcherGh(["api", path]));
+  // A read the Mac slept through fails at the next wake, and is read once more. One that still fails
+  // after a sleep is said as not read, not escalated: the next round reads it. Without a sleep it
+  // stays CANNOT read, so a check nobody could read is never taken for one that passed.
+  const sleptFrom = lastSleep();
+  const slept = () => { const s = lastSleep(); return s !== null && sleptFrom !== null && s > sleptFrom; };
+  const runsAt = (repo: Parameters<typeof checkRuns>[0], sha: string) => checkRuns(repo, sha, read) ?? (slept() ? checkRuns(repo, sha, read) : undefined);
   section("CI on PRs in review", () => {
     let any = false;
     for (const r of recs) {
@@ -210,8 +217,13 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
         if (!pr?.headRefOid) { keep(); out.push(`  ${where} CANNOT read its head`); continue; }
         if (pr.state !== "OPEN") continue;
         const head = pr.headRefOid;
-        const runs = checkRuns(repo, head, read);
-        if (!runs) { keep(); out.push(`  ${where} CANNOT read check-runs at ${head.slice(0, 7)}`); continue; }
+        const runs = runsAt(repo, head);
+        if (!runs) {
+          keep();
+          out.push(slept() ? `  ${where} not read at ${head.slice(0, 7)}: the Mac slept during the round; the next round reads it`
+            : `  ${where} CANNOT read check-runs at ${head.slice(0, 7)}`);
+          continue;
+        }
         // Mikael, 2026-10-09: "Ignore failing deep reviews.", as pr-ready does.
         const failed = [...latestByName(runs)].filter(([n, c]) => c.status === "completed" && CI_FAILED.has(c.conclusion ?? "") && !/deep review/i.test(n))
           .map(([n]) => n).sort();
@@ -220,7 +232,7 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
         const base = pr.baseRefName || repo.base;
         const cmp = read<{ behind_by?: number; base_commit?: { sha?: string } }>(`repos/${repo.remote}/compare/${base}...${head}`);
         const tip = cmp?.base_commit?.sha;
-        const onBase = tip ? checkRuns(repo, tip, read) : undefined;
+        const onBase = tip ? runsAt(repo, tip) : undefined;
         const latestOnBase = onBase && latestByName(onBase);
         const checks = failed.map((n) => `${n} (${latestOnBase ? standing(latestOnBase.get(n), base) : `unread on ${base}`})`);
         const behind = typeof cmp?.behind_by === "number" ? `${cmp.behind_by} behind ${base}` : `behind ${base}: unread`;
@@ -270,7 +282,7 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
     if (tracker.reads) {
       const a = heartbeatAge(ws, "queue");
       out.push(a === null ? "  queue heartbeat MISSING -- has it ever read the tracker?"
-        : `  queue heartbeat ${a}s ago${a > queueStaleS(ws) ? `  STALE (over ${Math.floor(queueStaleS(ws) / 60)} min: longer than a sleeping laptop explains)` : ""}`);
+        : `  queue heartbeat ${a}s ago${asleep(ws, "queue", a)}${stale(ws, "queue", a, queueStaleS(ws)) ? `  STALE (over ${Math.floor(queueStaleS(ws) / 60)} min: longer than a sleeping laptop explains)` : ""}`);
       // A stale heartbeat alone cannot say whether the job is not running or is running and cannot
       // reach the tracker, since an unavailable run deliberately skips the write. This separates them.
       const o = loadQueueState(ws).outcomes;
@@ -282,11 +294,11 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
     if ((ws.config.watchers.reviewsEveryMinutes ?? 5) > 0) {
       const r = heartbeatAge(ws, "reviews");
       out.push(r === null ? `  reviews heartbeat MISSING -- has it ever read GitHub? ${scheduleFix()}`
-        : `  reviews heartbeat ${r}s ago${r > reviewsStaleS(ws) ? `  STALE (over ${Math.floor(reviewsStaleS(ws) / 60)} min: new review comments are not being told)` : ""}`);
+        : `  reviews heartbeat ${r}s ago${asleep(ws, "reviews", r)}${stale(ws, "reviews", r, reviewsStaleS(ws)) ? `  STALE (over ${Math.floor(reviewsStaleS(ws) / 60)} min: new review comments are not being told)` : ""}`);
     }
     const a = heartbeatAge(ws, "round");
     out.push(a === null ? "  round heartbeat MISSING -- first run, or the round has never completed"
-      : `  previous round heartbeat ${a}s ago${a > ROUND_STALE_S ? "  STALE (over 130 min: a round was missed or could not tell the lead)" : ""}`);
+      : `  previous round heartbeat ${a}s ago${asleep(ws, "round", a)}${stale(ws, "round", a, ROUND_STALE_S) ? "  STALE (over 130 min: a round was missed or could not tell the lead)" : ""}`);
     out.push(...loaded(ws));
   });
 
@@ -351,6 +363,17 @@ function standing(c: CheckRun | undefined, base: string): string {
 }
 
 // Plumbing and the sessions: what says something is down.
+// A heartbeat is stale only when no run has found the Mac asleep within the same bound: a run that
+// started in a dark wake, or slept mid-run, shows the schedule ran and the Mac did not let it read.
+const stale = (ws: Workspace, name: string, age: number, bound: number) => {
+  const s = asleepAge(ws, name);
+  return age > bound && !(s !== null && s <= bound);
+};
+const asleep = (ws: Workspace, name: string, age: number) => {
+  const s = asleepAge(ws, name);
+  return s !== null && s < age ? ` (a run ${s}s ago found the Mac asleep)` : "";
+};
+
 const ALARM = (l: string) => /CANNOT|MISSING|STALE|FAILED|NOT (LOADED|RUNNING|SCHEDULED|INSTALLED)|connector is failing/.test(l);
 // The store's own flags, each already said-once by its marker.
 const STORE_FLAG = /OVER 90 MIN|over a working day|over 2 h --|NO SESSION:|UNKNOWN:|BLOCKER DONE:/;
@@ -376,6 +399,12 @@ export function news(ws: Workspace, lines: string[], at = Date.now()): { lines: 
 }
 
 export function runRound(ws: Workspace, opts: { factsOnly?: boolean } = {}, out: (line: string) => void = console.log): number {
+  if (!opts.factsOnly && darkWake()) {
+    logTo(openLog(ws, "round"), `outcome=${DARK_WAKE}`);
+    markAsleep(ws, "round");
+    out("round: dark-wake");
+    return 0;
+  }
   const facts = gatherFacts(ws);
   if (opts.factsOnly) {
     out(facts.text.trimEnd());
