@@ -268,7 +268,8 @@ const REVIEW_EVERY = 5 * 60_000;
 const prKey = (p: { repo?: string; number?: number }) => `${p.repo}#${p.number}`;
 
 function reviewKeys(ws: Workspace): string[] {
-  const keys = allRecs(ws).filter((r) => r.state !== null && IN_REVIEW.has(r.state)).flatMap((r) => recPrs(r).map(prKey));
+  // Every PR on a card: its assignees show at any state, its review standing only in review.
+  const keys = allRecs(ws).filter(onBoard).flatMap((r) => recPrs(r).map(prKey));
   return [...new Set(keys)];
 }
 
@@ -382,6 +383,7 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
       number: p.number ?? null,
       url: `https://github.com/${p.repo}/pull/${p.number}`,
       review: r.state !== null && IN_REVIEW.has(r.state) ? reviews.get(prKey(p)) : null,
+      assignees: reviews.get(prKey(p))?.assignees ?? [],
     })),
     // Mikael, 2026-11-16: the card must carry the design's slideset, from design-review through
     // the build. An item has one once a designer has sent it for review. No "approved" mark: on a card

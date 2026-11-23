@@ -2,9 +2,10 @@ import { execFile } from "node:child_process";
 import { ghBin } from "../gate/github.js";
 import { MAX_OUTPUT } from "../util.js";
 
-// Where each PR in review stands with its human reviewers, so the human can see from the board whether
-// a PR still has no reviews, has been reviewed, or is approved and ready to merge. GitHub is read in
-// the background, every PR in one GraphQL call, and the board is served the last answer.
+// Where each PR on the board stands: who it is assigned to, and, for a PR in review, its human
+// reviewers, so the human can see whether it still has no reviews, has been reviewed, or is approved
+// and ready to merge. GitHub is read in the background, every PR in one GraphQL call, and the board is
+// served the last answer.
 
 // The review-bot accounts. GraphQL types most of them as Bot already; the names cover an account
 // that comes back as a User.
@@ -25,6 +26,14 @@ export interface PrNode {
   author: Author | null;
   reviews: { nodes: { state: string; author: Author | null }[] };
   reviewThreads: { nodes: { isResolved: boolean; comments: { nodes: { author: Author | null }[] } }[] };
+  assignees?: { nodes: { login: string; name: string | null; avatarUrl: string }[] };
+}
+
+// Who a PR is assigned to, as the card shows them: the avatar, and the name or else the login.
+export interface Assignee {
+  login: string;
+  name: string;
+  avatar: string;
 }
 
 export type ReviewState = "none" | "commented" | "changes" | "approved" | "merged" | "closed";
@@ -38,6 +47,9 @@ export interface ReviewStatus {
   draft: boolean;
   // unresolved review threads a human reviewer opened
   threads: number;
+  // Mikael, 2026-11-23: "when there is a PR and it's assigned to somebody, I want to see the name
+  // and GH profile picture next to the PR link."
+  assignees: Assignee[];
 }
 
 // A reply in a review thread is filed as a COMMENTED review by whoever wrote it, so the PR's author
@@ -74,12 +86,15 @@ export function reviewStatus(pr: PrNode): ReviewStatus {
   else if (reviewers.length) state = "commented";
   else state = "none";
   const ready = state === "approved" && !draft && pr.mergeable === "MERGEABLE" && (pr.mergeStateStatus === "CLEAN" || pr.mergeStateStatus === "HAS_HOOKS");
-  return { state, reviewers, ready, conflicts, draft, threads };
+  const assignees = (pr.assignees?.nodes ?? []).filter((a) => a?.login)
+    .map((a) => ({ login: a.login, name: a.name?.trim() || a.login, avatar: a.avatarUrl }));
+  return { state, reviewers, ready, conflicts, draft, threads, assignees };
 }
 
 const PR_FIELDS = `state isDraft mergeable mergeStateStatus reviewDecision author { login __typename }
   reviews(last: 100) { nodes { state author { login __typename } } }
-  reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { author { login __typename } } } } }`;
+  reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { author { login __typename } } } } }
+  assignees(first: 10) { nodes { login name avatarUrl(size: 40) } }`;
 
 const OWNER_REPO = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/;
 
