@@ -58,3 +58,4 @@ td.who small{color:var(--mute);font-family:var(--mono);font-size:10.5px}
 .tip div span{display:inline-flex;align-items:center;gap:6px}
 .tip .tot{border-top:1px solid var(--line-soft);margin-top:4px;padding-top:4px}
 @media (max-width:640px){ .wrap{padding:12px 16px 32px} .tile .v{font-size:20px} }
+.tip small,td small{color:var(--faint);font-family:var(--mono);font-size:10.5px;margin-left:4px}
