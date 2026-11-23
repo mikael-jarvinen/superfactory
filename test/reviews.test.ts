@@ -102,6 +102,22 @@ test("one query for every PR, and its answer read back per PR", () => {
   assert.equal(parseAnswer(keys, "not json").size, 0);
 });
 
+// Mikael, 2026-11-23: "when there is a PR and it's assigned to somebody, I want to see the name and
+// GH profile picture next to the PR link."
+test("assignees come in the same query, each with a small avatar and the name, or the login without one", () => {
+  assert.match(prQuery(["o/r#1"]), /assignees\(first: 10\) \{ nodes \{ login name avatarUrl\(size: 40\) \} \}/);
+  const s = reviewStatus(pr({ assignees: { nodes: [
+    { login: "Lundis", name: "Lundis Lundqvist", avatarUrl: "https://avatars.githubusercontent.com/u/1?s=40&v=4" },
+    { login: "kim", name: "  ", avatarUrl: "https://avatars.githubusercontent.com/u/2?s=40&v=4" },
+  ] } }));
+  assert.deepEqual(s.assignees, [
+    { login: "Lundis", name: "Lundis Lundqvist", avatar: "https://avatars.githubusercontent.com/u/1?s=40&v=4" },
+    { login: "kim", name: "kim", avatar: "https://avatars.githubusercontent.com/u/2?s=40&v=4" },
+  ]);
+  assert.deepEqual(reviewStatus(pr()).assignees, [], "nobody assigned, nothing");
+  assert.deepEqual(reviewStatus(pr({ assignees: { nodes: [] } })).assignees, []);
+});
+
 test("a failed read keeps the previous answer and marks it stale", async () => {
   const answers = [
     JSON.stringify({ data: { r0: { p1: pr({}, [[user("kim"), "COMMENTED"]]), p2: pr() } } }),
@@ -122,8 +138,9 @@ test("a failed read keeps the previous answer and marks it stale", async () => {
   assert.equal(asked.length, 3, "one call per refresh, whatever the number of PRs");
 });
 
-// The badge reaches the card only for a PR in review, and the request is served from the cache.
-test("the snapshot carries the review of a PR in review", { skip: noInboxLock }, async () => {
+// The badge reaches the card only for a PR in review; the assignees for every PR on a card. The
+// request is served from the cache.
+test("the snapshot carries the review of a PR in review, and the assignees of any PR on a card", { skip: noInboxLock }, async () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
   process.env.CLAUDE_BIN = join(dir, "bin", "claude");
@@ -136,15 +153,20 @@ test("the snapshot carries the review of a PR in review", { skip: noInboxLock },
   const board = await serve(ws, {
     host: "127.0.0.1",
     port: 0,
-    reviews: async () => (calls++, JSON.stringify({ data: { r0: { p11: pr({ reviewDecision: "APPROVED", mergeStateStatus: "CLEAN" }, [[user("kim"), "APPROVED"]]) } } })),
+    reviews: async () => (calls++, JSON.stringify({ data: { r0: {
+      p11: pr({ reviewDecision: "APPROVED", mergeStateStatus: "CLEAN" }, [[user("kim"), "APPROVED"]]),
+      p12: pr({ assignees: { nodes: [{ login: "Lundis", name: null, avatarUrl: "https://avatars.githubusercontent.com/u/1?s=40&v=4" }] } }),
+    } } })),
   });
   after(() => board.close());
-  const snap = async () => (await (await fetch(board.url + "/api")).json()) as { tickets: { ticket: string; prs: { review: { state: string; ready: boolean } | null }[] }[] };
+  const snap = async () => (await (await fetch(board.url + "/api")).json()) as { tickets: { ticket: string; prs: { review: { state: string; ready: boolean } | null; assignees: { login: string; name: string; avatar: string }[] }[] }[] };
   for (let i = 0; i < 50 && !(await snap()).tickets.find((t) => t.ticket === "WEB-1")?.prs[0]?.review; i++) await new Promise((r) => setTimeout(r, 50));
   const s = await snap();
   const by = (k: string) => s.tickets.find((t) => t.ticket === k)?.prs[0];
   assert.deepEqual([by("WEB-1")?.review?.state, by("WEB-1")?.review?.ready], ["approved", true]);
-  assert.equal(by("WEB-2")?.review, null, "a PR still being built is not read");
+  assert.equal(by("WEB-2")?.review, null, "a PR still being built has no review badge");
+  assert.deepEqual(by("WEB-2")?.assignees, [{ login: "Lundis", name: "Lundis", avatar: "https://avatars.githubusercontent.com/u/1?s=40&v=4" }], "but shows who it is assigned to");
+  assert.deepEqual(by("WEB-1")?.assignees, [], "nobody assigned, nothing");
   for (let i = 0; i < 5; i++) await snap();
   assert.equal(calls, 1, "requests are served from the cache");
 });
