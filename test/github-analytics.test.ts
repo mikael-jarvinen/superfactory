@@ -10,7 +10,7 @@ import type { Workspace } from "../src/workspace.js";
 // grouped by person." The counting is a pure function of the cached PRs.
 
 const who = (login: string, bot = false): Person => ({ login, name: login, avatar: "", bot });
-const rv = (login: string, state: string, at: string, more: Partial<Review> = {}): Review => ({ state, at, author: who(login), reply: false, factory: false, ...more });
+const rv = (login: string, state: string, at: string, more: Partial<Review> = {}): Review => ({ state, at, author: who(login), factory: false, ...more });
 const pr = (over: Partial<Pr>): Pr => ({
   repo: "classic", number: 1, title: "t", url: "u", created: "2026-11-10T08:00:00Z", ready: null, merged: null, closed: null,
   state: "OPEN", draft: false, updated: "2026-11-20T08:00:00Z", author: who("author"), reviews: [], ...over,
@@ -49,34 +49,37 @@ test("PR traffic: opened, merged, closed unmerged and open at each day's end, by
   assert.equal(r.prs, 4);
 });
 
-test("only human reviews count: bots, the factory's replies, thread replies and the author's own are left out", () => {
+test("only human reviews count: bots, the factory's replies and the author's own are left out", () => {
   const p = pr({ reviews: [
     rv("lundis", "APPROVED", "2026-11-19T09:00:00Z"),
     rv("coderabbitai[bot]", "COMMENTED", "2026-11-19T09:00:00Z", { author: who("coderabbitai[bot]", true) }),
     rv("mikael", "COMMENTED", "2026-11-19T09:00:00Z", { factory: true }),
-    rv("kim", "COMMENTED", "2026-11-19T09:00:00Z", { reply: true }),
     rv("author", "COMMENTED", "2026-11-19T09:00:00Z"),
     rv("kim", "PENDING", "2026-11-19T09:00:00Z"),
   ] });
-  assert.deepEqual(p.reviews.map((r) => counts(r, p, false)), [true, false, false, false, false, false]);
-  assert.deepEqual(p.reviews.map((r) => counts(r, p, true)), [true, true, true, false, false, false], "the toggle brings back bots and the factory, never a thread reply or the author");
+  assert.deepEqual(p.reviews.map((r) => counts(r, p, false)), [true, false, false, false, false]);
+  assert.deepEqual(p.reviews.map((r) => counts(r, p, true)), [true, true, true, false, false], "the toggle brings back bots and the factory, never the author");
   const humans = report([p], { days: 2, repos: ["classic"], bots: false, now: NOW });
   assert.deepEqual(humans.people.map((x) => x.login), ["lundis"]);
   const all = report([p], { days: 2, repos: ["classic"], bots: true, now: NOW });
   assert.deepEqual(all.people.map((x) => x.login).sort(), ["coderabbitai[bot]", "lundis", "mikael"]);
 });
 
-test("reviews, approvals and changes requested per day, grouped by person", () => {
+test("reviews, approvals and changes requested per day, grouped by person: one review per reviewer, PR and day", () => {
   const prs = [
     pr({ number: 1, reviews: [rv("lundis", "APPROVED", "2026-11-19T09:00:00Z"), rv("kim", "CHANGES_REQUESTED", "2026-11-19T21:30:00Z"), rv("kim", "APPROVED", "2026-11-20T08:00:00Z")] }),
-    pr({ number: 2, reviews: [rv("lundis", "COMMENTED", "2026-11-20T08:00:00Z"), rv("lundis", "APPROVED", "2026-11-20T09:00:00Z"), rv("lundis", "DISMISSED", "2026-11-01T09:00:00Z")] }),
+    // Lundis comments, replies twice in threads and approves on the 20th: one review, an approval
+    pr({ number: 2, reviews: [rv("lundis", "COMMENTED", "2026-11-20T08:00:00Z"), rv("lundis", "COMMENTED", "2026-11-20T08:05:00Z"), rv("lundis", "COMMENTED", "2026-11-20T08:10:00Z"),
+      rv("lundis", "APPROVED", "2026-11-20T09:00:00Z"), rv("lundis", "DISMISSED", "2026-11-01T09:00:00Z")] }),
+    // three thread replies on one day: one review, a comment
+    pr({ number: 3, reviews: [rv("kim", "COMMENTED", "2026-11-19T10:00:00Z"), rv("kim", "COMMENTED", "2026-11-19T11:00:00Z"), rv("kim", "COMMENTED", "2026-11-19T12:00:00Z")] }),
   ];
   const r = report(prs, { days: 2, repos: ["classic"], bots: false, now: NOW });
   // kim's 21:30 UTC change request is the 19th's 23:30 in Helsinki
-  assert.deepEqual(r.reviews.reviews, { lundis: [1, 2], kim: [1, 1] });
+  assert.deepEqual(r.reviews.reviews, { lundis: [1, 1], kim: [2, 1] });
   assert.deepEqual(r.reviews.approvals, { lundis: [1, 1], kim: [0, 1] });
   assert.deepEqual(r.reviews.changes, { kim: [1, 0] });
-  assert.deepEqual(r.people.map((p) => [p.login, p.reviews, p.approvals, p.changes, p.comments]), [["lundis", 3, 2, 0, 1], ["kim", 2, 1, 1, 0]], "the review before the range is not counted");
+  assert.deepEqual(r.people.map((p) => [p.login, p.reviews, p.approvals, p.changes, p.comments]), [["kim", 3, 1, 1, 1], ["lundis", 2, 2, 0, 0]], "the review before the range is not counted");
 });
 
 test("medians run from opening, or from the first undrafting, to the first human review and to merge", () => {
@@ -94,32 +97,35 @@ test("medians run from opening, or from the first undrafting, to the first human
   assert.deepEqual(r.medians, { firstReviewHours: 3, firstReviewN: 2, mergeHours: 7, mergeN: 2 });
 });
 
-test("a PR from GitHub: opened as a draft when its first draft event made it ready, thread replies and factory replies marked", () => {
+test("a PR from GitHub: opened as a draft when its first draft event made it ready, the factory's replies marked", () => {
   const raw = {
     number: 8763, title: "AI plan", url: "u", createdAt: "2026-11-10T06:00:00Z", updatedAt: "2026-11-20T06:00:00Z", mergedAt: null, closedAt: null, state: "OPEN", isDraft: false,
     author: { login: "mikael-jarvinen", __typename: "User", avatarUrl: "a", name: "Mikael" },
     timelineItems: { nodes: [{ __typename: "ReadyForReviewEvent", createdAt: "2026-11-18T06:00:00Z" }] },
     reviews: { nodes: [
-      { state: "COMMENTED", submittedAt: "2026-11-19T06:00:00Z", body: "", author: { login: "Lundis", __typename: "User", avatarUrl: "b", name: null }, comments: { nodes: [{ body: "agreed", replyTo: { id: "x" } }] } },
-      { state: "COMMENTED", submittedAt: "2026-11-19T07:00:00Z", body: "", author: { login: "mikael-jarvinen", __typename: "User", avatarUrl: "a", name: "Mikael" }, comments: { nodes: [{ body: "> Written by agent.\n\nFixed.", replyTo: { id: "y" } }] } },
-      { state: "APPROVED", submittedAt: "2026-11-19T08:00:00Z", body: "LGTM", author: { login: "copilot-pull-request-reviewer", __typename: "Bot", avatarUrl: "c" }, comments: { nodes: [] } },
+      { state: "COMMENTED", submittedAt: "2026-11-19T06:00:00Z", body: "", author: { login: "Lundis", __typename: "User", avatarUrl: "b", name: null } },
+      { state: "COMMENTED", submittedAt: "2026-11-19T07:00:00Z", body: "> Written by agent.\n\nFixed.", author: { login: "mikael-jarvinen", __typename: "User", avatarUrl: "a", name: "Mikael" } },
+      { state: "APPROVED", submittedAt: "2026-11-19T08:00:00Z", body: "LGTM", author: { login: "copilot-pull-request-reviewer", __typename: "Bot", avatarUrl: "c" } },
       { state: "PENDING", submittedAt: null, body: "", author: { login: "kim", __typename: "User", avatarUrl: "d", name: "Kim" } },
     ] },
   };
   const p = toPr("lyytioy/lyyti-classic", raw, new Set(["coderabbitai"]));
   assert.equal(p.ready, "2026-11-18T06:00:00Z");
-  assert.deepEqual(p.reviews.map((r) => [r.author?.login, r.author?.name, r.reply, r.factory, r.author?.bot]), [
-    ["Lundis", "Lundis", true, false, false],
-    ["mikael-jarvinen", "Mikael", true, true, false],
-    ["copilot-pull-request-reviewer", "copilot-pull-request-reviewer", false, false, true],
+  assert.deepEqual(p.reviews.map((r) => [r.author?.login, r.author?.name, r.factory, r.author?.bot]), [
+    ["Lundis", "Lundis", false, false],
+    ["mikael-jarvinen", "Mikael", true, false],
+    ["copilot-pull-request-reviewer", "copilot-pull-request-reviewer", false, true],
   ], "a pending review has no submittedAt and is left out");
   const converted = toPr("r", { ...raw, timelineItems: { nodes: [{ __typename: "ConvertToDraftEvent", createdAt: "2026-11-12T06:00:00Z" }] } }, new Set());
   assert.equal(converted.ready, null, "opened ready and converted later: timed from opening");
 });
 
-test("a PR a bot opened is traffic only with bots shown", () => {
-  const prs = [pr({ number: 1, created: "2026-11-19T08:00:00Z" }), pr({ number: 2, created: "2026-11-19T08:00:00Z", author: who("dependabot", true) })];
-  assert.deepEqual(report(prs, { days: 2, repos: ["classic"], bots: false, now: NOW }).traffic.opened.classic, [1, 0]);
+test("a PR a bot opened is traffic only with bots shown, and a person's review of it counts either way", () => {
+  const prs = [pr({ number: 1, created: "2026-11-19T08:00:00Z" }),
+    pr({ number: 2, created: "2026-11-19T08:00:00Z", author: who("dependabot", true), reviews: [rv("slipslop", "APPROVED", "2026-11-19T09:00:00Z")] })];
+  const off = report(prs, { days: 2, repos: ["classic"], bots: false, now: NOW });
+  assert.deepEqual(off.traffic.opened.classic, [1, 0]);
+  assert.deepEqual(off.reviews.approvals, { slipslop: [1, 0] }, "a human approving dependabot's PR is a human review");
   assert.deepEqual(report(prs, { days: 2, repos: ["classic"], bots: true, now: NOW }).traffic.opened.classic, [2, 0]);
 });
 

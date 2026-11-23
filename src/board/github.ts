@@ -41,8 +41,6 @@ export interface Review {
   state: string;
   at: string;
   author: Person | null;
-  // a reply inside an existing thread, which GitHub files as a COMMENTED review of its own
-  reply: boolean;
   // posted by the factory under the human's login, as its comment marker says
   factory: boolean;
 }
@@ -74,7 +72,7 @@ export interface Cache {
 
 const PERSON = "login __typename avatarUrl(size: 40) ... on User { name }";
 const QUERY = `query($q: String!, $after: String) {
-  search(query: $q, type: ISSUE, first: 50, after: $after) {
+  search(query: $q, type: ISSUE, first: 100, after: $after) {
     issueCount
     pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest {
@@ -83,11 +81,7 @@ const QUERY = `query($q: String!, $after: String) {
       timelineItems(itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT], first: 1) {
         nodes { __typename ... on ReadyForReviewEvent { createdAt } ... on ConvertToDraftEvent { createdAt } }
       }
-      reviews(first: 50) { nodes {
-        state submittedAt body
-        author { ${PERSON} }
-        comments(first: 1) { nodes { body replyTo { id } } }
-      } }
+      reviews(first: 100) { nodes { state submittedAt body author { ${PERSON} } } }
     } }
   }
   rateLimit { remaining resetAt }
@@ -112,7 +106,7 @@ interface RawPr {
   isDraft: boolean;
   author: RawPerson | null;
   timelineItems?: { nodes: { __typename?: string; createdAt?: string }[] };
-  reviews?: { nodes: { state: string; submittedAt: string | null; body: string | null; author: RawPerson | null; comments?: { nodes: { body: string | null; replyTo: { id: string } | null }[] } }[] };
+  reviews?: { nodes: { state: string; submittedAt: string | null; body: string | null; author: RawPerson | null }[] };
 }
 
 export type Graphql = (query: string, vars: Record<string, string>) => Promise<string>;
@@ -146,19 +140,19 @@ export function toPr(repo: string, n: RawPr, bots: Set<string>): Pr {
     draft: n.isDraft,
     updated: n.updatedAt,
     author: person(n.author, bots),
-    reviews: (n.reviews?.nodes ?? []).filter((r) => r.submittedAt).map((r) => {
-      const c = r.comments?.nodes?.[0];
-      return {
-        state: r.state,
-        at: r.submittedAt as string,
-        author: person(r.author, bots),
-        reply: !(r.body ?? "").trim() && !!c?.replyTo,
-        factory: isMarked(r.body ?? "") || isMarked(c?.body ?? ""),
-      };
-    }),
+    reviews: (n.reviews?.nodes ?? []).filter((r) => r.submittedAt).map((r) => ({
+      state: r.state,
+      at: r.submittedAt as string,
+      author: person(r.author, bots),
+      factory: isMarked(r.body ?? ""),
+    })),
   };
 }
 
+// A page costs 2 points. Asking for each review's first comment, to tell a reply in a thread from a
+// review, made it 52 (rateLimit dryRun, 2026-11-23), so reviews are counted per person, PR and day
+// instead (see report()), which folds a reviewer's replies into their review that day.
+//
 // GitHub's secondary rate limit refuses a run of heavy searches fired back to back ("API rate limit
 // exceeded", type RATE_LIMITED, with points to spare): on 2026-11-23 a first read of five repos was
 // cut off by it after ten minutes. So pages are paced, and a refused page waits and is asked again.
@@ -191,7 +185,7 @@ async function ask(gql: Graphql, vars: Record<string, string>): Promise<{ data?:
   }
 }
 
-// Every PR in one repo updated in a window, a page of 50 at a time; a window GitHub would cut at
+// Every PR in one repo updated in a window, a page of 100 at a time; a window GitHub would cut at
 // 1000 results is read as two halves.
 async function fetchWindow(gql: Graphql, remote: string, from: Date, to: Date, bots: Set<string>, out: Pr[]): Promise<void> {
   const q = `repo:${remote} is:pr updated:${from.toISOString().slice(0, 19)}Z..${to.toISOString().slice(0, 19)}Z`;
@@ -367,10 +361,10 @@ const median = (xs: number[]): number | null => {
   return s.length % 2 ? (s[m] as number) : ((s[m - 1] as number) + (s[m] as number)) / 2;
 };
 
-// A review that counts: submitted, not a reply inside a thread, not the PR's own author answering,
-// and, unless bots are shown, by a person rather than a bot or the factory.
+// A review that counts: submitted, not the PR's own author answering in its threads, and, unless bots
+// are shown, by a person rather than a bot or the factory.
 export function counts(r: Review, pr: Pr, bots: boolean): boolean {
-  if (!r.author || r.reply || r.state === "PENDING") return false;
+  if (!r.author || r.state === "PENDING") return false;
   if (pr.author && r.author.login === pr.author.login) return false;
   return bots || (!r.author.bot && !r.factory);
 }
@@ -385,8 +379,7 @@ export function report(prs: Pr[], o: Options): Report {
   const last = days[days.length - 1] as string;
   const zeros = () => days.map(() => 0);
   const wanted = new Set(o.repos);
-  // A PR a bot opened (dependabot, the dependency and autofix apps) is traffic only with bots shown.
-  const mine = prs.filter((p) => wanted.has(p.repo) && (o.bots || !p.author?.bot));
+  const mine = prs.filter((p) => wanted.has(p.repo));
 
   const traffic: Report["traffic"] = { opened: {}, merged: {}, closed: {}, open: {} };
   for (const r of o.repos) for (const m of Object.keys(traffic) as (keyof Report["traffic"])[]) traffic[m][r] = zeros();
@@ -401,7 +394,38 @@ export function report(prs: Pr[], o: Options): Report {
     (series[key] ??= zeros())[i] = (series[key]![i] ?? 0) + 1;
   };
 
+  const reviewsOf = (p: Pr) => {
+    // One review per reviewer, PR and Helsinki day: GitHub files every reply in a thread as a review of
+    // its own, so a reviewer answering five times is still one review that day. It is an approval if
+    // they approved that day, a change request if they asked for changes, and a comment otherwise.
+    const sittings = new Map<string, { who: Person; day: string; states: Set<string> }>();
+    for (const r of p.reviews) {
+      if (!counts(r, p, o.bots)) continue;
+      const day = dayOf(r.at);
+      if (day < first || day > last) continue;
+      const who = r.author as Person;
+      const key = `${who.login}\0${day}`;
+      const s = sittings.get(key) ?? { who, day, states: new Set<string>() };
+      s.states.add(r.state);
+      sittings.set(key, s);
+    }
+    for (const { who, day, states } of sittings.values()) {
+      const c = people.get(who.login) ?? { ...who, reviews: 0, approvals: 0, changes: 0, comments: 0 };
+      c.reviews++;
+      bump(reviews.reviews, who.login, day);
+      if (states.has("APPROVED")) { c.approvals++; bump(reviews.approvals, who.login, day); }
+      if (states.has("CHANGES_REQUESTED")) { c.changes++; bump(reviews.changes, who.login, day); }
+      if (!states.has("APPROVED") && !states.has("CHANGES_REQUESTED")) c.comments++;
+      people.set(who.login, c);
+    }
+  };
+
   for (const p of mine) {
+    // A PR a bot opened (dependabot, the dependency and autofix apps) is PR traffic only with bots
+    // shown; a person's review of it is a review either way.
+    const counted = o.bots || !p.author?.bot;
+    reviewsOf(p);
+    if (!counted) continue;
     bump(traffic.opened, p.repo, dayOf(p.created));
     if (p.merged) bump(traffic.merged, p.repo, dayOf(p.merged));
     else if (p.closed) bump(traffic.closed, p.repo, dayOf(p.closed));
@@ -411,20 +435,6 @@ export function report(prs: Pr[], o: Options): Report {
     days.forEach((d, i) => {
       if (from <= d && (until === null || until > d)) traffic.open[p.repo]![i]! += 1;
     });
-
-    for (const r of p.reviews) {
-      if (!counts(r, p, o.bots)) continue;
-      const day = dayOf(r.at);
-      if (day < first || day > last) continue;
-      const who = r.author as Person;
-      const c = people.get(who.login) ?? { ...who, reviews: 0, approvals: 0, changes: 0, comments: 0 };
-      c.reviews++;
-      bump(reviews.reviews, who.login, day);
-      if (r.state === "APPROVED") { c.approvals++; bump(reviews.approvals, who.login, day); }
-      else if (r.state === "CHANGES_REQUESTED") { c.changes++; bump(reviews.changes, who.login, day); }
-      else c.comments++;
-      people.set(who.login, c);
-    }
 
     // From opening, or from the first undrafting of a PR opened as a draft. A PR still a draft has
     // not started.
