@@ -8,8 +8,8 @@ const view = {
   pr: q.get('pr') || 'opened',
   rv: q.get('rv') || 'reviews',
 };
-const PR_METRICS = { opened: 'Opened', merged: 'Merged', closed: 'Closed unmerged', open: "Open at day's end" };
-const RV_METRICS = { reviews: 'Reviews', approvals: 'Approvals', changes: 'Changes requested' };
+const PR_METRICS = { opened: 'Opened', merged: 'Merged', closed: 'Closed unmerged', open: "Open at day's end", lines: 'Lines changed' };
+const RV_METRICS = { reviews: 'Reviews', approvals: 'Approvals', changes: 'Changes requested', lines: 'Lines reviewed' };
 // The reviewers who get a colour of their own; the rest are Other.
 const PEOPLE_SHOWN = 7;
 let last = null;
@@ -20,6 +20,11 @@ const fmtDay = (d, long) => {
 };
 const hours = h => h == null ? '–' : h < 1 ? Math.round(h * 60) + ' min' : h < 48 ? (Math.round(h * 10) / 10) + ' h' : (Math.round(h / 24 * 10) / 10) + ' d';
 const sum = xs => xs.reduce((a, b) => a + b, 0);
+const num = n => Number(n).toLocaleString('en-GB');
+// an axis number: 12k rather than 12000
+const tick = n => n >= 10000 ? Math.round(n / 1000) + 'k' : n >= 1000 ? (Math.round(n / 100) / 10) + 'k' : String(n);
+// a series value as the tooltip and the table say it: lines changed carry their added and removed halves
+const said = (s, i) => s.split ? `${num(s.values[i] || 0)} <small>+${num(s.split.added[i] || 0)} −${num(s.split.deleted[i] || 0)}</small>` : num(s.values[i] || 0);
 const slot = i => i < 8 ? `var(--c${i + 1})` : 'var(--cother)';
 const avatar = p => p && p.avatar ? `<img class="av" src="${esc(p.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '';
 
@@ -37,16 +42,17 @@ const apiUrl = () => `/api/github?days=${view.days}&repos=${encodeURIComponent(v
 // A stacked bar per day: series [{key,label,color,values}], one value per day. The hit area of a
 // day spans its whole column, and its tooltip lists every series that day.
 function bars(id, days, series, unit){
-  const W = 960, H = 220, L = 34, B = 22, T = 8;
+  const W = 960, H = 220, L = 40, B = 22, T = 8;
   const totals = days.map((_, i) => sum(series.map(s => s.values[i] || 0)));
   const max = Math.max(1, ...totals);
-  const step = max <= 4 ? 1 : max <= 10 ? 2 : Math.ceil(max / 4 / 5) * 5;
+  const raw = max / 4, mag = Math.pow(10, Math.floor(Math.log10(Math.max(1, raw))));
+  const step = max <= 4 ? 1 : max <= 10 ? 2 : [1, 2, 2.5, 5, 10].map(m => m * mag).find(x => x >= raw);
   const top = Math.ceil(max / step) * step;
   const y = v => T + (H - T - B) * (1 - v / top);
   const band = (W - L) / days.length, bw = Math.max(2, Math.min(28, band * 0.7));
   const every = days.length <= 10 ? 1 : days.length <= 31 ? 5 : 14;
   let g = '';
-  for(let v = 0; v <= top; v += step) g += `<line class="grid" x1="${L}" x2="${W}" y1="${y(v)}" y2="${y(v)}"/><text class="axis" x="${L - 6}" y="${y(v) + 3}" text-anchor="end">${v}</text>`;
+  for(let v = 0; v <= top; v += step) g += `<line class="grid" x1="${L}" x2="${W}" y1="${y(v)}" y2="${y(v)}"/><text class="axis" x="${L - 6}" y="${y(v) + 3}" text-anchor="end">${tick(v)}</text>`;
   days.forEach((d, i) => {
     const x = L + band * i + (band - bw) / 2;
     const idxFromEnd = days.length - 1 - i;
@@ -73,7 +79,7 @@ function legend(series){
 }
 
 function table(days, series){
-  const rows = days.map((d, i) => `<tr><td>${esc(fmtDay(d, true))}</td>${series.map(s => `<td>${s.values[i] || 0}</td>`).join('')}<td>${sum(series.map(s => s.values[i] || 0))}</td></tr>`).reverse().join('');
+  const rows = days.map((d, i) => `<tr><td>${esc(fmtDay(d, true))}</td>${series.map(s => `<td>${said(s, i)}</td>`).join('')}<td>${num(sum(series.map(s => s.values[i] || 0)))}</td></tr>`).reverse().join('');
   return `<details class="tbl"><summary>table</summary><div class="scroll"><table><thead><tr><th>day</th>${series.map(s => `<th>${esc(s.label)}</th>`).join('')}<th>total</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
 }
 
@@ -81,9 +87,9 @@ const charts = {};
 function tipFor(el){
   const c = charts[el.dataset.chart], i = +el.dataset.i;
   if(!c) return;
-  const rows = c.series.filter(s => (s.values[i] || 0) > 0).map(s => `<div><span><i class="sw" style="background:${s.color}"></i>${s.icon || ''}${esc(s.label)}</span><span>${s.values[i]}</span></div>`).join('');
+  const rows = c.series.filter(s => (s.values[i] || 0) > 0).map(s => `<div><span><i class="sw" style="background:${s.color}"></i>${s.icon || ''}${esc(s.label)}</span><span>${said(s, i)}</span></div>`).join('');
   const tip = document.getElementById('tip');
-  tip.innerHTML = `<b>${esc(fmtDay(c.days[i], true))} · ${esc(c.unit)}</b>${rows || '<div>none</div>'}<div class="tot"><span>total</span><span>${sum(c.series.map(s => s.values[i] || 0))}</span></div>`;
+  tip.innerHTML = `<b>${esc(fmtDay(c.days[i], true))} · ${esc(c.unit)}</b>${rows || '<div>none</div>'}<div class="tot"><span>total</span><span>${num(sum(c.series.map(s => s.values[i] || 0)))}</span></div>`;
   tip.hidden = false;
   const r = el.getBoundingClientRect(), tw = tip.offsetWidth;
   tip.style.left = Math.max(8, Math.min(scrollX + r.left + r.width / 2 - tw / 2, scrollX + document.documentElement.clientWidth - tw - 8)) + 'px';
@@ -112,7 +118,8 @@ function render(d){
 
   // repos keep their configured colour whatever the filter
   const repoColor = k => slot(d.repos.findIndex(x => x.key === k));
-  const prSeries = r.repos.map(k => ({ key: k, label: d.repos.find(x => x.key === k)?.name || k, color: repoColor(k), values: r.traffic[view.pr][k] || [] }));
+  const prSeries = r.repos.map(k => ({ key: k, label: d.repos.find(x => x.key === k)?.name || k, color: repoColor(k), values: r.traffic[view.pr][k] || [],
+    split: view.pr === 'lines' ? { added: r.traffic.added[k] || [], deleted: r.traffic.deleted[k] || [] } : null }));
   // reviewers by their overall rank, the first seven with a colour, the rest folded into Other
   const people = Object.fromEntries(r.people.map(p => [p.login, p]));
   const top = d.rank.slice(0, PEOPLE_SHOWN);
@@ -124,6 +131,7 @@ function render(d){
   const total = m => sum(Object.values(r.traffic[m]).map(sum));
   const openNow = sum(Object.values(r.traffic.open).map(v => v[v.length - 1] || 0));
   const rvTotal = m => sum(Object.values(r.reviews[m]).map(sum));
+  const added = total('added'), deleted = total('deleted');
   charts.pr = { days: r.days, series: prSeries, unit: PR_METRICS[view.pr] };
   charts.rv = { days: r.days, series: rvSeries, unit: RV_METRICS[view.rv] };
 
@@ -143,7 +151,8 @@ function render(d){
       <div class="tile"><div class="v">${rvTotal('approvals')}</div><div class="l">approvals</div></div>
       <div class="tile"><div class="v">${hours(r.medians.firstReviewHours)}</div><div class="l">median to first review · ${r.medians.firstReviewN} PRs</div></div>
       <div class="tile"><div class="v">${hours(r.medians.mergeHours)}</div><div class="l">median to merge · ${r.medians.mergeN} PRs</div></div>
-    </div></section>
+      <div class="tile"><div class="v">${num(added + deleted)}</div><div class="l">lines merged · +${num(added)} −${num(deleted)}</div></div>
+    </div><p class="note">Lines are additions plus deletions as GitHub counts them, and include lockfiles and generated files.</p></section>
     <section class="card">
       <h2>PR traffic</h2>
       <div class="chips">${Object.entries(PR_METRICS).map(([k, l]) => `<button class="chip ${k === view.pr ? 'on' : ''}" data-pr="${k}" aria-pressed="${k === view.pr}">${esc(l)}</button>`).join('')}</div>
@@ -158,8 +167,8 @@ function render(d){
     </section>
     <section class="card">
       <h2>Reviewers</h2>
-      ${r.people.length ? `<div class="scroll"><table><thead><tr><th>reviewer</th><th>reviews</th><th>approvals</th><th>changes requested</th><th>comments</th></tr></thead><tbody>${r.people.map(p =>
-        `<tr><td class="who"><span class="p">${avatar(p)}${esc(p.name)}${p.name !== p.login ? ` <small>${esc(p.login)}</small>` : ''}${p.bot ? ' <small>bot</small>' : ''}</span></td><td>${p.reviews}</td><td>${p.approvals}</td><td>${p.changes}</td><td>${p.comments}</td></tr>`).join('')}</tbody></table></div>` : '<p class="note">nobody reviewed in this range</p>'}
+      ${r.people.length ? `<div class="scroll"><table><thead><tr><th>reviewer</th><th>reviews</th><th>approvals</th><th>changes requested</th><th>comments</th><th>lines reviewed</th></tr></thead><tbody>${r.people.map(p =>
+        `<tr><td class="who"><span class="p">${avatar(p)}${esc(p.name)}${p.name !== p.login ? ` <small>${esc(p.login)}</small>` : ''}${p.bot ? ' <small>bot</small>' : ''}</span></td><td>${p.reviews}</td><td>${p.approvals}</td><td>${p.changes}</td><td>${p.comments}</td><td>${num(p.lines)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="note">nobody reviewed in this range</p>'}
     </section>`;
 }
 

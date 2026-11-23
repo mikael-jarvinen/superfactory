@@ -196,3 +196,73 @@ test("a read stops while the fleet's GraphQL points run low, and goes on from th
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Mikael, 2026-11-23: "In PR traffic and review traffic I also want to view the amount of lines changed."
+test("lines changed: merged PRs' additions plus deletions per day by repo, and each review counts its PR's size", () => {
+  const prs = [
+    pr({ number: 1, merged: "2026-11-19T10:00:00Z", closed: "2026-11-19T10:00:00Z", state: "MERGED", additions: 120, deletions: 30,
+      reviews: [rv("lundis", "COMMENTED", "2026-11-19T08:00:00Z"), rv("lundis", "APPROVED", "2026-11-19T09:00:00Z"), rv("kim", "APPROVED", "2026-11-20T08:00:00Z")] }),
+    pr({ number: 2, merged: "2026-11-19T22:30:00Z", closed: "2026-11-19T22:30:00Z", state: "MERGED", additions: 5, deletions: 5 }), // the 20th in Helsinki
+    pr({ number: 3, repo: "portal", merged: "2026-11-20T08:00:00Z", closed: "2026-11-20T08:00:00Z", state: "MERGED", additions: 1000, deletions: 0 }),
+    pr({ number: 4, closed: "2026-11-19T10:00:00Z", state: "CLOSED", additions: 999, deletions: 999 }), // closed unmerged: no lines merged
+    pr({ number: 5, merged: "2026-11-19T10:00:00Z", closed: "2026-11-19T10:00:00Z", state: "MERGED", additions: undefined, deletions: undefined }), // read before lines were
+  ];
+  const r = report(prs, { days: 2, repos: ["classic", "portal"], bots: false, now: NOW });
+  assert.deepEqual(r.traffic.lines, { classic: [150, 10], portal: [0, 1000] });
+  assert.deepEqual(r.traffic.added, { classic: [120, 5], portal: [0, 1000] });
+  assert.deepEqual(r.traffic.deleted, { classic: [30, 5], portal: [0, 0] });
+  // Lundis's two reviews of #1 on the 19th are one review: its 150 lines once
+  assert.deepEqual(r.reviews.lines, { lundis: [150, 0], kim: [0, 150] });
+  assert.deepEqual(r.people.map((p) => [p.login, p.lines]), [["kim", 150], ["lundis", 150]]);
+});
+
+test("a cache read before lines were is read again from the start, keeping its PRs meanwhile", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sf-gh-"));
+  try {
+    const was = { ...pacing };
+    Object.assign(pacing, { pageMs: 0, limitedMs: 0 });
+    const ws = { logsDir: dir, config: { github: { bots: [] } } } as unknown as Workspace;
+    const { writeFileSync } = await import("node:fs");
+    const old = { repos: { "o/r": { fetched: "2026-11-20T09:00:00.000Z", complete: true, prs: { 7: pr({ repo: "o/r", number: 7 }) } } } };
+    writeFileSync(join(dir, "github-analytics.json"), JSON.stringify(old));
+    const asked: string[] = [];
+    const gql = async (_q: string, v: Record<string, string>) => {
+      asked.push(v.q ?? "");
+      return JSON.stringify({ data: { search: { issueCount: 0, pageInfo: { hasNextPage: false, endCursor: "" }, nodes: [] }, rateLimit: { remaining: 5000 } } });
+    };
+    await refreshCache(ws, ["o/r"], gql, new Date("2026-11-20T10:00:00Z"));
+    assert.match(asked[0]!, /updated:2026-08-15T10:00:00Z\.\./, "from the start of the kept window, not from the last read");
+    assert.ok(asked.some((a) => a.includes("is:open")), "and the old open PRs again");
+    const c = readCache(ws);
+    assert.equal(c.version, 2);
+    assert.ok(c.repos["o/r"]!.prs[7], "the PRs it had stay until read again");
+    asked.length = 0;
+    await refreshCache(ws, ["o/r"], gql, new Date("2026-11-20T10:30:00Z"));
+    assert.match(asked[0]!, /updated:2026-11-20T09:55:00Z\.\./, "once upgraded, only what changed");
+    Object.assign(pacing, was);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a page GitHub's gateway gives up on (HTTP 502) is asked again at half the size", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sf-gh-"));
+  try {
+    const was = { ...pacing };
+    Object.assign(pacing, { pageMs: 0, limitedMs: 0, failedMs: 0 });
+    const ws = { logsDir: dir, config: { github: { bots: [] } } } as unknown as Workspace;
+    const sizes: string[] = [];
+    const gql = async (_q: string, v: Record<string, string>) => {
+      if (v.q?.includes("is:open")) return JSON.stringify({ data: { search: { issueCount: 0, pageInfo: { hasNextPage: false, endCursor: "" }, nodes: [] } } });
+      sizes.push(v.first ?? "");
+      if (Number(v.first) > 25) return JSON.stringify({ errors: [{ message: "HTTP 502" }] });
+      return JSON.stringify({ data: { search: { issueCount: 0, pageInfo: { hasNextPage: false, endCursor: "" }, nodes: [] } } });
+    };
+    const r = await refreshCache(ws, ["o/r"], gql, new Date("2026-08-20T10:00:00Z"));
+    assert.deepEqual(r.failed, []);
+    assert.deepEqual(sizes.slice(0, 3), ["100", "50", "25"]);
+    Object.assign(pacing, was);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

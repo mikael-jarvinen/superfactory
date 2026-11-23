@@ -58,11 +58,19 @@ export interface Pr {
   state: string;
   draft: boolean;
   updated: string;
+  // lines added and removed, as GitHub counts them when read: lockfiles and generated files included
+  additions?: number;
+  deletions?: number;
   author: Person | null;
   reviews: Review[];
 }
 
+// A cache written before a field the page counts was read, re-read once from the start of the kept
+// window: version 2 brought the lines each PR changes.
+const CACHE_VERSION = 2;
+
 export interface Cache {
+  version?: number;
   // per repo remote: read up to `fetched`, whether the first read is done (every step, and the open
   // PRs older than the kept window), and its PRs by number
   repos: Record<string, { fetched: string; complete?: boolean; prs: Record<string, Pr> }>;
@@ -71,12 +79,12 @@ export interface Cache {
 // ---------------------------------------------------------------- reading GitHub
 
 const PERSON = "login __typename avatarUrl(size: 40) ... on User { name }";
-const QUERY = `query($q: String!, $after: String) {
-  search(query: $q, type: ISSUE, first: 100, after: $after) {
+const QUERY = `query($q: String!, $after: String, $first: Int!) {
+  search(query: $q, type: ISSUE, first: $first, after: $after) {
     issueCount
     pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest {
-      number title url createdAt updatedAt mergedAt closedAt state isDraft
+      number title url createdAt updatedAt mergedAt closedAt state isDraft additions deletions
       author { ${PERSON} }
       timelineItems(itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT], first: 1) {
         nodes { __typename ... on ReadyForReviewEvent { createdAt } ... on ConvertToDraftEvent { createdAt } }
@@ -104,6 +112,8 @@ interface RawPr {
   closedAt: string | null;
   state: string;
   isDraft: boolean;
+  additions?: number;
+  deletions?: number;
   author: RawPerson | null;
   timelineItems?: { nodes: { __typename?: string; createdAt?: string }[] };
   reviews?: { nodes: { state: string; submittedAt: string | null; body: string | null; author: RawPerson | null }[] };
@@ -114,7 +124,17 @@ export type Graphql = (query: string, vars: Record<string, string>) => Promise<s
 const ghGraphql: Graphql = (query, vars) =>
   new Promise((resolve) => {
     const args = ["api", "graphql", "-f", `query=${query}`, ...Object.entries(vars).flatMap(([k, v]) => ["-F", `${k}=${v}`])];
-    execFile(ghBin(), args, { timeout: 120_000, maxBuffer: MAX_OUTPUT }, (_err, stdout) => resolve(stdout || ""));
+    // gh prints GitHub's JSON answer, errors included. Anything else (nothing, or a gateway's HTML
+    // error page) becomes an error carrying what gh said, "HTTP 502" or a timeout, so a failed read
+    // says why and ask() can tell a passing failure.
+    execFile(ghBin(), args, { timeout: 120_000, maxBuffer: MAX_OUTPUT }, (err, stdout, stderr) => {
+      try {
+        JSON.parse(stdout);
+        resolve(stdout);
+      } catch {
+        resolve(JSON.stringify({ errors: [{ message: String(stderr || err?.message || "gh printed no JSON").trim().split("\n")[0] }] }));
+      }
+    });
   });
 
 export function person(p: RawPerson | null | undefined, bots: Set<string>): Person | null {
@@ -139,6 +159,8 @@ export function toPr(repo: string, n: RawPr, bots: Set<string>): Pr {
     state: n.state,
     draft: n.isDraft,
     updated: n.updatedAt,
+    additions: n.additions ?? 0,
+    deletions: n.deletions ?? 0,
     author: person(n.author, bots),
     reviews: (n.reviews?.nodes ?? []).filter((r) => r.submittedAt).map((r) => ({
       state: r.state,
@@ -156,14 +178,18 @@ export function toPr(repo: string, n: RawPr, bots: Set<string>): Pr {
 // GitHub's secondary rate limit refuses a run of heavy searches fired back to back ("API rate limit
 // exceeded", type RATE_LIMITED, with points to spare): on 2026-11-23 a first read of five repos was
 // cut off by it after ten minutes. So pages are paced, and a refused page waits and is asked again.
-export const pacing = { pageMs: 1500, limitedMs: 60_000, tries: 4, reserve: 1500 };
+// A page of 100 PRs with their line counts can also time out behind GitHub's gateway (HTTP 502, the
+// same day, an hour of classic with 400 PRs updated in it), or come back cut short (gh: "unexpected end of
+// JSON input"): that page is asked again at half the size.
+export const pacing = { pageMs: 1500, limitedMs: 60_000, failedMs: 5_000, tries: 4, reserve: 1500, page: 100, minPage: 10 };
 
 // The GraphQL points are the whole fleet's: the gate, the review watcher and the board's badges all
 // spend them. A read stops while fewer than pacing.reserve are left, and goes on at a later refresh.
 export class BudgetLow extends Error {}
 const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function ask(gql: Graphql, vars: Record<string, string>): Promise<{ data?: Record<string, unknown> }> {
+async function ask(gql: Graphql, asked: Record<string, string>): Promise<{ data?: Record<string, unknown> }> {
+  const vars = { first: String(pacing.page), ...asked };
   for (let i = 1; ; i++) {
     const raw = await gql(QUERY, vars);
     let d: { data?: Record<string, unknown>; errors?: { type?: string; message?: string }[] } = {};
@@ -173,6 +199,12 @@ async function ask(gql: Graphql, vars: Record<string, string>): Promise<{ data?:
       // not JSON: gh itself failed; asked again below like a refusal
     }
     const limited = !d.data && (!raw || (d.errors ?? []).some((e) => e.type === "RATE_LIMITED" || /rate limit/i.test(e.message ?? "")));
+    const passing = !d.data && !limited && (d.errors ?? []).some((e) => /HTTP 5\d\d|time(d)? ?out|ETIMEDOUT|ECONNRESET|no JSON|something went wrong|unexpected (end of JSON|EOF)/i.test(e.message ?? ""));
+    if (passing && i < pacing.tries) {
+      vars.first = String(Math.max(pacing.minPage, Math.floor(Number(vars.first) / 2)));
+      await sleepMs(pacing.failedMs * i);
+      continue;
+    }
     if (!limited || i >= pacing.tries) {
       await sleepMs(pacing.pageMs);
       if (!d.data) throw new Error((d.errors ?? []).map((e) => e.message).join("; ") || "no answer from GitHub");
@@ -223,10 +255,21 @@ export const cacheFile = (ws: Workspace) => join(ws.logsDir, "github-analytics.j
 export function readCache(ws: Workspace): Cache {
   try {
     const c = JSON.parse(readFileSync(cacheFile(ws), "utf8")) as Cache;
-    return c && typeof c.repos === "object" ? c : { repos: {} };
+    return c && typeof c.repos === "object" ? c : { version: CACHE_VERSION, repos: {} };
   } catch {
-    return { repos: {} };
+    return { version: CACHE_VERSION, repos: {} };
   }
+}
+
+// An older cache keeps its PRs, so the page shows them while the new read runs, and is read again
+// from the start of the kept window, step by step as a first read is.
+function upgrade(c: Cache, keepFrom: Date): void {
+  if ((c.version ?? 1) >= CACHE_VERSION) return;
+  for (const entry of Object.values(c.repos)) {
+    entry.fetched = keepFrom.toISOString();
+    entry.complete = false;
+  }
+  c.version = CACHE_VERSION;
 }
 
 function writeCache(ws: Workspace, c: Cache): void {
@@ -244,6 +287,7 @@ export async function refreshCache(ws: Workspace, remotes: string[], gql: Graphq
   const bots = new Set([...BOTS, ...ws.config.github.bots.map((b) => b.toLowerCase())]);
   const failed: string[] = [];
   const keepFrom = new Date(now.getTime() - KEEP_DAYS * 86_400_000);
+  upgrade(cache, keepFrom);
   let stop: string | null = null;
   for (const remote of remotes) {
     if (stop) {
@@ -340,15 +384,18 @@ export interface PersonCount extends Person {
   approvals: number;
   changes: number;
   comments: number;
+  // the size of each PR they reviewed, once per review: additions plus deletions
+  lines: number;
 }
 
 export interface Report {
   days: string[];
   repos: string[];
   // per metric, per repo, a count per day
-  traffic: Record<"opened" | "merged" | "closed" | "open", Record<string, number[]>>;
-  // per metric, per reviewer login, a count per day
-  reviews: Record<"reviews" | "approvals" | "changes", Record<string, number[]>>;
+  // lines: additions plus deletions of the PRs merged that day; added and deleted, the two halves
+  traffic: Record<"opened" | "merged" | "closed" | "open" | "lines" | "added" | "deleted", Record<string, number[]>>;
+  // per metric, per reviewer login, a count per day; lines: the size of each PR reviewed that day
+  reviews: Record<"reviews" | "approvals" | "changes" | "lines", Record<string, number[]>>;
   people: PersonCount[];
   medians: { firstReviewHours: number | null; firstReviewN: number; mergeHours: number | null; mergeN: number };
   prs: number;
@@ -381,18 +428,19 @@ export function report(prs: Pr[], o: Options): Report {
   const wanted = new Set(o.repos);
   const mine = prs.filter((p) => wanted.has(p.repo));
 
-  const traffic: Report["traffic"] = { opened: {}, merged: {}, closed: {}, open: {} };
+  const traffic: Report["traffic"] = { opened: {}, merged: {}, closed: {}, open: {}, lines: {}, added: {}, deleted: {} };
   for (const r of o.repos) for (const m of Object.keys(traffic) as (keyof Report["traffic"])[]) traffic[m][r] = zeros();
-  const reviews: Report["reviews"] = { reviews: {}, approvals: {}, changes: {} };
+  const reviews: Report["reviews"] = { reviews: {}, approvals: {}, changes: {}, lines: {} };
   const people = new Map<string, PersonCount>();
   const firstReview: number[] = [];
   const toMerge: number[] = [];
 
-  const bump = (series: Record<string, number[]>, key: string, day: string) => {
+  const bump = (series: Record<string, number[]>, key: string, day: string, by = 1) => {
     const i = at.get(day);
     if (i === undefined) return;
-    (series[key] ??= zeros())[i] = (series[key]![i] ?? 0) + 1;
+    (series[key] ??= zeros())[i] = (series[key]![i] ?? 0) + by;
   };
+  const size = (p: Pr) => (p.additions ?? 0) + (p.deletions ?? 0);
 
   const reviewsOf = (p: Pr) => {
     // One review per reviewer, PR and Helsinki day: GitHub files every reply in a thread as a review of
@@ -410,9 +458,11 @@ export function report(prs: Pr[], o: Options): Report {
       sittings.set(key, s);
     }
     for (const { who, day, states } of sittings.values()) {
-      const c = people.get(who.login) ?? { ...who, reviews: 0, approvals: 0, changes: 0, comments: 0 };
+      const c = people.get(who.login) ?? { ...who, reviews: 0, approvals: 0, changes: 0, comments: 0, lines: 0 };
       c.reviews++;
+      c.lines += size(p);
       bump(reviews.reviews, who.login, day);
+      bump(reviews.lines, who.login, day, size(p));
       if (states.has("APPROVED")) { c.approvals++; bump(reviews.approvals, who.login, day); }
       if (states.has("CHANGES_REQUESTED")) { c.changes++; bump(reviews.changes, who.login, day); }
       if (!states.has("APPROVED") && !states.has("CHANGES_REQUESTED")) c.comments++;
@@ -427,7 +477,12 @@ export function report(prs: Pr[], o: Options): Report {
     reviewsOf(p);
     if (!counted) continue;
     bump(traffic.opened, p.repo, dayOf(p.created));
-    if (p.merged) bump(traffic.merged, p.repo, dayOf(p.merged));
+    if (p.merged) {
+      bump(traffic.merged, p.repo, dayOf(p.merged));
+      bump(traffic.lines, p.repo, dayOf(p.merged), size(p));
+      bump(traffic.added, p.repo, dayOf(p.merged), p.additions ?? 0);
+      bump(traffic.deleted, p.repo, dayOf(p.merged), p.deletions ?? 0);
+    }
     else if (p.closed) bump(traffic.closed, p.repo, dayOf(p.closed));
     // open at a day's end: opened on or before it, and not closed by its end
     const from = dayOf(p.created);
