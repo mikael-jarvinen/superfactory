@@ -8,7 +8,7 @@ import { run } from "../src/util.js";
 import { claudeArgs, type ClaudeRun, runFailure, TIMED_OUT, watcherGh } from "../src/watchers/job.js";
 import { isAgents, reviewQuery } from "../src/watchers/reviews.js";
 import { openWorkspace } from "../src/workspace.js";
-import { factory, TOML, tempWorkspace } from "./helpers.js";
+import { factory, fakeTool, TOML, tempWorkspace } from "./helpers.js";
 
 const FAKE_CLAUDE = fileURLToPath(new URL("./fake-claude.js", import.meta.url));
 const FAKE_GH = fileURLToPath(new URL("./fake-gh.js", import.meta.url));
@@ -39,7 +39,7 @@ function watcherWorkspace(toml = JIRA) {
   script("gh", `exec "${process.execPath}" "${FAKE_GH}" "$@"`);
   script("launchctl", `printf 'PID\\tStatus\\tLabel\\n'`);
   const f = (name: string) => join(ws, name);
-  const run = (args: string[], replies: { stdout?: string; status?: number }[], routes: Record<string, unknown> = {}) => {
+  const run = (args: string[], replies: { stdout?: string; status?: number }[], routes: Record<string, unknown> = {}, env: NodeJS.ProcessEnv = {}) => {
     writeFileSync(f("replies.json"), JSON.stringify(replies));
     rmSync(f("replies.json.count"), { force: true });
     writeFileSync(f("claude.log"), "");
@@ -49,7 +49,7 @@ function watcherWorkspace(toml = JIRA) {
       env: {
         PATH: `${bin}:${process.env.PATH}`, GH_BIN: "", DOCKER_BIN: "", LAUNCHCTL_BIN: join(bin, "launchctl"),
         FAKE_CLAUDE_REPLIES: f("replies.json"), FAKE_CLAUDE_LOG: f("claude.log"), FAKE_GH_ROUTES: f("routes.json"), FAKE_GH_LOG: f("gh.log"),
-        TRACKER_RETRY_S: "0",
+        TRACKER_RETRY_S: "0", ...env,
       },
     });
     const calls = readFileSync(f("claude.log"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Call);
@@ -1086,4 +1086,83 @@ test("the review watcher reads Aikido's ignore command with the marker after it 
   assert.ok(!isAgents("@AikidoSec ignore: the human typed this"), "no marker: the human's own");
   assert.ok(!isAgents("@AikidoSec ignore: two lines\nthen\n> Written by agent."), "the marker straight after, nowhere later");
   assert.ok(!isAgents("Looks fine.\n> Written by agent."), "any other first line keeps the marker first");
+});
+
+// From 2026-11-21 the laptop slept overnight, launchd started each missed run in a 45-second dark
+// wake, and the Mac slept again mid-run: every round lost a few check-run reads as CANNOT read, and
+// every queue run held its slot for an hour or more and ended slept, its heartbeat going STALE.
+const DARK = fakeTool("pmset-dark", "echo 'Current System Capabilities are: CPU Network'");
+
+test("a watcher run in a dark wake does nothing and says so, and the round counts it as the Mac asleep", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  const logs = (name: string) => join(ws, "logs", name);
+  for (const job of ["queue", "reviews", "round"]) {
+    const r = run(["watch", job], [{ stdout: "QUEUE: (none)" }], {}, { PMSET_BIN: DARK });
+    assert.equal(r.status, 0, `${job}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, new RegExp(`${job}: dark-wake`));
+    assert.deepEqual(r.calls, [], `${job} ran no claude`);
+    assert.equal(readFileSync(join(ws, "gh.log"), "utf8"), "", `${job} called no gh`);
+    assert.match(readFileSync(logs(`${job}.log`), "utf8"), /outcome=dark-wake: the Mac is in a dark wake, so nothing ran/);
+    assert.ok(existsSync(logs(`${job}.asleep`)), `${job} marked the Mac asleep`);
+  }
+  assert.deepEqual(notes(), [], "a dark wake tells the lead nothing");
+  assert.ok(!existsSync(logs("watcher-failures.log")) || readFileSync(logs("watcher-failures.log"), "utf8") === "", "nor is it a failure");
+
+  // A heartbeat five hours old is no alarm while a run has found the Mac asleep since...
+  const old = new Date(Date.now() - 5 * 3600_000);
+  writeFileSync(logs("queue.heartbeat"), old.toISOString() + "\n");
+  utimesSync(logs("queue.heartbeat"), old, old);
+  let r = run(["watch", "round", "--facts"], []);
+  assert.match(r.stdout, /queue heartbeat 1800\ds ago \(a run \d+s ago found the Mac asleep\)\n/);
+  assert.doesNotMatch(r.stdout, /queue heartbeat [^\n]*STALE/);
+
+  // ...and is STALE once no run has.
+  rmSync(logs("queue.asleep"));
+  r = run(["watch", "round", "--facts"], []);
+  assert.match(r.stdout, /queue heartbeat 1800\ds ago {2}STALE \(over 120 min/);
+});
+
+test("the round reads check-runs once more after the Mac slept, and says not read, not CANNOT, when that fails too", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  const state = (...a: string[]) => assert.equal(factory(ws, ["state", ...a]).status, 0, a.join(" "));
+  const H = "1".repeat(40);
+  state("WEB-3", "building");
+  state("WEB-3", "pr-open", "--pr", "acme/web#3", "--head", H.slice(0, 7));
+  state("WEB-3", "your-review", "--reviewed", H.slice(0, 7), "--force");
+  const failed = { stdout: { total_count: 1, check_runs: [{ name: "e2e", status: "completed", conclusion: "failure", started_at: "2026-11-21T08:00:00Z", details_url: null }] } };
+  const lost = { status: 1, stderr: "gh api repos/acme/web/commits timed out after 1374s; the laptop slept during the call" };
+  const at = `api repos/acme/web/commits/${H}/check-runs?per_page=100&page=1`;
+  const routes = (atHead: unknown) => ({
+    "pr list -R acme/web --state all": { stdout: [{ number: 3, title: "WEB-3: x", headRefName: "WEB-3", state: "OPEN", isDraft: true, mergedAt: null, headRefOid: H, baseRefName: "main" }] },
+    "pr list -R acme/api --state all": { stdout: [] },
+    [at]: atHead,
+    [`api repos/acme/web/compare/main...${H}`]: { stdout: { behind_by: 0 } },
+  });
+  // A sysctl whose last sleep moves on every read: the Mac slept during the round.
+  const counter = join(ws, "sleeps");
+  const sleeping = fakeTool("sysctl-sleeping", `n=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "${counter}"; echo "{ sec = $((1795347493 + n)), usec = 0 }"`);
+  const asked = () => readFileSync(join(ws, "gh.log"), "utf8").split("\n").filter((l) => l.includes("check-runs")).length;
+  // Each run starts the routes' reply sequences afresh.
+  const round = (args: string[], atHead: unknown, env: NodeJS.ProcessEnv = {}) => {
+    rmSync(join(ws, "routes.json.counts"), { force: true });
+    return run(args, [], routes(atHead), env);
+  };
+
+  // Lost to the sleep, then read: the failed check is told as any other.
+  let r = round(["watch", "round", "--facts"], [lost, failed], { SYSCTL_BIN: sleeping });
+  assert.match(r.stdout, /WEB-3: acme\/web#3 at 1111111 CI FAILED: e2e/);
+  assert.equal(asked(), 2);
+
+  // Lost twice across a sleep: not read, and not an escalation.
+  r = round(["watch", "round"], [lost, lost], { SYSCTL_BIN: sleeping });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /round: facts=complete/);
+  assert.doesNotMatch(notes().join("\n"), /CI on PRs in review/);
+  r = round(["watch", "round", "--facts"], [lost, lost], { SYSCTL_BIN: sleeping });
+  assert.match(r.stdout, /WEB-3: acme\/web#3 not read at 1111111: the Mac slept during the round; the next round reads it/);
+
+  // With no sleep, a read that fails is CANNOT read, read once, and told.
+  r = round(["watch", "round"], [lost, failed]);
+  assert.equal(asked(), 1, "no second read without a sleep");
+  assert.match(notes().join("\n"), /CI on PRs in review: WEB-3: acme\/web#3 CANNOT read check-runs at 1111111/);
 });

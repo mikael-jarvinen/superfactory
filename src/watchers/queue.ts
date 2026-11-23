@@ -17,6 +17,7 @@ import { dockerWatchdog } from "./docker.js";
 import { failure } from "../failures.js";
 import { beat, heartbeatAge, heartbeatPath, loadPrompt, logTo, openLog, runFailure, runReader, TIMED_OUT, watcherGh } from "./job.js";
 import { deliver } from "./relay.js";
+import { DARK_WAKE, darkWake, markAsleep } from "./power.js";
 
 // What the last runs left: the queue keys already seen, the merge urls already reported, the PRs
 // already reported as conflicting (owner/repo#n), and the last few outcomes, which the round reads
@@ -195,6 +196,14 @@ export function runQueue(ws: Workspace, out: (line: string) => void = console.lo
   }
   const prompt = `${loadPrompt(ws, "queue")}\n\n${tracker.instructions(ws)}\n`;
   const log = openLog(ws, "queue");
+  if (darkWake()) {
+    logTo(log, `outcome=${DARK_WAKE}`);
+    markAsleep(ws, "queue");
+    const prev = loadQueueState(ws);
+    writeFileSync(queueStateFile(ws), JSON.stringify({ ...prev, outcomes: [...prev.outcomes, "dark-wake"].slice(-8) }) + "\n");
+    out("queue: dark-wake");
+    return 0;
+  }
   const r = runReader(ws, "queue", prompt, ["ToolSearch", ...tracker.tools], log);
   const read = r.status === 0 ? parseRead(ws, r.stdout) : null;
 
@@ -247,6 +256,7 @@ export function runQueue(ws: Workspace, out: (line: string) => void = console.lo
   // The heartbeat needs positive evidence that the tracker was read, so an outage, a failed run and
   // a run that went off contract all leave the last healthy run's heartbeat where it was.
   if (read?.outcome === "read") beat(ws, "queue");
+  if (r.slept) markAsleep(ws, "queue");
   const failed = r.status !== 0 ? runFailure("queue", r) : null;
   if (failed) failure(ws, failed);
   else if (r.status === 0 && read?.outcome === "off-contract") failure(ws, `queue READ NOTHING: no QUEUE: line and no ${UNAVAILABLE} sentinel`);

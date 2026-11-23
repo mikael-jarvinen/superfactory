@@ -21,6 +21,17 @@ chmodSync(join(fakeBin, "systemd-run"), 0o755);
 process.env.PATH = `${fakeBin}${delimiter}${process.env.PATH ?? ""}`;
 process.on("exit", () => rmSync(fakeBin, { recursive: true, force: true }));
 
+// Nor may a watcher test depend on this box's power state: a suite run in a dark wake would skip
+// every watcher run. The fakes say a full wake and a Mac that has not slept; a test that wants a
+// dark wake or a sleep sets PMSET_BIN or SYSCTL_BIN to its own.
+export const fakeTool = (name: string, body: string) => {
+  writeFileSync(join(fakeBin, name), `#!/bin/sh\n${body}\n`);
+  chmodSync(join(fakeBin, name), 0o755);
+  return join(fakeBin, name);
+};
+process.env.PMSET_BIN = fakeTool("pmset", "echo 'Current System Capabilities are: CPU Graphics Audio Network'\necho 'Current Power State: 4'");
+process.env.SYSCTL_BIN = fakeTool("sysctl", "echo '{ sec = 1795347493, usec = 0 } Sun Nov 22 13:38:13 2026'");
+
 // Nor may a test read this box's claude: its config dir (transcripts, the daemon's roster) or the
 // daemon's sockets. Every test file gets a claude daemon of its own that is up: a roster naming the
 // test process, which outlives every factory it runs, and one control socket. A test that sets its
