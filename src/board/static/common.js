@@ -60,6 +60,16 @@ addEventListener('DOMContentLoaded', () => {
   const msgs = nav.querySelector('a[href="/messages"]');
   msgs ? msgs.after(a) : nav.appendChild(a);
 });
+// The GitHub traffic page, after analytics.
+addEventListener('DOMContentLoaded', () => {
+  const nav = document.querySelector('header nav');
+  if(!nav || nav.querySelector('a[href="/github"]')) return;
+  const a = document.createElement('a');
+  a.href = '/github'; a.textContent = 'github';
+  if(location.pathname === '/github') a.classList.add('on');
+  const after = nav.querySelector('a[href="/analytics"]') || nav.querySelector('a[href="/messages"]');
+  after ? after.after(a) : nav.appendChild(a);
+});
 addEventListener('DOMContentLoaded', () => {
   if(location.pathname === '/') return;
   fetch('/api/tickets?summary=1', {cache:'no-store'}).then(r => r.ok ? r.json() : null).then(trackerNav).catch(() => {});

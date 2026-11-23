@@ -140,6 +140,9 @@ export interface Config {
   // null when the workspace has neither [wiki] nor a local tracker.
   wiki: Wiki | null;
   board: { host: string; port: number };
+  // The repos the board's GitHub page counts PR and review traffic for: repo keys, all of [repos]
+  // when unset. Its groups are the stacks.
+  analytics: { repos: string[] };
   // false lets a session message a session on another machine with nobody approving each send
   peers: { isolateMachines: boolean };
   // colleagueReview: false where nobody reviews as a colleague. your-review then goes straight to
@@ -688,6 +691,10 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   });
   w.done();
 
+  const an = reader(problems, "analytics", top.table("analytics") ?? {});
+  const analytics = { repos: repoKeys(an, "repos", an.strs("repos")) ?? Object.keys(repos) };
+  an.done();
+
   const wt = reader(problems, "worktree", top.table("worktree") ?? {});
   const worktree = { toolWritten: wt.strs("tool_written") ?? [] };
   wt.done();
@@ -697,6 +704,6 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
   return {
     file: resolve(file), dir,
     human: { name: humanName, legacyMessageKind },
-    github, paths, repos, stacks, hosts, roles, agents, tracker, wiki, board, peers, gate, watchers, worktree,
+    github, paths, repos, stacks, hosts, roles, agents, tracker, wiki, board, peers, gate, watchers, worktree, analytics,
   };
 }

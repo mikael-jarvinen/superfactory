@@ -20,6 +20,7 @@ import { markSeen, readSeen } from "./seen.js";
 import { markHandled, messageId, queue, queueTrouble, WAITING_KINDS } from "./queue.js";
 import { tryFailure } from "../failures.js";
 import { type Fetch, ReviewCache } from "./reviews.js";
+import { githubView, GithubTraffic, type Graphql } from "./github.js";
 import { isScheduler } from "../scheduler/state.js";
 import { isTrackerApi, servesTrackerApi, trackerApi, trackerSummary } from "../tickets/api.js";
 import { enabled as trackerEnabled } from "../tickets/store.js";
@@ -450,7 +451,7 @@ const TYPES: Record<string, string> = {
   ".webp": "image/webp",
   ".ico": "image/x-icon",
 };
-const PAGES: Record<string, string> = { "/": "board.html", "/messages": "messages.html", "/analytics": "analytics.html" };
+const PAGES: Record<string, string> = { "/": "board.html", "/messages": "messages.html", "/analytics": "analytics.html", "/github": "github.html" };
 // The analytics read every transcript the fleet wrote, so one report serves every request for this long.
 const ANALYTICS_EVERY = 30_000;
 // The local tracker's tickets page, served only with one; the wiki page, only with a wiki.
@@ -512,6 +513,8 @@ export interface ServeOptions {
   port?: number;
   // How the review badges read GitHub; gh by default.
   reviews?: Fetch;
+  // How the GitHub page reads PR and review traffic; gh by default.
+  github?: Graphql;
   // The lead's receipts, shared with the scheduler's watchdog in the same process.
   receipts?: Receipts;
 }
@@ -531,6 +534,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
   const stacks = new StackChecks();
   const receipts = opts.receipts ?? new Receipts();
   const reviews = new ReviewCache(opts.reviews);
+  const traffic = new GithubTraffic(ws, opts.github);
   const usage = new TranscriptUsage();
   let analytics: { at: number; body: Report & { at: string } } | null = null;
   const readAnalytics = () => {
@@ -633,6 +637,10 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
     }
     if (path === "/api/messages") return json(res, 200, messagesView(ws, sessions, receipts));
     if (path === "/api/analytics") return json(res, 200, readAnalytics());
+    if (path === "/api/github") {
+      traffic.refresh()?.catch(() => {});
+      return json(res, 200, { at: clock(), ...githubView(ws, traffic, new URL(req.url ?? "/", "http://board").searchParams) });
+    }
     if (isTrackerApi(path)) {
       replyTracker(res, trackerApi(ws, "GET", req.url ?? "/"));
       return;
