@@ -93,6 +93,34 @@ export function squash(s: string, max: number): string {
   return chars(s.split(/\s+/).filter(Boolean).join(" ")).slice(0, max).join("");
 }
 
+// The first sentence of a message: its first line with words, markdown marks taken off, up to the
+// first full stop, question or exclamation mark followed by a space. Longer than max, it ends at a
+// whole word with an ellipsis, never mid-word.
+export function firstSentence(s: string, max = Infinity): string {
+  const line = (s.split("\n").find((l) => l.trim()) ?? "").replace(/^[#>*\s-]+/, "").replace(/\*\*|__|`/g, "").trim();
+  const m = /^.*?[.?!](?=\s|$)/.exec(line);
+  const sentence = (m ? m[0] : line).trim();
+  if (chars(sentence).length <= max) return sentence;
+  const cut = chars(sentence).slice(0, max).join("");
+  const atWord = chars(sentence)[max] === " ";
+  const word = cut.lastIndexOf(" ");
+  return (atWord || word <= max / 2 ? cut : cut.slice(0, word)).replace(/[\s,;:]+$/, "") + "…";
+}
+
+// Words wrapped to lines no wider than width, each after the indent.
+export function wrap(s: string, width: number, indent = ""): string[] {
+  const lines: string[] = [];
+  let cur = "";
+  for (const w of s.split(/\s+/).filter(Boolean)) {
+    if (cur && chars(cur).length + 1 + chars(w).length > width) {
+      lines.push(indent + cur);
+      cur = w;
+    } else cur = cur ? `${cur} ${w}` : w;
+  }
+  if (cur) lines.push(indent + cur);
+  return lines;
+}
+
 // JSON as Python's json.dumps writes it (ensure_ascii, its separators, optional sort_keys), so a
 // file written here is byte-identical to one the old writer would produce.
 export function pyDumps(value: unknown, opts: { indent?: number; sortKeys?: boolean } = {}): string {

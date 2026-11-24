@@ -46,12 +46,14 @@ function render(d){
 }
 
 // The questions and decisions waiting on the human, oldest first, in a panel that stays shut until
-// opened. A row goes when the board says it is resolved (see queue.ts): marked handled here, replied
-// to from here, or its ticket moved out of blocked. Reading it does not. A row whose message is in the
-// thread below links to it; an older one opens its words in the panel.
+// opened. One card per question (see queue.ts): a decision and the block recorded for it, or the
+// lead's follow-ups on one ticket, are folded together, and the card shows the question itself,
+// whole, scrolling inside the card when long. A card that is only the lead's blocked note says so.
+// A card goes when the board says it is resolved: marked handled here, replied to from here, or its
+// ticket moved on. Reading it does not.
 let lastQueue = '', replyTo = null, replyQuote = '';
-const opened = new Set();
 const firstLine = s => (String(s || '').split('\n').find(l => l.trim()) || '').replace(/^[#>*\s-]+/, '').trim();
+const cardText = c => (c.questions && c.questions[0] ? c.questions[0].text : (c.blocked ? c.blocked.note : ''));
 function renderQueue(d){
   const panel = document.getElementById('queue'), qlist = document.getElementById('qlist');
   if(!panel || !qlist) return;
@@ -61,20 +63,25 @@ function renderQueue(d){
   const sel = getSelection();
   if(!sel.isCollapsed && qlist.contains(sel.anchorNode)) return;
   const note = d.queue_note ? `<div class="qnote">${esc(d.queue_note)}</div>` : '';
-  const html = note + (q.length ? q.map(i => {
-    const head = `<span class="kind">${esc(i.kind)}</span>${i.ticket ? `<span class="tk">${esc(i.ticket)}</span>` : ''}<span class="when">${esc(when(i.age_min))}</span>`;
-    const line = esc(firstLine(i.text) || i.kind);
-    const open = opened.has(i.id);
-    const go = i.in_thread ? `<a class="line" href="#q-${esc(i.id)}" data-go="${esc(i.id)}">${line}</a>`
-      : open ? `<div class="body">${md(i.text)}</div>${i.link ? `<div class="link"><a href="${esc(i.link)}" target="_blank" rel="noopener">${esc(i.link)}</a></div>` : ''}`
-      : `<button type="button" class="line" data-open="${esc(i.id)}" aria-expanded="false">${line}</button>`;
-    const less = !i.in_thread && open ? `<button type="button" data-open="${esc(i.id)}" aria-expanded="true">less</button>` : '';
-    return `<div class="qi ${esc(i.kind)}"><div class="qhead">${head}</div>${go}
-      <div class="qact"><button type="button" data-reply="${esc(i.id)}">reply</button><button type="button" data-done="${esc(i.id)}">handled</button>${less}</div></div>`;
+  const html = note + (q.length ? q.map(c => {
+    const kinds = (c.kinds || []).map(k => `<span class="kind">${esc(k)}</span>`).join('');
+    const head = `${kinds}${c.ticket ? `<span class="tk">${esc(c.ticket)}</span>` : ''}<span class="when">${esc(when(c.age_min))}</span>`;
+    const qs = (c.questions || []).map((x, n) => {
+      const earlier = n ? `<div class="qearlier">earlier on this</div>` : '';
+      const go = x.in_thread ? `<a class="qgo" href="#q-${esc(x.id)}" data-go="${esc(x.id)}">in the thread</a>` : '';
+      const link = x.link ? `<div class="link"><a href="${esc(x.link)}" target="_blank" rel="noopener">${esc(x.link)}</a></div>` : '';
+      return `${earlier}<div class="qbody body">${md(x.text)}</div>${link}${go}`;
+    }).join('');
+    const only = c.unposted
+      ? `<div class="qflag">Only the note from blocking the item: the question itself was never posted.</div><div class="qbody body">${md(c.blocked ? c.blocked.note : '')}</div>` : '';
+    const blocked = !c.unposted && c.blocked ? `<div class="qblocked">blocked on this since ${esc(clockOf(c.blocked.at))}</div>` : '';
+    return `<div class="qi${c.unposted ? ' unposted' : ''}" data-card="${esc(c.id)}"><div class="qhead">${head}</div>${qs}${only}${blocked}
+      <div class="qact"><button type="button" data-reply="${esc(c.id)}">reply</button><button type="button" data-done="${esc(c.id)}">handled</button></div></div>`;
   }).join('') : '<div class="none">nothing waiting on you</div>');
   if(html !== lastQueue){ qlist.innerHTML = html; lastQueue = html; }
-  qItems = new Map(q.map(i => [i.id, i]));
+  qItems = new Map(q.map(c => [c.id, c]));
 }
+const clockOf = t => { const d = new Date(t || ''); return isNaN(d) ? '?' : d.toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'}); };
 let qItems = new Map();
 
 // quiet: after a reply, whose question may have left the queue on its own meanwhile (its ticket moved
@@ -95,9 +102,9 @@ function startReply(id){
   // The quote goes in front of whatever is already typed, and cancel takes back only the quote.
   const draft = unquote();
   replyTo = id;
-  replyQuote = `> ${i.ticket ? i.ticket + ': ' : ''}${firstLine(i.text).slice(0, 200)}\n\n`;
+  replyQuote = `> ${i.ticket ? i.ticket + ': ' : ''}${firstLine(cardText(i)).slice(0, 200)}\n\n`;
   t.value = replyQuote + draft;
-  document.getElementById('replyto').textContent = `replying to ${i.ticket || i.kind}: sending marks it handled`;
+  document.getElementById('replyto').textContent = `replying to ${i.ticket || (i.kinds || []).join('+')}: sending marks it handled`;
   document.getElementById('replying').hidden = false;
   t.focus();
   t.setSelectionRange(t.value.length, t.value.length);
@@ -117,15 +124,11 @@ addEventListener('DOMContentLoaded', () => {
   const qlist = document.getElementById('qlist');
   if(!qlist) return;
   qlist.addEventListener('click', e => {
-    const b = e.target.closest('[data-done],[data-reply],[data-open],[data-go]');
+    const b = e.target.closest('[data-done],[data-reply],[data-go]');
     if(!b) return;
     if(b.dataset.done){ b.disabled = true; handled(b.dataset.done); }
     else if(b.dataset.reply) startReply(b.dataset.reply);
-    else if(b.dataset.open){
-      const id = b.dataset.open;
-      opened.has(id) ? opened.delete(id) : opened.add(id);
-      lastQueue = ''; tick();
-    } else if(b.dataset.go){
+    else if(b.dataset.go){
       const m = document.getElementById('q-' + b.dataset.go);
       if(!m) return;
       e.preventDefault();

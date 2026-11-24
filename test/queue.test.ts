@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import vm from "node:vm";
 import { JSDOM } from "jsdom";
-import { handledFile, markHandled, queue } from "../src/board/queue.js";
+import { handledFile, markHandled, queue, queueCards } from "../src/board/queue.js";
 import { serve } from "../src/board/server.js";
 import { say } from "../src/messages.js";
 import { transition } from "../src/state.js";
-import { pyDumps } from "../src/util.js";
+import { firstSentence, pyDumps, wrap } from "../src/util.js";
 import { openWorkspace, type Workspace } from "../src/workspace.js";
 import { factory, tempDir, tempWorkspace } from "./helpers.js";
 
@@ -126,14 +126,15 @@ test("queue: the page marks an item handled; reading the thread or writing in it
   const board = await serve(ws, { host: "127.0.0.1", port: 0 });
   after(() => board.close());
   const page = { "Content-Type": "application/json", "Origin": board.url };
-  const get = async () => (await (await fetch(board.url + "/api/messages")).json()) as { queue: { id: string; text: string; in_thread: boolean }[]; messages: { qid?: string; text: string }[] };
+  type Card = { id: string; questions: { id: string; text: string; in_thread: boolean }[] };
+  const get = async () => (await (await fetch(board.url + "/api/messages")).json()) as { queue: Card[]; messages: { qid?: string; text: string }[] };
   const handle = (id: unknown, headers: Record<string, string> = page) =>
     fetch(board.url + "/api/messages/handled", { method: "POST", headers, body: JSON.stringify({ id }) });
 
   const d = await get();
-  assert.deepEqual(d.queue.map((i) => [i.text, i.in_thread]), [["ship on friday?", true], ["which db?", true]]);
-  // Each queue row names its message in the thread by the same id.
-  assert.deepEqual(d.queue.map((i) => d.messages.find((m) => m.qid === i.id)?.text), ["ship on friday?", "which db?"]);
+  assert.deepEqual(d.queue.map((c) => c.questions.map((q) => [q.text, q.in_thread])), [[["ship on friday?", true]], [["which db?", true]]]);
+  // Each card's question names its message in the thread by the same id.
+  assert.deepEqual(d.queue.map((c) => d.messages.find((m) => m.qid === c.id)?.text), ["ship on friday?", "which db?"]);
 
   assert.equal((await fetch(board.url + "/api/messages", { method: "POST", headers: page, body: JSON.stringify({ text: "yes, friday" }) })).status, 200);
   await get();
@@ -145,7 +146,7 @@ test("queue: the page marks an item handled; reading the thread or writing in it
   assert.equal((await get()).queue.length, 2);
 
   assert.equal((await handle(id)).status, 200);
-  assert.deepEqual((await get()).queue.map((i) => i.text), ["which db?"]);
+  assert.deepEqual((await get()).queue.map((c) => c.questions[0]!.text), ["which db?"]);
   assert.ok(id in JSON.parse(readFileSync(handledFile(ws), "utf8")).handled, "kept in logs/");
   assert.equal((await handle(id)).status, 200, "handled twice is still handled");
 });
@@ -181,9 +182,14 @@ async function messagesPage(data: object) {
   return { s, w, doc: w.document, settle };
 }
 
+// A card as GET /api/messages serves it: one posted question, or only a blocked note.
+const card = (id: string, text: string, o: { in_thread?: boolean; ticket?: string | null; unposted?: boolean } = {}) => o.unposted
+  ? { id, ids: [id], ticket: o.ticket ?? null, kinds: ["blocked"], at: T(1), last: T(1), age_min: 5, questions: [], blocked: { id, at: T(1), note: text }, unposted: true }
+  : { id, ids: [id], ticket: o.ticket ?? null, kinds: ["decision"], at: T(1), last: T(1), age_min: 5, blocked: null, unposted: false,
+    questions: [{ id, t: T(1), kind: "decision", text, link: null, in_thread: !!o.in_thread }] };
+
 test("the message page: a shut panel with a count, a link into the thread, handled and reply", async () => {
-  const item = (id: string, text: string, in_thread: boolean, ticket: string | null = null) =>
-    ({ id, t: T(1), at: T(1), kind: "decision", ticket, text, link: null, from: "message", age_min: 5, in_thread });
+  const item = (id: string, text: string, in_thread: boolean, ticket: string | null = null) => card(id, text, { in_thread, ticket });
   const { s, doc, w, settle } = await messagesPage({
     at: "12:00", human: "Alex", lead: "niilo", lead_avatar: null, status: "idle", seen: null,
     messages: [{ t: T(1), kind: "decision", text: "ship on friday?", ticket: "LOCAL-ship", from: "lead", qid: "maaaaaaaaaaaa", age_min: 5 }],
@@ -193,15 +199,13 @@ test("the message page: a shut panel with a count, a link into the thread, handl
   assert.equal(panel.open, false, "shut until opened");
   assert.equal(doc.getElementById("qcount")!.textContent, "2");
   const rows = [...doc.querySelectorAll(".qi")];
-  assert.deepEqual(rows.map((r) => r.querySelector(".line")!.textContent), ["ship on friday?", "old one"]);
+  assert.deepEqual(rows.map((r) => r.querySelector(".qbody")!.textContent!.trim()), ["ship on friday?", "old one\nwith more words"]);
   assert.equal(rows[0]!.querySelector(".tk")!.textContent, "LOCAL-ship");
-  assert.equal(rows[0]!.querySelector("a.line")!.getAttribute("href"), "#q-maaaaaaaaaaaa");
+  assert.equal(rows[0]!.querySelector("a.qgo")!.getAttribute("href"), "#q-maaaaaaaaaaaa");
   assert.ok(doc.getElementById("q-maaaaaaaaaaaa"), "the message in the thread carries the anchor");
-
-  // One not in the thread opens its words in the panel.
-  (rows[1]!.querySelector("button.line") as HTMLElement).click();
-  await settle();
-  assert.match(doc.querySelectorAll(".qi")[1]!.querySelector(".body")!.innerHTML, /<strong>more<\/strong>/);
+  // The question is shown whole, without a click: Mikael, 2026-11-24, "it always collapses the message".
+  assert.match(rows[1]!.querySelector(".qbody")!.innerHTML, /<strong>more<\/strong>/);
+  assert.equal(rows[1]!.querySelector("a.qgo"), null, "not in the thread: no link to it");
 
   (doc.querySelector('[data-done="mbbbbbbbbbbbb"]') as HTMLElement).click();
   await settle();
@@ -242,7 +246,8 @@ test("queue: a fresh workspace with only the config it must have, its own names 
   const quiet = () => {};
   const board = await serve(ws, { host: "127.0.0.1", port: 0 });
   after(() => board.close());
-  const get = async () => ((await (await fetch(board.url + "/api/messages")).json()) as { human: string; lead: string; queue: { id: string; text: string; from: string }[] });
+  type Card = { id: string; unposted: boolean; questions: { text: string }[]; blocked: { note: string } | null };
+  const get = async () => ((await (await fetch(board.url + "/api/messages")).json()) as { human: string; lead: string; queue: Card[] });
   assert.deepEqual((await get()).queue, [], "nothing yet, and the first read sets the queue's start");
   // The lead's real writers: `factory say` and `factory state`.
   say(ws, ["pick a colour?"], { kind: "decision", ticket: "LOCAL-colour" }, quiet);
@@ -251,9 +256,10 @@ test("queue: a fresh workspace with only the config it must have, its own names 
   transition(ws, "LOCAL-key", "blocked", { note: "need the key" }, quiet);
   const d = await get();
   assert.deepEqual([d.human, d.lead], ["Robin", "kai"]);
-  assert.deepEqual(d.queue.map((i) => [i.from, i.text]), [["message", "pick a colour?"], ["board", "need the key"]]);
+  assert.deepEqual(d.queue.map((c) => [c.unposted, c.questions[0]?.text ?? c.blocked?.note]), [[false, "pick a colour?"], [true, "need the key"]]);
 
   const r = await fetch(board.url + "/api/messages/handled", { method: "POST", headers: { "Content-Type": "application/json", "Origin": board.url }, body: JSON.stringify({ id: d.queue[0]!.id }) });
+  assert.deepEqual((await get()).queue.map((c) => c.blocked?.note), ["need the key"]);
   assert.equal(r.status, 200);
   assert.equal(handledFile(ws), join(dir, "data", "lg", "messages-handled.json"));
   transition(ws, "LOCAL-key", "building", {}, quiet);
@@ -321,7 +327,7 @@ test("queue: a handled file that does not parse shows everything and is never wr
 });
 
 test("the message page: reply keeps a draft, cancel takes back only the quote, a question gone meanwhile is no error", async () => {
-  const item = { id: "maaaaaaaaaaaa", t: T(1), at: T(1), kind: "decision", ticket: "LOCAL-ship", text: "ship on friday?", link: null, from: "message", age_min: 5, in_thread: false };
+  const item = card("maaaaaaaaaaaa", "ship on friday?", { ticket: "LOCAL-ship" });
   const { s, doc, w, settle } = await messagesPage({
     at: "12:00", human: "Alex", lead: "niilo", lead_avatar: null, status: "idle", seen: null, messages: [], queue: [item],
   });
@@ -401,7 +407,7 @@ test("queue: a record marked handled stays handled when the lead posts its quest
 });
 
 test("the message page: a reply marks the question it quoted, even if another reply is started while it sends", async () => {
-  const item = (id: string, text: string) => ({ id, t: T(1), at: T(1), kind: "decision", ticket: null, text, link: null, from: "message", age_min: 5, in_thread: false });
+  const item = (id: string, text: string) => card(id, text);
   const { s, doc, w, settle } = await messagesPage({
     at: "12:00", human: "Alex", lead: "niilo", lead_avatar: null, status: "idle", seen: null, messages: [],
     queue: [item("maaaaaaaaaaaa", "first?"), item("mbbbbbbbbbbbb", "second?")],
@@ -423,9 +429,9 @@ test("the message page: a reply marks the question it quoted, even if another re
 
 // Mikael, 2026-11-18: "I need to always manually mark them as handled. Can't you?" The lead reads the
 // queue and marks what an answer settles, through the same file the page writes.
-test("queue from the CLI: the lead lists the open items and marks them handled, by id or by ticket", () => {
+test("queue from the CLI: the lead lists the open cards and marks them handled, by id or by ticket", () => {
   const ws = workspace();
-  const long = "should the event website keep the old design when the organiser picks a new one, or ask first every time it happens?";
+  const long = "should the event website keep the old design when the organiser picks a new one, or ask first every time it happens? It matters for the two customers on the old design.";
   row(ws, T(1), "decision", "use the classic route?", "LOCAL-a");
   row(ws, T(2), "decision", long, "LOCAL-b");
   row(ws, T(3), "blocked", "which db?", "LOCAL-a");
@@ -433,12 +439,15 @@ test("queue from the CLI: the lead lists the open items and marks them handled, 
 
   let r = factory(ws.dir, ["queue"]);
   assert.equal(r.status, 0, r.stderr);
-  const lines = r.stdout.trim().split("\n");
-  assert.equal(lines.length, 3);
-  assert.match(lines[0]!, new RegExp(`^${a1}  \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d  LOCAL-a  decision  use the classic route\\?$`));
-  assert.ok(lines[1]!.startsWith(`${b}  `) && lines[1]!.endsWith("…"), lines[1]);
-  assert.ok(lines[1]!.includes(long.slice(0, 100)) && !lines[1]!.includes(long.slice(0, 101)), "the first 100 characters");
-  assert.ok(lines[2]!.startsWith(`${a2}  `) && lines[2]!.includes("LOCAL-a  blocked  which db?"));
+  const lines = r.stdout.trimEnd().split("\n");
+  // one card per ticket: LOCAL-a's decision and block are one card, under its newest question
+  assert.match(lines[0]!, new RegExp(`^${a2} \\(\\+ ${a1}\\)  \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d  LOCAL-a  decision\\+blocked$`));
+  assert.equal(lines[1], "    which db?");
+  assert.equal(lines[2], "    and 1 earlier message on it");
+  assert.ok(lines[3]!.startsWith(`${b}  `) && lines[3]!.endsWith("LOCAL-b  decision"), lines[3]);
+  // the first full sentence, wrapped, never cut mid-sentence
+  assert.equal(lines.slice(4).map((l) => l.trim()).join(" "), long.split("? ")[0] + "?");
+  assert.ok(lines.slice(4).every((l) => l.startsWith("    ") && l.length <= 104), lines.join("\n"));
 
   // an id the queue does not hold refuses the call by name, and nothing is marked
   r = factory(ws.dir, ["handled", a1!, "mdeadbeef0000"]);
@@ -460,8 +469,10 @@ test("queue from the CLI: the lead lists the open items and marks them handled, 
   assert.ok(Number.isFinite(Date.parse(file.handled[b!]!)));
 
   assert.match(factory(ws.dir, ["handled", "--ticket", "LOCAL-zzz"]).stdout, /nothing open on LOCAL-zzz/);
-  r = factory(ws.dir, ["handled", "--ticket", "LOCAL-a"]);
+  // any one id of a card clears the whole card
+  r = factory(ws.dir, ["handled", a1!]);
   assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, new RegExp(`handled ${a1}[\\s\\S]*handled ${a2}`));
   assert.deepEqual(queue(ws), []);
   assert.match(factory(ws.dir, ["queue"]).stdout, /^nothing waiting on the human$/m);
 });
@@ -492,4 +503,91 @@ test("say --answers posts the message and marks what it answers, and a wrong id 
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, new RegExp(`handled ${c}[\\s\\S]*${a} was already handled`));
   assert.deepEqual(queue(ws), []);
+});
+
+// Mikael, 2026-11-24: "It can frequently duplicate topics. Also, it always collapses the message and
+// the message can also be a recap sometimes about 'asked mikael...'" The lead's decision on the
+// release-message formats was posted with no ticket at 15:45, and LOCAL-reports-launch-copy was
+// blocked on it 23 minutes later with the note "asked Mikael which release-message formats ...": two
+// cards, and the blocked one showed only the recap.
+test("queue cards: a decision and the block on it are one card, showing the decision, not the block's note", () => {
+  const ws = workspace();
+  const decision = "Cruz studied how earlier releases were announced. Which formats should I draft: a Productboard card, an in-app What's new, a product-updates post, or a blog?";
+  const now = Date.now();
+  const iso = (minAgo: number) => new Date(now - minAgo * 60_000).toISOString();
+  // a decision on its ticket, blocked half an hour later: the ticket folds them
+  row(ws, iso(60), "decision", "keep the old layout?", "LOCAL-layout");
+  rec(ws, "LOCAL-layout", "blocked", { question: "asked Mikael about the layout", at: iso(30) });
+  let cards = queueCards(ws);
+  assert.equal(cards.length, 1);
+  assert.deepEqual([cards[0]!.questions.map((q) => q.text), cards[0]!.blocked?.note, cards[0]!.unposted], [["keep the old layout?"], "asked Mikael about the layout", false]);
+  assert.equal(cards[0]!.ids.length, 2);
+
+  // today's case through the lead's own commands: a decision with no ticket, then the block
+  let r = factory(ws.dir, ["say", decision, "--kind", "decision"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /a decision with no --ticket: .* factory state <T> blocked --asks <its id>/);
+  const m = queueCards(ws).find((c) => c.questions[0]?.text === decision)!.id;
+  assert.equal(factory(ws.dir, ["state", "LOCAL-launch", "designing"]).status, 0);
+  r = factory(ws.dir, ["state", "LOCAL-launch", "blocked", "--note", "asked Mikael which release-message formats to draft"]);
+  assert.equal(r.status, 0, r.stderr);
+  // unlinked: two cards, and the state command says so, naming the loose decision and the fix
+  assert.match(r.stdout, /LOCAL-launch's card shows only this block's note, which is not a question/);
+  assert.ok(r.stdout.includes(`factory state LOCAL-launch blocked --asks ${m} --note`), r.stdout);
+  assert.equal(queueCards(ws).length, 3);
+  const loose = queueCards(ws).find((c) => c.ticket === "LOCAL-launch")!;
+  assert.equal(loose.unposted, true, "flagged: only a blocked note");
+  assert.match(factory(ws.dir, ["queue"]).stdout, /asked Mikael which release-message formats to draft \[only the blocked note: no question posted\]/);
+
+  // --asks folds it: one card, the decision shown whole, the note only as the block
+  assert.equal(factory(ws.dir, ["state", "LOCAL-launch", "blocked", "--asks", "mdeadbeef0000"]).status, 1, "a question the queue does not hold");
+  assert.equal(factory(ws.dir, ["state", "LOCAL-launch", "building", "--asks", m]).status, 2, "--asks belongs on blocked");
+  r = factory(ws.dir, ["state", "LOCAL-launch", "blocked", "--asks", m, "--note", "asked Mikael which release-message formats to draft"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, new RegExp(`queue: one card with the posted question ${m}`));
+  cards = queueCards(ws);
+  assert.equal(cards.length, 2);
+  const launch = cards.find((c) => c.ticket === "LOCAL-launch")!;
+  assert.deepEqual([launch.id, launch.questions.map((q) => q.text), launch.unposted], [m, [decision], false]);
+  const q = factory(ws.dir, ["queue"]).stdout;
+  assert.ok(q.includes("    Cruz studied how earlier releases were announced."), q);
+  assert.ok(!q.includes("asked Mikael which"), "the recap is not the question");
+
+  // handled by any one of its ids clears the whole card
+  const recId = launch.ids.find((id) => id.startsWith("r"))!;
+  r = factory(ws.dir, ["handled", recId]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(queueCards(ws).map((c) => c.ticket), ["LOCAL-layout"]);
+  assert.ok(markHandled(ws, cards.find((c) => c.ticket === "LOCAL-layout")!.ids[0]).ok);
+  assert.deepEqual(queueCards(ws), []);
+});
+
+test("queue cards: a block with a decision already open on its ticket says it folded in", () => {
+  const ws = workspace();
+  let r = factory(ws.dir, ["state", "LOCAL-font", "designing"]);
+  assert.equal(r.status, 0, r.stderr);
+  r = factory(ws.dir, ["say", "font A or B?", "--kind", "decision", "--ticket", "LOCAL-font"]);
+  assert.equal(r.status, 0, r.stderr);
+  r = factory(ws.dir, ["state", "LOCAL-font", "blocked", "--note", "asked about the font"]);
+  assert.equal(r.status, 0, r.stderr);
+  // posted with the block, the question covers the record already: one card, and a mark on either holds
+  assert.match(r.stdout, /queue: one card with the posted question m[0-9a-f]{12} \(covers m[0-9a-f]{12}\)/);
+  assert.equal(queueCards(ws).length, 1);
+});
+
+test("say --answers clears the cards it names, but not a new question it posts on the same ticket", () => {
+  const ws = workspace();
+  row(ws, T(1), "decision", "a?", "LOCAL-alpha");
+  const [a] = queue(ws).map((i) => i.id);
+  const r = factory(ws.dir, ["say", "a is settled, so: b?", "--kind", "decision", "--ticket", "LOCAL-alpha", "--answers", a!]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(queueCards(ws).map((c) => c.questions.map((q) => q.text)), [["a is settled, so: b?"]]);
+});
+
+test("firstSentence and wrap: a whole sentence, never cut mid-word", () => {
+  assert.equal(firstSentence("**Fonts:** pick one. Then the rest."), "Fonts: pick one.");
+  assert.equal(firstSentence("## Heading\nbody"), "Heading");
+  assert.equal(firstSentence("version 1.2 is out. Next."), "version 1.2 is out.");
+  assert.equal(firstSentence("one two three four five six", 13), "one two three…");
+  assert.deepEqual(wrap("aaa bbb ccc ddd", 7, "  "), ["  aaa bbb", "  ccc ddd"]);
 });

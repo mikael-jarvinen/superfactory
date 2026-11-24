@@ -13,11 +13,11 @@ import { isHuman, readRecent, readTail } from "../messages.js";
 import { allRecs, IN_REVIEW, isLocal, onBoard, type Rec, recPrs, STATES, stranded, undrafting, usesState, WAITING_ON_YOU } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { roster } from "../config.js";
-import { capitalize, run, sleep } from "../util.js";
+import { capitalize, firstSentence, run, sleep } from "../util.js";
 import { report, type Report, TranscriptUsage } from "./analytics.js";
 import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, saveAttachment } from "./inbox.js";
 import { markSeen, readSeen } from "./seen.js";
-import { markHandled, messageId, queue, queueTrouble, WAITING_KINDS } from "./queue.js";
+import { markHandled, messageId, queueCards, queueTrouble, WAITING_KINDS } from "./queue.js";
 import { tryFailure } from "../failures.js";
 import { type Fetch, ReviewCache } from "./reviews.js";
 import { githubView, GithubTraffic, type Graphql } from "./github.js";
@@ -367,6 +367,9 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
   const leadName = capitalize(lead(ws).name);
   // Only work someone is doing: waiting work lives in the backlog, and an item off the board keeps
   // its record until a dispatch brings it back.
+  // A blocked item's card names the question posted for it, not the lead's note on the block.
+  const asked = new Map<string, string>();
+  for (const c of queueCards(ws)) if (c.ticket && c.blocked && c.questions[0]) asked.set(c.ticket, firstSentence(c.questions[0].text, 240));
   const tickets = recs.filter(onBoard).map((r) => ({
     ticket: r.ticket,
     title: r.title ?? null,
@@ -377,7 +380,7 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
     jira: r.jira,
     local: isLocal(r.ticket),
     age_min: ageMinutes(r.since),
-    question: r.asked_you?.question ?? null,
+    question: asked.get(r.ticket) ?? r.asked_you?.question ?? null,
     line: lines.get(r.ticket) ?? null,
     prs: recPrs(r).map((p) => ({
       repo: (p.repo ?? "").split("/").pop(),
@@ -433,7 +436,9 @@ function messagesView(ws: Workspace, sessions: SessionCache, receipts: Receipts)
     return { ...r, ...qid, from: human ? "human" : "lead", age_min: ageMinutes(r.t), receipt: human && r.id ? receipts.receipt(r.id) : null };
   });
   const shown = new Set(rows.map((r) => r.qid).filter(Boolean));
-  const waiting = queue(ws).map((i) => ({ ...i, age_min: ageMinutes(i.at), in_thread: shown.has(i.id) }));
+  const waiting = queueCards(ws).map((c) => ({
+    ...c, age_min: ageMinutes(c.last), questions: c.questions.map((q) => ({ ...q, in_thread: shown.has(q.id) })),
+  }));
   return { at: clock(), human: ws.config.human.name, lead: leadName, lead_avatar: avatars(ws)[leadName] ?? null, status, seen: readSeen(ws), messages: rows, queue: waiting, queue_note: queueTrouble(ws) };
 }
 

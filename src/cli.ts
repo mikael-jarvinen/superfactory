@@ -4,7 +4,7 @@ import { basename } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { recordAllowClose } from "./allow-close.js";
 import { followInbox } from "./board/inbox.js";
-import { markHandledMany, queue as waitingQueue, queueTrouble } from "./board/queue.js";
+import { markHandledMany, queueCards as waitingCards, queueTrouble } from "./board/queue.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
 import { lastStopped, noteRan, noteStopped, noteUnrun, ran, staleIds, sweepStale } from "./stopped.js";
@@ -45,7 +45,7 @@ import {
   allRecs, appendEvent, BUSY, OFF, onBoard, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removePr, removeRec, saveRec, showRec, transition, validKey,
 } from "./state.js";
 import { trackerTitle } from "./tracker/title.js";
-import { chars, FactoryError, now, pyDumps, pyRepr, run, sleep, squash } from "./util.js";
+import { chars, FactoryError, firstSentence, now, pyDumps, pyRepr, run, sleep, squash, wrap } from "./util.js";
 import { failure } from "./failures.js";
 import { runQueue } from "./watchers/queue.js";
 import { runRound } from "./watchers/round.js";
@@ -98,11 +98,13 @@ usage: factory [--workspace <dir>] <command> [options]
                                   take a PR off the item, e.g. after a split. No transition.
   state <KEY> <new-state> [--agent A] [--stack S] [--evidence E] [--note N] [--title T]
         [--pr owner/repo#N] [--head SHA] [--reviewed SHA] [--jira STATUS] [--force]
-        [--canvas URL] [--slides URL] [--approved "<the human's words>"]
+        [--canvas URL] [--slides URL] [--approved "<the human's words>"] [--asks QUEUE-ID]
                                   transition. design-review needs the canvas and slides links;
                                   design-review -> off is the approval and needs --approved.
                                   The first state is designing or building: a ticket nobody is
-                                  doing waits in the backlog, not on the board.
+                                  doing waits in the backlog, not on the board. blocked --asks names
+                                  the decision posted for it without --ticket, so the human's queue
+                                  shows one card; it works on an item already blocked too.
   state <KEY> off [--approved "<words>"] [--note N] [--title T]
                                   take it off the board and keep the record (an approved design,
                                   the stack, the title) until a dispatch brings it back. A new
@@ -123,10 +125,11 @@ usage: factory [--workspace <dir>] <command> [options]
                                   (SF_NOTIFY=0 mutes it, SF_NOTIFY_SOUND names the sound).
                                   --answers marks those queue items handled once it is posted;
                                   an id not in the queue refuses before anything is posted
-  queue                           what waits on the human: id, when, ticket, kind and the start
-                                  of each open decision or blocked question, oldest first
-  handled <id>... [--ticket K]    mark queue items handled, as the page's button does; --ticket
-                                  marks every open one on K. An unknown id marks nothing
+  queue                           what waits on the human, one card per question, oldest first:
+                                  its ids, when, ticket and kinds, then its first full sentence
+  handled <id>... [--ticket K]    mark queue cards handled, as the page's button does: any one id
+                                  clears its whole card; --ticket clears every open one on K. An
+                                  unknown id marks nothing
   messages [-n 20]                the last n messages. Never read the log whole: it is
                                   append-only and unbounded.
   board [--stop]                  start the board in the background, or stop it
@@ -263,7 +266,7 @@ function cmdState(ws: Workspace, argv: string[]) {
   const { v, p } = args("state", argv, {
     list: { type: "boolean" }, all: { type: "boolean" }, off: { type: "boolean" }, force: { type: "boolean" },
     agent: s, stack: s, evidence: s, note: s, title: s, pr: s, head: s, reviewed: s, jira: s, canvas: s, slides: s, approved: s,
-    "remove-pr": s,
+    "remove-pr": s, asks: s,
   }, [0, 2]);
   const [ticket, next] = p;
   if (v.off) {
@@ -301,12 +304,38 @@ function cmdState(ws: Workspace, argv: string[]) {
     console.log(pyDumps(rec, { indent: 2, sortKeys: true }));
     return;
   }
+  // --asks names the posted question a block waits on, for one posted without the ticket, so the
+  // queue shows one card for both (board/queue.ts). It must be a question the queue holds now.
+  const asks = str(v.asks);
+  if (asks !== undefined) {
+    if (next !== "blocked") throw new UsageError("--asks belongs on blocked: it names the posted question the block waits on");
+    if (!waitingCards(ws).some((c) => c.questions.some((q) => q.id === asks)))
+      throw new FactoryError(`state: --asks ${asks} is not a posted question waiting in the queue; see factory queue`);
+  }
   transition(ws, ticket, next, {
     agent: str(v.agent), evidence: str(v.evidence), pr: str(v.pr), head: str(v.head), reviewed: str(v.reviewed),
     jira: str(v.jira), stack: str(v.stack), note: str(v.note), force: !!v.force, title: str(v.title),
-    canvas: str(v.canvas), slides: str(v.slides), approved: str(v.approved),
+    canvas: str(v.canvas), slides: str(v.slides), approved: str(v.approved), asks,
   });
+  if (next === "blocked") for (const l of blockedCardLines(ws, ticket)) console.log(l);
   if (IN_REVIEW.has(next)) releaseForReview(ws, ticket);
+}
+
+// What a block looks like on the human's queue: folded into the question already posted, or only its
+// note, which is no question to decide on. Mikael, 2026-11-24: a block whose card showed the lead's
+// recap ("asked Mikael which ...") rather than the question.
+function blockedCardLines(ws: Workspace, ticket: string): string[] {
+  const cards = waitingCards(ws);
+  const card = cards.find((c) => c.ticket === ticket);
+  if (card && !card.unposted) return [`  queue: one card with the posted question ${card.id} (covers ${card.ids.join(", ")})`];
+  const lines = [`  queue: ${ticket}'s card shows only this block's note, which is not a question ${ws.config.human.name} can decide on.`];
+  const loose = cards.filter((c) => !c.ticket && c.questions.length);
+  if (loose.length) {
+    lines.push("  If the question is one of these, posted without --ticket, fold the block into it:");
+    for (const c of loose.slice(-5)) lines.push(`    factory state ${ticket} blocked --asks ${c.questions[0]!.id} --note "..."   (${askedAt(c.questions[0]!.t)}: ${firstSentence(c.questions[0]!.text, 90)})`);
+  }
+  lines.push(`  Otherwise post it: factory say --kind decision --ticket ${ticket} "<the question>"`);
+  return lines;
 }
 
 function cmdDispatch(ws: Workspace, argv: string[]) {
@@ -781,14 +810,19 @@ function cmdSay(ws: Workspace, argv: string[]) {
     throw new UsageError(`say: --via: invalid choice: ${pyRepr(via)} (choose from ${VIAS.map(pyRepr).join(", ")})`);
   // --answers names the queue items this message settles. They are checked before anything is
   // posted, so a wrong id posts nothing, and marked handled once the message is in the log.
-  const answers = queueIds((v.answers as unknown as string[] | undefined) ?? []);
+  // Each id clears its whole card, worked out before posting, so this message never clears itself.
+  let answers = queueIds((v.answers as unknown as string[] | undefined) ?? []);
   if (answers.length) {
     const pre = markHandledMany(ws, answers, true);
     if (!pre.ok) throw new FactoryError(`say: --answers: ${pre.error}; nothing posted`);
+    answers = [...new Set([...pre.marked, ...pre.already])];
   }
+  // A decision with no ticket is a card of its own: a later block on the item cannot fold into it.
+  if (kind === "decision" && !str(v.ticket))
+    console.error(`say: a decision with no --ticket: if the item is blocked on it later, fold the block in with factory state <T> blocked --asks <its id>`);
   say(ws, p, { ticket: str(v.ticket), link: str(v.link), kind: kind as Kind, via: via as Via | undefined });
   if (answers.length) {
-    const r = markHandledMany(ws, answers);
+    const r = markHandledMany(ws, answers, false, false);
     if (!r.ok) throw new FactoryError(`say: posted, but could not mark ${answers.join(", ")} handled: ${r.error}`);
     handledLines(r);
   }
@@ -810,20 +844,25 @@ function askedAt(at: string | null): string {
   return `${d.getFullYear()}-${n(d.getMonth() + 1)}-${n(d.getDate())} ${n(d.getHours())}:${n(d.getMinutes())}`;
 }
 
-// What waits on the human, oldest first, one line each, for the lead to read and clear.
+// What waits on the human, oldest first: one line per card, the card's id with every id it covers,
+// then the question's first full sentence, wrapped, never cut mid-sentence. The whole text is on the
+// message page. A card that is only a blocked note says so: that note is the lead's, not a question.
 function cmdQueue(ws: Workspace, argv: string[]) {
   args("queue", argv, {}, [0, 0]);
   const trouble = queueTrouble(ws);
   if (trouble) console.error(`factory: ${trouble}`);
-  const items = waitingQueue(ws);
-  if (!items.length) {
+  const cards = waitingCards(ws);
+  if (!cards.length) {
     console.log("nothing waiting on the human");
     return;
   }
-  for (const i of items) {
-    const text = squash(i.text, 101);
-    const head = chars(text).slice(0, 100).join("");
-    console.log(`${i.id}  ${askedAt(i.at)}  ${i.ticket ?? "-"}  ${i.kind}  ${head}${head.length < text.length ? "…" : ""}`);
+  for (const c of cards) {
+    const also = c.ids.filter((id) => id !== c.id);
+    console.log(`${c.id}${also.length ? ` (+ ${also.join(", ")})` : ""}  ${askedAt(c.at)}  ${c.ticket ?? "-"}  ${c.kinds.join("+")}`);
+    const q = c.questions[0];
+    const text = q ? firstSentence(q.text) : `${firstSentence(c.blocked?.note ?? "")}  [only the blocked note: no question posted]`;
+    for (const l of wrap(text, 100, "    ")) console.log(l);
+    if (c.questions.length > 1) console.log(`    and ${c.questions.length - 1} earlier message${c.questions.length > 2 ? "s" : ""} on it`);
   }
 }
 
@@ -834,7 +873,7 @@ function cmdHandled(ws: Workspace, argv: string[]) {
   if (!p.length && !ticket) throw new UsageError("handled: give the queue ids, or --ticket K");
   const ids = queueIds(p);
   if (ticket) {
-    const on = waitingQueue(ws).filter((i) => i.ticket === ticket).map((i) => i.id);
+    const on = waitingCards(ws).filter((c) => c.ticket === ticket).flatMap((c) => c.ids);
     if (!on.length) console.log(`  nothing open on ${ticket}`);
     for (const id of on) if (!ids.includes(id)) ids.push(id);
   }

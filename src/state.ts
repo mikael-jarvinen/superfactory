@@ -96,7 +96,8 @@ export interface Rec {
   worktree: string | null;
   pr: Pr | null;
   prs?: Pr[];
-  asked_you: { question: string | null; at: string } | null;
+  // message: the queue id of the posted question this block waits on, when it was posted without the ticket
+  asked_you: { question: string | null; at: string; message?: string | null } | null;
   since: string | null;
   created: string;
   blocked_from: State | null;
@@ -236,6 +237,8 @@ export interface Change {
   canvas?: string;
   slides?: string;
   approved?: string;
+  // blocked: the queue id of the posted question this block waits on (see board/queue.ts)
+  asks?: string;
 }
 
 const isUrl = (s: string | undefined) => !!s && /^https?:\/\/\S+$/.test(s);
@@ -265,7 +268,9 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   const old = rec.state;
   // How the item stood: an old state, off the board, or nothing yet.
   const was = isNew ? null : old ?? OFF;
-  if (!isNew && !c.force) {
+  // blocked -> blocked with --asks links the block to the posted question it waits on, after the fact.
+  const relink = old === "blocked" && to === "blocked" && !!c.asks;
+  if (!isNew && !c.force && !relink) {
     const allowed = [...(old === null ? FROM_OFF : TRANSITIONS[old])].filter((s) => usable(ws, s));
     if (!allowed.includes(to))
       die(`${ticket}: ${old ?? OFF} -> ${to} is not a valid transition. From ${old ?? OFF} you can go to: ` +
@@ -306,7 +311,9 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   if (to === "blocked") {
     rec.blocked_from = old !== "blocked" ? old : rec.blocked_from;
     if (!c.note) warnings.push(`blocked without --note: record the question you asked ${human} so nobody re-asks it`);
-    rec.asked_you = { question: c.note ?? null, at: now() };
+    rec.asked_you = relink && rec.asked_you
+      ? { ...rec.asked_you, question: c.note ?? rec.asked_you.question, message: c.asks }
+      : { question: c.note ?? null, at: now(), ...(c.asks ? { message: c.asks } : {}) };
   } else if (old === "blocked") {
     rec.blocked_from = null;
     rec.asked_you = null;
