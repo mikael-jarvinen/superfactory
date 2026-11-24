@@ -29,6 +29,7 @@ import { demo, demoInit } from "./gate/demo.js";
 import { prNumber, resolveRepo } from "./gate/github.js";
 import { media } from "./gate/media.js";
 import { openForReview } from "./gate/open.js";
+import { waitForBotReview } from "./gate/reviewbot.js";
 import { ready, report } from "./gate/ready.js";
 import { send } from "./gate/send.js";
 import { ACCEPT_PROSE, waitAndSend } from "./gate/wait.js";
@@ -143,6 +144,12 @@ usage: factory [--workspace <dir>] <command> [options]
                                   head is the reviewed sha, then record colleague-review. Where
                                   [gate] colleague_review = false it is refused, and a PR is undrafted
                                   by hand in your-review.
+  pr-wait-coderabbit <repo> <n>   ask the review bot ([gate] review_bot) to review the PR's current
+                                  head and wait until it has: rate limits waited out and asked again,
+                                  a full review when the incremental one brings nothing. pr-open-for-review
+                                  does this for every PR it opens; run it before opening one by hand
+                                  (gh pr ready, a stacked PR). Exit 0 reviewed, 1 waiting cannot clear
+                                  it, 2 unreadable, 3 still waiting at FACTORY_REVIEW_WAIT_LIMIT.
   pr-wait <repo> <n> <reviewed-sha>
                                   wait while what is left is running or pending, then pr-send. Stops
                                   at once on anything waiting cannot clear, and before sending when
@@ -870,6 +877,14 @@ function cmdPrOpenForReview(ws: Workspace, argv: string[]) {
   openForReview(ws, p[0] as string);
 }
 
+function cmdPrWaitCoderabbit(ws: Workspace, argv: string[]) {
+  const { p } = args("pr-wait-coderabbit", argv, {}, [2, 2]);
+  const repo = resolveRepo(ws, p[0] as string);
+  const n = prNumber(p[1] as string);
+  const head = waitForBotReview(ws, repo, n);
+  console.log(`REVIEWED -- ${ws.config.gate.reviewBot || "no review bot is configured"}${ws.config.gate.reviewBot ? ` reviewed ${repo.remote}#${n} at ${head}` : ""}`);
+}
+
 function cmdPrWait(ws: Workspace, argv: string[]) {
   const { p } = args("pr-wait", argv, {}, [3, 3]);
   waitAndSend(ws, resolveRepo(ws, p[0] as string), prNumber(p[1] as string), p[2] as string);
@@ -998,6 +1013,7 @@ const COMMANDS: Record<string, (ws: Workspace, argv: string[]) => number | void 
   "pr-ready": cmdPrReady,
   "pr-send": cmdPrSend,
   "pr-wait": cmdPrWait,
+  "pr-wait-coderabbit": cmdPrWaitCoderabbit,
   "pr-open-for-review": cmdPrOpenForReview,
   "delta-range": cmdDeltaRange,
   "pr-comment": cmdPrComment,

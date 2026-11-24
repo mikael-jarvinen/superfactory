@@ -13,7 +13,7 @@ import type { Repo } from "../config.js";
 import { allRecs, recPrs } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { splitlines } from "../util.js";
-import { api, type CheckRun, checkRuns, commitPulls, type CommitStatus, conversation, gh, json, prCommits, prView, type Review, reviewComments, reviews, statuses, Unreadable } from "./github.js";
+import { api, type CheckRun, checkRuns, commitPulls, type CommitStatus, gh, json, prCommits, prView, type Review, reviewComments, reviews, statuses, Unreadable } from "./github.js";
 import { MEDIA_BEGIN } from "./media.js";
 import { seconds } from "./send.js";
 import { translationsAt } from "./translations.js";
@@ -23,18 +23,12 @@ export type FailureKind = "fatal" | "waits" | "unreadable";
 export interface Failure {
   text: string;
   kind: FailureKind;
-  // The comment that asks a review bot to review this head. `pr-wait` posts it once and waits;
-  // everything else reads the failure as it is.
+  // The comment that asks a review bot which skipped this head to review it. `pr-wait` posts it once
+  // and waits; everything else reads the failure as it is.
   trigger?: string;
   // The trigger that, once asked at this head, makes this failure a wait: the bot was asked and has
   // not answered yet. `pr-wait` times it from the ask.
   asked?: string;
-  // Seconds since the trigger (or `asked`) was last asked at this head; absent when it was not.
-  askedAgo?: number;
-  // A rate limit: `pr-wait` asks again once the last ask is old enough for the limit to have lifted.
-  retry?: boolean;
-  // The review bot has not reviewed this head yet: `pr-wait` holds it for the review ceiling.
-  review?: boolean;
 }
 
 export interface Verdict {
@@ -66,21 +60,21 @@ function sinceHead(times: (string | null | undefined)[]): number {
 }
 
 // The review bots the gate knows by name: the commit status each posts, and how to ask it to review.
-// `full` is the ask for a review from scratch, for a bot whose `trigger` reviews only the commits since
-// its last review (CodeRabbit: "@coderabbitai review" is incremental, "@coderabbitai full review"
-// "Reviews every file in the pull request again from scratch", docs.coderabbit.ai/reference/review-commands).
+// `full` asks for a review from scratch, for a bot whose `trigger` reviews only the commits since its
+// last review (CodeRabbit: "@coderabbitai full review" "Reviews every file in the pull request again
+// from scratch", docs.coderabbit.ai/reference/review-commands). pr-wait-coderabbit uses it.
 const KNOWN_BOTS: Record<string, { status: string; ask: string; trigger?: string; full?: string }> = {
   coderabbitai: { status: "CodeRabbit", ask: 'comment "@coderabbitai review" on the PR', trigger: "@coderabbitai review", full: "@coderabbitai full review" },
 };
-const reviewBotOf = (login: string) => KNOWN_BOTS[login] ?? { status: login, ask: `ask ${login} for a review of this head` };
+export const reviewBotOf = (login: string): { status: string; ask: string; trigger?: string; full?: string } => KNOWN_BOTS[login] ?? { status: login, ask: `ask ${login} for a review of this head` };
 
 // A green status that reviewed nothing: a skipped draft, a rate limit.
-const NOT_A_REVIEW = /rate limit|skipped|no review|not run/i;
-const RATE_LIMITED = /rate limit/i;
+export const NOT_A_REVIEW = /rate limit|skipped|no review|not run/i;
+export const RATE_LIMITED = /rate limit/i;
 // A draft it did not review: "Review skipped" or "Review paused", as its status or its check-run.
 const SKIPPED = /skipped|paused/i;
 // Its check-run's title when it reviewed, or found the diff already reviewed.
-const REVIEWED_RUN = /^(finished|review completed)$/i;
+export const REVIEWED_RUN = /^(finished|review completed)$/i;
 
 export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
   const pr = prView(repo, n);
@@ -228,6 +222,10 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
       // of its own, empty, at the head of the moment: on lyyti-classic#8705, 2026-11-12, two replies at
       // the head passed for its review there, which had been rate limited.
       else if (!rs.some((r) => (r.user?.login ?? "").replace(/\[bot\]$/, "") === botLogin && r.commit_id === sha && !!r.body?.trim())) {
+        // Mikael, 2026-11-12: "clearly the rule change from waiting on coderabbit even when we hit the
+        // limits is wrong. We have so many tasks waiting on the gate." Its latest word at this head,
+        // status or check-run, saying it is rate limited lets the PR go without its review, said every
+        // time, as on 2026-10-27: "we should be able to work without coderabbit when the limits are hit."
         const age = Math.round(sinceHead([...(runs ?? []).map((c) => c.started_at), ...sts.map((x) => x.created_at)]));
         const runTitle = latestRun?.status === "completed" ? (latestRun.output?.title ?? "") : "";
         const skipped = st ? (SKIPPED.test(desc) ? `its status here says "${desc}"` : "") : SKIPPED.test(runTitle) ? `its check here says "${runTitle}"` : "";
@@ -237,52 +235,21 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
         if (latestRun && latestRun.status !== "completed") {
           fail(`${bot.status} is reviewing ${short} (its check here is ${latestRun.status}${latestRun.output?.title ? `: ${latestRun.output.title}` : ""})`, "waits");
         } else {
-          // NOT SENDABLE until it reviews this head, whatever the reason it has not. On 2026-11-23
-          // lyyti-classic#8878 and #8879 went to Mikael with remarks that CodeRabbit was rate limited
-          // and had reviewed only an earlier head; its first look at the final version came when he
-          // opened them, with 12 findings on PRs colleagues were already reading. This replaces the
-          // waivers of 2026-10-27, 2026-11-12 (rate limit) and 2026-11-17 (an earlier head's review).
-          const talk = conversation(repo, n, sha, botLogin);
-          if (!talk) fail(`COULD NOT READ the comments of #${n} since ${short} -- cannot say whether ${bot.status} was asked to review it`, "unreadable");
-          else {
-            const ago = (body?: string) => {
-              const t = body ? talk.asked.get(body) : undefined;
-              return t === undefined ? undefined : Math.round((Date.now() - t) / 1000);
-            };
-            // Its latest word is a rate limit unless something was asked since: a new ask is waited
-            // on as an ask, and if it is limited again it says so again.
-            const lastAsk = Math.max(0, ...talk.asked.values());
-            const limitTimes = [
-              st && RATE_LIMITED.test(desc) ? Date.parse(st.created_at ?? "") || 1 : 0,
-              latestRun && rateLimitedRun(latestRun) ? Date.parse(latestRun.started_at ?? "") || 1 : 0,
-              talk.limitedAt ?? 0,
-            ];
-            const limitedAt = Math.max(...limitTimes);
-            const limited = limitedAt > 0 && limitedAt >= lastAsk;
-            const earlier: Earlier = limited ? {} : earlierReview(repo, n, botLogin, sha, rs, isBotRun);
-            if (limited) {
-              failures.push({ text: `${bot.status} is rate limited and has not reviewed ${short} -- once the limit lifts, ${ask}; pr-wait waits it out and asks again`,
-                // fatal to everything but pr-wait, which asks and waits: pr-send does not sit out the limit
-                kind: "fatal", trigger: bot.trigger, retry: true, review: true, askedAgo: ago(bot.trigger) });
-            } else if (earlier.unreadable) fail(`COULD NOT READ ${earlier.unreadable} -- cannot say whether ${bot.status} reviewed an earlier head of #${n}`, "unreadable");
-            else if (earlier.sha) {
-              // An incremental review asked at this head that brought nothing within the grace: it
-              // found nothing new to review, so the ask is for a review from scratch.
-              const was = `${bot.status} reviewed an earlier head, ${earlier.sha.slice(0, 7)}, not ${short}`;
-              const fullAgo = ago(bot.full);
-              const incrAgo = ago(bot.trigger);
-              if (bot.full && fullAgo !== undefined && fullAgo >= graceS())
-                fail(`${was}, and "${bot.full}" asked ${fullAgo}s ago brought no review -- read its reply on the PR`);
-              else {
-                const trigger = bot.full && incrAgo !== undefined && incrAgo >= graceS() ? bot.full : bot.trigger;
-                const how = trigger ? `comment "${trigger}" on the PR, then run this again` : ask;
-                failures.push({ text: `${was} -- ${how}`, kind: "fatal", trigger, review: true, askedAgo: ago(trigger) });
-              }
-            } else if (skipped) failures.push({ text: `${bot.status} has not reviewed ${short}: ${skipped} -- ${ask}`, kind: "fatal", trigger: bot.trigger, review: true, askedAgo: ago(bot.trigger) });
-            else if (!st && age < graceS()) fail(`${bot.status} has posted nothing at ${short} yet, ${age}s after its first check -- waiting up to ${graceS()}s`, "waits");
-            else if (st) fail(`${bot.status} has not reviewed ${short}: its status here says "${desc}" -- ${ask}`);
-            else failures.push({ text: `${bot.status} has not reviewed ${short}: it has posted nothing at this head -- ${ask}`, kind: "fatal", asked: bot.trigger, review: true, askedAgo: ago(bot.trigger) });
-          }
+          // Its review of the PR's first version is enough. On 2026-11-17 CodeRabbit cut the account
+          // to one review an hour, and every fix round queued behind it; Mikael chose to keep it for
+          // the first version of each PR and let later versions go without it. Its unresolved
+          // threads still block, below.
+          // The rate-limit waiver needs no history, so it goes first: a history read that fails
+          // does not hold back a PR the waiver lets go.
+          const limited = (st && RATE_LIMITED.test(desc)) || (latestRun && rateLimitedRun(latestRun));
+          const earlier: Earlier = limited ? {} : earlierReview(repo, n, botLogin, sha, rs, isBotRun);
+          if (limited) remarks.push(`${bot.status} is rate limited and has not reviewed ${short}; sent without its review`);
+          else if (earlier.unreadable) fail(`COULD NOT READ ${earlier.unreadable} -- cannot say whether ${bot.status} reviewed an earlier head of #${n}`, "unreadable");
+          else if (earlier.sha) remarks.push(`${bot.status} reviewed an earlier head, ${earlier.sha.slice(0, 7)}, not ${short}; later versions go without its review`);
+          else if (skipped) failures.push({ text: `${bot.status} has not reviewed ${short}: ${skipped} -- ${ask}`, kind: "fatal", trigger: bot.trigger });
+          else if (!st && age < graceS()) fail(`${bot.status} has posted nothing at ${short} yet, ${age}s after its first check -- waiting up to ${graceS()}s`, "waits");
+          else if (st) fail(`${bot.status} has not reviewed ${short}: its status here says "${desc}" -- ${ask}`);
+          else failures.push({ text: `${bot.status} has not reviewed ${short}: it has posted nothing at this head -- ${ask}`, kind: "fatal", asked: bot.trigger });
         }
       }
     }
