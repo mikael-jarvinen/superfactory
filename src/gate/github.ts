@@ -149,3 +149,31 @@ export function reviews(repo: Repo, n: number): Review[] | undefined {
     if (d.length < 100) return all;
   }
 }
+
+// What was said to and by a review bot on PR #n since its head commit: when each trigger was last
+// asked, and when the bot last answered that it is rate limited. Its rate-limit reply is a comment
+// (CodeRabbit on lyyti-classic#8879, 2026-11-23: "Action not completed ... Review rate limited"),
+// sometimes with no check-run at the head to say so. Undefined when the comments cannot be read.
+export interface Conversation {
+  // trigger body -> ms since the epoch of its latest ask after the head commit
+  asked: Map<string, number>;
+  limitedAt?: number;
+}
+
+export function conversation(repo: Repo, n: number, head: string, botLogin: string): Conversation | undefined {
+  const at = api<{ commit?: { committer?: { date?: string } } }>(`repos/${repo.remote}/commits/${head}`)?.commit?.committer?.date;
+  const comments = at ? api<{ body?: string; created_at?: string; user?: { login?: string } | null }[]>(`repos/${repo.remote}/issues/${n}/comments?since=${at}&per_page=100`) : undefined;
+  if (!at || !Array.isArray(comments)) return undefined;
+  const talk: Conversation = { asked: new Map() };
+  for (const c of comments) {
+    const t = Date.parse(c.created_at ?? "");
+    if (!Number.isFinite(t) || (c.created_at ?? "") <= at) continue;
+    const body = c.body?.trim() ?? "";
+    if ((c.user?.login ?? "").replace(/\[bot\]$/, "") === botLogin) {
+      if (/rate limited/i.test(body) && t > (talk.limitedAt ?? 0)) talk.limitedAt = t;
+    } else if (t > (talk.asked.get(body) ?? 0)) {
+      talk.asked.set(body, t);
+    }
+  }
+  return talk;
+}

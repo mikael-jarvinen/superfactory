@@ -4,12 +4,14 @@
 // A PR stays a draft until its item reaches undrafting(ws). Where that is colleague-review, this is
 // where it leaves draft; with [gate] colleague_review = false it is your-review, undrafted by hand, and
 // this refuses. Every open PR on the record is checked before any is opened: its head must still be
-// the sha that was reviewed. The record moves to colleague-review only once all of them are open.
+// the sha that was reviewed, and the review bot must have reviewed that head (reviewbot.ts: it asks and
+// waits, rate limits included). The record moves to colleague-review only once all of them are open.
 import { releaseForReview } from "../stacks/engine.js";
 import { COLLEAGUE_REVIEW_OFF, loadRec, recPrs, transition, undrafting } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
 import { api, gh, prView, resolveRepo } from "./github.js";
+import { waitForBotReview } from "./reviewbot.js";
 import { translationsAt } from "./translations.js";
 
 const refused = (msg: string) => new FactoryError(`pr-open-for-review: REFUSED -- ${msg}`);
@@ -20,7 +22,7 @@ export function openForReview(ws: Workspace, ticket: string, out: (line: string)
   if (!rec) throw refused(`no record for ${ticket}`);
   if (rec.state !== "your-review" && rec.state !== "colleague-review")
     throw refused(`${ticket} is ${rec.state}; a PR goes to colleagues from your-review`);
-  const open: { remote: string; n: number; draft: boolean }[] = [];
+  const open: { remote: string; n: number; draft: boolean; head: string }[] = [];
   const bad: string[] = [];
   for (const p of recPrs(rec)) {
     if (!p.repo || !p.number) continue;
@@ -51,12 +53,23 @@ export function openForReview(ws: Workspace, ticket: string, out: (line: string)
       if (problems.length) bad.push(`${where}: ${problems.join("; ")}`);
       else {
         out(`${where}: ${t.remark}`);
-        open.push({ remote: p.repo, n: p.number, draft: pr.isDraft });
+        open.push({ remote: p.repo, n: p.number, draft: pr.isDraft, head: pr.headRefOid });
       }
     }
   }
   if (bad.length) throw refused(`nothing opened:\n${bad.map((b) => `  ${b}`).join("\n")}`);
   if (!open.length) throw refused(`${ticket} has no open PR on its record`);
+  // The review bot's review of every head first, so none opens while another still waits for it.
+  for (const x of open) {
+    let head: string;
+    try {
+      head = waitForBotReview(ws, resolveRepo(ws, x.remote), x.n, out);
+    } catch (e) {
+      if (!(e instanceof FactoryError)) throw e;
+      throw new FactoryError(`pr-open-for-review: REFUSED -- nothing opened, ${ticket} stays ${rec.state}: ${e.message}`, e.code);
+    }
+    if (head !== x.head) throw refused(`nothing opened: ${x.remote}#${x.n} moved from ${x.head.slice(0, 7)} to ${head.slice(0, 7)} while waiting for its review`);
+  }
   for (const x of open) {
     if (!x.draft) {
       out(`${x.remote}#${x.n} is already open`);

@@ -60,18 +60,21 @@ function sinceHead(times: (string | null | undefined)[]): number {
 }
 
 // The review bots the gate knows by name: the commit status each posts, and how to ask it to review.
-const KNOWN_BOTS: Record<string, { status: string; ask: string; trigger?: string }> = {
-  coderabbitai: { status: "CodeRabbit", ask: 'comment "@coderabbitai review" on the PR', trigger: "@coderabbitai review" },
+// `full` asks for a review from scratch, for a bot whose `trigger` reviews only the commits since its
+// last review (CodeRabbit: "@coderabbitai full review" "Reviews every file in the pull request again
+// from scratch", docs.coderabbit.ai/reference/review-commands). pr-wait-coderabbit uses it.
+const KNOWN_BOTS: Record<string, { status: string; ask: string; trigger?: string; full?: string }> = {
+  coderabbitai: { status: "CodeRabbit", ask: 'comment "@coderabbitai review" on the PR', trigger: "@coderabbitai review", full: "@coderabbitai full review" },
 };
-const reviewBotOf = (login: string) => KNOWN_BOTS[login] ?? { status: login, ask: `ask ${login} for a review of this head` };
+export const reviewBotOf = (login: string): { status: string; ask: string; trigger?: string; full?: string } => KNOWN_BOTS[login] ?? { status: login, ask: `ask ${login} for a review of this head` };
 
 // A green status that reviewed nothing: a skipped draft, a rate limit.
-const NOT_A_REVIEW = /rate limit|skipped|no review|not run/i;
-const RATE_LIMITED = /rate limit/i;
+export const NOT_A_REVIEW = /rate limit|skipped|no review|not run/i;
+export const RATE_LIMITED = /rate limit/i;
 // A draft it did not review: "Review skipped" or "Review paused", as its status or its check-run.
 const SKIPPED = /skipped|paused/i;
 // Its check-run's title when it reviewed, or found the diff already reviewed.
-const REVIEWED_RUN = /^(finished|review completed)$/i;
+export const REVIEWED_RUN = /^(finished|review completed)$/i;
 
 export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
   const pr = prView(repo, n);
