@@ -44,6 +44,9 @@ function green(over: Routes = {}, head = HEAD, draft = true): Routes {
     [`api repos/${REMOTE}/pulls/${N}/commits?per_page=100&page=1`]: { stdout: [{ sha: head }] },
     [`pr diff ${N} --repo ${REMOTE}`]: { stdout: diffOf(2, 20) },
     [`pr ready ${N} --repo ${REMOTE}`]: { stdout: "" },
+    // the head commit and the PR's conversation since it: nothing asked, nothing answered
+    [`api repos/${REMOTE}/commits/${head}`]: { stdout: { commit: { committer: { date: "2026-01-01T09:59:00Z" } } } },
+    [`api repos/${REMOTE}/issues/${N}/comments`]: { stdout: [] },
     ...over,
   };
 }
@@ -59,7 +62,7 @@ function gateWorkspace(gate = "", toml = TOML, bots = ["coderabbitai", "Copilot"
   const log = join(ws, "gh.log");
   const env = (extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
     PATH: `${join(ws, "bin")}:${process.env.PATH}`, GH_BIN: "", FAKE_GH_ROUTES: routes, FAKE_GH_LOG: log,
-    FACTORY_SEND_DELAY: "0", FACTORY_SEND_POLL: "0", FACTORY_WAIT_POLL: "0", ...extra,
+    FACTORY_SEND_DELAY: "0", FACTORY_SEND_POLL: "0", FACTORY_WAIT_POLL: "0", FACTORY_REVIEW_POLL: "0", FACTORY_REVIEW_WAIT_LIMIT: "0", ...extra,
   });
   for (const [to, ...rest] of [["building"], ["pr-open", "--pr", `${REMOTE}#${N}`, "--head", HEAD], ["agent-review"], ["gate"]] as string[][])
     assert.equal(factory(ws, ["state", "WEB-1", to as string, ...rest]).status, 0);
@@ -294,9 +297,10 @@ test("a required review bot must have reviewed the head: pr-ready refuses, pr-wa
   assert.match(r.stderr, /still waiting after \d+s on:\n {2}- CodeRabbit has not reviewed aaaaaaa/);
 });
 
-// On 2026-11-17 CodeRabbit cut the account to one review an hour, and Mikael chose to keep it for the
-// first version of each PR and let later versions go without it.
-test("a review bot that reviewed an earlier head of the PR lets later heads pass, said as a remark", () => {
+// lyyti-classic#8878, 2026-11-23: CodeRabbit reviewed cfa707f, not the head 5d8dceb, and the PR went
+// to Mikael with a remark saying so; its first look at the final version came after he opened it. An
+// earlier head's review no longer stands in for the head's (it did from 2026-11-17).
+test("a review bot that reviewed only an earlier head of the PR holds it, naming the trigger", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const OLD = "b".repeat(40);
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
@@ -305,7 +309,7 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
   const commits = `api repos/${REMOTE}/pulls/${N}/commits?per_page=100&page=1`;
   const skippedHere = { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review skipped: draft pull request" }] } };
   const ready = (over: Routes) => run(green({ [st]: skippedHere, [rv]: { stdout: [] }, ...over }), ["pr-ready", "web", String(N)]);
-  const EARLIER = /CodeRabbit reviewed an earlier head, bbbbbbb, not aaaaaaa; later versions go without its review/;
+  const EARLIER = /CodeRabbit reviewed an earlier head, bbbbbbb, not aaaaaaa -- comment "@coderabbitai review" on the PR, then run this again/;
 
   // never reviewed: refused, with the same ask as before
   const oldStatus = `api repos/${REMOTE}/commits/${OLD}/status`;
@@ -333,9 +337,10 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
   ];
   for (const over of evidence) {
     r = ready(over);
-    assert.equal(r.status, 0, r.stdout);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stdout, /^NOT SENDABLE/m);
     assert.match(r.stdout, EARLIER);
-    assert.match(r.stdout, /^SENDABLE/m);
+    assert.doesNotMatch(r.stdout, /without its review/);
   }
 
   // a check-run on a commit another PR also has is that PR's review: a stacked PR carries its lower
@@ -375,10 +380,41 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
   r = ready({ [cm]: { stdout: [{ user: { login: "coderabbitai[bot]" }, original_commit_id: OLD, in_reply_to_id: 11 }] } });
   assert.equal(r.status, 1, r.stdout);
 
-  // its unresolved threads still block
+  // its unresolved threads block as well
   r = ready({ ...evidence[0], "api graphql": { stdout: { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [{ isResolved: false, path: "src/a.ts", line: 3 }] } } } } } } });
   assert.equal(r.status, 1, r.stdout);
   assert.match(r.stdout, /unresolved review threads: src\/a.ts:3/);
+
+  // "@coderabbitai review" is incremental. Asked at this head and answered with no review within the
+  // grace, it found nothing new, so the ask becomes "@coderabbitai full review"; asked too, and still
+  // nothing, it is refused for a person to read the replies.
+  const comments = `api repos/${REMOTE}/issues/${N}/comments`;
+  const at = (body: string, created_at: string) => ({ body, created_at, user: { login: "mikael" } });
+  const old = new Date(Date.now() - 3600_000).toISOString();
+  const now = new Date().toISOString();
+  r = ready({ ...evidence[0], [comments]: { stdout: [at("@coderabbitai review", now)] } });
+  assert.match(r.stdout, EARLIER, "asked a moment ago: the same ask, waited on");
+  r = ready({ ...evidence[0], [comments]: { stdout: [at("@coderabbitai review", old)] } });
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /CodeRabbit reviewed an earlier head, bbbbbbb, not aaaaaaa -- comment "@coderabbitai full review" on the PR, then run this again/);
+  r = ready({ ...evidence[0], [comments]: { stdout: [at("@coderabbitai review", old), at("@coderabbitai full review", old)] } });
+  assert.match(r.stdout, /CodeRabbit reviewed an earlier head, bbbbbbb, not aaaaaaa, and "@coderabbitai full review" asked \d+s ago brought no review -- read its reply on the PR/);
+
+  // pr-wait posts the ask, then the full review once the incremental one brought nothing, and sends
+  // when the review of the head lands
+  const FULL = `pr comment ${N} --repo ${REMOTE} --body @coderabbitai full review`;
+  const reviewOld = { user: { login: "coderabbitai[bot]" }, commit_id: OLD, state: "COMMENTED", body: REVIEW_BODY };
+  const reviewHead = { ...reviewOld, commit_id: HEAD };
+  r = run(green({
+    [st]: skippedHere, [rv]: [{ stdout: [reviewOld] }, { stdout: [reviewOld] }, { stdout: [reviewOld, reviewHead] }],
+    [comments]: [{ stdout: [] }, { stdout: [at("@coderabbitai review", old)] }],
+    [`pr comment ${N} --repo ${REMOTE} --body`]: { stdout: `https://github.com/${REMOTE}/pull/${N}#issuecomment-1\n` },
+  }), ["pr-wait", "web", String(N), HEAD]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.calls.filter((c) => c === POST).length, 1);
+  assert.equal(r.calls.filter((c) => c === FULL).length, 1);
+  assert.match(r.stdout, /^SENDABLE/m);
+  assert.doesNotMatch(r.stdout, /earlier head/);
 
   // a review of this head passes with no remark about an earlier one
   r = ready({ [rv]: { stdout: [{ user: { login: "coderabbitai[bot]" }, commit_id: HEAD, state: "COMMENTED", body: REVIEW_BODY }] } });
@@ -410,12 +446,14 @@ test("pr-wait asks a review bot that skipped the head, once, and waits for it", 
   assert.match(r.stderr, /posted "@coderabbitai review" to ask for a review of aaaaaaa/);
   assert.match(r.stdout, /^SENDABLE/m);
 
-  // asked, and then rate limited: sent with the remark, asked only the once
+  // asked, and then rate limited: asked again once the limit may have lifted, then its review lands
   const limited = checkRuns(check("test"), rabbitRun("Review skipped", { conclusion: "skipped" }), rabbitRun("Review rate limited", { started_at: "2026-01-01T10:05:00Z" }));
-  r = wait({ [cr]: [skipped("Review skipped"), limited], [rv]: { stdout: [] }, ...asking([], [TRIGGER]) });
+  r = wait({ [cr]: [skipped("Review skipped"), limited], [rv]: [{ stdout: [] }, { stdout: [] }, { stdout: [] }, { stdout: [review] }],
+    ...asking([], [TRIGGER], [TRIGGER, { ...TRIGGER, created_at: new Date().toISOString() }]) });
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.calls.filter((c) => c === POST).length, 1);
-  assert.ok(r.stdout.includes("CodeRabbit is rate limited and has not reviewed aaaaaaa; sent without its review"), r.stdout);
+  assert.equal(r.calls.filter((c) => c === POST).length, 2, "asked, and asked again after the limit");
+  assert.match(r.stderr, /waiting \(\d+s\) on: CodeRabbit is rate limited and has not reviewed aaaaaaa/);
+  assert.match(r.stdout, /^SENDABLE/m);
 
   // a second run at the same head finds the ask already made and does not post it again
   r = wait({ [cr]: skipped("Review paused"), [rv]: [{ stdout: [] }, { stdout: [review] }], ...asking([TRIGGER]) });
@@ -484,44 +522,61 @@ test("pr-wait waits on a review bot whose check is still running, past the grace
 const rabbitRun = (title: string, o: Record<string, unknown> = {}) =>
   check("CodeRabbit", { conclusion: "neutral", output: { title }, app: { slug: "coderabbitai" }, details_url: null, ...o });
 
-// Mikael, 2026-11-12: "clearly the rule change from waiting on coderabbit even when we hit the limits
-// is wrong. We have so many tasks waiting on the gate." A rate limit is a remark again, as on 2026-10-27.
-test("a rate-limited review bot lets the PR go without its review, said as a remark", () => {
+// lyyti-classic#8879, 2026-11-23: rate limited, it went to Mikael with a remark and CodeRabbit's first
+// look at it came after he opened it. A rate limit is waited out, never sent past (it was a remark
+// from 2026-11-12). Its replies are its own: "Action not completed ... Review rate limited".
+test("a rate-limited review bot holds the PR: pr-ready names the trigger, pr-wait waits it out and asks again", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
   const rv = `api repos/${REMOTE}/pulls/${N}/reviews?per_page=100&page=1`;
   const cr = `api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`;
-  const REMARK = "CodeRabbit is rate limited and has not reviewed aaaaaaa; sent without its review";
+  const comments = `api repos/${REMOTE}/issues/${N}/comments`;
+  const BLOCK = /^NOT SENDABLE:\n {2}1\. CodeRabbit is rate limited and has not reviewed aaaaaaa -- once the limit lifts, comment "@coderabbitai review" on the PR, then run this again; pr-wait waits it out and asks again/m;
   const limited = { [st]: { stdout: { statuses: [] } }, [rv]: { stdout: [] }, [cr]: checkRuns(check("test"), rabbitRun("Review rate limited")) };
+  const reply = (created_at: string) => ({ body: "<details>\n<summary>Action not completed</summary>\n\nReview rate limited.\n</details>", created_at, user: { login: "coderabbitai[bot]" } });
+  const asked = (created_at: string) => ({ ...TRIGGER, created_at, user: { login: "mikael" } });
 
-  let r = run(green(limited), ["pr-ready", "web", String(N)]);
-  assert.equal(r.status, 0, r.stdout);
-  assert.match(r.stdout, new RegExp(`REMARKS \\(not blocking\\):[\\s\\S]*- ${REMARK}`));
-  assert.doesNotMatch(r.stdout, /check 'CodeRabbit' concluded neutral/);
-
-  r = run(green({ [st]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review rate limited" }] } }, [rv]: { stdout: [] } }), ["pr-ready", "web", String(N)]);
-  assert.equal(r.status, 0, r.stdout);
-  assert.ok(r.stdout.includes(REMARK), "its status alone says it too");
-
-  // the waiver needs no history: a failed read of the PR's comments or commits does not hold it back
-  for (const broken of [`api repos/${REMOTE}/pulls/${N}/comments?per_page=100&page=1`, `api repos/${REMOTE}/pulls/${N}/commits?per_page=100&page=1`]) {
-    r = run(green({ ...limited, [broken]: { status: 1 } }), ["pr-ready", "web", String(N)]);
-    assert.equal(r.status, 0, r.stdout);
-    assert.ok(r.stdout.includes(REMARK), r.stdout);
+  // its check-run, its status, or only its reply to an ask says so
+  for (const over of [
+    limited,
+    { [st]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review rate limited", created_at: "2026-01-01T10:00:10Z" }] } }, [rv]: { stdout: [] } },
+    { ...limited, [cr]: checkRuns(check("test"), rabbitRun("Review skipped", { conclusion: "skipped" })), [comments]: { stdout: [asked("2026-01-01T10:01:00Z"), reply("2026-01-01T10:01:08Z")] } },
+  ]) {
+    const r = run(green(over), ["pr-ready", "web", String(N)]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stdout, BLOCK);
+    assert.doesNotMatch(r.stdout, /without its review/);
+    assert.doesNotMatch(r.stdout, /check 'CodeRabbit' concluded neutral/);
   }
+  let r = run(green(limited), ["pr-send", "web", String(N), HEAD]);
+  assert.equal(r.status, 1, r.stderr);
 
-  r = run(green(limited), ["pr-send", "web", String(N), HEAD]);
-  assert.equal(r.status, 0, r.stderr);
-  assert.ok(r.stdout.includes(REMARK), `pr-send shows the remark:\n${r.stdout}`);
+  // an ask made after the limit is waited on as an ask, not read as limited
+  r = run(green({ ...limited, [comments]: { stdout: [asked(new Date().toISOString())] } }), ["pr-ready", "web", String(N)]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.doesNotMatch(r.stdout, /rate limited/);
+  assert.match(r.stdout, /CodeRabbit has not reviewed aaaaaaa: it has posted nothing at this head/);
 
-  // pr-wait does not wait on it, and does not ask it
-  r = run(green({ ...limited, ...asking([]) }), ["pr-wait", "web", String(N), HEAD], { FACTORY_WAIT_LIMIT: "0" });
+  // pr-wait asks, is limited again, asks again once FACTORY_REVIEW_RETRY has passed, and sends
+  // when its review lands
+  const review = { user: { login: "coderabbitai[bot]" }, commit_id: HEAD, state: "COMMENTED", body: REVIEW_BODY };
+  r = run(green({
+    ...limited, [rv]: [{ stdout: [] }, { stdout: [] }, { stdout: [] }, { stdout: [review] }],
+    ...asking([], [asked("2026-01-01T10:01:00Z"), reply("2026-01-01T10:01:08Z")], [asked("2026-01-01T10:01:00Z"), reply("2026-01-01T10:01:08Z"), asked(new Date().toISOString())]),
+  }), ["pr-wait", "web", String(N), HEAD]);
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.calls.filter((c) => c === POST).length, 0);
+  assert.equal(r.calls.filter((c) => c === POST).length, 2);
+  assert.match(r.stderr, /waiting \(\d+s\) on: CodeRabbit is rate limited/);
   assert.match(r.stdout, /^SENDABLE/m);
-  assert.ok(r.stdout.includes(REMARK), r.stdout);
 
-  // an older rate limit under a later run still in progress is waited out, not sent
+  // an ask younger than FACTORY_REVIEW_RETRY is not repeated; the ceiling is the review limit
+  r = run(green({ ...limited, ...asking([asked(new Date(Date.now() - 60_000).toISOString()), reply(new Date().toISOString())]) }),
+    ["pr-wait", "web", String(N), HEAD], { FACTORY_WAIT_LIMIT: "0", FACTORY_REVIEW_WAIT_LIMIT: "0" });
+  assert.equal(r.status, 3, r.stderr);
+  assert.equal(r.calls.filter((c) => c === POST).length, 0);
+  assert.match(r.stderr, /still waiting after \d+s on:\n {2}- CodeRabbit is rate limited/);
+
+  // an older rate limit under a later run still in progress is waited out
   r = run(green({ ...limited, [cr]: checkRuns(check("test"), rabbitRun("Review rate limited"), rabbitRun("Review in progress", { status: "in_progress", conclusion: null, started_at: "2026-01-01T10:05:00Z" })) }), ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 1);
   assert.match(r.stdout, /check 'CodeRabbit' is in_progress, not completed/);
@@ -546,8 +601,8 @@ test("a review bot's replies in review threads are not its review of the head", 
 
   // rate limited with only replies: still said to have reviewed nothing
   r = run(over([reply, reply], "Review rate limited"), ["pr-ready", "web", String(N)]);
-  assert.equal(r.status, 0, r.stdout);
-  assert.ok(r.stdout.includes("CodeRabbit is rate limited and has not reviewed aaaaaaa; sent without its review"), r.stdout);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /CodeRabbit is rate limited and has not reviewed aaaaaaa/);
 });
 
 // lyyti-events#847, 2026-10-27: after a rebase CodeRabbit said "Already reviewed the last commit",
