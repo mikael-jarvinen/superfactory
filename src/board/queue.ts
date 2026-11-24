@@ -41,6 +41,74 @@ export interface QueueItem {
   link: string | null;
   // "message": a row of the log. "board": a blocked record whose question was never posted.
   from: "message" | "board";
+  // A record's link to the posted question it is blocked on (`factory state ... blocked --asks`), for a
+  // question posted without its ticket.
+  asks?: string | null;
+}
+
+// One question, as the human sees it: every open part of it folded together. Mikael, 2026-11-24:
+// "It can frequently duplicate topics. Also, it always collapses the message and the message can also
+// be a recap sometimes about 'asked mikael...'" A decision and the block recorded for it, or the lead's
+// follow-ups on the same ticket, are one card; marking it handled, or answering it, clears every part.
+export interface QueueCard {
+  // The card's own id: its newest posted question, else its record. Any of `ids` names it too.
+  id: string;
+  ids: string[];
+  ticket: string | null;
+  kinds: string[];
+  // When it was first asked, and when last.
+  at: string | null;
+  last: string | null;
+  // The posted questions, newest first, whole.
+  questions: { id: string; t: string | null; kind: string; text: string; link: string | null }[];
+  // The blocked record, when the item is blocked: its note is shown only when nothing was posted.
+  blocked: { id: string; at: string | null; note: string } | null;
+  // Only a blocked note and no posted question: the lead should post it with `factory say --kind decision`.
+  unposted: boolean;
+}
+
+// Fold the open parts into cards: one per ticket, and a record joins the untagged question it names
+// with `--asks`. A question posted with no ticket and named by nothing is a card of its own.
+export function toCards(parts: QueueItem[]): QueueCard[] {
+  const byId = new Map(parts.map((i) => [i.id, i]));
+  const key = (i: QueueItem): string => {
+    const linked = i.asks ? byId.get(i.asks) : undefined;
+    if (linked) return key(linked);
+    return i.ticket ? `t:${i.ticket}` : `i:${i.id}`;
+  };
+  const groups = new Map<string, QueueItem[]>();
+  for (const i of parts) {
+    const k = key(i);
+    groups.set(k, [...(groups.get(k) ?? []), i]);
+  }
+  const cards: QueueCard[] = [];
+  for (const g of groups.values()) {
+    const posted = g.filter((i) => i.from === "message").sort((a, b) => (time(b.at) || 0) - (time(a.at) || 0));
+    const rec = g.find((i) => i.from === "board") ?? null;
+    const ats = g.map((i) => i.at).filter((a): a is string => !!a).sort((a, b) => (time(a) || 0) - (time(b) || 0));
+    cards.push({
+      id: (posted[0] ?? rec!).id,
+      ids: g.map((i) => i.id),
+      ticket: g.find((i) => i.ticket)?.ticket ?? null,
+      kinds: [...new Set(g.map((i) => i.kind))],
+      at: ats[0] ?? null,
+      last: ats.at(-1) ?? null,
+      questions: posted.map((i) => ({ id: i.id, t: i.t, kind: i.kind, text: i.text, link: i.link })),
+      blocked: rec ? { id: rec.id, at: rec.at, note: rec.text } : null,
+      unposted: !posted.length,
+    });
+  }
+  return cards.sort((a, b) => (time(a.at) || 0) - (time(b.at) || 0));
+}
+
+// What waits on the human, as cards, oldest first.
+export const queueCards = (ws: Workspace): QueueCard[] => toCards(queue(ws));
+
+// Every part of the cards the ids name, so a mark clears the whole card. An id no card holds stays as
+// it is, for the caller's own check to refuse.
+function wholeCards(ws: Workspace, ids: string[]): string[] {
+  const cards = queueCards(ws);
+  return [...new Set(ids.flatMap((id) => cards.find((c) => c.ids.includes(id))?.ids ?? [id]))];
 }
 
 const hash = (...parts: string[]) => createHash("sha1").update(parts.join("\n")).digest("hex").slice(0, 12);
@@ -232,7 +300,7 @@ function open(ws: Workspace, recs = records(ws)): { items: QueueItem[]; read: bo
     const posted = items.filter((i) => i.ticket === r.ticket && time(i.t) >= from);
     for (const i of posted) covers.set(i.id, recordId(r));
     if (posted.length) continue;
-    items.push({ id: recordId(r), t: null, at: r.asked_you.at, kind: "blocked", ticket: r.ticket, text: r.asked_you.question ?? "blocked, with no question recorded", link: null, from: "board" });
+    items.push({ id: recordId(r), t: null, at: r.asked_you.at, kind: "blocked", ticket: r.ticket, text: r.asked_you.question ?? "blocked, with no question recorded", link: null, from: "board", asks: r.asked_you.message ?? null });
   }
   items.sort((a, b) => (time(a.at) || 0) - (time(b.at) || 0));
   return { items, read, covers };
@@ -270,7 +338,9 @@ export function queue(ws: Workspace): QueueItem[] {
 // Can't you?" Every id must be one the queue holds now; one that is not refuses the whole call by
 // name, so nothing is half marked. `check` validates without writing, so say can refuse before it
 // posts. An id already handled is a success that changes nothing.
-export function markHandledMany(ws: Workspace, ids: string[], check = false):
+// `whole` false marks exactly the ids given: say --answers expands them to whole cards before it posts,
+// so the question it posts itself is not swept into a card it joins.
+export function markHandledMany(ws: Workspace, ids: string[], check = false, whole = true):
   { ok: true; marked: string[]; already: string[] } | { ok: false; error: string; retry?: true } {
   const bad = ids.filter((id) => !/^[mr][0-9a-f]{12}$/.test(id));
   if (bad.length) return { ok: false, error: `not queue ids: ${bad.join(", ")}` };
@@ -278,7 +348,8 @@ export function markHandledMany(ws: Workspace, ids: string[], check = false):
   if (h === "unreadable") return { ok: false, error: brokenNote(ws) };
   const cur: Handled = h === "missing" ? fresh() : h;
   const already = ids.filter((id) => id in cur.handled);
-  const todo = [...new Set(ids.filter((id) => !(id in cur.handled)))];
+  const asked = [...new Set(ids.filter((id) => !(id in cur.handled)))];
+  const todo = (whole ? wholeCards(ws, asked) : asked).filter((id) => !(id in cur.handled));
   if (!todo.length) return { ok: true, marked: [], already };
   const { items, read } = open(ws);
   const unknown = todo.filter((id) => !items.some((i) => i.id === id));
@@ -307,7 +378,8 @@ export function markHandled(ws: Workspace, id: unknown): { ok: true } | { ok: fa
     if (!read && id.startsWith("m")) return { ok: false, error: "the message log could not be read", retry: true };
     return { ok: false, error: "nothing in the queue has that id" };
   }
-  cur.handled[id] = new Date().toISOString();
+  const at = new Date().toISOString();
+  for (const part of wholeCards(ws, [id])) cur.handled[part] = at;
   writeHandled(ws, cur);
   return { ok: true };
 }
