@@ -116,7 +116,11 @@ const hash = (...parts: string[]) => createHash("sha1").update(parts.join("\n"))
 // Lead rows have no id, and two can share a second, so a row is named by its time and its words.
 export const messageId = (r: Message) => "m" + hash(r.t ?? "", r.kind ?? "", r.ticket ?? "", r.text ?? "");
 // A record is asked again when it is blocked again, so its question is named by when it was asked.
-const recordId = (r: Rec) => "r" + hash(r.ticket, r.asked_you?.at ?? "");
+// A block linked with --asks to a posted question is named by that link too: linked after the fact,
+// it is a new part of that question's card, even when its unlinked block was marked handled before
+// (LOCAL-reports-launch-copy, 2026-11-24: linked after its recap card was handled, it stayed out of
+// the card, and the card had no ticket). An unlinked record keeps the id it always had.
+const recordId = (r: Rec) => "r" + (r.asked_you?.message ? hash(r.ticket, r.asked_you.at ?? "", r.asked_you.message) : hash(r.ticket, r.asked_you?.at ?? ""));
 
 const time = (t: string | null | undefined) => (t ? Date.parse(t) : NaN);
 

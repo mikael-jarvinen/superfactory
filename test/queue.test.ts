@@ -591,3 +591,30 @@ test("firstSentence and wrap: a whole sentence, never cut mid-word", () => {
   assert.equal(firstSentence("one two three four five six", 13), "one two three…");
   assert.deepEqual(wrap("aaa bbb ccc ddd", 7, "  "), ["  aaa bbb", "  ccc ddd"]);
 });
+
+// LOCAL-reports-launch-copy, 2026-11-24: the item was already blocked, and its recap card had been
+// marked handled; `state ... blocked --asks <the decision>` then left the card with no ticket and
+// printed the hint to run the command just run.
+test("queue cards: blocked -> blocked --asks folds the block into the decision, even after its own card was handled", () => {
+  const ws = workspace();
+  let r = factory(ws.dir, ["say", "Which release-message formats should I draft?", "--kind", "decision"]);
+  assert.equal(r.status, 0, r.stderr);
+  const m = queueCards(ws)[0]!.id;
+  assert.equal(factory(ws.dir, ["state", "LOCAL-launch", "designing"]).status, 0);
+  assert.equal(factory(ws.dir, ["state", "LOCAL-launch", "blocked", "--note", "asked Mikael which formats"]).status, 0);
+  const recap = queueCards(ws).find((c) => c.ticket === "LOCAL-launch")!;
+  assert.equal(recap.unposted, true);
+  assert.equal(factory(ws.dir, ["handled", recap.id]).status, 0, "the recap card handled on its own");
+  assert.deepEqual(queueCards(ws).map((c) => [c.id, c.ticket]), [[m, null]]);
+
+  r = factory(ws.dir, ["state", "LOCAL-launch", "blocked", "--asks", m, "--note", "release-message formats"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, new RegExp(`queue: one card with the posted question ${m} \\(covers ${m}, r[0-9a-f]{12}\\)`));
+  assert.doesNotMatch(r.stdout, /--asks/, "no hint to run what was just run");
+  const cards = queueCards(ws);
+  assert.deepEqual(cards.map((c) => [c.id, c.ticket, c.kinds, c.unposted]), [[m, "LOCAL-launch", ["decision", "blocked"], false]]);
+  assert.match(factory(ws.dir, ["queue"]).stdout, new RegExp(`^${m} \\(\\+ r[0-9a-f]{12}\\)  \\S+ \\S+  LOCAL-launch  decision\\+blocked$`, "m"));
+  // and the whole card clears at once
+  assert.equal(factory(ws.dir, ["handled", m]).status, 0);
+  assert.deepEqual(queueCards(ws), []);
+});
