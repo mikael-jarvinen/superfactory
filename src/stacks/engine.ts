@@ -5,7 +5,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { probeAll, stacksFile } from "../board/server.js";
 import type { Repo, Stack } from "../config.js";
-import { loadRec, saveRec } from "../state.js";
+import type { Session } from "../fleet.js";
+import { BUSY, loadRec, saveRec } from "../state.js";
+import { local, sessionAlive } from "../transport.js";
 import type { Workspace } from "../workspace.js";
 import { die, now, pyDumps, realpathLoose, run, sleep } from "../util.js";
 import { git, HTTPS, registeredWorktrees, worktreePath } from "../worktree.js";
@@ -159,6 +161,30 @@ export function describe(v: SlotView, human: string): string {
   }
 }
 
+// Who is still using a released slot, or null when nobody is. Its item is back at work (a fix round
+// that has not run `factory stack up` yet), or a session is working in one of its worktrees, a test
+// run in it most likely. Taking it then destroys the stack under those tests: CL-2342, twice on
+// 2026-11-25. `sessions` lists the local sessions; a listing that fails counts as in use.
+export function slotInUse(ws: Workspace, stack: Stack, v: SlotView, sessions: () => Session[]): string | null {
+  if (v.kind !== "released" || !v.entry) return null;
+  const rec = v.ticket ? loadRec(ws, v.ticket) : null;
+  if (rec?.state && BUSY.has(rec.state)) return `${v.ticket} is ${rec.state} again, ${rec.agent ?? "no builder"}'s`;
+  const wts = Object.entries(v.entry.worktrees).filter(([r, wt]) => !isOwn(ws, stack.key, r, wt)).map(([, wt]) => realpathLoose(wt));
+  let rows: Session[];
+  try {
+    rows = sessions();
+  } catch (e) {
+    return `the session listing failed (${(e as Error).message}), so nobody can say ${v.ticket}'s worktree is idle`;
+  }
+  for (const s of rows) {
+    if ((s.state !== "working" && s.status !== "busy") || !sessionAlive(s) || !s.cwd) continue;
+    const cwd = realpathLoose(s.cwd.replace(/\/+$/, ""));
+    const wt = wts.find((w) => cwd === w || cwd.startsWith(`${w}/`));
+    if (wt) return `${s.name ?? s.id ?? "a session"}'s session is working in ${basename(wt)}`;
+  }
+  return null;
+}
+
 const slotsOf = (stack: Stack) => Array.from({ length: stack.slots + 1 }, (_, i) => i);
 
 function placementOf(ws: Workspace, stack: Stack, reg: Registry, slot: number): Placement {
@@ -244,12 +270,32 @@ interface Choice {
 }
 
 // In order: the item's existing slot, the builder's pinned slot, a free slot, a slot whose worktree
-// vanished, one whose item is in review, then one held only by the stack's own idle worktrees. A
-// slot pinned to another builder is never offered, and a reserved one never at all.
+// vanished, one whose item is in review and nobody still uses (slotInUse), then one held only by
+// the stack's own idle worktrees. A slot pinned to another builder is never offered, and a reserved
+// one never at all.
 export function allocate(ws: Workspace, stack: Stack, reg: Registry, item: Placement, from: string | null, agent: string | null, want?: number): Choice {
   const pinnedTo = (n: number) => Object.keys(stack.pin).find((a) => stack.pin[a] === n) ?? null;
   const view = (n: number) => viewSlot(ws, stack, reg, n);
   const heldBy = (v: SlotView) => `${stack.key} slot ${v.slot} holds ${v.ticket}, ${v.agent ?? "which no builder's record names"}${v.agent ? "'s" : ""}`;
+  // The session listing is read once, and only when a released slot is in question.
+  let listed: { rows?: Session[]; err?: unknown } | undefined;
+  const sessions = () => {
+    listed ??= (() => {
+      try {
+        return { rows: local.sessions() };
+      } catch (err) {
+        return { err };
+      }
+    })();
+    if (listed.err) throw listed.err;
+    return listed.rows as Session[];
+  };
+  const mine = (v: SlotView) => Object.values(item).some((wt) => basename(wt) === v.ticket);
+  const inUse = (v: SlotView) => (mine(v) ? null : slotInUse(ws, stack, v, sessions));
+  const refuseInUse = (v: SlotView) => {
+    const who = inUse(v);
+    if (who) die(`${stack.key} slot ${v.slot} is released for ${v.ticket}'s review, but still in use: ${who}. Wait for it, or give the item another slot.`);
+  };
   if (want !== undefined) {
     checkSlot(stack, want);
     refuseReserved(ws, stack, want);
@@ -257,6 +303,7 @@ export function allocate(ws: Workspace, stack: Stack, reg: Registry, item: Place
     const pin = pinnedTo(want);
     if (agent && pin && pin !== agent) die(`${stack.key} slot ${want} is pinned to ${pin}`);
     if (v.kind === "held" && (agent === null || v.agent !== agent)) die(`${heldBy(v)}. Destroy it first if it is done with.`);
+    refuseInUse(v);
     return { slot: want, how: "asked for" };
   }
   if (agent === null) die("give --slot N for a slot of the base branches");
@@ -269,15 +316,20 @@ export function allocate(ws: Workspace, stack: Stack, reg: Registry, item: Place
   if (pin !== undefined) {
     const v = view(pin);
     if (v.kind === "held" && v.agent !== agent) die(`${agent}'s pinned slot: ${heldBy(v)}. Move that item to its own builder's slot first.`);
+    refuseInUse(v);
     return { slot: pin, how: "pinned" };
   }
   for (const [kind, how] of [
     ["free", "free"], ["vanished", "reclaimed"], ["released", "taken from an item in review"], ["own", "taken over from the stack's own worktrees"],
   ] as const) {
-    const n = slotsOf(stack).find((x) => open(x) && view(x).kind === kind);
+    const n = slotsOf(stack).find((x) => open(x) && view(x).kind === kind && (kind !== "released" || !inUse(view(x))));
     if (n !== undefined) return { slot: n, how };
   }
-  const taken = slotsOf(stack).filter((n) => !stack.reserve.includes(n)).map((n) => `  slot ${n}: ${describe(view(n), ws.config.human.name)}`);
+  const taken = slotsOf(stack).filter((n) => !stack.reserve.includes(n)).map((n) => {
+    const v = view(n);
+    const who = v.kind === "released" ? inUse(v) : null;
+    return `  slot ${n}: ${describe(v, ws.config.human.name)}${who ? `, but still in use: ${who}` : ""}`;
+  });
   return die(`every slot of ${stack.key} open to ${agent} is taken. Free one with \`factory stack destroy --stack ${stack.key} --slot N\`.\n${taken.join("\n")}`);
 }
 

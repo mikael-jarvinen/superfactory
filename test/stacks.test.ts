@@ -251,6 +251,45 @@ test("an item in review releases its slot: still up, taken back by its fix round
   assert.deepEqual(calls(dir), []);
 });
 
+// CL-2342, twice on 2026-11-25: another item's up took a released slot while its builder was still
+// testing on it. A released slot is refused while its item is back at work or a session is working in
+// its worktree, and the refusal names who.
+test("a released slot still in use is not taken, and the refusal says who uses it", () => {
+  const { dir, ws, wt } = setup();
+  const up = (cwd: string, ...a: string[]) => factory(dir, ["stack", "up", ...a], { cwd });
+  const state = (...a: string[]) => ok(factory(dir, ["state", ...a]), `state ${a.join(" ")}`);
+  const web1 = wt("web", "A-1", "eve");
+  ok(up(web1), "A-1");
+  ok(up(wt("web", "A-2", "fay")), "A-2");
+  state("A-1", "pr-open", "--pr", "acme/web#1", "--head", "abc1234");
+  for (const s of ["agent-review", "gate"]) state("A-1", s, "--evidence", "x");
+  state("A-1", "your-review", "--reviewed", "abc1234");
+  const a3 = wt("web", "A-3", "fay");
+  calls(dir);
+
+  // its item is back in a fix round that has not run up yet
+  state("A-1", "fixing");
+  let r = up(a3);
+  assert.match(r.stderr, /slot 1: A-1 is in review and still up; the next up takes it, but still in use: A-1 is fixing again, eve's/);
+  assert.match(up(a3, "--slot", "1").stderr, /solo slot 1 is released for A-1's review, but still in use: A-1 is fixing again, eve's/);
+
+  // in review, with eve's session working in its worktree
+  state("A-1", "gate", "--evidence", "x");
+  state("A-1", "your-review", "--reviewed", "abc1234");
+  const listing = (st: string) => writeFileSync(join(dir, "live.json"),
+    JSON.stringify([{ id: "s1", name: "eve", kind: "background", state: st, pid: process.pid, cwd: `${web1}/` }]));
+  writeFileSync(join(dir, "bin", "claude"), `#!/bin/sh\n[ "$1" = agents ] && cat ${join(dir, "live.json")} && exit 0\nexit 1\n`);
+  listing("working");
+  r = up(a3);
+  assert.match(r.stderr, /but still in use: eve's session is working in A-1/);
+  assert.deepEqual(calls(dir), [], "nothing is destroyed while it is in use");
+
+  // once that session is done, the next up takes the slot as before
+  listing("done");
+  assert.match(ok(up(a3), "A-3"), /solo slot 1 \(taken from an item in review\): web=A-3/);
+  assert.deepEqual(calls(dir), ["destroy solo 1 web=A-1 api=-", "up solo 1 web=A-3 api=-"]);
+});
+
 // Dispatching a new item stops a session whose item is in review, with the checks `factory stop` makes.
 test("a builder whose only items are in review is free, and stopping it loses nothing", () => {
   const { dir, ws, wt } = setup();
@@ -430,6 +469,7 @@ test("an assistant's item gets the slot it names: never the reserved one, a pinn
   assert.match(up(wt("web", "A-2", "fay")).stderr, /every slot of solo open to fay is taken/);
 
   // a slot of an item in review is taken, as a builder would take it
+  saveRec(ws, { ...loadRec(ws, "A-1")!, state: "your-review" });
   releaseForReview(ws, "A-1", () => {});
   const before = wt("web", "LOCAL-before", "val");
   assert.match(ok(up(before, "--stack", "solo", "--slot", "1"), "a released slot"), /solo slot 1 \(asked for\)[\s\S]*taking slot 1 from A-1, which is in review/);
