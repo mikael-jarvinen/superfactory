@@ -1079,6 +1079,40 @@ test("the review watcher reads a CodeRabbit finding as words and skips its revie
   ].join("\n")]);
 });
 
+// Mikael triggers "@claude review once"; claude[bot] answers with inline findings and one top-level
+// comment it edits from "Claude Code is working…" to the finished review.
+test("the review watcher tells claude[bot]'s findings like CodeRabbit's, drops the trigger, and waits for its finished review", () => {
+  const { ws, run, notes } = watcherWorkspace();
+  assert.equal(factory(ws, ["state", "WEB-2", "building"]).status, 0);
+  const file = join(ws, "state", "WEB-2.json");
+  const pr7 = { repo: "acme/web", number: 7 };
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), state: "colleague-review", pr: pr7, prs: [pr7] }));
+  const bot = { login: "claude", __typename: "Bot" };
+  const later = new Date(Date.now() + 60_000).toISOString();
+  const answer = (threads: object[], comments: object[]) => ({
+    stdout: { data: { viewer: { login: "alex-gh" }, r0: { p7: { url: "https://github.com/acme/web/pull/7", reviewThreads: { nodes: threads }, reviews: { nodes: [] }, comments: { nodes: comments } } } } },
+  });
+  const finding = { id: "PRRT_cl", isResolved: false, path: "src/a.ts", line: 12, originalLine: 12,
+    comments: { nodes: [{ databaseId: 4695904844, createdAt: later, body: "🔴 A second filter reopens the temp table.", author: bot }] } };
+  const trigger = { databaseId: 101, createdAt: later, body: "@claude review once", author: { login: "alex-gh", __typename: "User" } };
+  const status = (body: string) => ({ databaseId: 102, createdAt: later, body, author: bot });
+  const routes = (a: object) => ({ "pr list": { stdout: [] }, "api graphql": a });
+
+  assert.equal(run(["watch", "reviews"], [], routes(answer([], []))).status, 0, "first sight starts the cursor");
+  let r = run(["watch", "reviews"], [], routes(answer([finding], [trigger, status("Claude Code is working… <img src=\"x\" />")])));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(notes(), [[
+    "[review watcher]",
+    "review: WEB-2 web#7 (colleague-review) https://github.com/acme/web/pull/7",
+    '  - bot claude, finding, src/a.ts:12: "🔴 A second filter reopens the temp table." [thread PRRT_cl, comment 4695904844]',
+  ].join("\n")], "the trigger is not news, and the placeholder waits");
+
+  r = run(["watch", "reviews"], [], routes(answer([finding], [trigger, status("**Claude finished @alex-gh's task in 56s**\n\n### Review\n\n1. Group filters differ.")])));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(notes().length, 2);
+  assert.match(notes()[1] as string, /- bot claude, finding, top-level: "Claude finished @alex-gh's task in 56s ### Review 1\. Group filters differ\." \[comment 102\]/);
+});
+
 test("the review watcher reads Aikido's ignore command with the marker after it as the factory's, and nothing looser", () => {
   assert.ok(isAgents("> Written by agent.\n\nFixed in abc1234."));
   assert.ok(isAgents("@AikidoSec ignore: a dev script; its paths come from a fixed list.\n> Written by agent."));

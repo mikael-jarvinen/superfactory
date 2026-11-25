@@ -162,6 +162,12 @@ function readRest(key: string, node: PrNode, query: (q: string) => Record<string
 // The review bots whose comments are findings. Every other bot (sync-label, sonarcloud, codecov,
 // CodeRabbit's walkthrough) reports a status and asks nothing, so it is not news.
 const REVIEW_BOTS = /^(coderabbitai|copilot|aikido)/i;
+// claude[bot], which answers "@claude review once", counts only as the bot account: a person may be
+// called claude.
+const isClaude = (a: Author | null) => !!a && /^claude(\[bot\])?$/i.test(a.login) && (a.__typename === "Bot" || a.login.endsWith("[bot]"));
+// Its review arrives in one top-level comment it edits in place, created as "Claude Code is working…"
+// and rewritten when the run ends. Read before then, the note would carry only the placeholder.
+const stillWorking = (c: Comment) => isClaude(c.author) && /^Claude Code is working/.test((c.body ?? "").trim());
 
 export type Kind = "bot" | "colleague" | "human";
 export type Shape = "finding" | "suggestion" | "question" | "change request" | "approval";
@@ -186,10 +192,10 @@ export function prose(body: string): string {
 export const isAgents = isMarked;
 
 export function kindOf(author: Author | null, body: string, viewer: string): Kind | null {
-  if (isAgents(body) || /^@coderabbitai\b/.test(body.trim())) return null;
+  if (isAgents(body) || /^@(coderabbitai|claude)\b/.test(body.trim())) return null;
   const login = (author?.login ?? "").replace(/\[bot\]$/, "");
   if (!login) return null;
-  if (REVIEW_BOTS.test(login)) return "bot";
+  if (REVIEW_BOTS.test(login) || isClaude(author)) return "bot";
   if (author?.__typename === "Bot" || author?.login.endsWith("[bot]")) return null;
   return login === viewer ? "human" : "colleague";
 }
@@ -261,7 +267,10 @@ export function newItems(pr: PrNode, viewer: string, cursor: Cursor | undefined)
     const at = r.submittedAt ?? r.createdAt;
     if (fresh(`r${r.databaseId}`, at) && cursor !== undefined && kindOf(r.author, r.body ?? "", viewer) !== "bot") add(r, at, "review", `review ${r.databaseId}`, r.state);
   }
-  for (const c of pr.comments?.nodes ?? []) if (fresh(`i${c.databaseId}`, c.createdAt) && cursor !== undefined) add(c, c.createdAt, "top-level", `comment ${c.databaseId}`);
+  for (const c of pr.comments?.nodes ?? []) {
+    if (stillWorking(c)) continue;
+    if (fresh(`i${c.databaseId}`, c.createdAt) && cursor !== undefined) add(c, c.createdAt, "top-level", `comment ${c.databaseId}`);
+  }
   items.sort((a, b) => a.at.localeCompare(b.at));
   return { items, read: [...new Set(read)].sort() };
 }
