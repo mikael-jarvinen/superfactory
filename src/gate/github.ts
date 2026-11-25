@@ -3,10 +3,31 @@
 import type { Repo } from "../config.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError, pyRepr, run, type RunResult } from "../util.js";
+import { git, overArgs } from "../worktree.js";
 
 export const ghBin = () => process.env.GH_BIN || "gh";
 
 export const gh = (...args: string[]): RunResult => run(ghBin(), args);
+
+// GitHub refuses a PR's diff past 20000 lines with HTTP 406, however few files it touches:
+// lyyti-events#894 was 52. Then the diff comes from the repo's checkout instead, origin/<base>...<head>
+// after a fetch of the base, and of the PR's head when the checkout lacks it. Never a shallow fetch:
+// .git/shallow is shared by every worktree of the checkout. `local` says where the diff came from.
+const TOO_LARGE = /HTTP 406|too_large|exceeded the maximum number of lines/;
+export function prDiff(repo: Repo, n: number, base: string, head: string): RunResult & { local?: boolean } {
+  const r = gh("pr", "diff", String(n), "--repo", repo.remote);
+  if (r.status === 0 || !TOO_LARGE.test(r.stderr) || repo.host) return r;
+  const why = (what: string, x: RunResult) => ({ ...r, stderr: `${r.stderr.trim()}; and ${what} in ${repo.path} failed: ${x.stderr.trim()}` });
+  const over = overArgs(repo.gitOver);
+  const f = git(repo.path, ...over, "fetch", "-q", "origin", base);
+  if (f.status !== 0) return why(`git fetch origin ${base}`, f);
+  if (git(repo.path, "cat-file", "-e", `${head}^{commit}`).status !== 0) {
+    const h = git(repo.path, ...over, "fetch", "-q", "origin", `refs/pull/${n}/head`);
+    if (h.status !== 0) return why(`git fetch of #${n}'s head`, h);
+  }
+  const d = git(repo.path, "diff", "--no-color", "--no-ext-diff", "--find-renames", `origin/${base}...${head}`);
+  return d.status === 0 ? { ...d, local: true } : why(`git diff origin/${base}...${head}`, d);
+}
 
 // The PR itself could not be read: nothing else the gate says would mean anything.
 export class Unreadable extends FactoryError {

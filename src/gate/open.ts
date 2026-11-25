@@ -10,7 +10,7 @@ import { releaseForReview } from "../stacks/engine.js";
 import { COLLEAGUE_REVIEW_OFF, loadRec, recPrs, transition, undrafting } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
-import { api, gh, prView, resolveRepo } from "./github.js";
+import { api, gh, prDiff, prView, resolveRepo } from "./github.js";
 import { waitForBotReview } from "./reviewbot.js";
 import { translationsAt } from "./translations.js";
 
@@ -46,7 +46,7 @@ export function openForReview(ws: Workspace, ticket: string, out: (line: string)
     else {
       // The same translations check as pr-ready, asked again here, so a PR that never went through
       // pr-send cannot reach colleagues without its texts either.
-      const diff = gh("pr", "diff", String(p.number), "--repo", repo.remote);
+      const diff = prDiff(repo, p.number, pr.baseRefName, pr.headRefOid);
       const cmp = api<{ merge_base_commit?: { sha?: string } }>(`repos/${repo.remote}/compare/${pr.baseRefName}...${pr.headRefOid}`);
       const t = translationsAt(repo, pr.headRefOid, cmp?.merge_base_commit?.sha ?? pr.baseRefName, diff.status === 0 ? diff.stdout : undefined);
       const problems = [...t.failures, ...t.unreadable];
