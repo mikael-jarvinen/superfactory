@@ -46,6 +46,10 @@ const cmdline = (pid: number) => {
 
 type Run = ChildProcess & { out: string };
 const UP = "superfactory.ada.up";
+// The round is a real hourly job in these workspaces, and its run writes a lead's note, so firing
+// mid-test it adds its own relay failure where a test counts them. Its minute is half an hour from
+// now, out of reach of a file that runs for minutes.
+const ROUND_MINUTE = (new Date().getMinutes() + 30) % 60;
 
 // A workspace whose `up` never finishes: the fake claude lists no sessions, so up waits for a lead
 // that never appears. That makes it the long-running job these tests need.
@@ -100,7 +104,7 @@ exec "$@"
   chmodSync(join(dir, "bin", "systemd-run"), 0o755);
   writeFileSync(join(ws, "lead", "CLAUDE.md"), "You lead.\n");
   writeFileSync(join(ws, "prompts", "round.md"), "Judge the facts.\n");
-  writeFileSync(join(ws, "factory.toml"), `[human]\nname = "Alex"\n\n[paths]\nrepos = "repos"\n\n[roles.lead]\ncwd = "lead"\nsettings = "lead"\n\n[[agents]]\nname = "ada"\nrole = "lead"\n\n[board]\nhost = "127.0.0.1"\nport = ${boardPort}\n`);
+  writeFileSync(join(ws, "factory.toml"), `[human]\nname = "Alex"\n\n[paths]\nrepos = "repos"\n\n[roles.lead]\ncwd = "lead"\nsettings = "lead"\n\n[[agents]]\nname = "ada"\nrole = "lead"\n\n[board]\nhost = "127.0.0.1"\nport = ${boardPort}\n\n[watchers]\nround_minute = ${ROUND_MINUTE}\n`);
   const env = { PATH: `${join(dir, "bin")}:${process.env.PATH}`, HOME: home, USER: "factory-test", TMPDIR: dir, CLAUDE_BIN: join(dir, "bin", "claude"), GH_BIN: "", DOCKER_BIN: "", SF_NOTIFY: "0",
     DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1/bus", XDG_RUNTIME_DIR: "/run/user/1", SSH_AUTH_SOCK: join(dir, "agent.sock"), NOT_INHERITED: "x", ...extraEnv };
   const stateFile = join(ws, "logs", "run", "scheduler.json");
@@ -253,7 +257,7 @@ test("a missed fire runs once, and the job is then due at its next calendar time
   assert.equal(r.lastStart, first, "run once, not once per missed fire");
   const next = new Date(r.due);
   assert.ok(next.getTime() > Date.parse(first) && next.getTime() - Date.parse(first) <= 3600_000, r.due);
-  assert.equal(next.getMinutes(), 7, "the round's calendar minute");
+  assert.equal(next.getMinutes(), ROUND_MINUTE, "the round's calendar minute");
   if (t.upRunning()) t.upPids.add(t.state().jobs[UP].pid);
   d.kill();
 });
