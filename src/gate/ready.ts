@@ -61,7 +61,7 @@ function sinceHead(times: (string | null | undefined)[]): number {
 
 // The review bots the gate knows by name: the commit status each posts, and how to ask it to review.
 // `full` asks for a review from scratch, for a bot whose `trigger` reviews only the commits since its
-// last review (CodeRabbit: "@coderabbitai full review" "Reviews every file in the pull request again
+// last review ("@coderabbitai full review" "Reviews every file in the pull request again
 // from scratch", docs.coderabbit.ai/reference/review-commands). pr-wait-coderabbit uses it.
 const KNOWN_BOTS: Record<string, { status: string; ask: string; trigger?: string; full?: string }> = {
   coderabbitai: { status: "CodeRabbit", ask: 'comment "@coderabbitai review" on the PR', trigger: "@coderabbitai review", full: "@coderabbitai full review" },
@@ -86,7 +86,7 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
   const fail = (text: string, kind: FailureKind = "fatal") => failures.push({ text, kind });
 
   if (pr.state !== "OPEN") fail(`state is ${pr.state}, not OPEN`);
-  // A draft is no failure: Mikael, 2026-10-16, every PR stays one until its item reaches undrafting(ws).
+  // A draft is no failure: every PR stays one until its item reaches undrafting(ws).
   if (base !== repo.base) fail(`base branch is ${base}, expected ${repo.base}`);
 
   let unstable = false;
@@ -149,7 +149,7 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
         remarks.push(`check '${c.name}' concluded ${concl} but its workflow run concluded success -- the job is continue-on-error, ` +
           "so the repo does not gate on it. Read the failure, do not ignore it; it just is not a blocker.");
       } else if (/deep review/i.test(c.name)) {
-        // Mikael, 2026-10-09: "Ignore failing deep reviews." Aikido's Deep Review often concludes
+        // Failing deep reviews are ignored. Aikido's Deep Review often concludes
         // neutral/"could not complete" for infra reasons; it is not a gate. The repo's own code scan
         // (a separate check) is what gates, and gateChecks below still requires a real job to have run.
         remarks.push(`check '${c.name}' concluded ${concl} -- deep reviews are not a blocker by configuration; the gating scan is a separate check`);
@@ -198,8 +198,7 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
     }
   }
 
-  // THE REVIEW BOT AT THIS HEAD. Mikael, 2026-10-20, after a PR reached him with CodeRabbit never
-  // having reviewed its final head: "Coderabbit should review before you even give the PR to me?"
+  // THE REVIEW BOT AT THIS HEAD. The bot reviews the final head before the PR reaches the human.
   // Every PR is a draft until its item reaches undrafting(ws) in state.ts (colleague-review, or
   // your-review with [gate] colleague_review = false), and the bot skips drafts, so it reviews only
   // when asked; a green status from it is no evidence until it says it reviewed this sha.
@@ -211,7 +210,7 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
     const latestRun = (runs ?? []).filter(isBotRun).sort((a, b) => (a.started_at ?? "").localeCompare(b.started_at ?? "")).at(-1);
     // With no status of its own, its finished check-run is its review: after a rebase that carries
     // over a diff it already reviewed, it says "Already reviewed the last commit" and posts no
-    // review object (lyyti-events#847, 2026-10-27).
+    // review object.
     const reviewedRun = !st && latestRun?.status === "completed" && latestRun.conclusion === "success" &&
       REVIEWED_RUN.test(latestRun.output?.title ?? "");
     if (st?.state === "pending") fail(`${bot.status} is reviewing ${short} (${desc})`, "waits");
@@ -219,13 +218,11 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
       const rs = reviews(repo, n);
       if (rs === undefined) fail(`COULD NOT READ the reviews of #${n} -- cannot say whether ${bot.status} reviewed ${short}`, "unreadable");
       // A review counts only with a body. Each of its replies inside a review thread is a review object
-      // of its own, empty, at the head of the moment: on lyyti-classic#8705, 2026-11-12, two replies at
-      // the head passed for its review there, which had been rate limited.
+      // of its own, empty, at the head of the moment, so two replies at
+      // the head would pass for a review that had been rate limited.
       else if (!rs.some((r) => (r.user?.login ?? "").replace(/\[bot\]$/, "") === botLogin && r.commit_id === sha && !!r.body?.trim())) {
-        // Mikael, 2026-11-12: "clearly the rule change from waiting on coderabbit even when we hit the
-        // limits is wrong. We have so many tasks waiting on the gate." Its latest word at this head,
-        // status or check-run, saying it is rate limited lets the PR go without its review, said every
-        // time, as on 2026-10-27: "we should be able to work without coderabbit when the limits are hit."
+        // Work goes on without the bot when its limits are hit: its latest word at this head, status
+        // or check-run, saying it is rate limited lets the PR go without its review, said every time.
         const age = Math.round(sinceHead([...(runs ?? []).map((c) => c.started_at), ...sts.map((x) => x.created_at)]));
         const runTitle = latestRun?.status === "completed" ? (latestRun.output?.title ?? "") : "";
         const skipped = st ? (SKIPPED.test(desc) ? `its status here says "${desc}"` : "") : SKIPPED.test(runTitle) ? `its check here says "${runTitle}"` : "";
@@ -235,10 +232,9 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
         if (latestRun && latestRun.status !== "completed") {
           fail(`${bot.status} is reviewing ${short} (its check here is ${latestRun.status}${latestRun.output?.title ? `: ${latestRun.output.title}` : ""})`, "waits");
         } else {
-          // Its review of the PR's first version is enough. On 2026-11-17 CodeRabbit cut the account
-          // to one review an hour, and every fix round queued behind it; Mikael chose to keep it for
-          // the first version of each PR and let later versions go without it. Its unresolved
-          // threads still block, below.
+          // Its review of the PR's first version is enough: at one review an hour, every fix
+          // round would queue behind it, so later versions go without it. Its unresolved threads
+          // still block, below.
           // The rate-limit waiver needs no history, so it goes first: a history read that fails
           // does not hold back a PR the waiver lets go.
           const limited = (st && RATE_LIMITED.test(desc)) || (latestRun && rateLimitedRun(latestRun));
@@ -312,10 +308,9 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
 // finished, on any sha but the head. Read in that order, so a PR it reviewed costs no reads beyond
 // the reviews already in hand. Reviews and comments are this PR's own. A check-run belongs to a
 // commit, so it counts only when GitHub tied it to this PR, and at a commit no other PR has: a
-// stacked PR carries its lower PR's commits and the reviews the bot did there (CodeRabbit on
-// superfactory#119). The commit's PRs alone do not say whose review it was: GitHub lists only the
+// stacked PR carries its lower PR's commits and the reviews the bot did there. The commit's PRs alone do not say whose review it was: GitHub lists only the
 // open and merged ones, so a closed PR's review on a commit another PR now carries read as that
-// one's (CodeRabbit on superfactory#128). A status names no PR, so at an earlier commit it counts
+// one's. A status names no PR, so at an earlier commit it counts
 // for nothing.
 interface Earlier {
   sha?: string;

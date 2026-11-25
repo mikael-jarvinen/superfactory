@@ -119,7 +119,7 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
       const sessions = live as Map<string, Session> | null;
       const note = sessions && owedNote(r, sessions, unknown);
       if (note) flag += `  ${note.label.round}: ${note.says}`;
-      // Mikael, 2026-10-09: the round must check whether a blocked item is still truly blocked. A
+      // The round checks whether a blocked item is still truly blocked. A
       // blocked item that names a ticket it waits on ("held behind CL-2247 merge") stays blocked
       // silently after that ticket merges. When a named blocker has reached done, say so once, so
       // the dependent is re-dispatched rather than forgotten -- CL-2246 sat blocked for days behind
@@ -185,9 +185,8 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
     }
   }, (l) => l !== "  nothing open");
 
-  // Mikael, 2026-11-16: "If CI checks fail we should probably do something." He had found
-  // lyyti-classic#8587 (its e2e spec fixed on main after the PR's run) and #8705 (out of sync with
-  // main) failing himself. A PR waiting on review whose head has a failed check gets one line: the
+  // A failed check is acted on, whether the spec was fixed on main after the PR's run or the PR is
+  // out of sync with main. A PR waiting on review whose head has a failed check gets one line: the
   // failed checks, each with how the same check stands on the base's latest commit, and how far the
   // PR is behind its base. Green on the base reads as "fixed there, update the branch"; failing there
   // too as "not this PR's doing". Told once per head and failing set: a check that runs again, goes
@@ -224,7 +223,7 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
             : `  ${where} CANNOT read check-runs at ${head.slice(0, 7)}`);
           continue;
         }
-        // Mikael, 2026-10-09: "Ignore failing deep reviews.", as pr-ready does.
+        // Failing deep reviews are ignored, as pr-ready does.
         const failed = [...latestByName(runs)].filter(([n, c]) => c.status === "completed" && CI_FAILED.has(c.conclusion ?? "") && !/deep review/i.test(n))
           .map(([n]) => n).sort();
         if (!failed.length) continue;

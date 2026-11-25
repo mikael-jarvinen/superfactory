@@ -1,9 +1,7 @@
 // `factory watch reviews`: new review comments on the PRs of items in review, told to the lead so
 // it can dispatch the builder. Its own job, every five minutes by default: the queue watcher reads
-// the tracker through a model and stays at its own cadence, and this reads GitHub only. Mikael, 2026-11-17, after a colleague's factory answered his
-// review comment on their PR by itself: "I need this feature in my factory ... So basically I need a
-// script that alerts our factory when we get reviews". Until now nothing said a comment had come
-// in until Mikael mentioned it or the gate tripped on an unresolved thread.
+// the tracker through a model and stays at its own cadence, and this reads GitHub only. It alerts the factory when a review comes in,
+// rather than leaving it until the human mentions it or the gate trips on an unresolved thread.
 //
 // It reads and tells, nothing more: no code changes, no replies, no resolving. Handling stays with
 // the lead (fernandez/CLAUDE.md, "On a PR"). No model either: one GraphQL read for every watched PR,
@@ -21,8 +19,7 @@ import { DARK_WAKE, darkWake, markAsleep } from "./power.js";
 
 // What the watcher has read on each PR (owner/repo#n): the id of every comment and review in it,
 // told or not. Ids, not a time: a review is published when it is submitted, its inline comments keep
-// the draft's time, and two comments can share a second, so a time cursor lost both (CodeRabbit on
-// superfactory#119). In state/, beside the records, because it is what the factory has been told,
+// the draft's time, and two comments can share a second, so a time cursor loses both. In state/, beside the records, because it is what the factory has been told,
 // not a log. Not a .json name: every .json file in state/ is read as an item's record. A PR's entry
 // from before the ids is a time: what came before it counts as read.
 export const reviewCursorsFile = (ws: Workspace) => join(ws.stateDir, "reviews.state");
@@ -84,7 +81,7 @@ const PAGE = 100;
 // A thread's comments in the query for every PR: GitHub refuses a query that declares over 500,000
 // nodes, counting each nested connection's first times its parents'. 100 threads of 100 comments
 // made 10,300 per PR, so 49 watched PRs were refused, every poll, with no path to say which
-// (CodeRabbit on superfactory#128). 10 makes 1,300; readRest reads a longer thread's comments by
+//. 10 makes 1,300; readRest reads a longer thread's comments by
 // their own query, a page of PAGE at a time.
 const THREAD_FIRST_PAGE = 10;
 const PAGE_INFO = "pageInfo { hasNextPage endCursor }";
@@ -117,7 +114,7 @@ export function reviewQuery(keys: string[]): string {
 }
 
 // The cursor to read a connection's next page after: null when it has no next page, and false when
-// its page info cannot be followed (CodeRabbit on superfactory#128): a next page with no cursor (an
+// its page info cannot be followed: a next page with no cursor (an
 // empty `after` reads page one again), or a cursor already read (the same page forever).
 function nextCursor(info: Page<unknown>["pageInfo"] | undefined, seen: Set<string>): string | null | false {
   if (!info?.hasNextPage) return null;

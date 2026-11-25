@@ -1,6 +1,7 @@
 // The product-repo PRs the human has named for the lead to close. `factory allow-close` appends one
 // line per naming to state/allow-close.jsonl, with the human's own words; the guard reads it before
-// it lets `gh pr close` through on a product repo. Mikael, 2026-11-12: "I allow you to close the PR".
+// it lets `gh pr close` through on a product repo. The words are the human's
+// own, such as "I allow you to close the PR".
 // Not a .json file: state/*.json are ticket records.
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";

@@ -173,7 +173,7 @@ export function reviews(repo: Repo, n: number): Review[] | undefined {
 
 // What was said to and by a review bot on PR #n since its head commit: when each trigger was last
 // asked, and when the bot last answered that it is rate limited. Its rate-limit reply is a comment
-// (CodeRabbit on lyyti-classic#8879, 2026-11-23: "Action not completed ... Review rate limited"),
+// ("Action not completed ... Review rate limited"),
 // sometimes with no check-run at the head to say so. Undefined when the comments cannot be read.
 export interface Conversation {
   // trigger body -> ms since the epoch of its latest ask after the head commit

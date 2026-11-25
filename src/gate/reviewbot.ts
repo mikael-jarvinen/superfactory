@@ -2,10 +2,9 @@
 // `factory pr-open-for-review` runs it for every PR on the item, and `factory pr-wait-coderabbit
 // <repo> <n>` runs it alone, for a PR opened by hand (a stacked one).
 //
-// Mikael, 2026-11-24, after lyyti-classic#8878 and #8879 were opened for colleagues before CodeRabbit
-// had read their final heads, and it left 12 findings on PRs colleagues were already reading: what
-// reaches him may go without its review (his 2026-11-12 decision stands for pr-ready, pr-wait and
-// pr-send), but nothing opens for colleagues until it has reviewed the head.
+// What reaches the human may go without the bot's review (pr-ready, pr-wait and pr-send), but
+// nothing opens for colleagues until it has reviewed the head, so its findings never land on a PR
+// colleagues are already reading.
 //
 // So this asks: "@coderabbitai review", and "@coderabbitai full review" when the incremental one
 // brings nothing within the gate's grace (it reviews only commits since its last review). A rate

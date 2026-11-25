@@ -322,8 +322,8 @@ function cmdState(ws: Workspace, argv: string[]) {
 }
 
 // What a block looks like on the human's queue: folded into the question already posted, or only its
-// note, which is no question to decide on. Mikael, 2026-11-24: a block whose card showed the lead's
-// recap ("asked Mikael which ...") rather than the question.
+// note, which is no question to decide on, so a block's card never shows the lead's recap
+// ("asked ... which ...") in place of the question.
 function blockedCardLines(ws: Workspace, ticket: string): string[] {
   const cards = waitingCards(ws);
   const card = cards.find((c) => c.ticket === ticket);
@@ -376,17 +376,17 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
     const on = basename((s.cwd ?? "").replace(/\/+$/, ""));
     if (on === ticket && !force) {
       // An item taken off the board while its session ran goes back on as building, as a fresh
-      // dispatch would put it; off the board it can go nowhere else (CodeRabbit on #129).
+      // dispatch would put it; off the board it can go nowhere else.
       const kept = loadRec(ws, ticket);
       const cur = kept?.state ?? null;
       // The stack is the kept worktree's: the repo it is in, else what the record has. The repo this
-      // dispatch defaults to can be another (CodeRabbit on #129).
+      // dispatch defaults to can be another.
       const at = (s.cwd ?? "").replace(/\/+$/, "");
       const keptRepo = allowed.find((k) => worktreePath(ws.config.repos[k]!.path, ticket) === at);
       const keptStack = ag.stack ?? keptRepo ?? kept?.stack ?? stack;
       // A kept round stays where its worktree is, whatever --repo says; a --repo naming another repo
       // is said, never dropped silently. --repo is a repo key, so it is checked against the
-      // worktree's repo, or, for a builder whose stack is a repo, the record's (Marie on #129).
+      // worktree's repo, or, for a builder whose stack is a repo, the record's.
       const asked = str(v.repo);
       if (asked) {
         if (keptRepo) {
@@ -402,7 +402,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
       const noSlot = ag.host ? null : slotless(ws, keptStack, ticket, s.cwd ?? "");
       if (noSlot) console.log(`  warning: ${noSlot}\n  Put that in the fix brief.`);
       console.log(`  next: SendMessage the fix brief to ${name}; no new session was started`);
-      // the session kept is no reason to drop a --title (CodeRabbit on #129)
+      // the session kept is no reason to drop a --title
       titled(ws, ticket, str(v.title));
       return;
     }
@@ -457,7 +457,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
 }
 
 // A dispatch titles its record: --title, else the tracker's title when the record has none, so no
-// card shows a bare key (Niilo on #129). LOCAL- work with no title says how to give it one.
+// card shows a bare key. LOCAL- work with no title says how to give it one.
 function titled(ws: Workspace, ticket: string, given: string | undefined) {
   const rec = loadRec(ws, ticket);
   if (!rec) return;
@@ -716,32 +716,32 @@ function cmdDown(ws: Workspace, argv: string[]) {
     for (const s of hits) {
       console.log(`stopping ${s.name} (${s.id})`);
       // only a row live at the stop is the one to bring back: a dead duplicate listed after it
-      // must not replace its record (CodeRabbit on #130)
+      // must not replace its record
       const sid = s.id ?? "", sname = s.name ?? "";
       const st = lastStopped(ws, sname);
       const marked = !!sid && !!st?.failed?.includes(sid);
-      // what the row showed before the stop clears its pid (CodeRabbit on #130 at d1c64cc6)
+      // what the row showed before the stop clears its pid
       const showed = ran(s, st);
       const live = t.alive(s);
       // a launch marked as never come up is stopped too, so one up late does not outlive the down,
-      // and keeps its mark: its "stopped" is ours, no evidence that it ran (Marie on #130 at f62a6b10).
+      // and keeps its mark: its "stopped" is ours, no evidence that it ran.
       // One that had shown it ran (a pid, though dead) is not unrun: its stop is read as it is.
       if (marked && !live && !showed) noteUnrun(ws, sname, sid);
       // and one a down before marked unrun that has shown it ran since leaves unrun before the stop
-      // clears its pid (CodeRabbit on #130 at 2f878288)
+      // clears its pid
       if (marked && showed && st?.unrun?.includes(sid)) noteRan(ws, sname, [s]);
       stopSession(t, s, false);
       if (live) noteStopped(ws, s.name ?? "", s, hits);
     }
   // rows a hook's wake left (stopped.ts), once every session is stopped
   // One listing per host, taken only once an agent there has any, and kept when it fails: a host
-  // that does not answer costs one timeout, not one per agent (CodeRabbit on #130 at 2f878288).
+  // that does not answer costs one timeout, not one per agent.
   const after = new Map<string, Session[] | undefined>();
   for (const { agent, t } of agentSessions(ws, (where) => rows.get(where))) {
     if (!staleIds(ws, agent.name).length) continue;
     if (!after.has(t.where)) after.set(t.where, rowsNow(t));
     // a host whose listing failed shows nothing: its ids are kept, and it is not asked again, which
-    // sweepStale would do given no rows (CodeRabbit on #130 at f10e2da)
+    // sweepStale would do given no rows
     const listed = after.get(t.where);
     const removed = sweepStale(ws, agent.name, t, listed ?? []);
     if (listed && removed.length) after.set(t.where, listed.filter((r) => !removed.includes(r.id ?? "")));
