@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import vm from "node:vm";
 import { JSDOM } from "jsdom";
-import { projectDirFor, quantile, report, stat, TranscriptUsage, weekOf } from "../src/board/analytics.js";
+import { projectDirFor, quantile, refreshHosts, report, stat, TranscriptUsage, weekOf } from "../src/board/analytics.js";
+import { parseReply, type RemoteQuery, type Runner, sshRunner } from "../src/board/remote-transcripts.js";
 import { serve } from "../src/board/server.js";
 import { appendEvent, saveRec } from "../src/state.js";
 import { openWorkspace, type Workspace } from "../src/workspace.js";
@@ -81,7 +84,7 @@ function workspace(): Workspace {
   // last written before the first change, so never read
   transcript(otto, "s5.jsonl", "otto", [call("2026-11-02T11:00:00Z", "o1", { output_tokens: 1000 })]);
   utimesSync(join(projectDirFor(otto), "s5.jsonl"), new Date("2026-10-01T00:00:00Z"), new Date("2026-10-01T00:00:00Z"));
-  // the lead is left out, whatever it was doing
+  // the lead counts, with no item, whatever it was doing
   transcript(join(dir, "lead"), "l1.jsonl", "ada", [call("2026-11-02T11:00:00Z", "a1", { output_tokens: 1000 })]);
   // bea's worktree of WEB-1
   transcript(worktreePath(ws.config.repos.web!.path, "WEB-1"), "b1.jsonl", "bea", [call("2026-11-03T03:00:00Z", "b1", { output_tokens: 40 })]);
@@ -112,10 +115,12 @@ test("time, entries and tokens per item and state, and per week", () => {
   assert.equal(a["fixing"]!.tokens.output, 25, "a subagent's calls are its session's");
   assert.equal(item("LOCAL-b").states["queued"]!.tokens.output, 0, "nor is a queued one");
   assert.equal(item("WEB-1").states["building"]!.tokens.output, 40, "a builder's worktree is its item's");
-  assert.deepEqual(Object.keys(r.unattributed).sort(), ["nap", "otto"], "before the first change, and sessions of no fleet agent, are not counted");
+  assert.deepEqual(Object.keys(r.unattributed).sort(), ["ada", "nap", "otto"], "before the first change, and sessions of no fleet agent, are not counted");
   assert.equal(r.unattributed["otto"]!.output, 7 + 11, "otto's calls while its items were queued or with the human");
   assert.equal(r.unattributed["nap"]!.output, 9);
-  assert.deepEqual(r.left_out.sort(), ["ada", "rae"]);
+  assert.equal(r.unattributed["ada"]!.output, 1000, "the lead's, in its own cwd");
+  assert.deepEqual(r.left_out, [], "no agent is on a host");
+  assert.deepEqual(r.hosts, {});
 
   // weeks start on Monday, UTC, and a stay counts whole in the week it ended
   assert.equal(new Date(weekOf(Date.parse("2026-11-08T23:59:00Z"))).toISOString().slice(0, 10), "2026-11-02");
@@ -232,14 +237,17 @@ test("done counts no time, even for an item forced back out of it", () => {
   assert.equal(s["building"]!.seconds, 2 * H);
 });
 
-test("the lead's and reviewers' sessions are not counted, even in an agent's cwd", () => {
+test("the lead's and reviewers' sessions count as theirs with no item, even in an agent's cwd", () => {
   const ws = workspace();
   const shared = join(ws.dir, "assistants");
   transcript(shared, "lead.jsonl", "ada", [call("2026-11-01T12:00:00Z", "x1", { output_tokens: 1 }), call("2026-11-02T11:00:00Z", "x2", { output_tokens: 500 })]);
   transcript(shared, "rev.jsonl", "rae", [call("2026-11-02T11:00:00Z", "x3", { output_tokens: 500 })]);
+  transcript(join(ws.dir, "reviewers"), "rev.jsonl", "rae", [call("2026-11-02T12:00:00Z", "x4", { output_tokens: 70 })]);
   const r = report(ws, new TranscriptUsage(), NOW);
-  assert.deepEqual(Object.keys(r.unattributed).sort(), ["nap", "otto"]);
-  assert.equal(r.items.find((i) => i.ticket === "LOCAL-a")!.states["building"]!.tokens.output, 12);
+  assert.deepEqual(Object.keys(r.unattributed).sort(), ["ada", "nap", "otto", "rae"]);
+  assert.equal(r.unattributed["ada"]!.output, 1000 + 500, "its own cwd's and the shared one's, from the first change on");
+  assert.equal(r.unattributed["rae"]!.output, 500 + 70, "the reviewers' cwd is read too");
+  assert.equal(r.items.find((i) => i.ticket === "LOCAL-a")!.states["building"]!.tokens.output, 12, "never otto's item's");
 });
 
 test("the nav link reaches every other page through common.js", () => {
@@ -439,4 +447,214 @@ test("a fresh workspace's page shows the current period empty", async () => {
     assert.deepEqual(r[0]!.slice(1), ["·"], "no tickets and no state columns");
     assert.match(doc.getElementById("trends")!.textContent!, /time\u00b7avg per ticket, so far/);
   }
+});
+
+// rae (a reviewer) and cal (a builder, with its repo api checked out there) run on far, whose
+// transcripts sit under its own claude config dir. The runner is far's python3 run here, as ssh
+// would run it there, with far's config dir, so the script itself is what is tested.
+function hostedWorkspace(): { ws: Workspace; far: string; farDir: (cwd: string) => string } {
+  const dir = tempWorkspace(GROUPED.replace(`name = "rae"
+role = "reviewer"`, `name = "rae"
+role = "reviewer"
+host = "far"
+cwd = "/far/rae"`).replace(`[repos.api]
+remote = "acme/api"`, `[repos.api]
+remote = "acme/api"
+host = "far"
+path = "/far/api"`).replace(`name = "cal"
+role = "builder"`, `name = "cal"
+role = "builder"
+host = "far"`).replace('repos = ["web", "api"]', 'repos = ["web"]').replace(`stack = "app"
+appendix = ["briefs/app.md", "repo:AGENTS.md"]
+add_dirs = ["web", "api"]`, `stack = "app"
+appendix = ["briefs/app.md", "repo:AGENTS.md"]
+add_dirs = ["web"]`) + `
+[hosts.far]
+url = "http://127.0.0.1:9"
+token_file = "token"
+hash_files = ["daemon.toml", "workspace.toml"]
+`);
+  const ws = openWorkspace(dir);
+  const far = join(dir, "far-claude");
+  const farDir = (cwd: string) => join(far, "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
+  ev(ws, "2026-11-05T00:00:00Z", "LOCAL-h", null, "building", "cal");
+  ev(ws, "2026-11-05T06:00:00Z", "LOCAL-h", "building", "pr-open", "cal");
+  rec(ws, "LOCAL-h", "pr-open", "cal", "2026-11-05T06:00:00+00:00");
+  const wt = farDir(worktreePath("/far/api", "LOCAL-h"));
+  mkdirSync(wt, { recursive: true });
+  writeFileSync(join(wt, "c1.jsonl"), [JSON.stringify({ type: "agent-name", agentName: "cal" }),
+    call("2026-11-05T01:00:00Z", "c1", { output_tokens: 40, cache_read_input_tokens: 900 }),
+    call("2026-11-05T07:00:00Z", "c2", { output_tokens: 6 })].join("\n") + "\n");
+  // a session cal started in the checkout itself, while on LOCAL-h
+  mkdirSync(farDir("/far/api"), { recursive: true });
+  writeFileSync(join(farDir("/far/api"), "c0.jsonl"), [JSON.stringify({ type: "agent-name", agentName: "cal" }), call("2026-11-05T04:00:00Z", "c0", { output_tokens: 3 })].join("\n") + "\n");
+  mkdirSync(join(farDir("/far/rae"), "r1", "subagents"), { recursive: true });
+  writeFileSync(join(farDir("/far/rae"), "r1.jsonl"), [JSON.stringify({ type: "agent-name", agentName: "rae" }),
+    call("2026-11-05T02:00:00Z", "r1", { output_tokens: 9 })].join("\n") + "\n");
+  writeFileSync(join(farDir("/far/rae"), "r1", "subagents", "agent-y.jsonl"), call("2026-11-05T02:10:00Z", "r2", { output_tokens: 5 }) + "\n");
+  // last written before the first change, so never sent
+  writeFileSync(join(farDir("/far/rae"), "old.jsonl"), JSON.stringify({ type: "agent-name", agentName: "rae" }) + "\n" + call("2026-11-05T02:00:00Z", "o1", { output_tokens: 1000 }) + "\n");
+  utimesSync(join(farDir("/far/rae"), "old.jsonl"), new Date("2026-10-01T00:00:00Z"), new Date("2026-10-01T00:00:00Z"));
+  return { ws, far, farDir };
+}
+
+const python = (far: string, scripts: string[] = []): Runner => (script) =>
+  new Promise((resolve, reject) => {
+    scripts.push(script);
+    const p = spawn("python3", ["-"], { env: { ...process.env, CLAUDE_CONFIG_DIR: far } });
+    let out = "";
+    let err = "";
+    p.stdout.on("data", (b: Buffer) => (out += b.toString("utf8")));
+    p.stderr.on("data", (b: Buffer) => (err += b.toString("utf8")));
+    p.on("close", (code) => (code === 0 ? resolve(out) : reject(new Error(`python3 exited ${code}: ${err}`))));
+    p.stdin.end(script);
+  });
+
+const query = (script: string): RemoteQuery => JSON.parse(Buffer.from(/b64decode\("([^"]*)"\)/.exec(script)![1]!, "base64").toString("utf8"));
+
+test("agents on another host count, read over its runner, incrementally, and are left out until read", async () => {
+  const { ws, far, farDir } = hostedWorkspace();
+  const usage = new TranscriptUsage();
+  const before = report(ws, usage, NOW);
+  assert.deepEqual(before.left_out.sort(), ["cal", "rae"], "far is not read yet");
+  assert.deepEqual(before.hosts, { far: { read_at: null, error: null, files: 0 } });
+  assert.equal(before.items[0]!.states["building"]!.tokens.output, 0);
+
+  const scripts: string[] = [];
+  await refreshHosts(ws, usage, (h) => (assert.equal(h, "far"), python(far, scripts)));
+  const q = query(scripts[0]!);
+  assert.deepEqual(q.cwds.sort(), ["/far/api", "/far/api/.claude/worktrees/LOCAL-h", "/far/rae"], "the reviewer's cwd, the builder's checkout and worktree, as far's paths");
+  assert.deepEqual(q.offsets, {}, "nothing read yet");
+  const r = report(ws, usage, NOW);
+  assert.deepEqual(r.left_out, []);
+  assert.equal(r.hosts["far"]!.error, null);
+  assert.equal(r.hosts["far"]!.files, 4, "cal's two, rae's and its subagent's; not the one last written before the first change");
+  const h = r.items.find((i) => i.ticket === "LOCAL-h")!.states;
+  assert.deepEqual(h["building"]!.tokens, { input: 0, output: 43, cache_read: 900, cache_write: 0 }, "a hosted builder's worktree is its item's, and its checkout's session too");
+  assert.equal(h["pr-open"]!.tokens.output, 6);
+  assert.equal(r.unattributed["rae"]!.output, 9 + 5, "a hosted reviewer's, its subagent's with it");
+
+  // only what was written since is read: a call's later block and a new call
+  const wt = join(farDir(worktreePath("/far/api", "LOCAL-h")), "c1.jsonl");
+  writeFileSync(wt, readFileSync(wt, "utf8") + call("2026-11-05T07:00:01Z", "c2", { output_tokens: 8 }) + "\n" + call("2026-11-05T03:00:00Z", "c3", { output_tokens: 2 }) + "\n");
+  await refreshHosts(ws, usage, () => python(far, scripts));
+  assert.ok((query(scripts[1]!).offsets[wt] ?? 0) > 0, "the second read starts where the first stopped");
+  const r2 = report(ws, usage, NOW).items.find((i) => i.ticket === "LOCAL-h")!.states;
+  assert.equal(r2["building"]!.tokens.output, 45, "the new call");
+  assert.equal(r2["pr-open"]!.tokens.output, 8, "the call counted once, with its largest output");
+
+  // a read that fails keeps what was read, and says why
+  await refreshHosts(ws, usage, () => () => Promise.reject(new Error("ssh far exited 255: Connection refused")));
+  const r3 = report(ws, usage, NOW);
+  assert.deepEqual(r3.left_out, []);
+  assert.equal(r3.hosts["far"]!.error, "ssh far exited 255: Connection refused");
+  assert.equal(r3.items.find((i) => i.ticket === "LOCAL-h")!.states["building"]!.tokens.output, 45);
+
+  // a host never read is left out, with its reason
+  const fresh = new TranscriptUsage();
+  await refreshHosts(ws, fresh, () => () => Promise.resolve("not json"));
+  const r4 = report(ws, fresh, NOW);
+  assert.deepEqual(r4.left_out.sort(), ["cal", "rae"]);
+  assert.match(r4.hosts["far"]!.error!, /not the script.s: "not json"/);
+});
+
+test("the board reads other hosts in the background, and its page says who is not counted yet", async () => {
+  const { ws, far } = hostedWorkspace();
+  process.env.CLAUDE_BIN = join(ws.dir, "bin", "claude");
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const b = await serve(ws, { host: "127.0.0.1", port: 0, transcripts: () => async (s) => (await gate, python(far)(s)) });
+  after(() => b.close());
+  const first = await (await fetch(`${b.url}/api/analytics`)).json();
+  assert.deepEqual(first.left_out.sort(), ["cal", "rae"], "served at once, while far is read");
+  release();
+  let d = first;
+  for (const end = Date.now() + 10_000; d.left_out.length;) {
+    if (Date.now() > end) assert.fail("far was never counted");
+    await new Promise((r) => setTimeout(r, 50));
+    d = await (await fetch(`${b.url}/api/analytics`)).json();
+  }
+  assert.equal(d.unattributed.rae.output, 14);
+
+  const page = await (await fetch(`${b.url}/analytics`)).text();
+  const dom = new JSDOM(page.replace(/<script src[^>]*><\/script>/g, ""), { runScripts: "outside-only", url: `${b.url}/analytics`, pretendToBeVisual: true });
+  after(() => dom.window.close());
+  const w = dom.window;
+  Object.assign(w, { fetch: async () => ({ ok: true, json: async () => first }), matchMedia: () => ({ matches: true }), innerWidth: 375, setInterval: () => 0 });
+  const ctx = dom.getInternalVMContext();
+  for (const f of ["common.js", "analytics.js"])
+    new vm.Script(readFileSync(new URL(`../src/board/static/${f}`, import.meta.url), "utf8"), { filename: f }).runInContext(ctx);
+  w.document.dispatchEvent(new w.Event("DOMContentLoaded"));
+  for (const end = Date.now() + 5000; !/Not counted yet/.test(w.document.body.textContent ?? "");) {
+    if (Date.now() > end) assert.fail(`the page never said who is not counted: ${w.document.body.textContent}`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.match(w.document.body.textContent!, /Not counted yet: (cal, rae|rae, cal) \(far is still being read\)/);
+});
+
+test("a host's file is counted once, as its item's, however many cwds list it; a host with nothing to read is no one's reason", async () => {
+  const { ws, far, farDir } = hostedWorkspace();
+  const wt = worktreePath("/far/api", "LOCAL-h");
+  // a session with no name, which only the dir says is the item's
+  writeFileSync(join(farDir(wt), "u1.jsonl"), call("2026-11-05T02:00:00Z", "u1", { output_tokens: 100 }) + "\n");
+  // ada, listed before cal, sits in cal's worktree itself; rae in a path the dir name spells alike
+  const cfg = readFileSync(join(ws.dir, "factory.toml"), "utf8").replace(`name = "ada"`, `name = "ada"
+host = "far"
+cwd = "${wt}"`).replace(`cwd = "/far/rae"`, `cwd = "${wt.replace("/far/api/.claude", "/far.api/_claude")}"`) + `
+[hosts.near]
+url = "http://127.0.0.1:9"
+token_file = "token"
+hash_files = ["daemon.toml", "workspace.toml"]
+`;
+  writeFileSync(join(ws.dir, "factory.toml"), cfg);
+  const ws2 = openWorkspace(ws.dir);
+  const usage = new TranscriptUsage();
+  await refreshHosts(ws2, usage, () => python(far));
+  const r = report(ws2, usage, NOW);
+  const it = r.items.find((i) => i.ticket === "LOCAL-h")!;
+  assert.equal(it.states["building"]!.tokens.output, 43 + 100, "once, and the item's, not ada's: the unnamed session too");
+  assert.equal(it.states["pr-open"]!.tokens.output, 6);
+  assert.equal(r.unattributed["ada"], undefined);
+  assert.equal(r.unattributed["rae"], undefined);
+  assert.equal(r.unattributed["?"], undefined);
+  assert.deepEqual(Object.keys(r.hosts), ["far"], "near has no agent, so it is never read and never named");
+});
+
+test("what stops a host read before it starts is that host's error, and is logged", async () => {
+  const { ws, far } = hostedWorkspace();
+  writeFileSync(join(ws.stateDir, "BROKEN.json"), "{ not json");
+  const usage = new TranscriptUsage();
+  const logged: string[] = [];
+  const was = console.error;
+  console.error = (...a: unknown[]) => void logged.push(a.join(" "));
+  try {
+    await refreshHosts(ws, usage, () => python(far));
+  } finally {
+    console.error = was;
+  }
+  assert.match(usage.hostRead("far")?.error ?? "", /could not work out what to read: .*JSON/);
+  assert.match(logged.join("\n"), /analytics: the board could not work out what to read/);
+});
+
+test("ssh: what a login shell prints first is skipped, a reply that is not the script's says what it was, and a refused key says why", async () => {
+  const bin = mkdtempSync(join(tmpdir(), "sf-ssh-"));
+  const stub = (body: string) => {
+    writeFileSync(join(bin, "ssh"), `#!/bin/sh\ncat >/dev/null\n${body}\n`);
+    chmodSync(join(bin, "ssh"), 0o755);
+  };
+  const path = process.env["PATH"];
+  process.env["PATH"] = `${bin}:${path}`;
+  try {
+    stub(`echo "Welcome to far"; printf '\\n--sf-transcripts--\\n{"listing":{"/x":[]},"data":{}}'`);
+    const usage = new TranscriptUsage();
+    await usage.refresh("far", ["/x"], 0, sshRunner("far"));
+    assert.deepEqual(usage.hostRead("far"), { read_at: usage.hostRead("far")!.read_at, error: null, files: 0 });
+    stub(`echo "conda: command not found"`);
+    await assert.rejects(sshRunner("far")("x").then(parseReply), /not the script's: "conda: command not found/);
+    stub(`echo "far: Permission denied (publickey)." >&2; exit 255`);
+    await assert.rejects(sshRunner("far")("x"), /exited 255: far: Permission denied \(publickey\)\. \(the board has no ssh agent/);
+  } finally {
+    process.env["PATH"] = path;
+  }
+  assert.throws(() => parseReply('\n--sf-transcripts--\n{"listing"'), /not JSON .*: "\{\\"listing\\""/);
 });

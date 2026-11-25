@@ -14,7 +14,8 @@ import { allRecs, IN_REVIEW, isLocal, onBoard, type Rec, recPrs, STATES, strande
 import type { Workspace } from "../workspace.js";
 import { roster } from "../config.js";
 import { capitalize, firstSentence, run, sleep } from "../util.js";
-import { report, type Report, TranscriptUsage } from "./analytics.js";
+import { refreshHosts, report, type Report, TranscriptUsage } from "./analytics.js";
+import type { Runner } from "./remote-transcripts.js";
 import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, saveAttachment } from "./inbox.js";
 import { markSeen, readSeen } from "./seen.js";
 import { markHandled, messageId, queueCards, queueTrouble, WAITING_KINDS } from "./queue.js";
@@ -522,6 +523,8 @@ export interface ServeOptions {
   github?: Graphql;
   // The lead's receipts, shared with the scheduler's watchdog in the same process.
   receipts?: Receipts;
+  // How the analytics read another host's transcripts; ssh to its hosts.<name>.ssh by default.
+  transcripts?: (host: string) => Runner;
 }
 
 export interface Board {
@@ -542,8 +545,29 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
   const traffic = new GithubTraffic(ws, opts.github);
   const usage = new TranscriptUsage();
   let analytics: { at: number; body: Report & { at: string } } | null = null;
+  // Other hosts' transcripts are read in the background, once per ANALYTICS_EVERY at most, and a
+  // report made while a read runs counts what was read before it; when the read ends, the next
+  // request makes a new report.
+  let reading: Promise<void> | null = null;
+  let readAt = -Infinity;
+  const readHosts = () => {
+    if (reading || Date.now() - readAt < ANALYTICS_EVERY || !Object.keys(ws.config.hosts).length) return;
+    readAt = Date.now();
+    reading = refreshHosts(ws, usage, opts.transcripts)
+      .catch((e: unknown) => {
+        // refreshHosts records each host's failure itself; anything here is a bug, so it is logged
+        console.error(`analytics: reading other hosts failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+      })
+      .finally(() => {
+        reading = null;
+        analytics = null;
+      });
+  };
   const readAnalytics = () => {
-    if (!analytics || Date.now() - analytics.at >= ANALYTICS_EVERY) analytics = { at: Date.now(), body: { at: clock(), ...report(ws, usage) } };
+    if (!analytics || Date.now() - analytics.at >= ANALYTICS_EVERY) {
+      readHosts();
+      analytics = { at: Date.now(), body: { at: clock(), ...report(ws, usage) } };
+    }
     return analytics.body;
   };
   const readReviews = () => {

@@ -575,3 +575,19 @@ test("a hosted repo's path is kept normal, so its worktrees are found whatever t
   assert.equal(root.config.repos.api!.path, "/", "the root keeps its slash");
   assert.equal(worktreeOf(root, root.config.agents.find((a) => a.name === "cal")!, "/.claude/worktrees/TEST-1")?.ticket, "TEST-1", "a checkout at the root");
 });
+
+test("a host's ssh destination for its transcripts: its name unless given, and never an option", () => {
+  const load = (extra: string) => {
+    const dir = tempWorkspace(withHost("http://x:1", extra));
+    try {
+      return loadConfig(join(dir, "factory.toml"), {}).hosts["far"]!.ssh;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  assert.equal(load(""), "far");
+  assert.equal(load('ssh = "me@far.lan"'), "me@far.lan");
+  for (const bad of ["-oProxyCommand=sh", "far lan"])
+    assert.deepEqual(problems(withHost("http://x:1", `ssh = "${bad}"`)), [`hosts.far.ssh: must be an ssh destination, an alias or user@host, got "${bad}"`]);
+  assert.deepEqual(problems(withHost("http://x:1", 'ssh = ""')), ['hosts.far.ssh: must be a non-empty string, got ""']);
+});

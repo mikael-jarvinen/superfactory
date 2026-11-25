@@ -192,8 +192,22 @@ function footView(d){
     `${period === 'week' ? 'Weeks start on Monday, UTC. ' : period === 'month' ? 'Months are calendar months, UTC. ' : ''}` +
     `${period === 'all' ? '' : `Arrows are the change from the ${period} before. The ${period} still running counts only so far, and shows no change until it ends. `}` +
     `Done counts entries only. Tokens are input, output and cache reads and writes of the item's agent while it was on that item. ` +
-    `${d.left_out.length ? `Not counted: ${esc(d.left_out.join(', '))} (the lead, reviewers, and agents on another host). ` : ''}` +
+    `Every agent counts, on whichever machine it runs; the lead and the reviewers are never an item's agent, so theirs is spent with no item. ` +
+    `${d.left_out.length ? `Not counted yet: ${esc(d.left_out.join(', '))} (${esc(hostsNote(d.hosts))}). ` : ''}` +
+    `${stale(d.hosts) ? `${esc(stale(d.hosts))}. ` : ''}` +
     `${un ? `Spent with no item: ${un}.` : ''}</p>`;
+}
+
+// Why a host's agents are not counted: it has not been read yet, or its read failed.
+function hostsNote(hosts){
+  return Object.entries(hosts || {}).filter(([, r]) => r.read_at == null)
+    .map(([h, r]) => r.error ? `${h} could not be read: ${r.error}` : `${h} is still being read`).join('; ');
+}
+
+// A host read before whose last read failed: its counts are as of that earlier read.
+function stale(hosts){
+  return Object.entries(hosts || {}).filter(([, r]) => r.read_at != null && r.error)
+    .map(([h, r]) => `${h} as of ${new Date(r.read_at).toISOString().slice(0, 16).replace('T', ' ')} UTC, as its last read failed: ${r.error}`).join('; ');
 }
 
 // The page is built once and each part is refilled in place, so the filter keeps its caret and any
