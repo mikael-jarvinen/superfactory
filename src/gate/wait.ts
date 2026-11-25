@@ -45,7 +45,7 @@ export function waitAndSend(ws: Workspace, repo: Repo, n: number, reviewed: stri
           throw stop(4, `gate is green but not sending:\n  - ${v.prose}\n  trim the comments, or rerun with ${ACCEPT_PROSE}=1 if the volume is right`);
         break;
       }
-      // Asked at this head and not answered yet is a wait, timed from the ask (lyyti-classic#8522, #8524).
+      // Asked at this head and not answered yet is a wait, timed from the ask.
       const asked = new Set(v.failures.filter((f) => f.asked && (sinceAsked(repo, n, v.head, f.asked) ?? Infinity) < graceS()));
       const fatal = v.failures.filter((f) => f.kind === "fatal" && !f.trigger && !asked.has(f));
       if (fatal.length) throw stop(1, `NOT SENDABLE, and waiting will not clear it:\n${fatal.map((f) => `  - ${f.text}`).join("\n")}`);

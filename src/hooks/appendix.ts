@@ -1,6 +1,6 @@
 // SessionStart hook for a resumed session, run as `factory hook appendix --file <path>`. claude keeps
 // the system prompt a session started with when it is resumed or respawned, and reads no
-// --append-system-prompt(-file) given then (Otto on Claude Code 2.1.327). So a brief edited since the
+// --append-system-prompt(-file) given then (as of Claude Code 2.1.327). So a brief edited since the
 // session started would never reach it. The factory keeps each agent's current appendix at <path>
 // (transport.ts's currentAppendixPath), written at every start and before every resume and wake, and
 // this hook hands it to the resumed session as context. No file, no context: the agent has no

@@ -18,8 +18,8 @@ import type { Workspace } from "../workspace.js";
 //   events log says when): the lead moved the ticket on, so the question was answered;
 // - it is a `decision` row, and since it was posted the ticket has moved to another state, other
 //   than one where it waits on the human (blocked, design-review, your-review), or the lead has
-//   posted an `answer` on the ticket: the ticket has moved past the decision. Mikael, 2026-11-20:
-//   five decisions answered days before came back the moment their ticket was blocked.
+//   posted an `answer` on the ticket: the ticket has moved past the decision, so a decision
+//   answered days before does not come back when its ticket is blocked.
 // Reading it never does, and neither does a message typed in the thread: a message has no reply-to,
 // so nothing here can tell which question it answers; the lead, who reads it, marks what it settles.
 // Questions asked before the queue was first read in
@@ -46,10 +46,10 @@ export interface QueueItem {
   asks?: string | null;
 }
 
-// One question, as the human sees it: every open part of it folded together. Mikael, 2026-11-24:
-// "It can frequently duplicate topics. Also, it always collapses the message and the message can also
-// be a recap sometimes about 'asked mikael...'" A decision and the block recorded for it, or the lead's
-// follow-ups on the same ticket, are one card; marking it handled, or answering it, clears every part.
+// One question, as the human sees it: every open part of it folded together, so a topic shows once
+// and a lead's recap is not shown in place of the question. A decision and the block recorded for
+// it, or the lead's follow-ups on the same ticket, are one card; marking it handled, or answering
+// it, clears every part.
 export interface QueueCard {
   // The card's own id: its newest posted question, else its record. Any of `ids` names it too.
   id: string;
@@ -118,8 +118,8 @@ export const messageId = (r: Message) => "m" + hash(r.t ?? "", r.kind ?? "", r.t
 // A record is asked again when it is blocked again, so its question is named by when it was asked.
 // A block linked with --asks to a posted question is named by that link too: linked after the fact,
 // it is a new part of that question's card, even when its unlinked block was marked handled before
-// (LOCAL-reports-launch-copy, 2026-11-24: linked after its recap card was handled, it stayed out of
-// the card, and the card had no ticket). An unlinked record keeps the id it always had.
+// (otherwise a record linked after its recap card was handled stays out of the card, and the card
+// has no ticket). An unlinked record keeps the id it always had.
 const recordId = (r: Rec) => "r" + (r.asked_you?.message ? hash(r.ticket, r.asked_you.at ?? "", r.asked_you.message) : hash(r.ticket, r.asked_you?.at ?? ""));
 
 const time = (t: string | null | undefined) => (t ? Date.parse(t) : NaN);
@@ -338,12 +338,12 @@ export function queue(ws: Workspace): QueueItem[] {
 }
 
 // Mark several items handled in one write to the file the page writes, for the lead's `factory
-// handled` and `say --answers`: Mikael, 2026-11-18, "I need to always manually mark them as handled.
-// Can't you?" Every id must be one the queue holds now; one that is not refuses the whole call by
-// name, so nothing is half marked. `check` validates without writing, so say can refuse before it
-// posts. An id already handled is a success that changes nothing.
-// `whole` false marks exactly the ids given: say --answers expands them to whole cards before it posts,
-// so the question it posts itself is not swept into a card it joins.
+// handled` and `say --answers`, so the human need not mark each by hand. Every id must be one the
+// queue holds now; one that is not refuses the whole call by name, so nothing is half marked.
+// `check` validates without writing, so say can refuse before it posts. An id already handled is a
+// success that changes nothing. `whole` false marks exactly the ids given: say --answers expands
+// them to whole cards before it posts, so the question it posts itself is not swept into a card it
+// joins.
 export function markHandledMany(ws: Workspace, ids: string[], check = false, whole = true):
   { ok: true; marked: string[]; already: string[] } | { ok: false; error: string; retry?: true } {
   const bad = ids.filter((id) => !/^[mr][0-9a-f]{12}$/.test(id));

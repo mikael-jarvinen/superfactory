@@ -52,8 +52,8 @@ test("the scheduler renders one plist per job from config, labelled by the lead"
   assert.ok(!existsSync(join(ws.runDir, "launchd", "superfactory.ada.relay.plist")));
 });
 
-// Marie on superfactory#119 (L1): a reviews job that has never run on Linux is a daemon started
-// before config asked for it, which `factory schedule install` does not fix; a restart does.
+// A reviews job that has never run on Linux is a daemon started before config asked for it, which
+// `factory schedule install` does not fix; a restart does.
 test("a missing reviews heartbeat names the fix for this machine's scheduler", () => {
   assert.equal(scheduleFix("linux"), "systemctl --user restart factory-scheduler, which reads config again");
   assert.equal(scheduleFix("darwin"), "factory schedule install");

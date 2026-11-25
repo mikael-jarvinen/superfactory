@@ -2,10 +2,9 @@
 // `factory pr-open-for-review` runs it for every PR on the item, and `factory pr-wait-coderabbit
 // <repo> <n>` runs it alone, for a PR opened by hand (a stacked one).
 //
-// Mikael, 2026-11-24, after lyyti-classic#8878 and #8879 were opened for colleagues before CodeRabbit
-// had read their final heads, and it left 12 findings on PRs colleagues were already reading: what
-// reaches him may go without its review (his 2026-11-12 decision stands for pr-ready, pr-wait and
-// pr-send), but nothing opens for colleagues until it has reviewed the head.
+// What reaches the human may go without the bot's review (pr-ready, pr-wait and pr-send), but
+// nothing opens for colleagues until it has reviewed the head, so its findings never land on a PR
+// colleagues are already reading.
 //
 // So this asks: "@coderabbitai review", and "@coderabbitai full review" when the incremental one
 // brings nothing within the gate's grace (it reviews only commits since its last review). A rate
@@ -51,9 +50,9 @@ export function botReview(ws: Workspace, repo: Repo, n: number): BotReview {
   const desc = st?.description ?? "-";
   const run = runs.filter(isBotRun).sort((a, b) => (a.started_at ?? "").localeCompare(b.started_at ?? "")).at(-1);
 
-  // Reviewed: its status says so, its own check-run finished (a rebase it had already reviewed posts
-  // no review object, lyyti-events#847), or a review with a body at this head (its thread replies are
-  // empty review objects, lyyti-classic#8705).
+  // Reviewed: its status says so, its own check-run finished (a rebase it had already reviewed
+  // posts no review object), or a review with a body at this head (its thread replies are empty
+  // review objects).
   if (st?.state === "success" && !NOT_A_REVIEW.test(desc)) return { head, reviewed: true, text: `${bot.status} reviewed ${short}` };
   if (!st && run?.status === "completed" && run.conclusion === "success" && REVIEWED_RUN.test(run.output?.title ?? ""))
     return { head, reviewed: true, text: `${bot.status} reviewed ${short}` };

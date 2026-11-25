@@ -53,7 +53,7 @@ test("a message log replaced other than by rotation is read on past the last pri
   replace(ws.messages, readFileSync(ws.messages, "utf8"));
   postMessage(ws, "three");
   const second = pass(ws, c);
-  assert.deepEqual(second.printed, ["three"], "before the fix the offset went to 0 and one and two were printed again");
+  assert.deepEqual(second.printed, ["three"], "the offset holds, so one and two are not printed again");
   assert.notEqual(second.cursor?.last, c?.last, "and three is now the last printed");
 });
 

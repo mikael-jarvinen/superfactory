@@ -180,12 +180,12 @@ test("what a run's claude calls left in their scopes is cleaned up, but a superv
   }
 });
 
-// CodeRabbit on superfactory#128 (KJJs): the command line was read after the last stat, so a wrapper
-// that exec'd claude between the two read as the wrapper by its name and as a process by its
-// claude command line, and was killed. exec keeps the pid and start time, so nothing after caught it.
-// The exec is staged through /proc reads: once its command line has been read (telling it from a
-// claude), the stray's stat is read for the hop to its parent and then for the last look; right
-// after that look, its name, stat and command line are claude's.
+// Were the command line read after the last stat, a wrapper that exec'd claude between the two
+// would read as the wrapper by its name and as a process by its claude command line, and be killed.
+// exec keeps the pid and start time, so nothing after would catch it. The exec is staged through
+// /proc reads: once its command line has been read (telling it from a claude), the stray's stat is
+// read for the hop to its parent and then for the last look; right after that look, its name, stat
+// and command line are claude's.
 test("a stray that execs claude between the reads is not killed, the group waits", { skip: noCleanup() }, async () => {
   const bin = process.env.CLAUDE_BIN;
   const at = join(dir, "exec-race");

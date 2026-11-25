@@ -6,7 +6,7 @@ import { factory } from "./helpers.js";
 
 const doc = (p: string) => readFileSync(fileURLToPath(new URL(`../../${p}`, import.meta.url)), "utf8");
 
-// Niilo on #129: the docs say what \`factory state\` says, so waiting work is never told to sit on the board.
+// The docs say what \`factory state\` says, so waiting work is never told to sit on the board.
 test("README and design.md say where waiting work lives, as the help does", () => {
   const help = factory(undefined, ["--help"]).stdout;
   assert.match(help, /goes off with\s+--title, and \\?`state --off\\?` lists it/);

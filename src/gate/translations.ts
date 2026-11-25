@@ -1,9 +1,8 @@
 // Translations at the PR head: every text key the PR adds or starts using has a non-empty text in
 // every language the repo ships.
 //
-// Mikael, 2026-11-20: "nothing should reach me in my review or colleagues review if it does not have
-// translations. We have to avoid merging stuff without translations, so let's make it structurally
-// impossible." So pr-ready refuses on a miss, and pr-open-for-review asks the same, for a PR that
+// Nothing reaches your-review or colleague-review without its translations, so nothing merges
+// without them. So pr-ready refuses on a miss, and pr-open-for-review asks the same, for a PR that
 // never went through pr-send. Nothing turns it off: a false positive is fixed here, in the patterns
 // or the ignore lists, never by an environment variable.
 //

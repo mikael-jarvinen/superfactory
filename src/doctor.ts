@@ -239,8 +239,8 @@ export function workspaceFiles(ws: Workspace): Check[] {
 // ---------------------------------------------------------------- the state store
 
 // Turning colleague review off strands an item already in it: nothing moves anything into it, and
-// pr-open-for-review refuses. A real inconsistency, so MISSING, and doctor exits 1 (Niilo's call on
-// superfactory#135). One line, only where the switch is off.
+// pr-open-for-review refuses. A real inconsistency, so MISSING, and doctor exits 1. One line, only
+// where the switch is off.
 export function stateChecks(ws: Workspace): Check[] {
   if (usesState(ws, "colleague-review")) return [];
   const left = stranded(ws, allRecs(ws)).map((r) => r.ticket);
@@ -351,7 +351,7 @@ export function hostChecks(ws: Workspace): Check[] {
 // ---------------------------------------------------------------- resumed briefs
 
 // Whether this machine's claude hands a resumed session its brief. claude keeps the appendix a
-// session started with on a resume and reads no new one (Otto on Claude Code 2.1.327), so the
+// session started with on a resume and reads no new one (as of Claude Code 2.1.327), so the
 // factory gives a resumed session its current brief through a SessionStart hook (hooks/appendix.ts).
 // This starts a throwaway `claude -p` session with that hook and no appendix, resumes it, and asks
 // for the codeword only the hook's brief holds. Two model turns, so only on `doctor --resume-probe`.

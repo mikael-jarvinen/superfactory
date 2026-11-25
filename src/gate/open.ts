@@ -1,6 +1,5 @@
 // `factory pr-open-for-review <TICKET>`: open the item's PRs for colleague review, then record it.
 //
-// Mikael, 2026-10-16: "Only when they are in my colleagues review column should they be open PRs."
 // A PR stays a draft until its item reaches undrafting(ws). Where that is colleague-review, this is
 // where it leaves draft; with [gate] colleague_review = false it is your-review, undrafted by hand, and
 // this refuses. Every open PR on the record is checked before any is opened: its head must still be

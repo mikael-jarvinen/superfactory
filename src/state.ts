@@ -6,10 +6,10 @@ import { die, now, pyDumps, pyRepr, pyStr, squash } from "./util.js";
 
 export { STATES, type State };
 
-// `off` is not a state: it takes an item off the board and leaves its record, with state null, until
-// a dispatch brings it back. Mikael, 2026-11-18: the board's queued state was redundant with the
-// backlog; the board shows only work someone is doing, and waiting work stays in the tracker. The
-// record keeps what the tracker has no place for: an approved design, the stack, the title.
+// `off` is not a state: it takes an item off the board and leaves its record, with state null,
+// until a dispatch brings it back. A queued state would only repeat the backlog; the board shows
+// only work someone is doing, and waiting work stays in the tracker. The record keeps what the
+// tracker has no place for: an approved design, the stack, the title.
 export const OFF = "off";
 export type Target = State | typeof OFF;
 
@@ -42,9 +42,9 @@ export const stranded = <R extends { state: State | null }>(ws: Workspace, recs:
 const REVIEW_STATES = ["your-review", "colleague-review"] as const;
 export type ReviewState = (typeof REVIEW_STATES)[number];
 const isReview = (s: unknown): s is ReviewState => REVIEW_STATES.includes(s as ReviewState);
-// Mikael, 2026-10-16: a PR is a draft in every column but colleague review, and open there; once an
-// item has been with colleagues its PR stays open through the fix rounds after. With colleague
-// review off, your-review is where the human undrafts a PR to merge.
+// A PR is a draft in every column but colleague review, and open there; once an item has been with
+// colleagues its PR stays open through the fix rounds after. With colleague review off, your-review
+// is where the human undrafts a PR to merge.
 export const undrafting = (ws: Workspace): ReviewState => (usesState(ws, "colleague-review") ? "colleague-review" : "your-review");
 // An item that has been where its PR is undrafted keeps it open from then on. Colleague-review counts
 // with the switch off too: an item there before the switch went off has had its PR opened.
@@ -59,11 +59,10 @@ const FIRST: ReadonlySet<Target> = new Set(["designing", "building"]);
 export const BUSY: ReadonlySet<string> = new Set(["designing", "building", "fixing"]);
 // A design sent for approval frees its designer, as a PR in review frees its builder.
 export const WAITING_ON_YOU: ReadonlySet<string> = new Set(["design-review", "your-review", "blocked"]);
-// States that move only when the lead moves them. LOCAL-eventapi-form-spike sat in pr-open for five
-// days because nothing aged these.
+// States that move only when the lead moves them, so an item can sit in one for days unless
+// something ages them.
 export const WAITING_ON_LEAD: ReadonlySet<string> = new Set(["pr-open", "agent-review", "gate"]);
-// Mikael, 2026-10-20: "Tickets that are already in review should not reserve a stack and agent, let
-// the stack and agent work on something else." An item here frees its builder and its stack slot.
+// An item in review frees its builder and its stack slot, so both can work on something else.
 export const IN_REVIEW: ReadonlySet<string> = new Set(["your-review", "colleague-review"]);
 // Where a dispatch makes sense without argument. Anywhere else is a judgement, so it needs --force.
 export const DISPATCHABLE: ReadonlySet<string | null> = new Set([null, "building", "fixing"]);
@@ -256,8 +255,8 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   let rec = loadRec(ws, ticket);
   const isNew = rec === null;
   if (rec === null) {
-    // Work that waits with no tracker backlog to wait in, LOCAL- work above all, is recorded off the
-    // board, with a title so `state --off` says what it is (Niilo on #129).
+    // Work that waits with no tracker backlog to wait in, LOCAL- work above all, is recorded off
+    // the board, with a title so `state --off` says what it is.
     if (to === OFF && !c.title)
       die(`${ticket} has no record; a new item goes off the board only with --title "<what it is>", so \`state --off\` can show it`);
     if (to !== OFF && !FIRST.has(to))
@@ -323,7 +322,7 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   }
   if (c.agent) rec.agent = c.agent;
   // Off the board from building, the builder is free and the next dispatch picks one. From
-  // design-review the designer stays on the record, for the next round (Niilo on #129).
+  // design-review the designer stays on the record, for the next round.
   const left = rec.agent ?? null;
   if (to === OFF && old === "building" && !c.agent) rec.agent = null;
   if (c.stack) rec.stack = c.stack;
@@ -385,9 +384,8 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   return rec;
 }
 
-// Mikael split lyyti-classic#8754 off LOCAL-reports-petes-design into its own item, and the PR stayed
-// on both cards: --pr adds a PR to an item, and this takes one off. If it was the PR in focus, the
-// focus moves to the last one left.
+// A PR split off into its own item stays on both cards: --pr adds a PR to an item, and this takes
+// one off. If it was the PR in focus, the focus moves to the last one left.
 export function removePr(ws: Workspace, ticket: string, ref: string, note?: string, out: (line: string) => void = console.log): Rec {
   const m = /^([\w.-]+\/[\w.-]+)#(\d+)$/.exec(ref);
   if (!m) die("--remove-pr must look like owner/repo#N");

@@ -288,15 +288,9 @@ function render(d){
 
 (function(){
   async function tick(){
-    const pulse = document.getElementById('pulse'), at = document.getElementById('at');
     let d;
-    try {
-      const res = await fetch('/api/analytics', {cache: 'no-store'});
-      if(!res.ok) throw new Error(String(res.status));
-      d = await res.json();
-    }
-    catch { pulse.classList.add('stale'); at.textContent = 'not answering'; return; }
-    pulse.classList.remove('stale'); at.textContent = d.at;
+    try { d = await getJSON('/api/analytics'); } catch(e) { notAnswering(e); return; }
+    answered(d);
     render(d);
   }
   tick(); setInterval(tick, 30000);

@@ -56,7 +56,7 @@ test("a jira tracker needs a colleague-review status only while the step is on",
   assert.deepEqual(problems(OFF_TOML), [], "a status left in place is not an error");
 });
 
-test("on: your-review goes to colleague-review and on to done, as before", () => {
+test("on: your-review goes to colleague-review and on to done", () => {
   const ws = tempWorkspace(ON_TOML);
   toYourReview(ws, "WEB-1");
   const r = factory(ws, ["state", "WEB-1", "colleague-review", "--evidence", "Alex asked the team"]);

@@ -1,7 +1,6 @@
-// Niilo, 2026-11-18: Travis's `factory stop` then `factory wake` respawned 91c86061, his two-day-old
-// thread, and the respawned session had no --append-system-prompt-file. Stop removed the row it had
-// just stopped, so wake respawned the newest row left: an older conversation, on its older command
-// line. A stop now keeps the row and records its id, and wake resumes that one or none.
+// A stop that removed the row it had just stopped would leave wake to respawn the newest row left:
+// an older conversation, on its older command line, without its --append-system-prompt-file. A stop
+// keeps the row and records its id, and wake resumes that one or none.
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -88,7 +87,7 @@ test("a wake whose stopped session is gone says so, and respawns no older one", 
   assert.equal(r.status, 1);
   assert.match(r.stderr, /rae did not wake: 5e7a0b12, the session stopped last, is no longer listed, and an older one is another conversation/);
   assert.deepEqual(calls().filter((c) => c.startsWith("respawn") || c.startsWith("--bg")), [], "neither 91c86061 nor a fresh one");
-  // the way out is named, and the hook does not send people back to the wake that failed (Marie on #130)
+  // the way out is named, and the hook does not send people back to the wake that failed
   assert.match(r.stderr, /`factory review --name rae --force` starts it fresh/);
   const h = hook("rae");
   assert.equal(h.status, 2);
@@ -109,7 +108,7 @@ test("a stopped row with no name records nothing", () => {
   const { ws } = fleet();
   const w = openWorkspace(ws, {});
   noteStopped(w, "", { id: "x1", name: undefined });
-  assert.ok(!existsSync(join(w.runDir, "stopped-.json")), "down wrote stopped-.json for a nameless row (Marie on #130)");
+  assert.ok(!existsSync(join(w.runDir, "stopped-.json")), "down wrote stopped-.json for a nameless row");
 });
 
 test("a fresh launch removes the stopped row it replaces, and a record older than a launch elsewhere is not resumed", () => {
@@ -132,7 +131,7 @@ test("a fresh launch removes the stopped row it replaces, and a record older tha
   assert.equal(lastStopped(w, "rae"), null);
 });
 
-test("down records the row that was live, not a dead duplicate listed after it (CodeRabbit on #130)", () => {
+test("down records the row that was live, not a dead duplicate listed after it", () => {
   const { ws, run } = fleet();
   // a row the listing still shows but whose pid is gone: listed by default, not alive, and last
   const db = join(ws, "db.json");
@@ -145,8 +144,8 @@ test("down records the row that was live, not a dead duplicate listed after it (
   assert.equal(lastStopped(openWorkspace(ws, {}), "rae")?.id, "5e7a0b12", "the live one, which wake should bring back");
 });
 
-// CodeRabbit on #130 at 2e89a7a4: a stop wrote its record without the marks of launches that never
-// came up, so a dead launch whose host clock is ahead passed for newer than the stop.
+// A stop writes its record with the marks of launches that never came up, so a dead launch whose
+// host clock is ahead does not pass for newer than the stop.
 for (const how of ["stop", "down"] as const)
   test(`a ${how} keeps the mark of a launch that never came up`, () => {
     const { ws, run, calls } = fleet();
@@ -166,12 +165,12 @@ for (const how of ["stop", "down"] as const)
     assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn 5e7a0b12"], "not dead2, the launch that never came up");
     if (how === "stop") assert.ok(!calls().includes("stop dead2"), "a stop of rae is no stop of the launch that never came up");
     // down stops it too, so one up late does not outlive the down; it stays marked, and its
-    // "stopped" is not read as having run (Marie on #130 at f62a6b10)
+    // "stopped" is not read as having run
     else assert.ok(calls().includes("stop dead2"), calls().join("\n"));
   });
 
-// CodeRabbit on #130 at f62a6b10: a listing that failed at the stop, or when a new conversation took
-// the record, showed no rows, and every mark went with it.
+// A listing that fails at the stop, or when a new conversation takes the record, shows no rows, and
+// the marks must not go with it.
 for (const how of ["a stop", "a launch that came up"] as const)
   test(`${how} keeps every mark when the listing fails`, () => {
     const ws = tempWorkspace(TOML);
@@ -192,8 +191,8 @@ for (const how of ["a stop", "a launch that came up"] as const)
     assert.equal("s" in which ? which.s?.id : "gone", "cur1");
   });
 
-// Marie on #130 at b9d55a37: a launch down stopped unrun that came up late, seen by no factory
-// command while live, then ended by a raw `claude stop`, stayed unrun, and was never resumed.
+// A launch down stopped unrun that came up late, seen by no factory command while live, then ended
+// by a raw `claude stop`, must not stay unrun and never be resumed.
 test("a launch down stopped unrun that shows a pid later reads as having run", () => {
   const ws = tempWorkspace(TOML);
   after(() => rmSync(ws, { recursive: true, force: true }));
@@ -212,8 +211,8 @@ test("a launch down stopped unrun that shows a pid later reads as having run", (
   assert.equal("s" in which ? which.s?.id : "gone", "A");
 });
 
-// CodeRabbit on #130 at d1c64cc6: down marked a launch unrun though its row showed a pid, the
-// evidence it ran; the stop cleared the pid, and the wake resumed the recorded session instead.
+// down does not mark a launch unrun when its row shows a pid, the evidence it ran: the stop clears
+// the pid, and the wake would resume the recorded session instead.
 test("a down leaves a marked launch that showed a pid read as having run", () => {
   const { ws, run, calls } = fleet();
   const w = openWorkspace(ws, {});
@@ -235,8 +234,8 @@ test("a down leaves a marked launch that showed a pid read as having run", () =>
   assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn runA"], "the conversation since the stop");
 });
 
-// CodeRabbit on #130 at 2f878288: a launch an earlier down marked unrun that has run since, its pid
-// seen by this down, stayed unrun; the stop cleared the pid, and the wake took it as never run.
+// A launch an earlier down marked unrun that has run since, its pid seen by this down, is no longer
+// unrun: the stop clears the pid, and the wake would take it as never run.
 test("a down clears the unrun mark of a launch that has shown a pid since", () => {
   const { ws, run, calls } = fleet();
   const w = openWorkspace(ws, {});
@@ -254,7 +253,7 @@ test("a down clears the unrun mark of a launch that has shown a pid since", () =
   assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn runA"], "the conversation since the stop");
 });
 
-// CodeRabbit on #130 at 2f878288: down's stale sweep listed each host once per agent.
+// down's stale sweep lists each host once, not once per agent.
 test("down lists a host once to remove the rows a hook's wake left", () => {
   const { ws, run, calls } = fleet();
   const w = openWorkspace(ws, {});
@@ -265,7 +264,7 @@ test("down lists a host once to remove the rows a hook's wake left", () => {
   assert.ok(calls().filter((c) => c.startsWith("agents")).length <= 2, calls().join("\n"));
 });
 
-// CodeRabbit on #130 at f10e2da: a host whose listing failed was asked again for each agent.
+// A host whose listing failed is not asked again for each agent.
 test("down asks a host whose listing failed once, and keeps the rows a hook's wake left", () => {
   const { ws, run, calls } = fleet();
   const w = openWorkspace(ws, {});
@@ -279,8 +278,8 @@ test("down asks a host whose listing failed once, and keeps the rows a hook's wa
   assert.deepEqual(JSON.parse(readFileSync(join(w.runDir, "stale-cal.json"), "utf8")), ["c1"]);
 });
 
-// Marie on #130 at ed2b9911: a session the daemon retired idle ends "done" with no pid, and down kept
-// its unrun mark, as seen() took only a pid or alive as evidence; it was never resumed.
+// A session the daemon retired idle ends "done" with no pid; that is evidence it ran too, so down
+// drops its unrun mark and it is resumed.
 test("a down clears the unrun mark of a launch that has ended done, with no pid", () => {
   const { ws, run, calls } = fleet();
   const w = openWorkspace(ws, {});

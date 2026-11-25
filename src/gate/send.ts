@@ -1,10 +1,10 @@
 // `factory pr-send <repo> <n> <reviewed-sha>`: the last gate before the human sees a link.
 //
 // `pr-ready` answers about the head it reads; this asks what it cannot: is the head still the sha
-// somebody reviewed, before and after the gate. It leaves the PR as it is. Mikael, 2026-10-16: "Only
-// when they are in my colleagues review column should they be open PRs", so a PR stays a draft
-// through his review and is opened by `factory pr-open-for-review` when it goes to colleagues. With
-// [gate] colleague_review = false the human undrafts it in your-review instead: undrafting(ws).
+// somebody reviewed, before and after the gate. It leaves the PR as it is. A PR stays a draft until
+// its item reaches undrafting(ws): with colleague review on, it stays a draft through the human's
+// review and is opened by `factory pr-open-for-review` when it goes to colleagues. With [gate]
+// colleague_review = false the human undrafts it in your-review instead: undrafting(ws).
 import type { Repo } from "../config.js";
 import { allRecs, recPrs } from "../state.js";
 import type { Workspace } from "../workspace.js";

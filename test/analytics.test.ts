@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import vm from "node:vm";
@@ -12,7 +11,7 @@ import { serve } from "../src/board/server.js";
 import { appendEvent, saveRec } from "../src/state.js";
 import { openWorkspace, type Workspace } from "../src/workspace.js";
 import { worktreePath } from "../src/worktree.js";
-import { GROUPED, tempWorkspace } from "./helpers.js";
+import { GROUPED, tempDir, tempWorkspace } from "./helpers.js";
 
 // A fresh workspace with a lead (ada), builders (bea, cal), a reviewer (rae) and two assistants
 // (otto, nap), whose history is written with known times, and transcripts under the test's own
@@ -216,8 +215,8 @@ test("the page and its JSON are served, and the page renders them at phone width
   down = true;
   assert.equal(ticks.length, 1);
   await ticks[0]!();
-  assert.equal(doc.getElementById("at")!.textContent, "not answering");
-  assert.notEqual(at, "not answering");
+  assert.equal(doc.getElementById("at")!.textContent, "not answering: boom", "with the board's error");
+  assert.notEqual(at, "not answering: boom");
   assert.equal(doc.querySelector(".tbl")!.innerHTML, table);
   // the page's own stylesheet keeps the item table, the one wide thing, in a box of its own
   const css = readFileSync(new URL("../src/board/static/analytics.css", import.meta.url), "utf8");
@@ -362,7 +361,7 @@ const click = (doc: Document, sel: string) => (doc.querySelector(sel) as HTMLEle
 test("week and month: labelled bars of averages, a tooltip of the spread, and the change from the period before", async () => {
   const d = JSON.parse(JSON.stringify(report(workspace(), new TranscriptUsage(), Date.parse("2026-11-18T09:00:00Z"))));
   const { doc, state } = await page(d);
-  assert.equal(doc.getElementById("per")!.hidden, true, "all time first, as before");
+  assert.equal(doc.getElementById("per")!.hidden, true, "all time first");
   click(doc, '[data-period="week"]');
   assert.equal(doc.getElementById("all")!.hidden, true);
   assert.deepEqual([...doc.querySelectorAll(".wk .d")].map((x) => x.textContent), ["Week of 16 Nov so far", "Week of 9 Nov", "Week of 2 Nov"]);
@@ -432,7 +431,7 @@ test("week and month: labelled bars of averages, a tooltip of the spread, and th
   const table = doc.getElementById("ptable")!.innerHTML;
   state.down = true;
   await state.ticks[0]!();
-  assert.equal(doc.getElementById("at")!.textContent, "not answering");
+  assert.equal(doc.getElementById("at")!.textContent, "not answering: HTTP 500", "a refusal with no error of its own says its status");
   assert.equal(doc.getElementById("ptable")!.innerHTML, table);
 });
 
@@ -620,7 +619,7 @@ hash_files = ["daemon.toml", "workspace.toml"]
   assert.deepEqual(Object.keys(r.hosts), ["far"], "near has no agent, so it is never read and never named");
 });
 
-test("what stops a host read before it starts is that host's error, and is logged", async () => {
+test("what stops a host read before it starts is logged, and the report fails with it, for the page to show", async () => {
   const { ws, far } = hostedWorkspace();
   writeFileSync(join(ws.stateDir, "BROKEN.json"), "{ not json");
   const usage = new TranscriptUsage();
@@ -632,12 +631,12 @@ test("what stops a host read before it starts is that host's error, and is logge
   } finally {
     console.error = was;
   }
-  assert.match(usage.hostRead("far")?.error ?? "", /could not work out what to read: .*JSON/);
-  assert.match(logged.join("\n"), /analytics: the board could not work out what to read/);
+  assert.match(logged.join("\n"), /analytics: the board could not work out what to read: .*JSON/);
+  assert.throws(() => report(ws, usage), /JSON/, "the report, which /api/analytics answers with as its error");
 });
 
 test("ssh: what a login shell prints first is skipped, a reply that is not the script's says what it was, and a refused key says why", async () => {
-  const bin = mkdtempSync(join(tmpdir(), "sf-ssh-"));
+  const bin = tempDir("sf-ssh-");
   const stub = (body: string) => {
     writeFileSync(join(bin, "ssh"), `#!/bin/sh\ncat >/dev/null\n${body}\n`);
     chmodSync(join(bin, "ssh"), 0o755);

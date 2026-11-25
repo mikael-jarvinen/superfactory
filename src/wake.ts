@@ -2,8 +2,8 @@
 // <id>` reruns the session's command line under the same ids, so it comes back as it was. A message
 // to a session that is off is not queued, so the session is woken before the message goes.
 //
-// Probed 2026-11-15: a respawn is listed live within 2 s, and on a host its Remote Control name took
-// up to 10 s more to be addressable from another machine, hence WAKE_SETTLE_S.
+// A respawn is listed live within 2 s, and on a host its Remote Control name takes up to 10 s more
+// to be addressable from another machine, hence WAKE_SETTLE_S.
 import type { Agent } from "./config.js";
 import { findSession, pollForName, type Session } from "./fleet.js";
 import { currentAppendix, refreshSession } from "./launch.js";
@@ -55,8 +55,7 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   // Not findSession: it prefers a row alive() passes, and locally that is a host-wide check, so a
   // stale "done" row would beat the newest stopped session. The session the factory stopped is
   // resumed by its id, and never an older row in its place (stopped.ts).
-  // with no deadline, rows a hook's wake left are removed first, and are no candidates after (Marie
-  // on #130 at 6544d8fd)
+  // With no deadline, rows a hook's wake left are removed first, and are no candidates after.
   const swept = o.deadline === undefined ? sweepStale(ws, agent.name, t, all) : [];
   const which = resumable(ws, agent.name, all.filter((r) => isAgentSession(agent.name)(r) && !swept.includes(r.id ?? "")), newest);
   if ("gone" in which)
@@ -66,12 +65,12 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   if (!old?.id || (o.match && !o.match(old))) return { is: "none" };
   if (left() - LISTING_TIMEOUT_MS < 1000) return late(`respawning ${old.id}`);
   // A failed render fails the wake: the caller is told, rather than an agent coming back on
-  // settings older than its role's (CodeRabbit on #127). The render takes time of its own, so the
-  // respawn's budget is what is left after it (CodeRabbit on #127). The appendix is read and written
-  // too: the respawned session is handed it by its SessionStart hook, as claude reads no new one on a
-  // resume (Otto on Claude Code 2.1.327); a hosted agent's daemon writes both from the request.
-  // A brief that cannot be read now is no reason to keep a message from its recipient: the copy
-  // written last stays (undefined), which is the one the session started with or a later one.
+  // settings older than its role's. The render takes time of its own, so the respawn's budget is
+  // what is left after it. The appendix is read and written too: the respawned session is handed it
+  // by its SessionStart hook, as claude reads no new one on a resume (as of Claude Code 2.1.327); a
+  // hosted agent's daemon writes both from the request. A brief that cannot be read now is no
+  // reason to keep a message from its recipient: the copy written last stays (undefined), which is
+  // the one the session started with or a later one.
   let appendix: string | null | undefined;
   try {
     appendix = currentAppendix(ws, agent, old.cwd);
@@ -93,14 +92,13 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   // Respawned, and the last listing could not be had: most likely live, so not failed.
   if (s instanceof Unreachable) return { is: "unknown", why: `respawned ${old.id}, then ${s.brief}` };
   if (!s) return { is: "failed", why: `respawned ${old.id}, and it was not listed live ${Date.now() >= lastPollAt ? "in the time the hook has" : `within ${waitS} s`}` };
-  // the id that came back, which can differ from the one respawned (Marie on #130 at 2e89a7a4; Otto:
-  // barack 1f36afe6 came back as d7625a15). The record moves to it, so a later wake neither refuses
-  // the conversation as gone nor resumes the old row.
-  // A respawn that came back under a new id leaves the old row stopped; it goes (Marie at f62a6b10).
-  // No listing or stop starts that could run past the deadline. A stop has no bound of its own (a
-  // remote one runs to 35 s, a local one has none) and up to two rows can go, so with a deadline
-  // no cleanup starts at all: the record still moves, on the listing had before the respawn, and
-  // the old rows are left for a later step (CodeRabbit on #130 at d1c64cc6 and b77aae5c).
+  // the id that came back, which can differ from the one respawned (a respawned conversation can be
+  // listed under a new id). The record moves to it, so a later wake neither refuses the
+  // conversation as gone nor resumes the old row. A respawn that came back under a new id leaves
+  // the old row stopped; it goes. No listing or stop starts that could run past the deadline. A
+  // stop has no bound of its own (a remote one runs to 35 s, a local one has none) and up to two
+  // rows can go, so with a deadline no cleanup starts at all: the record still moves, on the
+  // listing had before the respawn, and the old rows are left for a later step.
   if (which.failed || (s.id && s.id !== old.id))
     replaceStopped(ws, agent.name, t, s.id ?? old.id, old.id, o.deadline !== undefined ? all : undefined);
   return { is: "woke", s, from: old.id };

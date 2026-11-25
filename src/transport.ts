@@ -169,7 +169,7 @@ export const local: Transport = {
     }
     return withActivity(rows);
   },
-  // As before, any failure here, a scope's included, is an empty listing.
+  // Any failure here, a scope's included, is an empty listing.
   sessionsAsync() {
     return new Promise((res) => {
       execFile(...claudeScoped(["agents", "--json"]), { timeout: LISTING_TIMEOUT_MS, maxBuffer: MAX_OUTPUT, env: claudeEnv() }, (err, stdout) => {

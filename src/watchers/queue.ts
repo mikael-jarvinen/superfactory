@@ -27,8 +27,8 @@ export interface QueueState {
   merged: string[];
   conflicting: string[];
   outcomes: string[];
-  // The summary of every ticket in the queue at its last read: a dispatch titles a new record from it,
-  // since waiting work has no record until then (Niilo on #129).
+  // The summary of every ticket in the queue at its last read: a dispatch titles a new record from
+  // it, since waiting work has no record until then.
   titles: Record<string, string>;
 }
 
@@ -76,8 +76,8 @@ export function belongs(rec: Rec, remote: string, pr: GhPr): { known: boolean; m
 }
 
 // `gh pr list` returns the newest PRs by creation, so in a busy repo a PR opened days before it
-// merged is never among them: lyyti-classic#8428 and #8429 merged on 2026-10-26 behind 52 newer
-// PRs, and neither watcher said so. Every PR the store records for these records is read by number.
+// merged is never among them, even dozens of newer PRs behind, and no watcher would say so. Every
+// PR the store records for these records is read by number.
 export function withRecorded(remote: string, recs: Rec[], listed: GhPr[], fields: string): GhPr[] {
   const have = new Set(listed.map((p) => p.number));
   const numbers = new Set(recs.flatMap(recPrs).filter((p) => p.repo === remote && typeof p.number === "number" && !have.has(p.number)).map((p) => p.number as number));
@@ -117,9 +117,8 @@ function merges(ws: Workspace, recs: Rec[], reported: string[], log: string): { 
   return { lines, urls };
 }
 
-// The states in which an item's PR is open work the factory still owes a merge to. Mikael asked
-// "how come you don't get alerted of conflicts? I have to always say." after pointing out
-// lyyti-classic#8587 and #8641 himself, while #8589 conflicted with nobody saying so.
+// The states in which an item's PR is open work the factory still owes a merge to, so a conflict
+// there is reported without the human having to point it out.
 export const CONFLICT_WATCHED: ReadonlySet<string> = new Set(["pr-open", "agent-review", "fixing", "gate", "your-review", "colleague-review", "blocked"]);
 const CONFLICT_FIELDS = "number,title,url,state,mergeable,mergeStateStatus,baseRefName,headRefName";
 const conflicted = (pr: GhPr) => pr.mergeable === "CONFLICTING" || pr.mergeStateStatus === "DIRTY";
@@ -129,8 +128,8 @@ const conflicted = (pr: GhPr) => pr.mergeable === "CONFLICTING" || pr.mergeState
 // delivery does: the PRs already reported that still conflict, or whose answer is not in yet. A PR
 // GitHub answers UNKNOWN for is still computing, so it is neither news nor cleared: the next run
 // asks again. A merged or closed PR is skipped first: GitHub goes on saying CONFLICTING for a
-// merged one (lyyti-classic#8334, merged 2026-10-14, still did on 2026-11-09). A PR that came
-// clean, closed, or left a watched item is dropped, so a later conflict is news again.
+// merged one, weeks after the merge. A PR that came clean, closed, or left a watched item is
+// dropped, so a later conflict is news again.
 export function conflicts(recs: Rec[], reported: string[], log: string): { lines: string[]; fresh: string[]; keep: string[] } {
   const lines: string[] = [];
   const fresh: string[] = [];

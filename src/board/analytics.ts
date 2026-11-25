@@ -197,13 +197,6 @@ export class TranscriptUsage {
     return out;
   }
 
-  // A read that could not start: every host it was for fails with it, keeping what each had read.
-  fail(host: string, why: string): void {
-    const h = this.hosts.get(host) ?? { read_at: null, error: null, files: 0, listing: {}, busy: null };
-    this.hosts.set(host, h);
-    h.error = why;
-  }
-
   hostRead(host: string): HostRead | null {
     const h = this.hosts.get(host);
     return h ? { read_at: h.read_at, error: h.error, files: h.files } : null;
@@ -344,9 +337,10 @@ function sources(ws: Workspace, items: string[]): Source[] {
   return [...out.values()].filter((s) => s.host || existsSync(s.dir)).sort((a, b) => Number(a.item === null) - Number(b.item === null));
 }
 
-// Reads every host's transcripts that the workspace's sessions wrote there, all hosts at once. `run`
-// is for tests; the board reads over ssh. Resolves when every read has finished or failed.
-// What cannot even be asked (the events log, the config) is every host's error, and is logged.
+// Reads every host's transcripts that the workspace's sessions wrote there, all hosts at once.
+// `run` is for tests; the board reads over ssh. Resolves when every read has finished or failed.
+// What cannot even be asked (the events log, the config) is logged: report() reads the same
+// records, so it fails with the same error, which /api/analytics answers and the page shows.
 export function refreshHosts(ws: Workspace, usage: TranscriptUsage, run?: (host: string) => Runner): Promise<void> {
   const byHost = new Map<string, string[]>();
   let since: number;
@@ -358,7 +352,6 @@ export function refreshHosts(ws: Workspace, usage: TranscriptUsage, run?: (host:
   } catch (e) {
     const why = `the board could not work out what to read: ${e instanceof Error ? e.message : String(e)}`;
     console.error(`analytics: ${why}`);
-    for (const h of Object.keys(ws.config.hosts)) usage.fail(h, why);
     return Promise.resolve();
   }
   return Promise.all([...byHost].map(([host, cwds]) =>
@@ -643,7 +636,7 @@ export function report(ws: Workspace, usage: TranscriptUsage, now = Date.now()):
     .map((a) => a.name);
   const recs = new Map(allRecs(ws).map((r) => [r.ticket, r]));
   return {
-    // queued was a state until 2026-11-18, and older events still name it.
+    // queued was once a state, and older events still name it.
     states: ["queued", OFF, ...STATES],
     now,
     all: bucket(closed.values(), open),

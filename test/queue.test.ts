@@ -68,8 +68,7 @@ test("queue: a blocked question leaves once its ticket leaves blocked after it, 
   assert.deepEqual(queue(ws).map((i) => i.text), ["a?", "d?"]);
 });
 
-// Mikael, 2026-11-20: seven items waiting, five of them decisions on CL-2446 answered on 16 Nov,
-// back the moment the lead blocked the ticket.
+// Decisions already answered must not come back as waiting the moment the lead blocks their ticket.
 test("queue: a decision leaves once its ticket moves past it, and blocking the ticket later never brings it back", () => {
   const ws = workspace();
   row(ws, T(1), "decision", "design A or B?", "LOCAL-d");
@@ -203,7 +202,7 @@ test("the message page: a shut panel with a count, a link into the thread, handl
   assert.equal(rows[0]!.querySelector(".tk")!.textContent, "LOCAL-ship");
   assert.equal(rows[0]!.querySelector("a.qgo")!.getAttribute("href"), "#q-maaaaaaaaaaaa");
   assert.ok(doc.getElementById("q-maaaaaaaaaaaa"), "the message in the thread carries the anchor");
-  // The question is shown whole, without a click: Mikael, 2026-11-24, "it always collapses the message".
+  // The question is shown whole, without a click.
   assert.match(rows[1]!.querySelector(".qbody")!.innerHTML, /<strong>more<\/strong>/);
   assert.equal(rows[1]!.querySelector("a.qgo"), null, "not in the thread: no link to it");
 
@@ -427,8 +426,7 @@ test("the message page: a reply marks the question it quoted, even if another re
   assert.equal(t.value, "> second?\n\n");
 });
 
-// Mikael, 2026-11-18: "I need to always manually mark them as handled. Can't you?" The lead reads the
-// queue and marks what an answer settles, through the same file the page writes.
+// The lead reads the queue and marks what an answer settles, through the same file the page writes.
 test("queue from the CLI: the lead lists the open cards and marks them handled, by id or by ticket", () => {
   const ws = workspace();
   const long = "should the event website keep the old design when the organiser picks a new one, or ask first every time it happens? It matters for the two customers on the old design.";
@@ -505,11 +503,9 @@ test("say --answers posts the message and marks what it answers, and a wrong id 
   assert.deepEqual(queue(ws), []);
 });
 
-// Mikael, 2026-11-24: "It can frequently duplicate topics. Also, it always collapses the message and
-// the message can also be a recap sometimes about 'asked mikael...'" The lead's decision on the
-// release-message formats was posted with no ticket at 15:45, and LOCAL-reports-launch-copy was
-// blocked on it 23 minutes later with the note "asked Mikael which release-message formats ...": two
-// cards, and the blocked one showed only the recap.
+// A decision posted with no ticket, then a ticket blocked on it minutes later with a recap note
+// ("asked the human which formats ..."), is one card, not two, and shows the question, not the
+// recap.
 test("queue cards: a decision and the block on it are one card, showing the decision, not the block's note", () => {
   const ws = workspace();
   const decision = "Cruz studied how earlier releases were announced. Which formats should I draft: a Productboard card, an in-app What's new, a product-updates post, or a blog?";
@@ -592,9 +588,8 @@ test("firstSentence and wrap: a whole sentence, never cut mid-word", () => {
   assert.deepEqual(wrap("aaa bbb ccc ddd", 7, "  "), ["  aaa bbb", "  ccc ddd"]);
 });
 
-// LOCAL-reports-launch-copy, 2026-11-24: the item was already blocked, and its recap card had been
-// marked handled; `state ... blocked --asks <the decision>` then left the card with no ticket and
-// printed the hint to run the command just run.
+// An item already blocked, whose recap card was marked handled: `state ... blocked --asks <the
+// decision>` gives the card its ticket, and does not print the hint to run the command just run.
 test("queue cards: blocked -> blocked --asks folds the block into the decision, even after its own card was handled", () => {
   const ws = workspace();
   let r = factory(ws.dir, ["say", "Which release-message formats should I draft?", "--kind", "decision"]);

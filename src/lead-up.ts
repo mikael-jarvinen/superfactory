@@ -20,7 +20,7 @@ export const resumePrompt = (ws: Workspace) => `You were restarted by \`factory 
 
 // A fresh launch's argv with `--resume <id>` before the prompt, and no appendix flag: a resumed
 // session keeps the system prompt it started with, its appendix included, and claude ignores
-// --append-system-prompt-file and --append-system-prompt given on a resume (Otto on Claude Code
+// --append-system-prompt-file and --append-system-prompt given on a resume (as of Claude Code
 // 2.1.327). The current appendix reaches it through its SessionStart hook (hooks/appendix.ts), from
 // the file resume() writes first.
 export function resumeArgs(ws: Workspace, agent: Agent, sessionId: string, prompt: string): string[] {
@@ -44,7 +44,7 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
   if (!fresh) {
     sweepStale(ws, ld.name, t);
     // with no record too: resumable leaves out the rows a hook's wake left, which a sweep that
-    // failed still lists (CodeRabbit on #130 at 2f878288)
+    // failed still lists
     const which = resumable(ws, ld.name, t.sessions(true).filter(isAgentSession(ld.name)), (rows) => pick(t, rows));
     if ("gone" in which)
       throw new FactoryError(`${ld.name}'s last stopped session ${which.gone} is no longer listed, and an older one is another conversation. ` +
@@ -57,7 +57,7 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
     if (!ld.host && typeof old.sessionId === "string" && resume(ws, ld, t, old, old.sessionId, waitS, out, appendix, marks)) return;
     // A respawn reruns the old command line, which still names the settings file: a render that
     // fails (a role's template gone) leaves the last render there, so the lead comes back on it
-    // rather than staying down, and the failure is said loudly (CodeRabbit on #127).
+    // rather than staying down, and the failure is said loudly.
     try {
       refreshSession(ws, ld, appendix);
     } catch (e) {
@@ -67,7 +67,7 @@ export function bringUpLead(ws: Workspace, ld: Agent, t: Transport, fresh: boole
     const r = t.respawn(ld.name, sid, undefined, ld.host ? appendix : undefined);
     const up = r.ok ? waitForName(t, ld.name, waitS) : null;
     if (up) {
-      // the id that came back, which can differ from the one respawned (Marie on #130 at 2e89a7a4)
+      // the id that came back, which can differ from the one respawned
       if (marks || (up.id && up.id !== sid)) replaceStopped(ws, ld.name, t, up.id ?? sid, sid);
       out(`${ld.name} respawned from ${sid}: ${r.said}`);
       return;
@@ -97,9 +97,8 @@ function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId:
     return false;
   }
   // Up under a new id, the one a later stop records; until now the record stays, so a resume that
-  // fails leaves the next try aimed at the same conversation (CodeRabbit on #130). The row it
-  // replaced is removed below.
-  // Launches still marked keep their marks, now on the new id (CodeRabbit on #130 at 7a20b268).
+  // fails leaves the next try aimed at the same conversation. The row it replaced is removed below.
+  // Launches still marked keep their marks, now on the new id.
   if (marks && back.id) replaceStopped(ws, ld.name, t, back.id);
   else if (back.id) moveRecord(ws, ld.name, back.id, lastStopped(ws, ld.name)?.failed ?? []);
   // A resume that comes back under a new id leaves the old one listed, stopped; take it off the list.

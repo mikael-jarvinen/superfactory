@@ -18,9 +18,8 @@ import { api, gh, json } from "./github.js";
 export const MARKER = "> Written by agent.";
 
 // Aikido acts on `@AikidoSec ignore: <reason>` only when the comment starts with it: a reply that
-// starts with the marker is never read as the command (portal#3468, 2026-11-20). So in Aikido's own
-// threads, and only for that command, the reply is the command on its first line with the marker
-// straight after it. Mikael, 2026-11-20: "Do the second."
+// starts with the marker is never read as the command. So in Aikido's own threads, and only for
+// that command, the reply is the command on its first line with the marker straight after it.
 export const AIKIDO_BOT = "aikido-pr-checks";
 const AIKIDO_IGNORE = /^@AikidoSec ignore: \S[^\n]*$/;
 

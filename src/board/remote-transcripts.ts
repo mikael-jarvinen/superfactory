@@ -2,7 +2,7 @@
 // a `host` write their transcripts on that machine, so the board asks it over ssh, as the factory's
 // heartbeat already does: `ssh <dest> python3 -`, with the script below on stdin. Python, as the
 // host's daemon runs node from its own install and a non-interactive ssh shell may not have it on
-// PATH (niilo-server's has none), while python3 is there.
+// PATH, while python3 is there.
 //
 // The script is given the cwds whose transcripts are wanted, the earliest time a call could count,
 // and how far into each file the board has read already. For each cwd it lists the transcripts in
@@ -12,9 +12,9 @@
 // reads, the session name and each assistant call's id, time and usage, so the bulk of a transcript
 // never crosses the network. A file shorter than its offset was rewritten, and is sent from its start.
 //
-// Measured against niilo-server (3.1 GB of transcripts, 3,834 files in the fleet's cwds): the first
-// read takes 8 s and sends 38 MB, and each read after it 0.35 s, almost all of it the listing. The
-// board reads in the background (server.ts), so neither holds up a request.
+// Measured with 3.1 GB of transcripts, 3,834 files in the fleet's cwds: the first read takes 8 s and
+// sends 38 MB, and each read after it 0.35 s, almost all of it the listing. The board reads in the
+// background (server.ts), so neither holds up a request.
 import { spawn } from "node:child_process";
 
 export interface RemoteQuery {

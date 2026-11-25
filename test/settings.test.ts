@@ -87,8 +87,8 @@ test("[github] lead_merges is rendered into the lead's guard and nobody else's",
   for (const name of ["bea", "rae"]) assert.doesNotMatch(commandFor(render(dir, name), "PreToolUse", "Bash|Read|Grep|mcp__.*"), /--lead-merge/, name);
 });
 
-// Jira moved to the "claude.ai Atlassian MCP" connector, and a matcher written for the old one let
-// a builder transition a ticket. Claude Code tests a regex matcher against the tool name unanchored.
+// Jira writes come from the "claude.ai Atlassian MCP" connector and the older one alike, and Claude
+// Code tests a regex matcher against the tool name unanchored.
 test("a builder's tracker hook catches Jira writes on the new connector and the old, and no reads", () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
@@ -109,8 +109,8 @@ test("a builder's tracker hook catches Jira writes on the new connector and the 
   for (const r of reads) assert.ok(!matches(`mcp__claude_ai_Atlassian_MCP__${r}`), r);
 });
 
-// Nomura could not run the functions tests: the Firebase emulators need java, and a builder's
-// PATH had none. A stack's env and path_prepend reach every builder session on it, and no other.
+// A builder's tests can need what its PATH lacks, such as java for the Firebase emulators. A
+// stack's env and path_prepend reach every builder session on it, and no other.
 test("a builder on a stack gets the stack's env, with its directories first on PATH", () => {
   const toml = TOML.replace("pin = { bea = 1 }\n", 'pin = { bea = 1 }\nenv = { JAVA_HOME = "/opt/java" }\npath_prepend = ["/opt/java/bin"]\n');
   const dir = tempWorkspace(toml);
@@ -129,9 +129,9 @@ test("a builder on a stack gets the stack's env, with its directories first on P
 });
 
 // A wake renders the recipient's settings in the sender's hook, whose PATH has the sender's stack
-// first: what the sender's stack prepended comes out of it, and the recipient's own goes first
-// (CodeRabbit on #127). Only that: a directory the sender's stack shares with the system PATH keeps
-// its place there, for every other stack (Marie's gate of #127). The sender's PATH is its own render's.
+// first: what the sender's stack prepended comes out of it, and the recipient's own goes first.
+// Only that: a directory the sender's stack shares with the system PATH keeps its place there, for
+// every other stack. The sender's PATH is its own render's.
 test("a stack's PATH takes the sender's prepended directories out, and only those", () => {
   const toml = TOML.replace("pin = { bea = 1 }\n", 'pin = { bea = 1 }\npath_prepend = ["/opt/java/bin"]\n')
     .replace("[roles.lead]", '[repos.tools]\nremote = "acme/tools"\n\n[stacks.tools]\nrepos = ["tools"]\nslots = 1\npath_prepend = ["/usr/local/bin", "/opt/tools/bin"]\n\n[stacks.docs]\nrepos = ["tools"]\nslots = 1\nenv = { DOCS = "1" }\n\n[roles.lead]')
@@ -150,11 +150,10 @@ test("a stack's PATH takes the sender's prepended directories out, and only thos
   // and tia woken back from bea's session gets its own PATH again
   assert.deepEqual(sessionEnv(ws, agentOrDie(ws, "tia"), woken.PATH, woken.SF_PATH_PREPEND), tia);
   // a recipient that prepends nothing loses tia's run too: on a stack with env only, or on none
-  // (Marie and Niilo on #127)
   assert.deepEqual(sessionEnv(ws, agentOrDie(ws, "dot"), tia.PATH, tia.SF_PATH_PREPEND), { DOCS: "1", PATH: system, SF_PATH_PREPEND: "" });
   for (const name of ["cal", "ada", "rae"])
     assert.deepEqual(sessionEnv(ws, agentOrDie(ws, name), tia.PATH, tia.SF_PATH_PREPEND), { PATH: system, SF_PATH_PREPEND: "" }, name);
-  // and with no sender's run to take out, they keep the launcher's PATH, as before
+  // and with no sender's run to take out, they keep the launcher's PATH
   assert.equal(sessionEnv(ws, agentOrDie(ws, "cal"), system, ""), undefined);
   assert.deepEqual(sessionEnv(ws, agentOrDie(ws, "dot"), system, ""), { DOCS: "1" });
   // a sender with no stack prepended nothing, so nothing comes out: the system PATH stays whole behind bea's own
@@ -162,8 +161,8 @@ test("a stack's PATH takes the sender's prepended directories out, and only thos
     { PATH: "/opt/java/bin:/usr/local/bin:/usr/bin:/opt/java/bin:/bin", SF_PATH_PREPEND: "/opt/java/bin" });
 });
 
-// The old guard took its mode from the wrapper script's name, so the lead's session ran as a
-// builder. The role now travels in the rendered command, and a command without one refuses.
+// The guard's mode travels in the rendered command, never the wrapper's name, and a command without
+// one refuses.
 test("the rendered guard runs, labelled with the role it was rendered for", () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
@@ -211,9 +210,9 @@ test("the lead's stop is held once while nothing holds the inbox", () => {
   assert.equal(stop(false).stdout, "");
 });
 
-// Mikko via Niilo on superfactory#119 (L2): every session's GitHub comments go out under the human's
-// login, so each must carry the marker, not only the guarded lead's and builders'. A template that
-// names marked-comments renders a hook on Bash and the GitHub MCP tools that holds them to it.
+// Every session's GitHub comments go out under the human's login, so each must carry the marker,
+// not only the guarded lead's and builders'. A template that names marked-comments renders a hook
+// on Bash and the GitHub MCP tools that holds them to it.
 test("a template with marked-comments refuses an unmarked comment and passes a marked one or a trigger", () => {
   const dir = tempWorkspace(TOML.replace('settings = "builder"', 'settings = "settings/marked.json"'));
   after(() => rmSync(dir, { recursive: true, force: true }));
@@ -245,27 +244,27 @@ test("a template with marked-comments refuses an unmarked comment and passes a m
   assert.equal(mcp("mcp__github__pull_request_review_write", "Looks good to me."), 2, "an unmarked review body is refused");
   assert.equal(mcp("mcp__github__get_file_contents", "anything"), 0, "a read passes");
 
-  // superfactory#119 round 2. N1: the hook refuses only a comment write, never a command the
-  // guard's policy would (xargs, sudo, exec, watch), nor one it cannot parse.
+  // The hook refuses only a comment write, never a command the guard's policy would (xargs, sudo,
+  // exec, watch), nor one it cannot parse.
   for (const c of ["printf x | xargs echo", "find . -name '*.ts' | xargs grep -l x", "sudo ls", "exec ls", "watch ls", "echo 'unbalanced", "/opt/x/bin/tool"])
     assert.equal(bash(c), 0, c);
   assert.equal(bash("printf 7 | xargs -I{} gh pr comment {} -b hi"), 2, "a gh behind xargs is still checked");
   assert.equal(bash("sudo -u x gh pr comment 7 -b hi"), 2, "and behind sudo");
   assert.equal(bash("/usr/bin/gh pr comment 7 -b hi"), 2, "and by path");
-  assert.equal(bash("gh pr review 7 --comment -bhi"), 2, "N3: an attached value");
-  assert.equal(bash("gh api graphql -f query='mutation { addComment(input: {subjectId: \"X\", body: \"hi\"}) { clientMutationId } }'"), 2, "N4");
-  assert.equal(bash("gh api repos/acme/web/pulls/7/reviews -f 'body=> Written by agent.' -f 'comments[][body]=nit'"), 2, "N5");
+  assert.equal(bash("gh pr review 7 --comment -bhi"), 2, "an attached value");
+  assert.equal(bash("gh api graphql -f query='mutation { addComment(input: {subjectId: \"X\", body: \"hi\"}) { clientMutationId } }'"), 2, "a graphql mutation that comments");
+  assert.equal(bash("gh api repos/acme/web/pulls/7/reviews -f 'body=> Written by agent.' -f 'comments[][body]=nit'"), 2, "a review with inline comments");
   const submit = "gh api graphql -f query='mutation($i: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $i) { clientMutationId } }' -f 'i[pullRequestReviewId]=R'";
-  assert.equal(bash(`${submit} -f 'i[body]=hi'`), 2, "round 3: an input variable's body");
+  assert.equal(bash(`${submit} -f 'i[body]=hi'`), 2, "an input variable's body");
   assert.equal(bash(`${submit} -f 'i[body]=> Written by agent. ok'`), 0, "a marked one passes");
-  // N6: every MCP tool reaches the hook, which matches GitHub's comment tools in any case.
+  // Every MCP tool reaches the hook, which matches GitHub's comment tools in any case.
   assert.ok(matches("mcp__claude_ai_github__add_issue_comment") && matches("mcp__claude_ai_Slack__send"));
   assert.equal(mcp("mcp__claude_ai_github__add_issue_comment", "Fixed."), 2, "lowercase github is held too");
   assert.equal(mcp("mcp__claude_ai_Slack__send", "hi"), 0, "another server's tool passes");
 });
 
-// CodeRabbit on superfactory#128 (KJJU): valid JSON that is not an object (null, an array, a number,
-// a string) is not a hook envelope. The hook refuses it with the invalid-input diagnostic, not a throw.
+// Valid JSON that is not an object (null, an array, a number, a string) is not a hook envelope. The
+// hook refuses it with the invalid-input diagnostic, not a throw.
 test("marked-comments refuses valid JSON that is not an object envelope", () => {
   for (const input of ["null", "[]", "3", '"s"']) {
     const r = markedComments([], input);
@@ -274,9 +273,9 @@ test("marked-comments refuses valid JSON that is not an object envelope", () => 
   }
 });
 
-// Mikael, 2026-11-25: "we should be able to read from slack. The guard was so that no agent send
-// messages on their own." Slack reads pass for the lead and the assistants, by an exact list; every
-// other Slack tool is refused for every role, and builders get no Slack at all.
+// No agent sends messages on its own, but it can read: Slack reads pass for the lead and the
+// assistants, by an exact list; every other Slack tool is refused for every role, and builders get
+// no Slack at all.
 test("Slack: the lead and assistants may read, nobody may write, and an unlisted tool is refused", () => {
   const dir = tempWorkspace(TOML.replace("[tracker]", `[[agents]]
 name = "val"

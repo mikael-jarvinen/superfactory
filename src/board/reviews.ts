@@ -47,8 +47,7 @@ export interface ReviewStatus {
   draft: boolean;
   // unresolved review threads a human reviewer opened
   threads: number;
-  // Mikael, 2026-11-23: "when there is a PR and it's assigned to somebody, I want to see the name
-  // and GH profile picture next to the PR link."
+  // shown by name and GitHub profile picture next to the PR link
   assignees: Assignee[];
 }
 

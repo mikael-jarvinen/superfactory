@@ -299,16 +299,16 @@ test("what an ended run leaves in its process group is cleaned up, but never a c
   const [stray, session, child] = [t.pidIn("stray.pid") as number, t.pidIn("session.pid") as number, t.pidIn("child.pid") as number];
   process.kill(pid, "SIGKILL"); // up alone: its group lives on
   await until("the stray to be cleaned up", () => !runningNotZombie(stray));
-  // up's own systemd-run can still be in the group when the run ends: it may be listed beside the stray, which
-  // is still required (Marie on #130 at 2e89a7a4: the CI flake at 7a20b268)
+  // up's own systemd-run can still be in the group when the run ends: it may be listed beside the
+  // stray, which is still required
   assert.match(d.out, new RegExp(`job ${UP.replace(/\./g, "\\.")}: ended, leaving (\\d+ \\(systemd-run\\), )?${stray} \\(sleep\\)(, \\d+ \\(systemd-run\\))? in its process group or scopes; SIGTERM`), d.out);
   assert.ok(runningNotZombie(session), "a claude in the group is left alone");
   assert.ok(runningNotZombie(child), "and so is what runs under it");
   d.kill();
 });
 
-// A process caught in exec, as a systemd-run becoming the claude it runs, reads with no command line
-// for a moment, and was then killed as no claude: up's next listing, in CI on #128. A stray that blanks
+// A process caught in exec, as a systemd-run becoming the claude it runs, reads with no command
+// line for a moment, and must not be killed as no claude by up's next listing. A stray that blanks
 // its own command line stands in for one, and is not killed while it reads so.
 test("a process whose command line reads empty is not killed, and its group waits for the next check", { skip: noCleanup() }, async () => {
   const t = await setup();
@@ -322,11 +322,11 @@ test("a process whose command line reads empty is not killed, and its group wait
   process.kill(pid, "SIGKILL");
   await until("up's end to be seen", () => d.out.includes(`job ${UP} exited`));
   await sleep(3000); // three checks
-  assert.ok(runningNotZombie(stray), "left alone");
+  assert.ok(runningNotZombie(stray), `left alone; the scheduler said:\n${d.out}`);
   assert.doesNotMatch(d.out, /ended, leaving/, d.out);
   assert.ok(t.state().jobs[UP].clearing?.includes(pid), "still to be cleared");
 
-  // Niilo on #128: a stray whose argv stays blank sat in clearing forever, unseen. After
+  // A stray whose argv stays blank must not sit in clearing forever, unseen. After
   // UNSURE_CHECKS checks the lead is told once, naming the pid and the group, and it is still left be.
   const notes = () => {
     const f = notesLog(openWorkspace(t.ws));
@@ -342,8 +342,8 @@ test("a process whose command line reads empty is not killed, and its group wait
   d.kill();
 });
 
-// Marie on #128: a note that cannot be written was tried on every check past UNSURE_CHECKS, each try
-// logging "the lead is told" and leaving a relay failure. It is tried once, and said once.
+// A note that cannot be written is tried once past UNSURE_CHECKS, and said once, not on every check
+// with a "the lead is told" and a relay failure each.
 test("a lead's note about an unsure process that cannot be written is tried and said once, not on every check", { skip: noCleanup() }, async () => {
   const t = await setup();
   writeFileSync(join(t.dir, "stray-blank-argv"), "");

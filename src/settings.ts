@@ -212,7 +212,7 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
   add("PreToolUse", "SendMessage", wakeArgs, WAKE_HOOK_TIMEOUT_S);
   // a failed send from a host, to an agent it cannot wake, is explained
   if (s.host) for (const ev of ["PostToolUse", "PostToolUseFailure"]) add(ev, "SendMessage", wakeArgs, 10);
-  // A resumed or respawned session keeps the appendix it started with and reads no new one (Otto on
+  // A resumed or respawned session keeps the appendix it started with and reads no new one (as of
   // Claude Code 2.1.327), so every role is handed its current one when it comes back
   // (hooks/appendix.ts). The file is this machine's: a host renders its own agents' settings.
   add("SessionStart", "resume", ["hook", "appendix", "--file", currentAppendixPath(ws.runDir, s.name)], 10);

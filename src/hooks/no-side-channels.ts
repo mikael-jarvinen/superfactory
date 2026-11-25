@@ -3,11 +3,11 @@
 // lead's, and only the lead moves tickets. Enforced here because builders run in bypass mode, where
 // deny rules do not apply. Which tools reach it is decided when the settings are rendered.
 //
-// Slack is read-only, and only for the lead and the assistants. Mikael, 2026-11-25: "we should be able
-// to read from slack. The guard was so that no agent send messages on their own." So the reads below
-// pass for those two roles, by exact name: an allow-list, so a tool the connector adds later is
-// refused until someone names it here. Every other Slack tool, posting above all, is refused for every
-// role, and builders, reviewers and designers get no Slack at all.
+// Slack is read-only, and only for the lead and the assistants. The guard keeps agents from sending
+// messages on their own, not from reading. So the reads below pass for those two roles, by exact
+// name: an allow-list, so a tool the connector adds later is refused until someone names it here.
+// Every other Slack tool, posting above all, is refused for every role, and builders, reviewers and
+// designers get no Slack at all.
 import { parseArgs } from "node:util";
 import type { HookResult } from "../settings.js";
 import { capitalize } from "../util.js";

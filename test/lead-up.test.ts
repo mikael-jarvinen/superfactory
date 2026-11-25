@@ -94,7 +94,7 @@ test("a resumed lead is up even when taking the old entry off the list fails", (
   assert.throws(() => bringUpLead(ws, ld, fake([stopped()], { stopBug: true }).t, false, () => {}, 1), TypeError, "a bug in stop is no die: it throws");
 });
 
-test("a resume that fails falls back to respawn, as before", () => {
+test("a resume that fails falls back to respawn", () => {
   const { t, respawned } = fake([stopped()], { startFails: true });
   const said: string[] = [];
   bringUpLead(ws, ld, t, false, (l) => said.push(l), 1);
@@ -103,8 +103,8 @@ test("a resume that fails falls back to respawn, as before", () => {
   assert.equal(said[1], `${ld.name} respawned from d1079ed1: respawned`);
 });
 
-// The respawn reruns the old command line, whose --settings is this file: rendered again first, a lead
-// stopped before an upgrade comes back with the current hooks (CodeRabbit on #124).
+// The respawn reruns the old command line, whose --settings is this file: rendered again first, a
+// lead stopped before an upgrade comes back with the current hooks.
 test("a lead respawned here comes back with its settings rendered again", () => {
   const file = settingsFile(ws, ld);
   writeFileSync(file, "{}\n");
@@ -115,7 +115,7 @@ test("a lead respawned here comes back with its settings rendered again", () => 
 });
 
 // A role whose template is gone must not keep the lead down: it comes back on the settings last
-// rendered, and the failure is said (CodeRabbit on #127).
+// rendered, and the failure is said.
 test("a lead whose settings cannot be rendered is respawned anyway, and the failure said loudly", () => {
   const w = openWorkspace(dir, {});
   const role = w.config.roles[lead(w).role] as { settings: string };
@@ -182,8 +182,8 @@ test("a lead whose brief is missing is refused before anything is resumed, respa
   assert.deepEqual([r.started, r.respawned, r.removed], [[], [], []]);
 });
 
-// Niilo, 2026-11-18: restart-lead resumes the conversation it just stopped, by its id. The newest
-// row by the listing's clues can be an older thread, here one whose transcript was touched last.
+// restart-lead resumes the conversation it just stopped, by its id. The newest row by the listing's
+// clues can be an older thread, here one whose transcript was touched last.
 test("restart-lead resumes the lead it stopped, by id, and refuses when that row is gone", () => {
   const today = stopped({ id: "5e7a0b12", sessionId: "today-uuid", startedAt: 2000 });
   const older = stopped({ id: "91c86061", sessionId: "older-uuid", startedAt: 1000, activeAt: 9000 });
@@ -194,7 +194,7 @@ test("restart-lead resumes the lead it stopped, by id, and refuses when that row
     assert.deepEqual(respawned, []);
     const args = started[0]!.args;
     assert.equal(args[args.indexOf("--resume") + 1], "today-uuid", "the conversation stopped last, not the older thread");
-    assert.deepEqual(removed, ["5e7a0b12"], "the row the resume replaced goes, so stopped rows do not build up (Marie on #130)");
+    assert.deepEqual(removed, ["5e7a0b12"], "the row the resume replaced goes, so stopped rows do not build up");
     assert.equal(lastStopped(ws, ld.name), null);
 
     noteStopped(ws, ld.name, stopped({ id: "aa11bb22" }));
@@ -204,7 +204,7 @@ test("restart-lead resumes the lead it stopped, by id, and refuses when that row
     assert.deepEqual([gone.started, gone.respawned], [[], []], "neither the older thread nor a fresh one");
 
     // a lead launched since the stop, from another box whose run dir has no record: the record is
-    // stale, and the newest row is the conversation (Marie on #130)
+    // stale, and the newest row is the conversation
     noteStopped(ws, ld.name, stopped({ id: "aa11bb22", startedAt: 1000 }));
     const later = stopped({ id: "c0ffee00", sessionId: "later-uuid", startedAt: Date.now() + 60_000 });
     const other = fake([stopped({ id: "aa11bb22", sessionId: "stale-uuid", startedAt: 1000 }), later]);
@@ -216,7 +216,7 @@ test("restart-lead resumes the lead it stopped, by id, and refuses when that row
   }
 });
 
-test("a resume that never comes back keeps the stop record for the next try (CodeRabbit on #130)", () => {
+test("a resume that never comes back keeps the stop record for the next try", () => {
   const today = stopped({ id: "5e7a0b12", sessionId: "today-uuid", startedAt: 2000 });
   try {
     noteStopped(ws, ld.name, today);
@@ -229,7 +229,7 @@ test("a resume that never comes back keeps the stop record for the next try (Cod
   }
 });
 
-test("a launch that never comes up keeps the stopped row and its record (CodeRabbit on #130)", () => {
+test("a launch that never comes up keeps the stopped row and its record", () => {
   const today = stopped({ id: "5e7a0b12", sessionId: "today-uuid" });
   try {
     noteStopped(ws, ld.name, today);
@@ -249,7 +249,7 @@ test("a launch that never comes up keeps the stopped row and its record (CodeRab
   }
 });
 
-test("a launch that never comes up does not make its row the one a wake resumes (CodeRabbit on #130 at fcf9403e)", () => {
+test("a launch that never comes up does not make its row the one a wake resumes", () => {
   const today = stopped({ id: "5e7a0b12", sessionId: "today-uuid", startedAt: Date.now() - 3_600_000 });
   try {
     noteStopped(ws, ld.name, today);
@@ -275,7 +275,6 @@ test("a launch that never comes up does not make its row the one a wake resumes 
   }
 });
 
-// Marie's gate on #130 at 5e10c7e0
 const record = (st: { id: string; at: string; failed?: string[] }) => {
   mkdirSync(ws.runDir, { recursive: true });
   writeFileSync(join(ws.runDir, `stopped-${ld.name}.json`), JSON.stringify(st));
@@ -292,7 +291,7 @@ const failNow = (rows: Session[], deadRow: number, launchId?: string) => {
   return f;
 };
 
-test("up picks among the rows resumable filtered, not the whole listing (Marie on #130 at 5e10c7e0)", () => {
+test("up picks among the rows resumable filtered, not the whole listing", () => {
   const t0 = Date.now();
   try {
     record({ id: "old1", at: new Date(t0 - 3_600_000).toISOString(), failed: ["new1"] });
@@ -309,7 +308,7 @@ test("up picks among the rows resumable filtered, not the whole listing (Marie o
   }
 });
 
-test("a failed launch that comes up later is no longer passed over (Marie on #130 at 5e10c7e0)", () => {
+test("a failed launch that comes up later is not passed over", () => {
   for (const seenLive of [true, false]) {
     const today = stopped({ id: "5e7a0b12", sessionId: undefined, startedAt: Date.now() - 3_600_000 });
     try {
@@ -335,7 +334,7 @@ test("a failed launch that comes up later is no longer passed over (Marie on #13
   }
 });
 
-test("a failed launch's rows are told by the listing, not by this host's clock (Marie on #130 at 5e10c7e0)", () => {
+test("a failed launch's rows are told by the listing, not by this host's clock", () => {
   const today = stopped({ id: "5e7a0b12", startedAt: Date.now() - 7_200_000 });
   try {
     noteStopped(ws, ld.name, today);
@@ -350,7 +349,7 @@ test("a failed launch's rows are told by the listing, not by this host's clock (
   }
 });
 
-test("with no stop record, a failed launch is still not the one resumed (Marie on #130 at 5e10c7e0)", () => {
+test("with no stop record, a failed launch is still not the one resumed", () => {
   const old = stopped({ id: "old1", sessionId: undefined, state: "done", startedAt: Date.now() - 3_600_000 });
   try {
     forgetStopped(ws, ld.name);
@@ -365,7 +364,7 @@ test("with no stop record, a failed launch is still not the one resumed (Marie o
   }
 });
 
-test("a note that cannot be written leaves die's launch id message (Marie on #130 at 5e10c7e0)", () => {
+test("a note that cannot be written leaves die's launch id message", () => {
   const old = stopped({ id: "old1", startedAt: Date.now() - 3_600_000 });
   const f = join(ws.runDir, `stopped-${ld.name}.json`);
   mkdirSync(f, { recursive: true });
@@ -378,7 +377,7 @@ test("a note that cannot be written leaves die's launch id message (Marie on #13
   }
 });
 
-test("a failed launch's row that has shown nothing keeps its mark (Marie on #130 at 24691398)", () => {
+test("a failed launch's row that has shown nothing keeps its mark", () => {
   for (const shown of [{ state: "working" }, {}] as Partial<Session>[]) {
     const today = stopped({ id: "5e7a0b12", sessionId: undefined, startedAt: Date.now() - 3_600_000 });
     try {
@@ -398,7 +397,7 @@ test("a failed launch's row that has shown nothing keeps its mark (Marie on #130
   }
 });
 
-test("a marked launch that ran is the newer conversation, whatever its host's clock (CodeRabbit on #130 at 43510c94)", () => {
+test("a marked launch that ran is the newer conversation, whatever its host's clock", () => {
   const today = stopped({ id: "5e7a0b12", sessionId: undefined, startedAt: Date.now() - 7_200_000 });
   try {
     noteStopped(ws, ld.name, today);
@@ -415,7 +414,7 @@ test("a marked launch that ran is the newer conversation, whatever its host's cl
   }
 });
 
-test("a marked launch that ran is not marked again on a later wake (CodeRabbit on #130 at 43510c94)", () => {
+test("a marked launch that ran is not marked again on a later wake", () => {
   const today = stopped({ id: "5e7a0b12", sessionId: undefined, startedAt: Date.now() - 3_600_000 });
   try {
     noteStopped(ws, ld.name, today);
@@ -438,7 +437,7 @@ test("a marked launch that ran is not marked again on a later wake (CodeRabbit o
   }
 });
 
-test("a marked launch that ran is resumed even when its row sorts before the stopped one (CodeRabbit on #130 at 85389fcf)", () => {
+test("a marked launch that ran is resumed even when its row sorts before the stopped one", () => {
   const t0 = Date.now();
   try {
     record({ id: "old1", at: new Date(t0 - 60_000).toISOString(), failed: ["new1"] });
@@ -455,7 +454,7 @@ test("a marked launch that ran is resumed even when its row sorts before the sto
   }
 });
 
-test("a marked launch that ran leaves the other marks in place (CodeRabbit on #130 at 85389fcf)", () => {
+test("a marked launch that ran leaves the other marks in place", () => {
   const t0 = Date.now();
   try {
     record({ id: "old1", at: new Date(t0 - 3_600_000).toISOString(), failed: ["new1", "new2"] });
@@ -479,7 +478,7 @@ test("a marked launch that ran leaves the other marks in place (CodeRabbit on #1
   }
 });
 
-test("a wake that resumes nothing leaves the record and the stopped row (Marie on #130 at 85389fcf)", () => {
+test("a wake that resumes nothing leaves the record and the stopped row", () => {
   const t0 = Date.now();
   try {
     record({ id: "old1", at: new Date(t0 - 3_600_000).toISOString(), failed: ["new1"] });
@@ -498,7 +497,7 @@ test("a wake that resumes nothing leaves the record and the stopped row (Marie o
   }
 });
 
-test("a lead resumed under a new id keeps the marks of launches that never came up (CodeRabbit on #130 at 7a20b268)", () => {
+test("a lead resumed under a new id keeps the marks of launches that never came up", () => {
   const t0 = Date.now();
   try {
     // a launch that ran has replaced the stopped session; another never came up, and sorts newest
@@ -520,7 +519,7 @@ test("a lead resumed under a new id keeps the marks of launches that never came 
   }
 });
 
-test("a fresh launch that comes up keeps the marks of launches that never did (CodeRabbit on #130 at 2e89a7a4)", () => {
+test("a fresh launch that comes up keeps the marks of launches that never did", () => {
   const t0 = Date.now();
   try {
     record({ id: "old1", at: new Date(t0 - 3_600_000).toISOString(), failed: ["dead2"] });
@@ -542,7 +541,7 @@ test("a fresh launch that comes up keeps the marks of launches that never did (C
   }
 });
 
-test("a launch that ran and comes back under a new id takes the record, marks and all (Marie on #130 at 2e89a7a4)", () => {
+test("a launch that ran and comes back under a new id takes the record, marks and all", () => {
   const t0 = Date.now();
   try {
     record({ id: "old1", at: new Date(t0 - 3_600_000).toISOString(), failed: ["runA", "deadB"] });
@@ -569,8 +568,8 @@ test("a launch that ran and comes back under a new id takes the record, marks an
   }
 });
 
-// Marie on #130 at f62a6b10: a respawn that came back under a new id left the old row listed,
-// stopped, and such rows piled up.
+// A respawn that comes back under a new id must not leave the old row listed, stopped, for such
+// rows to pile up.
 for (const via of ["wake", "up"] as const)
   test(`a respawn by ${via} that comes back under a new id takes the old row off the list`, () => {
     const t0 = Date.now();
@@ -592,8 +591,8 @@ for (const via of ["wake", "up"] as const)
     }
   });
 
-// CodeRabbit on #130 at d1c64cc6: the cleanup after a wake's respawn listed and stopped with no
-// regard for the deadline. Short of time for both, the record still moves; the old row waits.
+// The cleanup after a wake's respawn needs a listing and a stop. With a deadline, none is started:
+// the record still moves, and the old row waits.
 for (const leftS of [30, 120])
 test(`a wake with a deadline ${leftS} s off starts no listing or stop after its respawn, and still moves the record`, () => {
   const t0 = Date.now();
@@ -618,7 +617,7 @@ test(`a wake with a deadline ${leftS} s off starts no listing or stop after its 
       return { ok: true, said: "respawned", why: "" };
     };
     // 30 s: time for the listing and the respawn only. 120 s: time for a cleanup listing too, but a
-    // stop after it has no bound, so none starts either way (CodeRabbit on #130 at b77aae5c).
+    // stop after it has no bound, so none starts either way.
     const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10, deadline: Date.now() + leftS * 1000 });
     assert.equal(w.is, "woke", JSON.stringify(w));
     assert.equal(after, 0, "no full listing after the respawn");
@@ -631,7 +630,7 @@ test(`a wake with a deadline ${leftS} s off starts no listing or stop after its 
 
 const noteStaleIds = (ids: string[]) => (mkdirSync(ws.runDir, { recursive: true }), writeFileSync(staleFile(), JSON.stringify(ids) + "\n"));
 
-test("a sweep never removes the row the record names (Marie on #130 at 6544d8fd)", () => {
+test("a sweep never removes the row the record names", () => {
   const t0 = Date.now();
   try {
     // runA, left stale, was resumed by hand and stopped again: the record names it
@@ -647,7 +646,7 @@ test("a sweep never removes the row the record names (Marie on #130 at 6544d8fd)
   }
 });
 
-test("a stale id that noteStopped or moveRecord writes as the record leaves the stale list (Marie on #130 at 6544d8fd)", () => {
+test("a stale id that noteStopped or moveRecord writes as the record leaves the stale list", () => {
   try {
     noteStaleIds(["runA", "runB"]);
     noteStopped(ws, ld.name, { id: "runA", name: ld.name, kind: "background", alive: true });
@@ -659,7 +658,7 @@ test("a stale id that noteStopped or moveRecord writes as the record leaves the 
   }
 });
 
-test("a wake with no deadline never respawns a row its sweep just removed (Marie on #130 at 6544d8fd)", () => {
+test("a wake with no deadline never respawns a row its sweep just removed", () => {
   const t0 = Date.now();
   try {
     noteStaleIds(["newB"]);
@@ -676,7 +675,7 @@ test("a wake with no deadline never respawns a row its sweep just removed (Marie
   }
 });
 
-test("a sweep keeps an id a hook's wake noted while it ran (Marie on #130 at 6544d8fd)", () => {
+test("a sweep keeps an id a hook's wake noted while it ran", () => {
   const t0 = Date.now();
   try {
     noteStaleIds(["oldB"]);
@@ -698,7 +697,7 @@ test("a sweep keeps an id a hook's wake noted while it ran (Marie on #130 at 654
   }
 });
 
-test("up with no record never resumes a row a hook's wake left, its removal failed (CodeRabbit on #130 at 2f878288)", () => {
+test("up with no record never resumes a row a hook's wake left, its removal failed", () => {
   try {
     noteStaleIds(["runA"]);
     const f = fake([{ id: "runA", name: ld.name, kind: "background", state: "stopped", startedAt: Date.now() - 60_000 }], { stopFails: true });
@@ -711,7 +710,7 @@ test("up with no record never resumes a row a hook's wake left, its removal fail
   }
 });
 
-test("a deadline wake keeps a mark written during its respawn, for a launch its listing never saw (CodeRabbit on #130 at 2f878288)", () => {
+test("a deadline wake keeps a mark written during its respawn, for a launch its listing never saw", () => {
   const t0 = Date.now();
   try {
     record({ id: "runA", at: new Date(t0 - 3_600_000).toISOString(), failed: ["deadB"] });
@@ -768,7 +767,7 @@ test("a row a deadline wake left goes at the next wake with no deadline, and is 
     assert.equal(w.is, "woke", JSON.stringify(w));
     assert.deepEqual(f.removed, [], "the hook's wake stops nothing");
     assert.deepEqual(staleIds(), ["runA"], "the old row is noted for later");
-    // runA2 ends: the next hook wake resumes runA2, never the stale runA (Niilo on #130 at c2ef44e3)
+    // runA2 ends: the next hook wake resumes runA2, never the stale runA
     const a2 = rows.find((r) => r.id === "runA2");
     if (a2) Object.assign(a2, { alive: false, state: "stopped" });
     f.respawned.length = 0;

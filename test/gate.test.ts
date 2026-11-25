@@ -174,7 +174,7 @@ test("pr-wait waits on a running check, then stops before sending on prose volum
   assert.equal(r.calls.filter((c) => c === cr).length, 1);
 });
 
-// Mikael, 2026-10-16: a PR is a draft until its item reaches undrafting(ws). pr-send gates it as it is, checks the
+// A PR is a draft until its item reaches undrafting(ws). pr-send gates it as it is, checks the
 // head is the reviewed sha before and after, and opens nothing.
 test("pr-send gates the PR as it is and refuses a head that is not the reviewed sha", () => {
   const { run } = gateWorkspace();
@@ -197,8 +197,8 @@ test("pr-send gates the PR as it is and refuses a head that is not the reviewed 
   assert.ok(!r.calls.some((c) => c.startsWith("pr ready")), "pr-send never opens or drafts a PR");
 });
 
-// On 2026-10-16 pr-wait saw CL-2290 green and pr-send's own read, a moment later, met mergeability
-// being recomputed after a merge into the base.
+// pr-wait can see a PR green and pr-send's own read, a moment later, meet mergeability being
+// recomputed after a merge into the base.
 test("pr-send's gate read waits out what time clears, and stops at once on what it does not", () => {
   const { run } = gateWorkspace();
   const prKey = `pr view ${N} --repo ${REMOTE} --json ${PR_FIELDS}`;
@@ -244,8 +244,8 @@ const asking = (...reads: unknown[][]): Routes => ({
   [POST]: { stdout: `https://github.com/${REMOTE}/pull/${N}#issuecomment-1\n` },
 });
 
-// Mikael, 2026-10-20: "Coderabbit should review before you even give the PR to me?" The statuses
-// are CodeRabbit's own, as read off lyyti-api#3270 and #3271, lyyti-classic#8350 and lyyti-public#1740.
+// CodeRabbit reviews a PR before it reaches the human, unless it is rate limited or reviewed an
+// earlier head (below). The statuses are CodeRabbit's own, as it posts them on real PRs.
 test("a required review bot must have reviewed the head: pr-ready refuses, pr-wait waits while it reviews", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
@@ -294,8 +294,8 @@ test("a required review bot must have reviewed the head: pr-ready refuses, pr-wa
   assert.match(r.stderr, /still waiting after \d+s on:\n {2}- CodeRabbit has not reviewed aaaaaaa/);
 });
 
-// On 2026-11-17 CodeRabbit cut the account to one review an hour, and Mikael chose to keep it for the
-// first version of each PR and let later versions go without it.
+// CodeRabbit's account limit is one review an hour, kept for the first version of each PR; later
+// versions go without it.
 test("a review bot that reviewed an earlier head of the PR lets later heads pass, said as a remark", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const OLD = "b".repeat(40);
@@ -307,7 +307,7 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
   const ready = (over: Routes) => run(green({ [st]: skippedHere, [rv]: { stdout: [] }, ...over }), ["pr-ready", "web", String(N)]);
   const EARLIER = /CodeRabbit reviewed an earlier head, bbbbbbb, not aaaaaaa; later versions go without its review/;
 
-  // never reviewed: refused, with the same ask as before
+  // never reviewed: refused, with the ask to review
   const oldStatus = `api repos/${REMOTE}/commits/${OLD}/status`;
   const oldRuns = `api repos/${REMOTE}/commits/${OLD}/check-runs?per_page=100&page=1`;
   const oldPulls = `api repos/${REMOTE}/commits/${OLD}/pulls?per_page=100&page=1`;
@@ -324,10 +324,9 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
     { [cm]: { stdout: [{ user: { login: "coderabbitai[bot]" }, original_commit_id: OLD, in_reply_to_id: null }] } },
     { [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, ...onlyThisPr, [oldStatus]: { stdout: { statuses: [] } },
       [oldRuns]: checkRuns(check("test"), rabbitRun("Review completed", { conclusion: "success", ...ours })) },
-    // a clean incremental pass leaves no review, no comment and no status, only its check-run titled
-    // Finished: CodeRabbit on superfactory#130 at f61c245d and #131 at eb279a03, and on #128 at
-    // 5332c327 and c023ab97, where GitHub ties the run to the open PR. It posted no commit status on
-    // any of #128-#131's 90 commits, so a status is not read for it
+    // a clean incremental pass leaves no review, no comment and no status, only its check-run
+    // titled Finished, where GitHub ties the run to the open PR. It posts no commit status for such
+    // a pass, on any commit of a PR, so a status is not read for it
     { [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, ...onlyThisPr, [oldStatus]: { stdout: { statuses: [] } },
       [oldRuns]: checkRuns(check("test"), rabbitRun("Finished", { conclusion: "success", ...ours })) },
   ];
@@ -339,14 +338,14 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
   }
 
   // a check-run on a commit another PR also has is that PR's review: a stacked PR carries its lower
-  // PR's commits (CodeRabbit on superfactory#119)
+  // PR's commits
   r = ready({ ...evidence[2], [oldPulls]: { stdout: [{ number: N - 1 }, { number: N }] } });
   assert.equal(r.status, 1, r.stdout);
   assert.doesNotMatch(r.stdout, /earlier head/);
-  // CodeRabbit on superfactory#128: a closed, unmerged PR's review stays on its commits, and GitHub
-  // lists only open and merged PRs for a commit, so a commit of this PR's that only this PR is listed
-  // for may carry that one's review. Its status names no PR, and its check-run names the closed PR,
-  // or none: neither is this PR's review.
+  // A closed, unmerged PR's review stays on its commits, and GitHub lists only open and merged PRs
+  // for a commit, so a commit of this PR's that only this PR is listed for may carry that one's
+  // review. Its status names no PR, and its check-run names the closed PR, or none: neither is this
+  // PR's review.
   const closed = { pull_requests: [{ number: N - 5 }] };
   const retained: [string, Routes][] = [
     ["a status", { ...evidence[2], [oldRuns]: checkRuns(check("test")),
@@ -392,8 +391,8 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
   assert.match(r.stderr, /waiting \(\d+s\) on: CodeRabbit is reviewing aaaaaaa \(Review in progress\)/);
 });
 
-// On 2026-10-28 CodeRabbit skipped seven drafts, and each time the lead asked for the review by hand
-// and polled. Its check-runs are its own, as read off lyyti-classic#8509 and lyyti-api#3278.
+// CodeRabbit skips drafts, so the gate asks for the review itself. Its check-runs are its own, as
+// it posts them on real PRs.
 test("pr-wait asks a review bot that skipped the head, once, and waits for it", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
@@ -426,8 +425,8 @@ test("pr-wait asks a review bot that skipped the head, once, and waits for it", 
   assert.equal(r.calls.filter((c) => c === POST).length, 1);
 });
 
-// lyyti-classic#8522 and #8524, 2026-10-29: after the ask CodeRabbit's skipped check-run was gone and
-// the grace since the head's first check long past, so pr-wait refused minutes before the review came.
+// After the ask CodeRabbit's skipped check-run is gone and the grace since the head's first check
+// can be long past; pr-wait must not refuse minutes before the review comes.
 test("pr-wait waits on a review bot it asked, timed from the ask, not the head", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
@@ -448,16 +447,16 @@ test("pr-wait waits on a review bot it asked, timed from the ask, not the head",
   assert.match(r.stderr, /waiting \(\d+s\) on: CodeRabbit has not reviewed aaaaaaa: it has posted nothing at this head/);
   assert.match(r.stdout, /^SENDABLE/m);
 
-  // asked longer ago than the grace: refused as before
+  // asked longer ago than the grace: refused
   r = run(over([TRIGGER]), ["pr-wait", "web", String(N), HEAD]);
   assert.equal(r.status, 1, r.stderr);
   assert.equal(r.calls.filter((c) => c === POST).length, 0);
   assert.match(r.stderr, /waiting will not clear it:\n {2}- CodeRabbit has not reviewed aaaaaaa: it has posted nothing at this head/);
 });
 
-// lyyti-classic#8641, 2026-11-12: asked at 10:54:12, CodeRabbit's check-run went in_progress at 10:54:53
-// and was still running when the grace from the ask ran out at 11:04, so pr-wait refused it as having
-// posted nothing. A bot whose check is running is reviewing, whatever the clock says.
+// CodeRabbit's check-run can go in_progress within a minute of the ask and still be running when
+// the grace from the ask runs out. A bot whose check is running is reviewing, whatever the clock
+// says.
 test("pr-wait waits on a review bot whose check is still running, past the grace from the ask", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
@@ -480,12 +479,12 @@ test("pr-wait waits on a review bot whose check is still running, past the grace
   assert.match(r.stdout, /^SENDABLE/m);
 });
 
-// The check-run is CodeRabbit's own, as read off lyyti-classic#8447: neutral, titled "Review rate limited".
+// The check-run is CodeRabbit's own, as it posts it on a real PR: neutral, titled "Review rate
+// limited".
 const rabbitRun = (title: string, o: Record<string, unknown> = {}) =>
   check("CodeRabbit", { conclusion: "neutral", output: { title }, app: { slug: "coderabbitai" }, details_url: null, ...o });
 
-// Mikael, 2026-11-12: "clearly the rule change from waiting on coderabbit even when we hit the limits
-// is wrong. We have so many tasks waiting on the gate." A rate limit is a remark again, as on 2026-10-27.
+// A rate limit is a remark, not a wait: tasks do not queue on the gate behind CodeRabbit's limit.
 test("a rate-limited review bot lets the PR go without its review, said as a remark", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
@@ -527,8 +526,8 @@ test("a rate-limited review bot lets the PR go without its review, said as a rem
   assert.match(r.stdout, /check 'CodeRabbit' is in_progress, not completed/);
 });
 
-// lyyti-classic#8705, 2026-11-12: its two replies in review threads there are review objects at the
-// head's sha, and the gate read them as its review of the head.
+// Its replies in review threads are review objects at the head's sha, and the gate does not read
+// them as its review of the head.
 test("a review bot's replies in review threads are not its review of the head", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const reply = { user: { login: "coderabbitai[bot]" }, commit_id: HEAD, state: "COMMENTED", body: "" };
@@ -550,8 +549,8 @@ test("a review bot's replies in review threads are not its review of the head", 
   assert.ok(r.stdout.includes("CodeRabbit is rate limited and has not reviewed aaaaaaa; sent without its review"), r.stdout);
 });
 
-// lyyti-events#847, 2026-10-27: after a rebase CodeRabbit said "Already reviewed the last commit",
-// finished its check-run green, and set no status and no review object.
+// After a rebase CodeRabbit says "Already reviewed the last commit", finishes its check-run green,
+// and sets no status and no review object.
 test("a review bot's own finished check-run at the head counts as its review", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
@@ -586,7 +585,7 @@ test("a review bot that skipped the draft still refuses the PR, its neutral chec
   assert.doesNotMatch(r.stdout, /rate limited/);
 });
 
-// On 2026-10-20 pr-wait refused a lyyti-api PR whose gate jobs had simply not started yet.
+// pr-wait does not refuse a PR whose gate jobs have simply not started yet.
 test("gate jobs that have not started yet are waited on for a while after the push", () => {
   const { run } = gateWorkspace();
   const cr = `api repos/${REMOTE}/commits/${HEAD}/check-runs?per_page=100&page=1`;
@@ -599,7 +598,7 @@ test("gate jobs that have not started yet are waited on for a while after the pu
   assert.match(late.stdout, /none of the repo's gate jobs ran at a+ \(test\) -- the gate is missing, not green/);
 });
 
-// Mikael, 2026-10-16: "Only when they are in my colleagues review column should they be open PRs."
+// With colleague review on, pr-open-for-review is where a PR leaves draft.
 test("pr-open-for-review opens the item's PRs at the reviewed sha, then records colleague review", () => {
   const { ws, run } = gateWorkspace();
   const stateOf = () => /"state": "([a-z-]+)"/.exec(factory(ws, ["state", "WEB-1"]).stdout)?.[1];
@@ -627,8 +626,8 @@ test("pr-open-for-review opens the item's PRs at the reviewed sha, then records 
   assert.deepEqual(opens(r.calls), []);
 });
 
-// Mikael, 2026-11-20: "nothing should reach me in my review or colleagues review if it does not have
-// translations." Both doors ask: pr-ready, and pr-open-for-review for a PR that skipped pr-send.
+// Nothing reaches the human's review or colleague review without translations. Both doors ask:
+// pr-ready, and pr-open-for-review for a PR that skipped pr-send.
 test("a new text missing a language is refused by pr-ready and by pr-open-for-review", () => {
   // The same workspace with its repo keyed portal, which has the modules' text conventions.
   assert.ok(TOML.includes("[repos.web]"), "the test config still names its repo web");
@@ -665,7 +664,7 @@ test("a new text missing a language is refused by pr-ready and by pr-open-for-re
   assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [`pr ready ${N} --repo ${REMOTE}`]);
 });
 
-// A PR stacked on another PR's branch waits for that one: CL-2284's #8351 sits on #8315's branch.
+// A PR stacked on another PR's branch waits for that one.
 test("pr-open-for-review leaves a PR stacked on another branch as it is", () => {
   const { ws, run } = gateWorkspace();
   assert.equal(factory(ws, ["state", "WEB-1", "your-review", "--reviewed", HEAD]).status, 0);
@@ -764,7 +763,7 @@ test("pr-comment replies only inside a configured bot's thread", () => {
   assert.ok(r.calls.some((c) => c.startsWith(`api repos/${REMOTE}/pulls/${N}/comments/11/replies -f body=> Written by agent.`)));
 });
 
-// Aikido reads its ignore command only at the start of a comment (portal#3468, 2026-11-20).
+// Aikido reads its ignore command only at the start of a comment.
 test("pr-comment puts Aikido's ignore command first, with the marker after it, only in Aikido's threads", () => {
   const { ws, run } = gateWorkspace("", TOML, ["coderabbitai", "aikido-pr-checks"]);
   const body = join(ws, "ignore.md");
@@ -892,8 +891,8 @@ test("demo --before finds the base commit the checked-out files match", () => {
   assert.equal(beforeSha(dir).sha, base);
 });
 
-// A PR stacked on another branch: its before is that branch's head on origin, named with --base-ref.
-// Lyyti-classic#8752, based on #8751's branch, could get no before set while only main counted.
+// A PR stacked on another branch: its before is that branch's head on origin, named with
+// --base-ref, not main.
 test("demo --before --base-ref accepts a stacked PR's base and still refuses an unrelated commit", () => {
   const dir = join(tempWorkspace(TOML), "repo");
   after(() => rmSync(dirname(dir), { recursive: true, force: true }));
@@ -922,7 +921,7 @@ test("demo --before --base-ref accepts a stacked PR's base and still refuses an 
   const unrelated = commit("b.txt", "unrelated\n");
   g("switch", "-q", "upper");
 
-  // Detached at the base branch's head: refused without --base-ref, as before; accepted with it.
+  // Detached at the base branch's head: refused without --base-ref, accepted with it.
   g("switch", "-q", "--detach", "origin/lower");
   assert.equal(beforeSha(dir).sha, undefined, "without --base-ref only main counts");
   assert.deepEqual(beforeSha(dir, "lower"), { sha: lower, base: "origin/lower" });
@@ -934,14 +933,14 @@ test("demo --before --base-ref accepts a stacked PR's base and still refuses an 
   g("switch", "-q", "--detach", unrelated);
   assert.equal(beforeSha(dir, "lower").sha, undefined, "an unrelated commit is no base");
 
-  // CodeRabbit on #119 (L7): a base branch whose files equal main's is still the base named.
+  // A base branch whose files equal main's is still the base named.
   g("switch", "-qc", "same", "main");
   g("commit", "-q", "--allow-empty", "-m", "same files as main");
   const same = g("rev-parse", "HEAD");
   g("update-ref", "refs/remotes/origin/same", same);
   g("switch", "-q", "--detach", "origin/same");
   assert.equal(beforeSha(dir, "same").sha, same, "--base-ref's head first");
-  assert.equal(beforeSha(dir).sha, g("rev-parse", "origin/main"), "without --base-ref, main as before");
+  assert.equal(beforeSha(dir).sha, g("rev-parse", "origin/main"), "without --base-ref, main");
 
   // --base-ref names a branch on origin; a sha or a branch never fetched is refused outright.
   assert.throws(() => beforeSha(dir, lower), /is not a branch on origin/);
@@ -978,8 +977,8 @@ test("pr-media puts a stacked PR's base-stamped demo under Before and refuses ma
   assert.match(r.stderr, /the demo captured ccccccc but the PR head is aaaaaaa and its base \(lower\) is eeeeeee/);
 });
 
-// CodeRabbit on #119 (L8): the spec read Before from DEMO_OUT's "-before" suffix, so a key or a
-// moved output dir could film the wrong label. factory demo says it, and the template reads it.
+// The spec does not read Before from DEMO_OUT's "-before" suffix, where a key or a moved output dir
+// could film the wrong label: factory demo says it, and the template reads it.
 test("factory demo tells the spec which film it is by DEMO_BEFORE, and the template reads it", () => {
   const dir = tempWorkspace(TOML);
   after(() => rmSync(dir, { recursive: true, force: true }));
@@ -992,9 +991,9 @@ test("factory demo tells the spec which film it is by DEMO_BEFORE, and the templ
   assert.doesNotMatch(spec, /endsWith\('-before'\)/);
 });
 
-// Mikael, 2026-11-24: lyyti-classic#8878 and #8879 were opened for colleagues before CodeRabbit had
-// read their final heads, and its 12 findings landed on PRs colleagues were already reading. What
-// reaches him may still go without its review (above); nothing opens for colleagues without it.
+// A PR opened for colleagues before CodeRabbit read its final head would get its findings while
+// colleagues are already reading. What reaches the human may still go without its review (above);
+// nothing opens for colleagues without it.
 test("pr-wait-coderabbit asks for the review of the head and waits it out, rate limits included", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
@@ -1004,7 +1003,7 @@ test("pr-wait-coderabbit asks for the review of the head and waits it out, rate 
   const review = { user: { login: "coderabbitai[bot]" }, commit_id: HEAD, state: "COMMENTED", body: REVIEW_BODY };
   const ago = (s: number) => new Date(Date.now() - s * 1000).toISOString();
   const asked = (body: string, created_at: string) => ({ body, created_at, user: { login: "mikael" } });
-  // its reply to an ask while limited, as on lyyti-classic#8879
+  // its reply to an ask while limited
   const limitedReply = (created_at: string) => ({ body: "<details>\n<summary>Action not completed</summary>\n\nReview rate limited.\n</details>", created_at, user: { login: "coderabbitai[bot]" } });
   const skipped = { [st]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review skipped: draft pull request" }] } } };
   const limited = { [st]: { stdout: { statuses: [] } }, [cr]: checkRuns(check("test"), rabbitRun("Review rate limited")) };
@@ -1055,7 +1054,7 @@ test("pr-wait-coderabbit asks for the review of the head and waits it out, rate 
   assert.equal(r.status, 0, r.stderr);
   assert.equal(posts(r.calls), 0);
 
-  // pr-ready keeps the rate limit a remark: what reaches Mikael may go without its review
+  // pr-ready keeps the rate limit a remark: what reaches the human may go without its review
   r = run(green({ ...limited, [rv]: { stdout: [] } }), ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 0, r.stdout);
   assert.match(r.stdout, /CodeRabbit is rate limited and has not reviewed aaaaaaa; sent without its review/);
@@ -1090,8 +1089,8 @@ test("pr-open-for-review opens nothing until the review bot has reviewed every h
   assert.equal(stateOf(), "colleague-review");
 });
 
-// lyyti-events#894, 2026-11-25: GitHub refused its diff as over 20000 lines, and pr-ready checked
-// neither translations nor prose. The diff now comes from the repo's checkout instead.
+// GitHub refuses a diff over 20000 lines; pr-ready still checks translations and prose, on the diff
+// from the repo's checkout instead.
 test("a diff GitHub refuses as too large is read from the checkout, and the prose check still runs", () => {
   const { ws, run } = gateWorkspace();
   const origin = join(ws, "origins", "web.git");

@@ -12,7 +12,7 @@ import { run } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, fakeDaemon, tempDir, tempWorkspace, TOML } from "./helpers.js";
 
-// What a real systemd-run --user --scope said with no user bus: systemd 259 (niilo), 249 (turing).
+// What a real systemd-run --user --scope said with no user bus: systemd 259, then 249.
 const NO_BUS_259 = "Failed to connect to user scope bus via local transport: No such file or directory";
 const NO_BUS_249 = "Failed to connect to bus: No such file or directory";
 // A systemd-run first on PATH: it logs its arguments, one call per line, tab-separated, then runs
@@ -75,7 +75,7 @@ echo "backgrounded · abc123 · rae"
   assert.ok(existsSync(currentAppendixPath(ws.runDir, "bea")));
   local.start({ ...req, appendix: null, args });
   assert.equal(readFileSync(join(dir, "args"), "utf8"), "--bg P\n");
-  // and leaves no current copy for a later resume to be handed (Marie on #131)
+  // and leaves no current copy for a later resume to be handed
   assert.ok(!existsSync(currentAppendixPath(ws.runDir, "bea")));
 });
 
@@ -228,7 +228,7 @@ test("on Linux a listing past 64 MB is claude's, not systemd-run's, and one unde
   process.env.CLAUDE_BIN = claude;
   try {
     assert.throws(() => local.sessions(), { message: `\`claude agents --json\` failed: claude agents wrote more than the ${64 * 1024 * 1024} bytes of output that are read` });
-    // 20 MB, past the 16 MB the async listing used to read.
+    // 20 MB, past 16 MB: the listing is read whole up to its 64 MB cap.
     writeFileSync(claude, `#!/bin/sh\nprintf '[{"id":"s1","name":"bea","kind":"background","state":"idle"}'\nhead -c ${20 * 1024 * 1024} /dev/zero | tr '\\0' ' '\necho ']'\n`);
     assert.equal(local.sessions().length, 1);
     assert.deepEqual(await local.sessionsAsync(), local.sessions());

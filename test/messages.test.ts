@@ -64,7 +64,7 @@ test("the log rotates past a megabyte, and messages reads only the tail", () => 
     "2026-01-02T03:04  ada       answer\n    two\n    lines\n");
 });
 
-// 2026-11-16: the log rolled to .1 and the page showed one message; the rest were in .1.
+// A log that rolled to .1 still shows every message: the rest are in .1.
 test("a rollover leaves the newest messages visible, on the page and in messages -n", () => {
   const ws = tempWorkspace();
   after(() => rmSync(ws, { recursive: true, force: true }));

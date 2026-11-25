@@ -96,7 +96,7 @@ export function beforeSha(cwd = process.cwd(), baseRef?: string): { sha?: string
 
 // What the spec runs with. The workspace's demo.env carries the app's sign-in and base URLs; the
 // command line wins. DEMO_BEFORE says which film this is, so the spec need not guess it from
-// DEMO_OUT's name (CodeRabbit on superfactory#119).
+// DEMO_OUT's name.
 export function demoEnv(ws: Workspace, pw: string, outDir: string, specDir: string, baseUrl: string | undefined, before: boolean): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
