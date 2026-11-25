@@ -273,3 +273,42 @@ test("marked-comments refuses valid JSON that is not an object envelope", () => 
     assert.match(r.stderr ?? "", /hook input was not the expected JSON/, input);
   }
 });
+
+// Mikael, 2026-11-25: "we should be able to read from slack. The guard was so that no agent send
+// messages on their own." Slack reads pass for the lead and the assistants, by an exact list; every
+// other Slack tool is refused for every role, and builders get no Slack at all.
+test("Slack: the lead and assistants may read, nobody may write, and an unlisted tool is refused", () => {
+  const dir = tempWorkspace(TOML.replace("[tracker]", `[[agents]]
+name = "val"
+role = "assistant"
+
+[roles.assistant]
+cwd = "assistants"
+settings = "lead"
+
+[tracker]`));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const chat = "mcp__claude_ai_Slack__.*";
+  const call = (agent: string, tool: string) => runHook(commandFor(render(dir, agent), "PreToolUse", chat), { tool_name: `mcp__claude_ai_Slack__${tool}`, tool_input: {} });
+  for (const [agent, role] of [["ada", "lead"], ["val", "assistant"], ["bea", "builder"]] as const)
+    assert.match(commandFor(render(dir, agent), "PreToolUse", chat), new RegExp(` hook no-side-channels --lead ada --role ${role}$`), agent);
+
+  // a lead read and an assistant read pass
+  for (const tool of ["slack_read_channel", "slack_search_public_and_private", "slack_read_thread"]) {
+    assert.equal(call("ada", tool).status, 0, `lead: ${tool}`);
+    assert.equal(call("val", tool).status, 0, `assistant: ${tool}`);
+  }
+  // a builder's read is refused
+  const builder = call("bea", "slack_read_channel");
+  assert.equal(builder.status, 2);
+  assert.match(builder.stderr, /Slack reads are for Ada and the assistants only/);
+  // writes are refused for the lead too
+  for (const tool of ["slack_send_message", "slack_add_reaction", "slack_create_conversation"]) {
+    const r = call("ada", tool);
+    assert.equal(r.status, 2, tool);
+    assert.match(r.stderr, /Slack is read-only: no agent posts, reacts, creates or edits there/, tool);
+  }
+  // a tool the connector adds later is refused until it is named
+  assert.equal(call("ada", "slack_read_new_thing").status, 2);
+  assert.equal(call("val", "slack_schedule_message").status, 2);
+});

@@ -233,7 +233,8 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
     } else if (h === "marked-comments") {
       add("PreToolUse", COMMENT_TOOLS, ["hook", "marked-comments"], 5);
     } else if (h === "no-side-channels") {
-      add("PreToolUse", CHAT, ["hook", "no-side-channels", "--lead", leadName], 5);
+      // the role decides whether a Slack read passes (hooks/no-side-channels.ts)
+      add("PreToolUse", CHAT, ["hook", "no-side-channels", "--lead", leadName, "--role", s.role], 5);
       const writes = TRACKER_WRITES[ws.config.tracker.kind];
       if (writes && !t.trackerWrites) add("PreToolUse", writes, ["hook", "no-side-channels", "--lead", leadName], 5);
     } else {
