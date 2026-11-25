@@ -1,16 +1,18 @@
-// The GitHub traffic page, from /api/github. PR traffic per day by repo, review traffic per day by
-// reviewer, and the people table. The filters live in the URL, so a view can be shared.
+// The GitHub traffic page, from /api/github. PR traffic per day by repo or by author, review traffic
+// per day by reviewer, and the author and reviewer tables. The filters live in the URL, so a view can be shared.
 const q = new URLSearchParams(location.search);
 const view = {
   days: Number(q.get('days')) || 30,
   repos: q.get('repos') || '',
   bots: q.get('bots') === '1',
   pr: q.get('pr') || 'opened',
+  // PR traffic stacked by repo, or by the PR's author
+  by: q.get('by') === 'author' ? 'author' : 'repo',
   rv: q.get('rv') || 'reviews',
 };
 const PR_METRICS = { opened: 'Opened', merged: 'Merged', closed: 'Closed unmerged', open: "Open at day's end", lines: 'Lines changed' };
 const RV_METRICS = { reviews: 'Reviews', approvals: 'Approvals', changes: 'Changes requested', lines: 'Lines reviewed' };
-// The reviewers who get a colour of their own; the rest are Other.
+// The reviewers, and the PR authors, who get a colour of their own; the rest are Other.
 const PEOPLE_SHOWN = 7;
 let last = null;
 
@@ -34,6 +36,7 @@ function save(){
   if(view.repos) p.set('repos', view.repos);
   if(view.bots) p.set('bots', '1');
   if(view.pr !== 'opened') p.set('pr', view.pr);
+  if(view.by !== 'repo') p.set('by', view.by);
   if(view.rv !== 'reviews') p.set('rv', view.rv);
   history.replaceState(null, '', location.pathname + (p.toString() ? '?' + p : ''));
 }
@@ -120,19 +123,30 @@ function render(d){
   const repoColor = k => slot(d.repos.findIndex(x => x.key === k));
   const prSeries = r.repos.map(k => ({ key: k, label: d.repos.find(x => x.key === k)?.name || k, color: repoColor(k), values: r.traffic[view.pr][k] || [],
     split: view.pr === 'lines' ? { added: r.traffic.added[k] || [], deleted: r.traffic.deleted[k] || [] } : null }));
-  // reviewers by their overall rank, the first seven with a colour, the rest folded into Other
+  // people by one overall rank, PRs opened plus reviews, so a person has the same colour in both charts:
+  // the first seven with a colour, the rest folded into Other
+  const bySum = (per, l) => r.days.map((_, i) => sum(l.map(x => (per[x] || [])[i] || 0)));
+  const personSeries = (per, rank, info, split) => {
+    const top = rank.slice(0, PEOPLE_SHOWN);
+    const out = top.filter(l => per[l] && sum(per[l]) > 0).map(l => ({ key: l, label: info[l]?.name || l, icon: avatar(info[l]), color: slot(top.indexOf(l)), values: per[l],
+      split: split ? { added: split.added[l] || [], deleted: split.deleted[l] || [] } : null }));
+    const rest = Object.keys(per).filter(l => !top.includes(l) && sum(per[l]) > 0);
+    if(rest.length) out.push({ key: 'other', label: `Other (${rest.length})`, color: 'var(--cother)', values: bySum(per, rest),
+      split: split ? { added: bySum(split.added, rest), deleted: bySum(split.deleted, rest) } : null });
+    return out;
+  };
   const people = Object.fromEntries(r.people.map(p => [p.login, p]));
-  const top = d.rank.slice(0, PEOPLE_SHOWN);
-  const per = r.reviews[view.rv];
-  const rvSeries = top.filter(l => per[l] && sum(per[l]) > 0).map(l => ({ key: l, label: people[l]?.name || l, icon: avatar(people[l]), color: slot(top.indexOf(l)), values: per[l] }));
-  const rest = Object.keys(per).filter(l => !top.includes(l));
-  if(rest.length) rvSeries.push({ key: 'other', label: `Other (${rest.length})`, color: 'var(--cother)', values: r.days.map((_, i) => sum(rest.map(l => per[l][i] || 0))) });
+  const rvSeries = personSeries(r.reviews[view.rv], d.rank, people, null);
+  const authors = Object.fromEntries(r.authors.map(p => [p.login, p]));
+  const prByAuthor = personSeries(r.byAuthor[view.pr], d.rank, authors, view.pr === 'lines' ? { added: r.byAuthor.added, deleted: r.byAuthor.deleted } : null);
+  const prShown = view.by === 'author' ? prByAuthor : prSeries;
+  const authorRows = r.authors.filter(a => a.opened || a.merged || a.closed);
 
   const total = m => sum(Object.values(r.traffic[m]).map(sum));
   const openNow = sum(Object.values(r.traffic.open).map(v => v[v.length - 1] || 0));
   const rvTotal = m => sum(Object.values(r.reviews[m]).map(sum));
   const added = total('added'), deleted = total('deleted');
-  charts.pr = { days: r.days, series: prSeries, unit: PR_METRICS[view.pr] };
+  charts.pr = { days: r.days, series: prShown, unit: PR_METRICS[view.pr] };
   charts.rv = { days: r.days, series: rvSeries, unit: RV_METRICS[view.rv] };
 
   root.innerHTML = `
@@ -156,14 +170,18 @@ function render(d){
     <section class="card">
       <h2>PR traffic</h2>
       <div class="chips">${Object.entries(PR_METRICS).map(([k, l]) => `<button class="chip ${k === view.pr ? 'on' : ''}" data-pr="${k}" aria-pressed="${k === view.pr}">${esc(l)}</button>`).join('')}</div>
-      ${legend(prSeries)}
-      ${bars('pr', r.days, prSeries, PR_METRICS[view.pr])}
-      ${table(r.days, prSeries)}
+      <div class="chips by" role="group" aria-label="group PR traffic by"><span class="lbl">group by</span>${[['repo', 'repo'], ['author', 'author']].map(([k, l]) => `<button class="chip ${k === view.by ? 'on' : ''}" data-by="${k}" aria-pressed="${k === view.by}">${l}</button>`).join('')}</div>
+      ${prShown.length ? legend(prShown) + bars('pr', r.days, prShown, PR_METRICS[view.pr]) + table(r.days, prShown) : '<p class="note">none in this range</p>'}
     </section>
     <section class="card">
       <h2>Review traffic</h2>
       <div class="chips">${Object.entries(RV_METRICS).map(([k, l]) => `<button class="chip ${k === view.rv ? 'on' : ''}" data-rv="${k}" aria-pressed="${k === view.rv}">${esc(l)}</button>`).join('')}</div>
       ${rvSeries.length ? legend(rvSeries) + bars('rv', r.days, rvSeries, RV_METRICS[view.rv]) + table(r.days, rvSeries) : '<p class="note">none in this range</p>'}
+    </section>
+    <section class="card">
+      <h2>PR authors</h2>
+      ${authorRows.length ? `<div class="scroll"><table><thead><tr><th>author</th><th>PRs opened</th><th>merged</th><th>closed unmerged</th><th>lines merged</th></tr></thead><tbody>${authorRows.map(p =>
+        `<tr><td class="who"><span class="p">${avatar(p)}${esc(p.name)}${p.name !== p.login ? ` <small>${esc(p.login)}</small>` : ''}${p.bot ? ' <small>bot</small>' : ''}</span></td><td>${p.opened}</td><td>${p.merged}</td><td>${p.closed}</td><td>${num(p.lines)} <small>+${num(p.added)} −${num(p.deleted)}</small></td></tr>`).join('')}</tbody></table></div>` : '<p class="note">no PRs in this range</p>'}
     </section>
     <section class="card">
       <h2>Reviewers</h2>
@@ -186,10 +204,11 @@ async function load(){
 }
 
 document.addEventListener('click', e => {
-  const b = e.target.closest('button[data-days],button[data-pr],button[data-rv]');
+  const b = e.target.closest('button[data-days],button[data-pr],button[data-rv],button[data-by]');
   if(!b) return;
   if(b.dataset.days){ view.days = +b.dataset.days; save(); load(); }
   else if(b.dataset.pr){ view.pr = b.dataset.pr; save(); last && render(last); }
+  else if(b.dataset.by){ view.by = b.dataset.by; save(); last && render(last); }
   else if(b.dataset.rv){ view.rv = b.dataset.rv; save(); last && render(last); }
 });
 document.addEventListener('change', e => {

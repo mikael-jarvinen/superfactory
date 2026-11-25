@@ -388,12 +388,33 @@ export interface PersonCount extends Person {
   lines: number;
 }
 
+// A PR author's own PRs in the range: opened, merged, closed unmerged, and the lines of those merged.
+export interface AuthorCount extends Person {
+  opened: number;
+  merged: number;
+  closed: number;
+  lines: number;
+  added: number;
+  deleted: number;
+}
+
+export type TrafficMetric = "opened" | "merged" | "closed" | "open" | "lines" | "added" | "deleted";
+
+// Who opened a PR. A deleted account has no author, as GitHub's own "ghost".
+const GHOST: Person = { login: "ghost", name: "ghost", avatar: "", bot: false };
+export const authorOf = (p: Pr): Person => p.author ?? GHOST;
+
 export interface Report {
   days: string[];
   repos: string[];
   // per metric, per repo, a count per day
   // lines: additions plus deletions of the PRs merged that day; added and deleted, the two halves
-  traffic: Record<"opened" | "merged" | "closed" | "open" | "lines" | "added" | "deleted", Record<string, number[]>>;
+  traffic: Record<TrafficMetric, Record<string, number[]>>;
+  // the same, per PR author login. Mikael, 2026-11-25: "it colors the columns based on repos, but I
+  // want to also view by PR author."
+  byAuthor: Record<TrafficMetric, Record<string, number[]>>;
+  // every author with a PR counted in the range, most PRs opened first
+  authors: AuthorCount[];
   // per metric, per reviewer login, a count per day; lines: the size of each PR reviewed that day
   reviews: Record<"reviews" | "approvals" | "changes" | "lines", Record<string, number[]>>;
   people: PersonCount[];
@@ -429,7 +450,9 @@ export function report(prs: Pr[], o: Options): Report {
   const mine = prs.filter((p) => wanted.has(p.repo));
 
   const traffic: Report["traffic"] = { opened: {}, merged: {}, closed: {}, open: {}, lines: {}, added: {}, deleted: {} };
-  for (const r of o.repos) for (const m of Object.keys(traffic) as (keyof Report["traffic"])[]) traffic[m][r] = zeros();
+  for (const r of o.repos) for (const m of Object.keys(traffic) as TrafficMetric[]) traffic[m][r] = zeros();
+  const byAuthor: Report["byAuthor"] = { opened: {}, merged: {}, closed: {}, open: {}, lines: {}, added: {}, deleted: {} };
+  const authors = new Map<string, AuthorCount>();
   const reviews: Report["reviews"] = { reviews: {}, approvals: {}, changes: {}, lines: {} };
   const people = new Map<string, PersonCount>();
   const firstReview: number[] = [];
@@ -476,19 +499,41 @@ export function report(prs: Pr[], o: Options): Report {
     const counted = o.bots || !p.author?.bot;
     reviewsOf(p);
     if (!counted) continue;
-    bump(traffic.opened, p.repo, dayOf(p.created));
+    // Each count goes to the PR's repo and to its author alike, so the two groupings add up the same.
+    const a = authorOf(p);
+    const both = (m: TrafficMetric, day: string, by = 1) => {
+      bump(traffic[m], p.repo, day, by);
+      bump(byAuthor[m], a.login, day, by);
+    };
+    const tally = (f: (c: AuthorCount) => void) => {
+      const c = authors.get(a.login) ?? { ...a, opened: 0, merged: 0, closed: 0, lines: 0, added: 0, deleted: 0 };
+      f(c);
+      authors.set(a.login, c);
+    };
+    const inRange = (day: string) => at.has(day);
+    tally(() => {}); // known by name and face even with only an older PR open in the range
+    both("opened", dayOf(p.created));
+    if (inRange(dayOf(p.created))) tally((c) => c.opened++);
     if (p.merged) {
-      bump(traffic.merged, p.repo, dayOf(p.merged));
-      bump(traffic.lines, p.repo, dayOf(p.merged), size(p));
-      bump(traffic.added, p.repo, dayOf(p.merged), p.additions ?? 0);
-      bump(traffic.deleted, p.repo, dayOf(p.merged), p.deletions ?? 0);
+      const day = dayOf(p.merged);
+      both("merged", day);
+      both("lines", day, size(p));
+      both("added", day, p.additions ?? 0);
+      both("deleted", day, p.deletions ?? 0);
+      if (inRange(day)) tally((c) => { c.merged++; c.lines += size(p); c.added += p.additions ?? 0; c.deleted += p.deletions ?? 0; });
     }
-    else if (p.closed) bump(traffic.closed, p.repo, dayOf(p.closed));
+    else if (p.closed) {
+      both("closed", dayOf(p.closed));
+      if (inRange(dayOf(p.closed))) tally((c) => c.closed++);
+    }
     // open at a day's end: opened on or before it, and not closed by its end
     const from = dayOf(p.created);
     const until = p.closed ? dayOf(p.closed) : null;
     days.forEach((d, i) => {
-      if (from <= d && (until === null || until > d)) traffic.open[p.repo]![i]! += 1;
+      if (from <= d && (until === null || until > d)) {
+        traffic.open[p.repo]![i]! += 1;
+        (byAuthor.open[a.login] ??= zeros())[i]! += 1;
+      }
     });
 
     // From opening, or from the first undrafting of a PR opened as a draft. A PR still a draft has
@@ -506,6 +551,8 @@ export function report(prs: Pr[], o: Options): Report {
     days,
     repos: o.repos,
     traffic,
+    byAuthor,
+    authors: [...authors.values()].sort((x, y) => y.opened - x.opened || y.merged - x.merged || x.login.localeCompare(y.login)),
     reviews,
     people: [...people.values()].sort((a, b) => b.reviews - a.reviews || b.approvals - a.approvals || a.login.localeCompare(b.login)),
     medians: { firstReviewHours: median(firstReview), firstReviewN: firstReview.length, mergeHours: median(toMerge), mergeN: toMerge.length },
@@ -515,6 +562,18 @@ export function report(prs: Pr[], o: Options): Report {
 
 // Every PR the cache holds, newest data per repo.
 export const allPrs = (c: Cache): Pr[] => Object.values(c.repos).flatMap((r) => Object.values(r.prs));
+
+// Everyone by PRs opened plus the reviews that count, most first, then by login. A bot's PR counts
+// only with bots shown, as in the traffic.
+export function peopleRank(prs: Pr[], bots: boolean): string[] {
+  const tally = new Map<string, number>();
+  const add = (login: string) => tally.set(login, (tally.get(login) ?? 0) + 1);
+  for (const p of prs) {
+    if (bots || !p.author?.bot) add(authorOf(p).login);
+    for (const r of p.reviews) if (counts(r, p, bots) && r.author) add(r.author.login);
+  }
+  return [...tally].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([login]) => login);
+}
 
 export function cacheExists(ws: Workspace): boolean {
   return existsSync(cacheFile(ws));
@@ -538,7 +597,8 @@ export interface View {
   repos: { key: string; remote: string; name: string }[];
   groups: { label: string; repos: string[] }[];
   selected: string[];
-  // every reviewer by human reviews over the whole cache, so a person keeps one colour whatever the filter
+  // every person by PRs opened plus reviews over the whole cache. Both charts colour people by it, so a
+  // person has one colour in PR and review traffic alike, whatever the filter (Mikael, 2026-11-25).
   rank: string[];
   report: Report | null;
 }
@@ -563,9 +623,7 @@ export function githubView(ws: Workspace, traffic: { fetching(): boolean; failed
   const fetchedAt = repos.map((r) => cache.repos[r.remote]?.fetched).filter((f): f is string => !!f).sort();
   const loading = !repos.some((r) => Object.keys(cache.repos[r.remote]?.prs ?? {}).length);
   const reading = repos.filter((r) => !cache.repos[r.remote]?.complete).map((r) => ({ name: r.name, upTo: cache.repos[r.remote]?.fetched ?? "" }));
-  const tally = new Map<string, number>();
-  for (const p of prs) for (const r of p.reviews) if (counts(r, p, bots) && r.author) tally.set(r.author.login, (tally.get(r.author.login) ?? 0) + 1);
-  const rank = [...tally].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([login]) => login);
+  const rank = peopleRank(prs, bots);
   return {
     loading,
     fetching: traffic.fetching(),
