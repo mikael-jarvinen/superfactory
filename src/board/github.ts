@@ -563,6 +563,18 @@ export function report(prs: Pr[], o: Options): Report {
 // Every PR the cache holds, newest data per repo.
 export const allPrs = (c: Cache): Pr[] => Object.values(c.repos).flatMap((r) => Object.values(r.prs));
 
+// Everyone by PRs opened plus the reviews that count, most first, then by login. A bot's PR counts
+// only with bots shown, as in the traffic.
+export function peopleRank(prs: Pr[], bots: boolean): string[] {
+  const tally = new Map<string, number>();
+  const add = (login: string) => tally.set(login, (tally.get(login) ?? 0) + 1);
+  for (const p of prs) {
+    if (bots || !p.author?.bot) add(authorOf(p).login);
+    for (const r of p.reviews) if (counts(r, p, bots) && r.author) add(r.author.login);
+  }
+  return [...tally].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([login]) => login);
+}
+
 export function cacheExists(ws: Workspace): boolean {
   return existsSync(cacheFile(ws));
 }
@@ -585,10 +597,9 @@ export interface View {
   repos: { key: string; remote: string; name: string }[];
   groups: { label: string; repos: string[] }[];
   selected: string[];
-  // every reviewer by human reviews over the whole cache, so a person keeps one colour whatever the filter
+  // every person by PRs opened plus reviews over the whole cache. Both charts colour people by it, so a
+  // person has one colour in PR and review traffic alike, whatever the filter (Mikael, 2026-11-25).
   rank: string[];
-  // every PR author by PRs opened over the whole cache, for the same reason
-  authorRank: string[];
   report: Report | null;
 }
 
@@ -612,12 +623,7 @@ export function githubView(ws: Workspace, traffic: { fetching(): boolean; failed
   const fetchedAt = repos.map((r) => cache.repos[r.remote]?.fetched).filter((f): f is string => !!f).sort();
   const loading = !repos.some((r) => Object.keys(cache.repos[r.remote]?.prs ?? {}).length);
   const reading = repos.filter((r) => !cache.repos[r.remote]?.complete).map((r) => ({ name: r.name, upTo: cache.repos[r.remote]?.fetched ?? "" }));
-  const tally = new Map<string, number>();
-  for (const p of prs) for (const r of p.reviews) if (counts(r, p, bots) && r.author) tally.set(r.author.login, (tally.get(r.author.login) ?? 0) + 1);
-  const rank = [...tally].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([login]) => login);
-  const opened = new Map<string, number>();
-  for (const p of prs) if (bots || !p.author?.bot) opened.set(authorOf(p).login, (opened.get(authorOf(p).login) ?? 0) + 1);
-  const authorRank = [...opened].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([login]) => login);
+  const rank = peopleRank(prs, bots);
   return {
     loading,
     fetching: traffic.fetching(),
@@ -632,7 +638,6 @@ export function githubView(ws: Workspace, traffic: { fetching(): boolean; failed
     groups,
     selected,
     rank,
-    authorRank,
     report: loading ? null : report(prs, { days, repos: selected, bots, now }),
   };
 }

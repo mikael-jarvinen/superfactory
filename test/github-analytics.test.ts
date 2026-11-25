@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { counts, dayOf, daysEnding, pacing, type Person, type Pr, readCache, refreshCache, report, type Review, toPr } from "../src/board/github.js";
+import { counts, dayOf, daysEnding, pacing, peopleRank, type Person, type Pr, readCache, refreshCache, report, type Review, toPr } from "../src/board/github.js";
 import type { Workspace } from "../src/workspace.js";
 
 // Mikael, 2026-11-23: "how many reviews happen per day, how many PRs get approved per day and
@@ -297,4 +297,17 @@ test("PR traffic by author: the same counts per PR author, adding up to the repo
   const withBots = report(prs, { days: 3, repos: ["classic", "portal"], bots: true, now: NOW });
   assert.deepEqual(withBots.byAuthor.opened.dependabot, [0, 1, 0]);
   assert.equal(Object.hasOwn(r.byAuthor.opened, "dependabot"), false, "bots hidden: not an author either");
+});
+
+// Mikael, 2026-11-25: one colour per person across PR and review traffic, by one rank of both.
+test("people rank: PRs opened plus reviews that count, bots' PRs only with bots shown", () => {
+  const prs = [
+    pr({ number: 1, author: who("niilo"), reviews: [rv("lundis", "APPROVED", "2026-11-19T09:00:00Z"), rv("niilo", "COMMENTED", "2026-11-19T09:30:00Z")] }),
+    pr({ number: 2, author: who("niilo") }),
+    pr({ number: 3, author: who("sami"), reviews: [rv("lundis", "COMMENTED", "2026-11-19T10:00:00Z"), rv("kim", "APPROVED", "2026-11-19T11:00:00Z")] }),
+    pr({ number: 4, author: who("dependabot", true), reviews: [rv("kim", "APPROVED", "2026-11-19T12:00:00Z")] }),
+  ];
+  // niilo: 2 PRs (the reply on their own PR is no review); lundis: 2 reviews; kim: 2 reviews; sami: 1 PR
+  assert.deepEqual(peopleRank(prs, false), ["kim", "lundis", "niilo", "sami"]);
+  assert.deepEqual(peopleRank(prs, true), ["kim", "lundis", "niilo", "dependabot", "sami"]);
 });

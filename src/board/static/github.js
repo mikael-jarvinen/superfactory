@@ -123,7 +123,8 @@ function render(d){
   const repoColor = k => slot(d.repos.findIndex(x => x.key === k));
   const prSeries = r.repos.map(k => ({ key: k, label: d.repos.find(x => x.key === k)?.name || k, color: repoColor(k), values: r.traffic[view.pr][k] || [],
     split: view.pr === 'lines' ? { added: r.traffic.added[k] || [], deleted: r.traffic.deleted[k] || [] } : null }));
-  // people by their overall rank, the first seven with a colour, the rest folded into Other
+  // people by one overall rank, PRs opened plus reviews, so a person has the same colour in both charts:
+  // the first seven with a colour, the rest folded into Other
   const bySum = (per, l) => r.days.map((_, i) => sum(l.map(x => (per[x] || [])[i] || 0)));
   const personSeries = (per, rank, info, split) => {
     const top = rank.slice(0, PEOPLE_SHOWN);
@@ -137,7 +138,7 @@ function render(d){
   const people = Object.fromEntries(r.people.map(p => [p.login, p]));
   const rvSeries = personSeries(r.reviews[view.rv], d.rank, people, null);
   const authors = Object.fromEntries(r.authors.map(p => [p.login, p]));
-  const prByAuthor = personSeries(r.byAuthor[view.pr], d.authorRank, authors, view.pr === 'lines' ? { added: r.byAuthor.added, deleted: r.byAuthor.deleted } : null);
+  const prByAuthor = personSeries(r.byAuthor[view.pr], d.rank, authors, view.pr === 'lines' ? { added: r.byAuthor.added, deleted: r.byAuthor.deleted } : null);
   const prShown = view.by === 'author' ? prByAuthor : prSeries;
   const authorRows = r.authors.filter(a => a.opened || a.merged || a.closed);
 
