@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -216,8 +216,8 @@ test("the page and its JSON are served, and the page renders them at phone width
   down = true;
   assert.equal(ticks.length, 1);
   await ticks[0]!();
-  assert.equal(doc.getElementById("at")!.textContent, "not answering");
-  assert.notEqual(at, "not answering");
+  assert.equal(doc.getElementById("at")!.textContent, "not answering: boom", "with the board's error");
+  assert.notEqual(at, "not answering: boom");
   assert.equal(doc.querySelector(".tbl")!.innerHTML, table);
   // the page's own stylesheet keeps the item table, the one wide thing, in a box of its own
   const css = readFileSync(new URL("../src/board/static/analytics.css", import.meta.url), "utf8");
@@ -620,7 +620,7 @@ hash_files = ["daemon.toml", "workspace.toml"]
   assert.deepEqual(Object.keys(r.hosts), ["far"], "near has no agent, so it is never read and never named");
 });
 
-test("what stops a host read before it starts is that host's error, and is logged", async () => {
+test("what stops a host read before it starts is logged, and the report fails with it, for the page to show", async () => {
   const { ws, far } = hostedWorkspace();
   writeFileSync(join(ws.stateDir, "BROKEN.json"), "{ not json");
   const usage = new TranscriptUsage();
@@ -632,8 +632,8 @@ test("what stops a host read before it starts is that host's error, and is logge
   } finally {
     console.error = was;
   }
-  assert.match(usage.hostRead("far")?.error ?? "", /could not work out what to read: .*JSON/);
-  assert.match(logged.join("\n"), /analytics: the board could not work out what to read/);
+  assert.match(logged.join("\n"), /analytics: the board could not work out what to read: .*JSON/);
+  assert.throws(() => report(ws, usage), /JSON/, "the report, which /api/analytics answers with as its error");
 });
 
 test("ssh: what a login shell prints first is skipped, a reply that is not the script's says what it was, and a refused key says why", async () => {
@@ -655,6 +655,8 @@ test("ssh: what a login shell prints first is skipped, a reply that is not the s
     await assert.rejects(sshRunner("far")("x"), /exited 255: far: Permission denied \(publickey\)\. \(the board has no ssh agent/);
   } finally {
     process.env["PATH"] = path;
+    rmSync(bin, { recursive: true, force: true });
   }
+  assert.ok(!existsSync(bin), "the stub's temp dir is removed");
   assert.throws(() => parseReply('\n--sf-transcripts--\n{"listing"'), /not JSON .*: "\{\\"listing\\""/);
 });

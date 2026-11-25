@@ -322,7 +322,7 @@ test("a process whose command line reads empty is not killed, and its group wait
   process.kill(pid, "SIGKILL");
   await until("up's end to be seen", () => d.out.includes(`job ${UP} exited`));
   await sleep(3000); // three checks
-  assert.ok(runningNotZombie(stray), "left alone");
+  assert.ok(runningNotZombie(stray), `left alone; the scheduler said:\n${d.out}`);
   assert.doesNotMatch(d.out, /ended, leaving/, d.out);
   assert.ok(t.state().jobs[UP].clearing?.includes(pid), "still to be cleared");
 

@@ -292,10 +292,11 @@ function render(d){
     let d;
     try {
       const res = await fetch('/api/analytics', {cache: 'no-store'});
-      if(!res.ok) throw new Error(String(res.status));
+      // the board's own error, when it sent one, says why
+      if(!res.ok) throw new Error((await res.json().catch(() => ({}))).error || '');
       d = await res.json();
     }
-    catch { pulse.classList.add('stale'); at.textContent = 'not answering'; return; }
+    catch(e) { pulse.classList.add('stale'); at.textContent = e.message ? `not answering: ${e.message}` : 'not answering'; return; }
     pulse.classList.remove('stale'); at.textContent = d.at;
     render(d);
   }
