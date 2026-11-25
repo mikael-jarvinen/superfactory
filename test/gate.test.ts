@@ -1089,3 +1089,32 @@ test("pr-open-for-review opens nothing until the review bot has reviewed every h
   assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [`pr ready ${N} --repo ${REMOTE}`]);
   assert.equal(stateOf(), "colleague-review");
 });
+
+// lyyti-events#894, 2026-11-25: GitHub refused its diff as over 20000 lines, and pr-ready checked
+// neither translations nor prose. The diff now comes from the repo's checkout instead.
+test("a diff GitHub refuses as too large is read from the checkout, and the prose check still runs", () => {
+  const { ws, run } = gateWorkspace();
+  const origin = join(ws, "origins", "web.git");
+  const clone = join(ws, "repos", "web");
+  const must = (dir: string, ...args: string[]) => {
+    const r = git(dir, "-c", "user.name=t", "-c", "user.email=t@t", ...args);
+    assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  mkdirSync(dirname(origin), { recursive: true });
+  must(ws, "init", "-q", "--bare", "-b", "main", origin);
+  must(ws, "clone", "-q", origin, clone);
+  must(clone, "commit", "-q", "--allow-empty", "-m", "start");
+  must(clone, "push", "-q", "origin", "HEAD:main");
+  must(clone, "switch", "-q", "-c", "feature");
+  writeFileSync(join(clone, "a.ts"), diffOf(35, 2).split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).map((l) => l.slice(1)).join("\n") + "\n");
+  must(clone, "add", "a.ts");
+  must(clone, "commit", "-q", "-m", "feature");
+  const head = must(clone, "rev-parse", "HEAD");
+
+  const tooLarge = { status: 1, stderr: `could not find pull request diff: HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000) (https://api.github.com/repos/${REMOTE}/pulls/${N})\nPullRequest.diff too_large\n` };
+  const r = run(green({ [`pr diff ${N} --repo ${REMOTE}`]: tooLarge }, head), ["pr-ready", "web", String(N)]);
+  assert.match(r.stdout, /diff read from .*repos\/web: GitHub refuses it as over 20000 lines/);
+  assert.match(r.stdout, /35 added prose\/comment lines against 2 of code/);
+  assert.doesNotMatch(r.stdout + r.stderr, /could not read the diff|COULD NOT READ the diff/);
+});

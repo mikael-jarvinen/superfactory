@@ -13,7 +13,7 @@ import type { Repo } from "../config.js";
 import { allRecs, recPrs } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { splitlines } from "../util.js";
-import { api, type CheckRun, checkRuns, commitPulls, type CommitStatus, gh, json, prCommits, prView, type Review, reviewComments, reviews, statuses, Unreadable } from "./github.js";
+import { api, type CheckRun, checkRuns, commitPulls, type CommitStatus, gh, json, prCommits, prDiff, prView, type Review, reviewComments, reviews, statuses, Unreadable } from "./github.js";
 import { MEDIA_BEGIN } from "./media.js";
 import { seconds } from "./send.js";
 import { translationsAt } from "./translations.js";
@@ -279,7 +279,8 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
 
   // PROSE VOLUME. Measured, not blocking.
   let prose: string | undefined;
-  const diff = gh("pr", "diff", String(n), "--repo", repo.remote);
+  const diff = prDiff(repo, n, base, sha);
+  if (diff.local) remarks.push(`diff read from ${repo.path}: GitHub refuses it as over 20000 lines`);
   if (diff.status !== 0) {
     prose = "could not read the diff to measure prose -- check comment volume by hand";
   } else {
