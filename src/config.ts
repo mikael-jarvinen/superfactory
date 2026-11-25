@@ -82,6 +82,9 @@ export interface Agent {
   group?: string;
 }
 
+// An ssh destination, never an option: ssh would read "-oProxyCommand=..." as one.
+const SSH_DEST = /^[A-Za-z0-9_.@][A-Za-z0-9_.@-]*$/;
+
 // Another machine's factory daemon. remote.ts says what a request carries.
 export interface Host {
   name: string;
@@ -89,6 +92,9 @@ export interface Host {
   tokenFile: string;
   hashFiles: string[];
   gitOver: GitOver;
+  // The ssh destination the board reads this host's Claude transcripts over, for its analytics:
+  // an alias in ~/.ssh/config or user@host. The host's name when not given.
+  ssh: string;
 }
 
 // A project of the local tracker: its tickets are <KEY>-<n>, and its wiki pages sit under its key.
@@ -445,7 +451,13 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
       tokenFile: path(r, "token_file", r.str("token_file") ?? "~/.config/factory/token") ?? "",
       hashFiles: (r.strs("hash_files", true) ?? []).map((f) => path(r, "hash_files", f) ?? ""),
       gitOver: "https",
+      ssh: SSH_DEST.test(key) ? key : "",
     };
+    const ssh = r.str("ssh");
+    if (ssh !== undefined) {
+      if (SSH_DEST.test(ssh)) hosts[key]!.ssh = ssh;
+      else r.bad("ssh", `must be an ssh destination, an alias or user@host, got ${show(ssh)}`);
+    }
     const over = r.str("git_over");
     if (over !== undefined) {
       if ((GIT_OVER as readonly string[]).includes(over)) hosts[key]!.gitOver = over as GitOver;
