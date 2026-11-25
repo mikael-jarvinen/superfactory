@@ -6,7 +6,8 @@ import { JSDOM } from "jsdom";
 
 // common.js's poll, as every page that polls the board runs it, and the GitHub page, which fetches
 // through the same getJSON. What the board answers decides the header: its snapshot's time, the
-// board's own error, its HTTP status, or no reason when the board cannot be reached at all.
+// board's own error, its HTTP status, "its answer is not JSON", or no reason when the board cannot
+// be reached at all.
 const windows: JSDOM[] = [];
 after(() => windows.forEach((d) => d.window.close()));
 

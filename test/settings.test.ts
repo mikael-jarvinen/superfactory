@@ -87,8 +87,8 @@ test("[github] lead_merges is rendered into the lead's guard and nobody else's",
   for (const name of ["bea", "rae"]) assert.doesNotMatch(commandFor(render(dir, name), "PreToolUse", "Bash|Read|Grep|mcp__.*"), /--lead-merge/, name);
 });
 
-// Jira moved to the "claude.ai Atlassian MCP" connector, and a matcher written for the old one let
-// a builder transition a ticket. Claude Code tests a regex matcher against the tool name unanchored.
+// Jira writes come from the "claude.ai Atlassian MCP" connector and the older one alike, and Claude
+// Code tests a regex matcher against the tool name unanchored.
 test("a builder's tracker hook catches Jira writes on the new connector and the old, and no reads", () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
@@ -161,8 +161,8 @@ test("a stack's PATH takes the sender's prepended directories out, and only thos
     { PATH: "/opt/java/bin:/usr/local/bin:/usr/bin:/opt/java/bin:/bin", SF_PATH_PREPEND: "/opt/java/bin" });
 });
 
-// The old guard took its mode from the wrapper script's name, so the lead's session ran as a
-// builder. The role now travels in the rendered command, and a command without one refuses.
+// The guard's mode travels in the rendered command, never the wrapper's name, and a command without
+// one refuses.
 test("the rendered guard runs, labelled with the role it was rendered for", () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));

@@ -122,7 +122,7 @@ export function wrap(s: string, width: number, indent = ""): string[] {
 }
 
 // JSON as Python's json.dumps writes it (ensure_ascii, its separators, optional sort_keys), so a
-// file written here is byte-identical to one the old writer would produce.
+// file written here is byte-identical to one Python writes.
 export function pyDumps(value: unknown, opts: { indent?: number; sortKeys?: boolean } = {}): string {
   const { indent, sortKeys = false } = opts;
   const enc = (v: unknown, level: number): string => {

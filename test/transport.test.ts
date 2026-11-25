@@ -12,7 +12,7 @@ import { run } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
 import { factory, fakeDaemon, tempDir, tempWorkspace, TOML } from "./helpers.js";
 
-// What a real systemd-run --user --scope said with no user bus: systemd 259 (niilo), 249 (turing).
+// What a real systemd-run --user --scope said with no user bus: systemd 259, then 249.
 const NO_BUS_259 = "Failed to connect to user scope bus via local transport: No such file or directory";
 const NO_BUS_249 = "Failed to connect to bus: No such file or directory";
 // A systemd-run first on PATH: it logs its arguments, one call per line, tab-separated, then runs

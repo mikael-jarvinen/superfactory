@@ -84,7 +84,7 @@ const table: [GuardContext, number, string[]][] = [
   ]],
   // A comment goes out under the human's login: the watcher tells the factory's from the human's by
   // the marker, so a protected session posts only marked or trigger bodies.
-  // Beyond the old table. timeout is unwrapped and its command checked rather than refused; a shell's
+  // Also: timeout is unwrapped and its command checked rather than refused; a shell's
   // -c script is checked; ");" is two operators; a quoted "|" or ">" is a word; >&1 writes no file.
   [ro, REFUSE, ["(ls); git commit -m x", "timeout 5 git commit -m x", "env GIT_DIR=/x/.git git log"]],
   [ro, ALLOW, ["timeout 5 git log -1", "npm test 2>&1", "grep '|' f", "grep '>' f"]],

@@ -2238,8 +2238,8 @@ function shortOption(name: string, o: string): { next: boolean; unknown: boolean
 }
 
 // Whether the words after an option this cannot read may run gh: gh or a shell by name, a word that
-// names gh, or one from a variable or a substitution before what looks like a comment write (sudo
-// --frob x $G pr comment).
+// names gh, or one from a variable or a substitution before what looks like a comment write
+// (sudo --frob x $G pr comment).
 const mayRunGh = (rest: string[]): boolean =>
   rest.some((x, k) =>
     x === "gh" || SHELLS.has(posix.basename(x.replace(/^\\/, "")).toLowerCase()) || namesGh(x) ||
