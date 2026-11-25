@@ -100,7 +100,7 @@ export interface ClaudeRun {
 
 // launchd starts a missed run in a dark wake that lasts seconds, the Mac sleeps again mid-run, and
 // on waking the timeout has long passed. A run that outlived its timeout by more than this was
-// frozen, not stuck: it ends "exit=127" in the failures log.
+// frozen, not stuck, so it is not logged as a failure (runFailure).
 const SLEPT_MARGIN_S = 120;
 
 // The run's reply and exit. A run killed at its timeout counts as failed. A `claude -p` can start
@@ -120,11 +120,11 @@ export function runClaude(ws: Workspace, job: Job, prompt: string, tools: string
   return { status: r.status, stdout: r.stdout, seconds, slept };
 }
 
-// In a `claude -p` the claude.ai
-// connectors arrive a few seconds after the session starts, later on a network still waking from
-// sleep, and a run that searched for the tool before they arrived ended unavailable while the next
-// one read Jira. So a run that cannot reach the tracker gets one more run, half a minute later; a
-// second one that cannot is an outage. TRACKER_RETRY_S overrides the wait, for the tests.
+// In a `claude -p` the claude.ai connectors arrive a few seconds after the session starts, later on
+// a network still waking from sleep, and a run that searched for the tool before they arrived ended
+// unavailable while the next one read Jira. So a run that cannot reach the tracker gets one more
+// run, half a minute later; a second one that cannot is an outage. TRACKER_RETRY_S overrides the
+// wait, for the tests.
 const RETRY_WAIT_S = 30;
 
 export function runReader(ws: Workspace, job: "queue" | "round", prompt: string, tools: string[], log: string): ClaudeRun {

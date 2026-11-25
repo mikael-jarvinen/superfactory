@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import vm from "node:vm";
@@ -12,7 +11,7 @@ import { serve } from "../src/board/server.js";
 import { appendEvent, saveRec } from "../src/state.js";
 import { openWorkspace, type Workspace } from "../src/workspace.js";
 import { worktreePath } from "../src/worktree.js";
-import { GROUPED, tempWorkspace } from "./helpers.js";
+import { GROUPED, tempDir, tempWorkspace } from "./helpers.js";
 
 // A fresh workspace with a lead (ada), builders (bea, cal), a reviewer (rae) and two assistants
 // (otto, nap), whose history is written with known times, and transcripts under the test's own
@@ -432,7 +431,7 @@ test("week and month: labelled bars of averages, a tooltip of the spread, and th
   const table = doc.getElementById("ptable")!.innerHTML;
   state.down = true;
   await state.ticks[0]!();
-  assert.equal(doc.getElementById("at")!.textContent, "not answering");
+  assert.equal(doc.getElementById("at")!.textContent, "not answering: HTTP 500", "a refusal with no error of its own says its status");
   assert.equal(doc.getElementById("ptable")!.innerHTML, table);
 });
 
@@ -637,7 +636,7 @@ test("what stops a host read before it starts is logged, and the report fails wi
 });
 
 test("ssh: what a login shell prints first is skipped, a reply that is not the script's says what it was, and a refused key says why", async () => {
-  const bin = mkdtempSync(join(tmpdir(), "sf-ssh-"));
+  const bin = tempDir("sf-ssh-");
   const stub = (body: string) => {
     writeFileSync(join(bin, "ssh"), `#!/bin/sh\ncat >/dev/null\n${body}\n`);
     chmodSync(join(bin, "ssh"), 0o755);
@@ -655,8 +654,6 @@ test("ssh: what a login shell prints first is skipped, a reply that is not the s
     await assert.rejects(sshRunner("far")("x"), /exited 255: far: Permission denied \(publickey\)\. \(the board has no ssh agent/);
   } finally {
     process.env["PATH"] = path;
-    rmSync(bin, { recursive: true, force: true });
   }
-  assert.ok(!existsSync(bin), "the stub's temp dir is removed");
   assert.throws(() => parseReply('\n--sf-transcripts--\n{"listing"'), /not JSON .*: "\{\\"listing\\""/);
 });

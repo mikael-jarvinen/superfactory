@@ -113,8 +113,8 @@ function resolveDir(dir: string): string {
     return posix.normalize(abs);
   }
 }
-// A path from cwd with its `..` left in: the kernel takes link/.. as the link target's parent, where
-// posix.resolve (and realpathSync, which calls it) drops both (link/../tool).
+// A path from cwd with its `..` left in: the kernel takes link/.. as the link target's parent,
+// where posix.resolve (and realpathSync, which calls it) drops both (link/../tool).
 function unresolved(p: string): string {
   return p.startsWith("/") ? p : `${process.cwd()}/${p}`;
 }
@@ -173,8 +173,8 @@ export function tokenize(cmd: string): Tok[] {
         if (e !== "\n") wordStart = false;
         continue;
       }
-      // a # at the start of a word comments out the rest of its line, a ) in it included: bash reads
-      // on to the next line for the substitution's end
+      // a # at the start of a word comments out the rest of its line, a ) in it included: bash
+      // reads on to the next line for the substitution's end
       if (!q && c === "#" && wordStart) {
         let d = next();
         while (d !== "" && d !== "\n") d = next();
@@ -278,7 +278,8 @@ export function tokenize(cmd: string): Tok[] {
         tok = tok.slice(0, -1) + ansiC(next, (x) => back.push(x));
         quoted = true;
       } else if (c === "'" || c === '"') {
-        // a quote ends the $'s adjacency even when its span adds nothing: bash keeps the $ of $""'x'
+        // a quote ends the $'s adjacency even when its span adds nothing: bash keeps the $ of
+        // $""'x'
         [state, dq, bareDollar] = [c, tok.length, -1];
       } else if (c === "\\") [esc, state] = ["a", "\\"];
       else if (!PUNCT.includes(c)) {
@@ -363,8 +364,9 @@ interface Simple {
   upstream?: string[];
   // the groups, loops, ifs and subshells it is inside, outermost first, each by its own number; 0 is the line
   scope?: number[];
-  // the scopes a ;, &&, || or & closed a pipeline in just before it: what was printed in such a scope before
-  // it reaches no pipe after it (`echo 'a " b'; echo true | at now`, and the same in a { })
+  // the scopes a ;, &&, || or & closed a pipeline in just before it: what was printed in such a
+  // scope before it reaches no pipe after it (`echo 'a " b'; echo true | at now`, and the same in a
+  // { })
   cuts?: number[];
 }
 
@@ -442,8 +444,8 @@ function simpleCommands(toks: Tok[], bodies: string[] = [], ticks: "refuse" | "p
       if (t.includes(">") && !(t === ">&" && /^(\d+|-)$/.test(target))) writes.push(target);
       if (t === "<" || t === "<>") reads.push(target);
       const input = t === "<<<" ? target : t === "<<" && /^HEREDOC\d+$/.test(target) ? (bodies[Number(target.slice(7))] ?? "") : null;
-      // on fd 0 a later input replaces an earlier one, and a file (in reads) leaves no text; on another
-      // fd a text is kept, which over-checks (`bash <<'A' <<'B'` runs only B)
+      // on fd 0 a later input replaces an earlier one, and a file (in reads) leaves no text; on
+      // another fd a text is kept, which over-checks (`bash <<'A' <<'B'` runs only B)
       const onZero = (fd ?? "0") === "0";
       if (onZero && (input !== null || t === "<" || t === "<>")) [in0, redirected0] = [input, true];
       else if (input !== null) stdin.push(input);
@@ -473,8 +475,8 @@ function checkEnvName(n: string) {
 }
 
 // `export PATH=…` overrides the environment as surely as the `PATH=…` prefix does, so both forms
-// are refused alike. The other
-// builtins that assign change PATH, HOME and GIT_* just the same, since those are already exported.
+// are refused alike. The other builtins that assign change PATH, HOME and GIT_* just the same,
+// since those are already exported.
 const ASSIGNERS = new Set(["export", "declare", "typeset", "readonly", "local"]);
 function checkExport(words: string[]) {
   const [w, ...args] = words;
@@ -777,11 +779,11 @@ const API_RENAME_TO_MAIN = /^(-X|--method)\s*=?\s*POST repos\/([\w.-]+\/[\w.-]+)
 
 // Merged means GitHub's compare of the default branch with the branch finds nothing ahead: every
 // commit on the branch is already in the default branch, so deleting it loses nothing. A squash
-// merge leaves the branch ahead and reads as unmerged. Any failure reads as unmerged.
-// The GitHub lookups one verdict makes share one budget, well inside the hook's 10 s timeout:
-// Claude Code lets a call through when its hook times out, so a stalled GitHub must end the lookups
-// with time left for the guard to refuse. A lookup past the budget has failed.
-// The budget is kept by a monotonic clock, which a change to the system's time does not move.
+// merge leaves the branch ahead and reads as unmerged. Any failure reads as unmerged. The GitHub
+// lookups one verdict makes share one budget, well inside the hook's 10 s timeout: Claude Code lets
+// a call through when its hook times out, so a stalled GitHub must end the lookups with time left
+// for the guard to refuse. A lookup past the budget has failed. The budget is kept by a monotonic
+// clock, which a change to the system's time does not move.
 export const GITHUB_BUDGET_MS = 6_000;
 let githubDeadline = 0;
 const startLookups = () => {
@@ -814,10 +816,10 @@ function checkBranchWrite(repo: string, branch: string, ctx: GuardContext, why: 
 }
 
 // Updating a PR's branch merges or rebases its base into its head, a write to the head branch: on a
-// product repo it follows the rule for any branch write, so a PR whose head is the default branch or
-// a protected one is refused, as is one whose head cannot be read. That holds
-// for a PR into the factory's own repo too: its head may be a fork's, a product repo's default branch.
-// There a head that cannot be read stays allowed, as before: it is almost always the factory's own.
+// product repo it follows the rule for any branch write, so a PR whose head is the default branch
+// or a protected one is refused, as is one whose head cannot be read. That holds for a PR into the
+// factory's own repo too: its head may be a fork's, a product repo's default branch. There a head
+// that cannot be read stays allowed, as before: it is almost always the factory's own.
 function checkPrHeadWrite(repo: string, n: string, ctx: GuardContext): void {
   const ownBase = ctx.ownRepos.some((r) => r.toLowerCase() === repo.toLowerCase());
   if (!/^\d+$/.test(n)) return ownBase ? undefined : refuse(`updating a branch of ${repo} needs the PR's number, so the guard can read its head`);
@@ -835,8 +837,8 @@ function prHeadOnGitHub(repo: string, n: string): [string, string] | null {
 
 // The owner/repo a `gh pr <merge|close|...>` targets, from --repo/-R or a PR URL. null when the
 // command relies on the cwd's remote, which the guard cannot resolve -- the caller then fails safe.
-// gh takes the repo from a PR URL over --repo, so a URL and a --repo that disagree, or two of either,
-// are refused: the guard would check one repo while gh acts on the other.
+// gh takes the repo from a PR URL over --repo, so a URL and a --repo that disagree, or two of
+// either, are refused: the guard would check one repo while gh acts on the other.
 function ghPrRepo(args: string[]): string | null {
   const slug = /^[\w.-]+\/[\w.-]+$/;
   const named: string[] = [];
@@ -942,10 +944,10 @@ function checkLeadMerge(args: string[]): void {
 const HOW_TO_CLOSE = "a product PR closes only once the human has named that exact PR and the lead has recorded it with " +
   "`factory allow-close <repo-key> <n> --words \"<the human's words>\"`";
 
-// The comment rule. A comment the factory's sessions post goes out under the
-// human's token login, so the review watcher tells it from the human's own by the marker it starts
-// with. A comment write passes only when its body is in the command and starts with the marker, or
-// is a bot trigger; a body from a file, a $(...) or a variable cannot be checked here.
+// The comment rule. A comment the factory's sessions post goes out under the human's token login,
+// so the review watcher tells it from the human's own by the marker it starts with. A comment write
+// passes only when its body is in the command and starts with the marker, or is a bot trigger; a
+// body from a file, a $(...) or a variable cannot be checked here.
 const COMMENT_HINT = `start the body with "${MARKER}" (or post it with \`factory pr-comment\`), in the command itself, not from a file or $(...)`;
 const markedBody = (b: string) => b.trimStart().startsWith(MARKER) || /^@coderabbitai\b/.test(b.trimStart());
 const UNCHECKABLE = `a comment's body must be checkable: ${COMMENT_HINT}`;
@@ -1045,9 +1047,9 @@ const fromFile = (f: Field) => f.typed && f.value.startsWith("@");
 const COMMENT_PATHS = /(^|\/)(issues|pulls)\/(\d+\/)?(comments|reviews)\b|\/replies\b|(^|\/)commits\/[^/]+\/comments\b/;
 
 // Whether a REST endpoint may post a comment. The shell fills an expansion in it ($N, ${N}, $(...),
-// `...`) before gh sees it, so an expansion reads as any one segment (issues/$N/comments is a comment
-// route), and an endpoint whose route an expansion may supply, one with no literal segment after its
-// last expansion ("$P", repos/o/r/issues/$N), is taken as one that may.
+// `...`) before gh sees it, so an expansion reads as any one segment (issues/$N/comments is a
+// comment route), and an endpoint whose route an expansion may supply, one with no literal segment
+// after its last expansion ("$P", repos/o/r/issues/$N), is taken as one that may.
 const EXPANSION = /\$\{[^}]*\}|\$\([^)]*\)|\$\w+|\$[@*#?$!-]|`[^`]*`/g;
 function commentRoute(endpoint: string): boolean {
   const path = endpoint.replace(/\?.*$/s, "");
@@ -1299,8 +1301,8 @@ function checkApiProtect(args: string[], ctx: GuardContext): void {
     return;
   }
   const own = (repo: string) => ctx.ownRepos.some((r) => r.toLowerCase() === repo.toLowerCase());
-  // PUT pulls/N/update-branch is `gh pr update-branch` by another route, a write to the PR's head
-  //. gh fills {owner} and {repo} from the cwd's remote, which the guard cannot read.
+  // PUT pulls/N/update-branch is `gh pr update-branch` by another route, a write to the PR's head.
+  // gh fills {owner} and {repo} from the cwd's remote, which the guard cannot read.
   if (/\/pulls\/[^/]*\/update-branch\/?(\?|$)/i.test(ep)) {
     const u = /^repos\/([\w.-]+\/[\w.-]+)\/pulls\/(\d+)\/update-branch\/?(?:\?.*)?$/i.exec(ep);
     if (!u) refuse("updating a PR's branch through the API needs repos/owner/name/pulls/<number>/update-branch spelled out, so the guard can read its head");
@@ -1314,8 +1316,8 @@ function checkApiProtect(args: string[], ctx: GuardContext): void {
     const branch = a.fields.filter((f) => f.key === "branch").map((f) => f.value);
     const why = `a contents write to ${repo} needs -f branch=<a feature branch>: without one it commits to the default branch`;
     if (a.input || branch.length !== 1 || !branch[0] || branch[0].startsWith("@") || /[$`]/.test(branch[0] as string)) refuse(why);
-    // gh fills {owner}, {repo} and {branch} in a typed field from the cwd's repo and checkout, which
-    // the guard cannot read: -F branch={branch} on the default branch writes there
+    // gh fills {owner}, {repo} and {branch} in a typed field from the cwd's repo and checkout,
+    // which the guard cannot read: -F branch={branch} on the default branch writes there
     if (/\{(owner|repo|branch)\}/.test(branch[0] as string)) refuse(`${why}; gh fills a {placeholder} from the checkout, which the guard cannot read`);
     checkBranchWrite(repo, branch[0] as string, ctx, why);
   }
@@ -1332,8 +1334,8 @@ function checkApiProtect(args: string[], ctx: GuardContext): void {
 function checkGhProtect(words: string[], ctx: GuardContext): void {
   let args = ghPath(words.slice(1));
   checkGhCommand(args);
-  // gh issue close, reopen, lock and unlock act on a PR given its number (gh's issue/close.go closes
-  // it as a PR), and offline an issue's number cannot be told from a PR's: checked as gh pr
+  // gh issue close, reopen, lock and unlock act on a PR given its number (gh's issue/close.go
+  // closes it as a PR), and offline an issue's number cannot be told from a PR's: checked as gh pr
   if (args[0] === "issue" && ["close", "reopen", "lock", "unlock"].includes(args[1] ?? "")) args = ["pr", ...args.slice(1)];
   if (args[0] === "api") checkApiProtect(args.slice(1), ctx);
   if (args[0] === "pr" && args[1] === "update-branch") {
@@ -1349,7 +1351,8 @@ function checkGhProtect(words: string[], ctx: GuardContext): void {
     const target = (repo as string).toLowerCase();
     // a factory-own repo (lyyti-factory / superfactory): the lead and its assistants may merge or close it.
     if (!ctx.ownRepos.some((r) => r.toLowerCase() === target)) {
-      // the lead may merge test PRs and bug fixes in the repos named in leadMerges
+      // the lead may merge in the repos named in leadMerges, one PR at the head it names
+      // (checkLeadMerge)
       if (args[1] === "merge" && ctx.role === "lead" && (ctx.leadMerges ?? []).some((r) => r.toLowerCase() === target)) {
         checkLeadMerge(args);
         return;
@@ -1410,12 +1413,13 @@ export function mcpCommentVerdict(tool: string, input: unknown): string | null {
   return null;
 }
 
-// The GitHub MCP server's tools reach the same PRs as gh, so the guard sees them too. A read passes. A merge, close or undraft is checked as the gh command
-// it equals, a comment must carry the marker, and a commit to a branch follows git push's rule for
-// protected branches. Any other write, including a tool the server adds later, is refused, and a
-// readonly session writes nothing. The hook sees only mcp__<server>__<tool>, so a GitHub tool is
-// known by its tool name whatever its server is called; an unknown tool is refused only on a server
-// named like GitHub's, and every other server's tools pass.
+// The GitHub MCP server's tools reach the same PRs as gh, so the guard sees them too. A read
+// passes. A merge, close or undraft is checked as the gh command it equals, a comment must carry
+// the marker, and a commit to a branch follows git push's rule for protected branches. Any other
+// write, including a tool the server adds later, is refused, and a readonly session writes nothing.
+// The hook sees only mcp__<server>__<tool>, so a GitHub tool is known by its tool name whatever its
+// server is called; an unknown tool is refused only on a server named like GitHub's, and every
+// other server's tools pass.
 const MCP_TOOL = /^mcp__(.+?)__(.+)$/;
 const MCP_GITHUB_READ = /^(get_\w+|list_\w+|search_\w+|issue_read|pull_request_read)$/;
 const MCP_GITHUB_BRANCH_WRITES = new Set(["push_files", "create_or_update_file", "delete_file", "create_branch"]);
@@ -1832,8 +1836,9 @@ function checkProtect({ words: raw, reads, stdin = [], piped = false, redirected
   // its arguments (ionice, strace, systemd-run, docker exec), so any later word that names one of
   // those, by commandWord's shape and file rule, is checked as a command from there on, and a word
   // holding a command line whose first word names one (watch 'gh pr merge 1', vi -c '!gh ...'), or
-  // an option's value that does (--pre=gh), is checked as that line or word. The command word's arguments are skipped only for a program that can never run another
-  // (DATA_ONLY), and for docker run's image word.
+  // an option's value that does (--pre=gh), is checked as that line or word. The command word's
+  // arguments are skipped only for a program that can never run another (DATA_ONLY), and for docker
+  // run's image word.
   if (!ARGV_CHECKED.has(name) && !SHELLS.has(name) && name !== "sh" && !dataOnly(words, raw)) {
     const image = dockerImage(words);
     for (let i = 1; i < words.length; i++) {
@@ -1885,9 +1890,9 @@ function checkProtect({ words: raw, reads, stdin = [], piped = false, redirected
 
 // ---------------------------------------------------------------- secret files
 //
-// Every role, both policies. A grep's redaction can miss a key, so no command prints a secret file's
-// contents, filtered or not. What cannot print it stays allowed: test -f, ls, stat,
-// grep -q/-l/-c, writing it by redirect, editing it in place with sed -i, and copying a template into
+// Every role, both policies. A grep's redaction can miss a key, so no command prints a secret
+// file's contents, filtered or not. What cannot print it stays allowed: test -f, ls, stat, grep
+// -q/-l/-c, writing it by redirect, editing it in place with sed -i, and copying a template into
 // it. The stack scripts write .env inside `factory stack up`, which the guard never sees into.
 
 // Committed templates hold no secrets, and builders read them to learn the keys.
@@ -1998,16 +2003,16 @@ function checkSecrets({ words: raw, reads }: Simple): void {
 
 // ---------------------------------------------------------------- the hook
 
-// The body starts on the line after the one holding <<DELIM, whatever else is on that line, and ends
-// at a line that is the delimiter (after tabs, for <<-). The delimiter is any word, END-DATA as well as
-// EOF, quoted in whole or in part (<<EN'D-DATA' ends at END-DATA). With any part
-// quoted the body is text; unquoted, bash runs each $(...) and `...` in it.
+// The body starts on the line after the one holding <<DELIM, whatever else is on that line, and
+// ends at a line that is the delimiter (after tabs, for <<-). The delimiter is any word, END-DATA
+// as well as EOF, quoted in whole or in part (<<EN'D-DATA' ends at END-DATA). With any part quoted
+// the body is text; unquoted, bash runs each $(...) and `...` in it.
 const HEREDOC_OPEN = /(?<!<)<<(-?)[ \t]*((?:[^\s'"<>;&|()\\]|\\.|'[^']*'|"(?:[^"\\]|\\.)*")+)/g;
 interface Heredoc { start: number; head: number; rest: string; body: string; quoted: boolean; end: number }
 // Whether text[at] is shell code: not in a comment, where an unquoted # at the start of a word runs
-// to the end of its line, nor inside quotes, where `<<EOF` is text
-// (`echo '<<EOF'` opens no heredoc, and the lines after it are commands). A $( inside double
-// quotes is code again, as in --body "$(cat <<'EOF' ... EOF)", until its ).
+// to the end of its line, nor inside quotes, where `<<EOF` is text (`echo '<<EOF'` opens no
+// heredoc, and the lines after it are commands). A $( inside double quotes is code again, as in
+// --body "$(cat <<'EOF' ... EOF)", until its ).
 function isCode(text: string, at: number): boolean {
   // what each open level is: a quote, a $( or ( of code, or the line
   const stack: string[] = [""];
@@ -2069,8 +2074,8 @@ function nextHeredoc(text: string, from: number): Heredoc | null {
 }
 
 // What echo or printf prints, or null for any other command. Only \\n, \\t and \\\\ are read, and
-// only %s, %d and %%: any other escape (\\x67, \\147, \\c) in echo's words or printf's format, or any
-// other format (%.2s, %b), is UNREADABLE, which a pipe into crontab, at or batch refuses.
+// only %s, %d and %%: any other escape (\\x67, \\147, \\c) in echo's words or printf's format, or
+// any other format (%.2s, %b), is UNREADABLE, which a pipe into crontab, at or batch refuses.
 const UNREADABLE = "\u0000unreadable";
 function printedText(words: string[]): string | null {
   const name = posix.basename(words[0] ?? "");
@@ -2177,8 +2182,8 @@ function checkCommand(cmd: string, ctx: GuardContext): void {
   if (!ctx.cwdChanged && /(^|[^\w.-])(cd|pushd|popd)\b|\s-(execdir|okdir)\b|\s--chdir\b|\benv\b[^;&|\n]*\s-[A-Za-z]*C/.test(cmd)) ctx = { ...ctx, cwdChanged: true };
   // heredocs: keep the header, drop the body so its lines are not parsed as commands. The newline
   // after the closing delimiter stays: without it the next line was read as the header's arguments.
-  // Each body is kept by its number, which takes the delimiter's place after its own `<<`, so the body
-  // is the stdin of the command that opens it (`bash < x.sh <<'E' | cat`).
+  // Each body is kept by its number, which takes the delimiter's place after its own `<<`, so the
+  // body is the stdin of the command that opens it (`bash < x.sh <<'E' | cat`).
   let text = cmd;
   const bodies: string[] = [];
   for (let h = nextHeredoc(text, 0); h; h = nextHeredoc(text, h.start + 1)) {
@@ -2295,9 +2300,10 @@ function looksLikeWrite(rest: string[]): boolean {
 const ENV_DIRS = ["HOME", "PWD", "OLDPWD", "TMPDIR", "CLAUDE_JOB_DIR", "CLAUDE_PROJECT_DIR", "XDG_RUNTIME_DIR"];
 // A name the line sets twice is read only when its values are the same but for the first word's
 // directory, one program by its basename (G=~/.local/bin/gh; [ -x $G ] || G=~/agents/bin/gh), as
-// which one bash runs depends on the path taken (G="gh pr view"; G="gh pr comment"). A value with blanks is
-// read as the words bash splits it into (P="node $CLAUDE_JOB_DIR/tmp/p.mjs"; $P ...). `named` is
-// whether the line names a variable this could not read, bare (G=$(...), read G, for G in).
+// which one bash runs depends on the path taken (G="gh pr view"; G="gh pr comment"). A value with
+// blanks is read as the words bash splits it into (P="node $CLAUDE_JOB_DIR/tmp/p.mjs"; $P ...).
+// `named` is whether the line names a variable this could not read, bare (G=$(...), read G, for G
+// in).
 function lineValues(text: string, sims: Simple[]): { vals: Map<string, string>; named: (n: string) => boolean } {
   const bare = (n: string) => (text.match(new RegExp(`(?<![\\w$])(?<!\\$\\{)${n}(?!\\w)`, "g")) ?? []).length;
   const vals = new Map<string, string>();
@@ -2459,9 +2465,9 @@ function shownInput(s: Simple, into: string): string[] {
 }
 
 // One xargs short-option word, read as xargs reads it: left to right, the first letter that takes a
-// value ends the cluster and the rest of the word is that value, so -dI is a
-// delimiter of I and -ri is -r -i. I, d, E, n, L, P, s and a with nothing after them take the next
-// word; i, e and l take only an attached value. Only I and i set the replace slot (i's is {}).
+// value ends the cluster and the rest of the word is that value, so -dI is a delimiter of I and -ri
+// is -r -i. I, d, E, n, L, P, s and a with nothing after them take the next word; i, e and l take
+// only an attached value. Only I and i set the replace slot (i's is {}).
 const XARGS_VALUE = "IiedElnLPsa";
 function xargsShort(o: string): { next: boolean; slot?: string | "next" } {
   for (let j = 1; j < o.length; j++) {
@@ -2609,13 +2615,12 @@ function replaceString(opts: string[]): string | null {
   return r;
 }
 
-// Whether a line may run gh once bash has removed its quotes: g"h", 'g'h, g\h and g$'h' are all gh
-//. It only picks the lines the comment rule parses, so it may say yes too often;
-// the rule itself reads the parsed command names. env's -Sgh names it too.
-// A \n or \t that echo or printf prints splits words as well: printf 'a\ngh ...' | sh runs gh,
-// so each is read both ways. An octal, hex or unicode escape can spell gh itself
-// (printf '\147h ...' | sh), so a line with one is parsed, where printed text it cannot read is
-// refused only on its way into a shell.
+// Whether a line may run gh once bash has removed its quotes: g"h", 'g'h, g\h and g$'h' are all gh.
+// It only picks the lines the comment rule parses, so it may say yes too often; the rule itself
+// reads the parsed command names. env's -Sgh names it too. A \n or \t that echo or printf prints
+// splits words as well: printf 'a\ngh ...' | sh runs gh, so each is read both ways. An octal, hex
+// or unicode escape can spell gh itself (printf '\147h ...' | sh), so a line with one is parsed,
+// where printed text it cannot read is refused only on its way into a shell.
 const GH_WORD = /(?:\b|-[A-Za-z]*S)gh\b/i;
 export const namesGh = (cmd: string): boolean =>
   /\\(?:[0-7]|x[0-9a-f]|[uU][0-9a-f])/i.test(cmd) ||
@@ -2646,26 +2651,26 @@ function checkComments(cmd: string): void {
     return v !== undefined && /\s/.test(v) ? v.trim().split(/\s+/) : [resolveWord(w, vals)];
   });
   for (const s of sims) {
-    // commandWords, not protect's stripPrefixes: this rule holds sessions that run no protect guard,
-    // so an env override or a wrapper is no refusal here
+    // commandWords, not protect's stripPrefixes: this rule holds sessions that run no protect
+    // guard, so an env override or a wrapper is no refusal here
     const via: { name: string; opts: string[] }[] = [];
     const words = commandWords(read(s.words), via);
     pipe(s, printedText(words));
     // a command word from a variable or a substitution may be gh: G=gh; $G pr comment ..., and
-    // $(echo gh) pr comment .... This line names gh, or it would not be read here.
-    // One lineValues cannot read is refused before what looks like a comment write, not a read.
-    // The whole line is read for one too when what the word holds was made on it: a substitution, or
-    // a variable the line sets some way this cannot read (G=$(echo gh pr comment 5 --body); $G hi).
+    // $(echo gh) pr comment .... This line names gh, or it would not be read here. One lineValues
+    // cannot read is refused before what looks like a comment write, not a read. The whole line is
+    // read for one too when what the word holds was made on it: a substitution, or a variable the
+    // line sets some way this cannot read (G=$(echo gh pr comment 5 --body); $G hi).
     const w0 = words[0] ?? "";
     const made = /\$\(|`/.test(w0) || [...w0.matchAll(/\$\{?([A-Za-z_]\w*)/g)].some((m) => named(m[1] as string));
     if (dynamicWord(w0) && writeAfter(words.slice(1), made ? text : "")) refuse("a command word from a variable or a substitution cannot be checked for a comment it posts: name the command");
     const name = posix.basename((words[0] ?? "").replace(/^\\/, "")).toLowerCase();
-    // xargs runs its command with its input as more arguments (echo '...' | xargs gh,
-    // and | xargs -0 bash -c). A gh or a shell it runs is checked with each text the line shows that
-    // input can be. Input the line does not show is refused, except under -I, where it only fills the
-    // replace string's slots of a command the line shows whole: that command is checked as written.
-    // Shown input under -I goes into those slots, each line and the whole text, so a -c script made
-    // of it is the script checked (xargs -I{} sh -c '{}').
+    // xargs runs its command with its input as more arguments (echo '...' | xargs gh, and | xargs
+    // -0 bash -c). A gh or a shell it runs is checked with each text the line shows that input can
+    // be. Input the line does not show is refused, except under -I, where it only fills the replace
+    // string's slots of a command the line shows whole: that command is checked as written. Shown
+    // input under -I goes into those slots, each line and the whole text, so a -c script made of it
+    // is the script checked (xargs -I{} sh -c '{}').
     const xargs = via.find((v) => v.name === "xargs");
     if (xargs && (name === "gh" || SHELLS.has(name))) {
       const inputs = shownInput(s, name);
@@ -2688,8 +2693,8 @@ function checkComments(cmd: string): void {
       for (const input of inputs) {
         if (slot !== null) {
           const items = how.delim !== null ? input.split(how.delim) : input.split(/\n|\\n/);
-          // in its default mode xargs takes each line's quotes and backslashes as it does for any item,
-          // so sh gets --body > Written..., a redirection; each is read both ways
+          // in its default mode xargs takes each line's quotes and backslashes as it does for any
+          // item, so sh gets --body > Written..., a redirection; each is read both ways
           const unquoted = how.delim !== null ? [] : items.map(xargsLine).filter((l): l is string => l !== null);
           for (const line of new Set([input, ...items, ...unquoted]))
             checkComments(words.map((w) => q(slot ? w.split(slot).join(how.delim !== null ? line : line.replace(/^[ \t]+/, "")) : w)).join(" "));
@@ -2708,8 +2713,8 @@ function checkComments(cmd: string): void {
     else if (SHELLS.has(name)) {
       const script = shellScript(words.slice(1));
       if (script.code !== undefined) checkComments(script.code);
-      // no -c and no script file: the shell runs its stdin, a heredoc or here-string included, which
-      // a quoted heredoc's delimiter does not keep from running
+      // no -c and no script file: the shell runs its stdin, a heredoc or here-string included,
+      // which a quoted heredoc's delimiter does not keep from running
       else if (script.file === undefined)
         for (const input of shownInput(s, name)) if (namesGh(input)) checkComments(input);
     } else if (name === "eval" && words.length > 1) checkComments(words.slice(1).join(" "));
@@ -2749,8 +2754,8 @@ function backtickBodies(text: string): string[] {
   return out;
 }
 
-// The comment rule alone: a command that names no gh cannot post through it,
-// and nothing here refuses for any other reason, so the hook never takes a tool away.
+// The comment rule alone: a command that names no gh cannot post through it, and nothing here
+// refuses for any other reason, so the hook never takes a tool away.
 export function commentVerdict(cmd: string): string | null {
   if (!namesGh(cmd)) return null;
   try {

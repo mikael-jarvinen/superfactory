@@ -337,10 +337,10 @@ function sources(ws: Workspace, items: string[]): Source[] {
   return [...out.values()].filter((s) => s.host || existsSync(s.dir)).sort((a, b) => Number(a.item === null) - Number(b.item === null));
 }
 
-// Reads every host's transcripts that the workspace's sessions wrote there, all hosts at once. `run`
-// is for tests; the board reads over ssh. Resolves when every read has finished or failed.
-// What cannot even be asked (the events log, the config) is logged: report() reads the same records,
-// so it fails with the same error, which /api/analytics answers and the page shows.
+// Reads every host's transcripts that the workspace's sessions wrote there, all hosts at once.
+// `run` is for tests; the board reads over ssh. Resolves when every read has finished or failed.
+// What cannot even be asked (the events log, the config) is logged: report() reads the same
+// records, so it fails with the same error, which /api/analytics answers and the page shows.
 export function refreshHosts(ws: Workspace, usage: TranscriptUsage, run?: (host: string) => Runner): Promise<void> {
   const byHost = new Map<string, string[]>();
   let since: number;

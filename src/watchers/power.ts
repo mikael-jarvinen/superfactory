@@ -1,9 +1,10 @@
 // What the Mac's power state says about a watcher run.
 //
-// launchd starts a run it missed while the Mac slept in the next wake, and on a closed lid that is a
-// dark wake: a maintenance wake of about 45 seconds, no display, the network up. The Mac sleeps again
-// mid-run, and every call in flight then waits for the next wake, an hour or two later: a round
-// reports its check-run reads as CANNOT read, and a queue run takes 20 to 90 minutes and ends "slept".
+// launchd starts a run it missed while the Mac slept in the next wake, and on a closed lid that is
+// a dark wake: a maintenance wake of about 45 seconds, no display, the network up. The Mac sleeps
+// again mid-run, and every call in flight then waits for the next wake, an hour or two later: a
+// round reports its check-run reads as CANNOT read, and a queue run takes 20 to 90 minutes and ends
+// "slept".
 //
 // So a run in a dark wake does nothing and says so, and the round counts a run that found the Mac
 // asleep as the schedule working. `pmset -g systemstate` answers in about 20 ms: a dark wake's

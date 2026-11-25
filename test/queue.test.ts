@@ -426,8 +426,7 @@ test("the message page: a reply marks the question it quoted, even if another re
   assert.equal(t.value, "> second?\n\n");
 });
 
-// The lead reads the
-// queue and marks what an answer settles, through the same file the page writes.
+// The lead reads the queue and marks what an answer settles, through the same file the page writes.
 test("queue from the CLI: the lead lists the open cards and marks them handled, by id or by ticket", () => {
   const ws = workspace();
   const long = "should the event website keep the old design when the organiser picks a new one, or ask first every time it happens? It matters for the two customers on the old design.";
@@ -505,7 +504,8 @@ test("say --answers posts the message and marks what it answers, and a wrong id 
 });
 
 // A decision posted with no ticket, then a ticket blocked on it minutes later with a recap note
-// ("asked the human which formats ..."), is one card, not two, and shows the question, not the recap.
+// ("asked the human which formats ..."), is one card, not two, and shows the question, not the
+// recap.
 test("queue cards: a decision and the block on it are one card, showing the decision, not the block's note", () => {
   const ws = workspace();
   const decision = "Cruz studied how earlier releases were announced. Which formats should I draft: a Productboard card, an in-app What's new, a product-updates post, or a blog?";

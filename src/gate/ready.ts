@@ -59,9 +59,9 @@ function sinceHead(times: (string | null | undefined)[]): number {
   return t.length ? (Date.now() - Math.min(...t)) / 1000 : 0;
 }
 
-// The review bots the gate knows by name: the commit status each posts, and how to ask it to review.
-// `full` asks for a review from scratch, for a bot whose `trigger` reviews only the commits since its
-// last review ("@coderabbitai full review" "Reviews every file in the pull request again
+// The review bots the gate knows by name: the commit status each posts, and how to ask it to
+// review. `full` asks for a review from scratch, for a bot whose `trigger` reviews only the commits
+// since its last review ("@coderabbitai full review" "Reviews every file in the pull request again
 // from scratch", docs.coderabbit.ai/reference/review-commands). pr-wait-coderabbit uses it.
 const KNOWN_BOTS: Record<string, { status: string; ask: string; trigger?: string; full?: string }> = {
   coderabbitai: { status: "CodeRabbit", ask: 'comment "@coderabbitai review" on the PR', trigger: "@coderabbitai review", full: "@coderabbitai full review" },
@@ -198,10 +198,11 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
     }
   }
 
-  // THE REVIEW BOT AT THIS HEAD. The bot reviews the final head before the PR reaches the human.
-  // Every PR is a draft until its item reaches undrafting(ws) in state.ts (colleague-review, or
-  // your-review with [gate] colleague_review = false), and the bot skips drafts, so it reviews only
-  // when asked; a green status from it is no evidence until it says it reviewed this sha.
+  // THE REVIEW BOT AT THIS HEAD. The bot reviews a PR before it reaches the human, unless it is
+  // rate limited or reviewed an earlier head of the PR (below). Every PR is a draft until its item
+  // reaches undrafting(ws) in state.ts (colleague-review, or your-review with [gate]
+  // colleague_review = false), and the bot skips drafts, so it reviews only when asked; a green
+  // status from it is no evidence until it says it reviewed this sha.
   if (botLogin && bot && sts !== undefined) {
     const short = sha.slice(0, 7);
     const st = sts.find(isBot);
@@ -217,25 +218,25 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
     else if (!reviewedRun && !(st?.state === "success" && !NOT_A_REVIEW.test(desc))) {
       const rs = reviews(repo, n);
       if (rs === undefined) fail(`COULD NOT READ the reviews of #${n} -- cannot say whether ${bot.status} reviewed ${short}`, "unreadable");
-      // A review counts only with a body. Each of its replies inside a review thread is a review object
-      // of its own, empty, at the head of the moment, so two replies at
-      // the head would pass for a review that had been rate limited.
+      // A review counts only with a body. Each of its replies inside a review thread is a review
+      // object of its own, empty, at the head of the moment, so two replies at the head would pass
+      // for a review that had been rate limited.
       else if (!rs.some((r) => (r.user?.login ?? "").replace(/\[bot\]$/, "") === botLogin && r.commit_id === sha && !!r.body?.trim())) {
-        // Work goes on without the bot when its limits are hit: its latest word at this head, status
-        // or check-run, saying it is rate limited lets the PR go without its review, said every time.
+        // Work goes on without the bot when its limits are hit: its latest word at this head,
+        // status or check-run, saying it is rate limited lets the PR go without its review, said
+        // every time.
         const age = Math.round(sinceHead([...(runs ?? []).map((c) => c.started_at), ...sts.map((x) => x.created_at)]));
         const runTitle = latestRun?.status === "completed" ? (latestRun.output?.title ?? "") : "";
         const skipped = st ? (SKIPPED.test(desc) ? `its status here says "${desc}"` : "") : SKIPPED.test(runTitle) ? `its check here says "${runTitle}"` : "";
-        // Its check-run still running is it reviewing, however long since the ask: it can still be in
-        // progress when the grace from the ask runs out. pr-wait's own limit bounds the wait.
+        // Its check-run still running is it reviewing, however long since the ask: it can still be
+        // in progress when the grace from the ask runs out. pr-wait's own limit bounds the wait.
         if (latestRun && latestRun.status !== "completed") {
           fail(`${bot.status} is reviewing ${short} (its check here is ${latestRun.status}${latestRun.output?.title ? `: ${latestRun.output.title}` : ""})`, "waits");
         } else {
-          // Its review of the PR's first version is enough: at one review an hour, every fix
-          // round would queue behind it, so later versions go without it. Its unresolved threads
-          // still block, below.
-          // The rate-limit waiver needs no history, so it goes first: a history read that fails
-          // does not hold back a PR the waiver lets go.
+          // Its review of the PR's first version is enough: at CodeRabbit's account limit of one
+          // review an hour, every fix round would queue behind it, so later versions go without it.
+          // Its unresolved threads still block, below. The rate-limit waiver needs no history, so
+          // it goes first: a history read that fails does not hold back a PR the waiver lets go.
           const limited = (st && RATE_LIMITED.test(desc)) || (latestRun && rateLimitedRun(latestRun));
           const earlier: Earlier = limited ? {} : earlierReview(repo, n, botLogin, sha, rs, isBotRun);
           if (limited) remarks.push(`${bot.status} is rate limited and has not reviewed ${short}; sent without its review`);
@@ -307,10 +308,10 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
 // finished, on any sha but the head. Read in that order, so a PR it reviewed costs no reads beyond
 // the reviews already in hand. Reviews and comments are this PR's own. A check-run belongs to a
 // commit, so it counts only when GitHub tied it to this PR, and at a commit no other PR has: a
-// stacked PR carries its lower PR's commits and the reviews the bot did there. The commit's PRs alone do not say whose review it was: GitHub lists only the
-// open and merged ones, so a closed PR's review on a commit another PR now carries read as that
-// one's. A status names no PR, so at an earlier commit it counts
-// for nothing.
+// stacked PR carries its lower PR's commits and the reviews the bot did there. The commit's PRs
+// alone do not say whose review it was: GitHub lists only the open and merged ones, so a closed
+// PR's review on a commit another PR now carries would read as that one's. A status names no PR, so
+// at an earlier commit it counts for nothing.
 interface Earlier {
   sha?: string;
   unreadable?: string;

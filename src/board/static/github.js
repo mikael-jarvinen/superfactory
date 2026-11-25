@@ -191,14 +191,9 @@ function render(d){
 }
 
 async function load(){
-  const pulse = document.getElementById('pulse'), at = document.getElementById('at');
   let d;
-  try {
-    const res = await fetch(apiUrl(), {cache: 'no-store'});
-    if(!res.ok) throw new Error(String(res.status));
-    d = await res.json();
-  } catch { pulse.classList.add('stale'); at.textContent = 'not answering'; return; }
-  pulse.classList.remove('stale'); at.textContent = d.at;
+  try { d = await getJSON(apiUrl()); } catch(e) { notAnswering(e); return; }
+  document.getElementById('pulse').classList.remove('stale'); document.getElementById('at').textContent = d.at;
   hideTip();
   render(d);
 }

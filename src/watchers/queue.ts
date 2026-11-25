@@ -27,8 +27,8 @@ export interface QueueState {
   merged: string[];
   conflicting: string[];
   outcomes: string[];
-  // The summary of every ticket in the queue at its last read: a dispatch titles a new record from it,
-  // since waiting work has no record until then.
+  // The summary of every ticket in the queue at its last read: a dispatch titles a new record from
+  // it, since waiting work has no record until then.
   titles: Record<string, string>;
 }
 
@@ -76,7 +76,8 @@ export function belongs(rec: Rec, remote: string, pr: GhPr): { known: boolean; m
 }
 
 // `gh pr list` returns the newest PRs by creation, so in a busy repo a PR opened days before it
-// merged is never among them, and no watcher would say so. Every PR the store records for these records is read by number.
+// merged is never among them, even dozens of newer PRs behind, and no watcher would say so. Every
+// PR the store records for these records is read by number.
 export function withRecorded(remote: string, recs: Rec[], listed: GhPr[], fields: string): GhPr[] {
   const have = new Set(listed.map((p) => p.number));
   const numbers = new Set(recs.flatMap(recPrs).filter((p) => p.repo === remote && typeof p.number === "number" && !have.has(p.number)).map((p) => p.number as number));
@@ -127,8 +128,8 @@ const conflicted = (pr: GhPr) => pr.mergeable === "CONFLICTING" || pr.mergeState
 // delivery does: the PRs already reported that still conflict, or whose answer is not in yet. A PR
 // GitHub answers UNKNOWN for is still computing, so it is neither news nor cleared: the next run
 // asks again. A merged or closed PR is skipped first: GitHub goes on saying CONFLICTING for a
-// merged one, weeks after the merge. A PR that came
-// clean, closed, or left a watched item is dropped, so a later conflict is news again.
+// merged one, weeks after the merge. A PR that came clean, closed, or left a watched item is
+// dropped, so a later conflict is news again.
 export function conflicts(recs: Rec[], reported: string[], log: string): { lines: string[]; fresh: string[]; keep: string[] } {
   const lines: string[] = [];
   const fresh: string[] = [];

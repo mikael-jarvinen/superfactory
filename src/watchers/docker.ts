@@ -1,6 +1,7 @@
-// Docker Desktop can quit on its own, an orderly quit with no crash and no trigger in its logs,
-// and take every stack down with it, unnoticed until a builder cannot run a test. The queue watcher runs every 15 minutes, so it is the cheapest place to notice and bring it
-// back: start Docker Desktop, then the same detached boot `factory up` uses, which waits for Docker.
+// Docker Desktop can quit on its own, an orderly quit with no crash and no trigger in its logs, and
+// take every stack down with it, unnoticed until a builder cannot run a test. The queue watcher
+// runs every 15 minutes, so it is the cheapest place to notice and bring it back: start Docker
+// Desktop, then the same detached boot `factory up` uses, which waits for Docker.
 import { spawnSync } from "node:child_process";
 import { startBoot } from "../stacks/engine.js";
 import type { Workspace } from "../workspace.js";

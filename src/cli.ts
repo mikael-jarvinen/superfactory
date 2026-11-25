@@ -321,8 +321,8 @@ function cmdState(ws: Workspace, argv: string[]) {
   if (IN_REVIEW.has(next)) releaseForReview(ws, ticket);
 }
 
-// What a block looks like on the human's queue: folded into the question already posted, or only its
-// note, which is no question to decide on, so a block's card never shows the lead's recap
+// What a block looks like on the human's queue: folded into the question already posted, or only
+// its note, which is no question to decide on, so a block's card never shows the lead's recap
 // ("asked ... which ...") in place of the question.
 function blockedCardLines(ws: Workspace, ticket: string): string[] {
   const cards = waitingCards(ws);
@@ -379,8 +379,8 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
       // dispatch would put it; off the board it can go nowhere else.
       const kept = loadRec(ws, ticket);
       const cur = kept?.state ?? null;
-      // The stack is the kept worktree's: the repo it is in, else what the record has. The repo this
-      // dispatch defaults to can be another.
+      // The stack is the kept worktree's: the repo it is in, else what the record has. The repo
+      // this dispatch defaults to can be another.
       const at = (s.cwd ?? "").replace(/\/+$/, "");
       const keptRepo = allowed.find((k) => worktreePath(ws.config.repos[k]!.path, ticket) === at);
       const keptStack = ag.stack ?? keptRepo ?? kept?.stack ?? stack;
@@ -724,8 +724,8 @@ function cmdDown(ws: Workspace, argv: string[]) {
       const showed = ran(s, st);
       const live = t.alive(s);
       // a launch marked as never come up is stopped too, so one up late does not outlive the down,
-      // and keeps its mark: its "stopped" is ours, no evidence that it ran.
-      // One that had shown it ran (a pid, though dead) is not unrun: its stop is read as it is.
+      // and keeps its mark: its "stopped" is ours, no evidence that it ran. One that had shown it
+      // ran (a pid, though dead) is not unrun: its stop is read as it is.
       if (marked && !live && !showed) noteUnrun(ws, sname, sid);
       // and one a down before marked unrun that has shown it ran since leaves unrun before the stop
       // clears its pid

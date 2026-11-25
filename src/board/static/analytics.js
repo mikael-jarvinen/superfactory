@@ -288,16 +288,9 @@ function render(d){
 
 (function(){
   async function tick(){
-    const pulse = document.getElementById('pulse'), at = document.getElementById('at');
     let d;
-    try {
-      const res = await fetch('/api/analytics', {cache: 'no-store'});
-      // the board's own error, when it sent one, says why
-      if(!res.ok) throw new Error((await res.json().catch(() => ({}))).error || '');
-      d = await res.json();
-    }
-    catch(e) { pulse.classList.add('stale'); at.textContent = e.message ? `not answering: ${e.message}` : 'not answering'; return; }
-    pulse.classList.remove('stale'); at.textContent = d.at;
+    try { d = await getJSON('/api/analytics'); } catch(e) { notAnswering(e); return; }
+    document.getElementById('pulse').classList.remove('stale'); document.getElementById('at').textContent = d.at;
     render(d);
   }
   tick(); setInterval(tick, 30000);

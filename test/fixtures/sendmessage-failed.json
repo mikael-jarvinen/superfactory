@@ -1,5 +1,5 @@
 {
-  "_recorded": "Claude Code 2.1.325, 2026-11-15: the hook input of a SendMessage to a known session that was stopped. Session ids and paths dropped; the rest verbatim.",
+  "_recorded": "Claude Code 2.1.325: the hook input of a SendMessage to a known session that was stopped. Session ids and paths dropped; the rest verbatim.",
   "hook_event_name": "PostToolUse",
   "tool_name": "SendMessage",
   "tool_input": {

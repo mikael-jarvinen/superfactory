@@ -50,9 +50,9 @@ export function botReview(ws: Workspace, repo: Repo, n: number): BotReview {
   const desc = st?.description ?? "-";
   const run = runs.filter(isBotRun).sort((a, b) => (a.started_at ?? "").localeCompare(b.started_at ?? "")).at(-1);
 
-  // Reviewed: its status says so, its own check-run finished (a rebase it had already reviewed posts
-  // no review object), or a review with a body at this head (its thread replies are empty review
-  // objects).
+  // Reviewed: its status says so, its own check-run finished (a rebase it had already reviewed
+  // posts no review object), or a review with a body at this head (its thread replies are empty
+  // review objects).
   if (st?.state === "success" && !NOT_A_REVIEW.test(desc)) return { head, reviewed: true, text: `${bot.status} reviewed ${short}` };
   if (!st && run?.status === "completed" && run.conclusion === "success" && REVIEWED_RUN.test(run.output?.title ?? ""))
     return { head, reviewed: true, text: `${bot.status} reviewed ${short}` };

@@ -175,11 +175,11 @@ export function toPr(repo: string, n: RawPr, bots: Set<string>): Pr {
 // instead (see report()), which folds a reviewer's replies into their review that day.
 //
 // GitHub's secondary rate limit refuses a run of heavy searches fired back to back ("API rate limit
-// exceeded", type RATE_LIMITED, with points to spare): a first read of five repos can be
-// cut off by it after ten minutes. So pages are paced, and a refused page waits and is asked again.
-// A page of 100 PRs with their line counts can also time out behind GitHub's gateway (HTTP 502, as
-// with an hour of a repo with 400 PRs updated in it), or come back cut short (gh: "unexpected end of
-// JSON input"): that page is asked again at half the size.
+// exceeded", type RATE_LIMITED, with points to spare): a first read of five repos can be cut off by
+// it after ten minutes. So pages are paced, and a refused page waits and is asked again. A page of
+// 100 PRs with their line counts can also time out behind GitHub's gateway (HTTP 502, as with an
+// hour of a repo with 400 PRs updated in it), or come back cut short (gh: "unexpected end of JSON
+// input"): that page is asked again at half the size.
 export const pacing = { pageMs: 1500, limitedMs: 60_000, failedMs: 5_000, tries: 4, reserve: 1500, page: 100, minPage: 10 };
 
 // The GraphQL points are the whole fleet's: the gate, the review watcher and the board's badges all
@@ -595,8 +595,8 @@ export interface View {
   repos: { key: string; remote: string; name: string }[];
   groups: { label: string; repos: string[] }[];
   selected: string[];
-  // every person by PRs opened plus reviews over the whole cache. Both charts colour people by it, so a
-  // person has one colour in PR and review traffic alike, whatever the filter.
+  // every person by PRs opened plus reviews over the whole cache. Both charts colour people by it,
+  // so a person has one colour in PR and review traffic alike, whatever the filter.
   rank: string[];
   report: Report | null;
 }

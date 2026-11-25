@@ -10,9 +10,9 @@ export const ghBin = () => process.env.GH_BIN || "gh";
 export const gh = (...args: string[]): RunResult => run(ghBin(), args);
 
 // GitHub refuses a PR's diff past 20000 lines with HTTP 406, however few files it touches. Then the
-// diff comes from the repo's checkout instead, origin/<base>...<head>
-// after a fetch of the base, and of the PR's head when the checkout lacks it. Never a shallow fetch:
-// .git/shallow is shared by every worktree of the checkout. `local` says where the diff came from.
+// diff comes from the repo's checkout instead, origin/<base>...<head> after a fetch of the base,
+// and of the PR's head when the checkout lacks it. Never a shallow fetch: .git/shallow is shared by
+// every worktree of the checkout. `local` says where the diff came from.
 const TOO_LARGE = /HTTP 406|too_large|exceeded the maximum number of lines/;
 export function prDiff(repo: Repo, n: number, base: string, head: string): RunResult & { local?: boolean } {
   const r = gh("pr", "diff", String(n), "--repo", repo.remote);
@@ -173,8 +173,8 @@ export function reviews(repo: Repo, n: number): Review[] | undefined {
 
 // What was said to and by a review bot on PR #n since its head commit: when each trigger was last
 // asked, and when the bot last answered that it is rate limited. Its rate-limit reply is a comment
-// ("Action not completed ... Review rate limited"),
-// sometimes with no check-run at the head to say so. Undefined when the comments cannot be read.
+// ("Action not completed ... Review rate limited"), sometimes with no check-run at the head to say
+// so. Undefined when the comments cannot be read.
 export interface Conversation {
   // trigger body -> ms since the epoch of its latest ask after the head commit
   asked: Map<string, number>;

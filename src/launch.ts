@@ -38,10 +38,10 @@ export function sessionEnv(ws: Workspace, agent: Agent, path = process.env.PATH 
   const prepend = stack?.pathPrepend ?? [];
   const env: Record<string, string> = { ...stack?.env };
   // path is this process's, and a wake renders a recipient's settings in its sender's hook, whose
-  // PATH starts with what the sender's stack prepended. Exactly that run comes
-  // out, and nothing else: a render never dedupes, so a directory a stack shares with the system
-  // PATH, /usr/local/bin say, keeps its system copy and survives the next render.
-  // A recipient that prepends nothing, on a stack or none, still loses the sender's run.
+  // PATH starts with what the sender's stack prepended. Exactly that run comes out, and nothing
+  // else: a render never dedupes, so a directory a stack shares with the system PATH,
+  // /usr/local/bin say, keeps its system copy and survives the next render. A recipient that
+  // prepends nothing, on a stack or none, still loses the sender's run.
   if (prepend.length || sent) {
     env.PATH = [...prepend, ...withoutRun(path.split(":").filter(Boolean), sent.split(":").filter(Boolean))].join(":");
     env[PREPENDED] = prepend.join(":");
@@ -68,13 +68,13 @@ export function settingsFile(ws: Workspace, agent: Agent): string {
 
 // Before a session is resumed or respawned. A respawn reruns a session's old command line, whose
 // --settings names the file settingsFile renders, so the file is rendered again first: a session
-// stopped before an upgrade comes back with the current hooks, the guard's matcher among them
-//. And its current appendix is written, which the SessionStart hook hands the resumed session (hooks/appendix.ts), since claude
-// keeps the system prompt a session started with and reads no new appendix then (as of Claude
-// Code 2.1.327). A hosted agent's are written on its host, from the respawn request (refreshHosted).
-// An appendix of undefined leaves the copy written last. The appendix is written first: up respawns
-// a lead whose settings cannot be rendered, on the last render, and that lead still gets its brief
-// as it is now.
+// stopped before an upgrade comes back with the current hooks, the guard's matcher among them. And
+// its current appendix is written, which the SessionStart hook hands the resumed session
+// (hooks/appendix.ts), since claude keeps the system prompt a session started with and reads no new
+// appendix then (as of Claude Code 2.1.327). A hosted agent's are written on its host, from the
+// respawn request (refreshHosted). An appendix of undefined leaves the copy written last. The
+// appendix is written first: up respawns a lead whose settings cannot be rendered, on the last
+// render, and that lead still gets its brief as it is now.
 export function refreshSession(ws: Workspace, agent: Agent, appendix: string | null | undefined): void {
   if (agent.host) return;
   if (appendix !== undefined) writeCurrentAppendix(ws.runDir, agent.name, appendix);

@@ -244,8 +244,8 @@ const asking = (...reads: unknown[][]): Routes => ({
   [POST]: { stdout: `https://github.com/${REMOTE}/pull/${N}#issuecomment-1\n` },
 });
 
-// CodeRabbit reviews before a PR reaches the human. The statuses are CodeRabbit's own, as it posts
-// them on real PRs.
+// CodeRabbit reviews a PR before it reaches the human, unless it is rate limited or reviewed an
+// earlier head (below). The statuses are CodeRabbit's own, as it posts them on real PRs.
 test("a required review bot must have reviewed the head: pr-ready refuses, pr-wait waits while it reviews", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
@@ -294,8 +294,8 @@ test("a required review bot must have reviewed the head: pr-ready refuses, pr-wa
   assert.match(r.stderr, /still waiting after \d+s on:\n {2}- CodeRabbit has not reviewed aaaaaaa/);
 });
 
-// CodeRabbit's account gets one review an hour, kept for the first version of each PR; later versions
-// go without it.
+// CodeRabbit's account limit is one review an hour, kept for the first version of each PR; later
+// versions go without it.
 test("a review bot that reviewed an earlier head of the PR lets later heads pass, said as a remark", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const OLD = "b".repeat(40);
@@ -324,9 +324,9 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
     { [cm]: { stdout: [{ user: { login: "coderabbitai[bot]" }, original_commit_id: OLD, in_reply_to_id: null }] } },
     { [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, ...onlyThisPr, [oldStatus]: { stdout: { statuses: [] } },
       [oldRuns]: checkRuns(check("test"), rabbitRun("Review completed", { conclusion: "success", ...ours })) },
-    // a clean incremental pass leaves no review, no comment and no status, only its check-run titled
-    // Finished, where GitHub ties the run to the open PR. It posts no commit status for such a pass, so
-    // a status is not read for it
+    // a clean incremental pass leaves no review, no comment and no status, only its check-run
+    // titled Finished, where GitHub ties the run to the open PR. It posts no commit status for such
+    // a pass, on any commit of a PR, so a status is not read for it
     { [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, ...onlyThisPr, [oldStatus]: { stdout: { statuses: [] } },
       [oldRuns]: checkRuns(check("test"), rabbitRun("Finished", { conclusion: "success", ...ours })) },
   ];
@@ -342,10 +342,10 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
   r = ready({ ...evidence[2], [oldPulls]: { stdout: [{ number: N - 1 }, { number: N }] } });
   assert.equal(r.status, 1, r.stdout);
   assert.doesNotMatch(r.stdout, /earlier head/);
-  // A closed, unmerged PR's review stays on its commits, and GitHub
-  // lists only open and merged PRs for a commit, so a commit of this PR's that only this PR is listed
-  // for may carry that one's review. Its status names no PR, and its check-run names the closed PR,
-  // or none: neither is this PR's review.
+  // A closed, unmerged PR's review stays on its commits, and GitHub lists only open and merged PRs
+  // for a commit, so a commit of this PR's that only this PR is listed for may carry that one's
+  // review. Its status names no PR, and its check-run names the closed PR, or none: neither is this
+  // PR's review.
   const closed = { pull_requests: [{ number: N - 5 }] };
   const retained: [string, Routes][] = [
     ["a status", { ...evidence[2], [oldRuns]: checkRuns(check("test")),
@@ -391,8 +391,8 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
   assert.match(r.stderr, /waiting \(\d+s\) on: CodeRabbit is reviewing aaaaaaa \(Review in progress\)/);
 });
 
-// CodeRabbit skips drafts, so the gate asks for the review itself. Its check-runs are its own, as it
-// posts them on real PRs.
+// CodeRabbit skips drafts, so the gate asks for the review itself. Its check-runs are its own, as
+// it posts them on real PRs.
 test("pr-wait asks a review bot that skipped the head, once, and waits for it", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
@@ -425,8 +425,8 @@ test("pr-wait asks a review bot that skipped the head, once, and waits for it", 
   assert.equal(r.calls.filter((c) => c === POST).length, 1);
 });
 
-// After the ask CodeRabbit's skipped check-run is gone and the grace since the head's first check can
-// be long past; pr-wait must not refuse minutes before the review comes.
+// After the ask CodeRabbit's skipped check-run is gone and the grace since the head's first check
+// can be long past; pr-wait must not refuse minutes before the review comes.
 test("pr-wait waits on a review bot it asked, timed from the ask, not the head", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
@@ -454,8 +454,9 @@ test("pr-wait waits on a review bot it asked, timed from the ask, not the head",
   assert.match(r.stderr, /waiting will not clear it:\n {2}- CodeRabbit has not reviewed aaaaaaa: it has posted nothing at this head/);
 });
 
-// CodeRabbit's check-run can go in_progress within a minute of the ask and still be running when the
-// grace from the ask runs out. A bot whose check is running is reviewing, whatever the clock says.
+// CodeRabbit's check-run can go in_progress within a minute of the ask and still be running when
+// the grace from the ask runs out. A bot whose check is running is reviewing, whatever the clock
+// says.
 test("pr-wait waits on a review bot whose check is still running, past the grace from the ask", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
@@ -478,7 +479,8 @@ test("pr-wait waits on a review bot whose check is still running, past the grace
   assert.match(r.stdout, /^SENDABLE/m);
 });
 
-// The check-run is CodeRabbit's own, as it posts it on a real PR: neutral, titled "Review rate limited".
+// The check-run is CodeRabbit's own, as it posts it on a real PR: neutral, titled "Review rate
+// limited".
 const rabbitRun = (title: string, o: Record<string, unknown> = {}) =>
   check("CodeRabbit", { conclusion: "neutral", output: { title }, app: { slug: "coderabbitai" }, details_url: null, ...o });
 
@@ -524,8 +526,8 @@ test("a rate-limited review bot lets the PR go without its review, said as a rem
   assert.match(r.stdout, /check 'CodeRabbit' is in_progress, not completed/);
 });
 
-// Its replies in review threads are review objects at the head's sha, and the gate does not read them
-// as its review of the head.
+// Its replies in review threads are review objects at the head's sha, and the gate does not read
+// them as its review of the head.
 test("a review bot's replies in review threads are not its review of the head", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const reply = { user: { login: "coderabbitai[bot]" }, commit_id: HEAD, state: "COMMENTED", body: "" };
@@ -547,8 +549,8 @@ test("a review bot's replies in review threads are not its review of the head", 
   assert.ok(r.stdout.includes("CodeRabbit is rate limited and has not reviewed aaaaaaa; sent without its review"), r.stdout);
 });
 
-// After a rebase CodeRabbit says "Already reviewed the last commit", finishes its check-run green, and
-// sets no status and no review object.
+// After a rebase CodeRabbit says "Already reviewed the last commit", finishes its check-run green,
+// and sets no status and no review object.
 test("a review bot's own finished check-run at the head counts as its review", () => {
   const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
@@ -596,7 +598,7 @@ test("gate jobs that have not started yet are waited on for a while after the pu
   assert.match(late.stdout, /none of the repo's gate jobs ran at a+ \(test\) -- the gate is missing, not green/);
 });
 
-// A PR is open only in the colleague review column.
+// With colleague review on, pr-open-for-review is where a PR leaves draft.
 test("pr-open-for-review opens the item's PRs at the reviewed sha, then records colleague review", () => {
   const { ws, run } = gateWorkspace();
   const stateOf = () => /"state": "([a-z-]+)"/.exec(factory(ws, ["state", "WEB-1"]).stdout)?.[1];
@@ -889,8 +891,8 @@ test("demo --before finds the base commit the checked-out files match", () => {
   assert.equal(beforeSha(dir).sha, base);
 });
 
-// A PR stacked on another branch: its before is that branch's head on origin, named with --base-ref,
-// not main.
+// A PR stacked on another branch: its before is that branch's head on origin, named with
+// --base-ref, not main.
 test("demo --before --base-ref accepts a stacked PR's base and still refuses an unrelated commit", () => {
   const dir = join(tempWorkspace(TOML), "repo");
   after(() => rmSync(dirname(dir), { recursive: true, force: true }));

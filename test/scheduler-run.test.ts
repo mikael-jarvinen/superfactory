@@ -300,15 +300,15 @@ test("what an ended run leaves in its process group is cleaned up, but never a c
   process.kill(pid, "SIGKILL"); // up alone: its group lives on
   await until("the stray to be cleaned up", () => !runningNotZombie(stray));
   // up's own systemd-run can still be in the group when the run ends: it may be listed beside the
-  // stray, which is still required (the CI flake at 7a20b268)
+  // stray, which is still required
   assert.match(d.out, new RegExp(`job ${UP.replace(/\./g, "\\.")}: ended, leaving (\\d+ \\(systemd-run\\), )?${stray} \\(sleep\\)(, \\d+ \\(systemd-run\\))? in its process group or scopes; SIGTERM`), d.out);
   assert.ok(runningNotZombie(session), "a claude in the group is left alone");
   assert.ok(runningNotZombie(child), "and so is what runs under it");
   d.kill();
 });
 
-// A process caught in exec, as a systemd-run becoming the claude it runs, reads with no command line
-// for a moment, and must not be killed as no claude by up's next listing. A stray that blanks
+// A process caught in exec, as a systemd-run becoming the claude it runs, reads with no command
+// line for a moment, and must not be killed as no claude by up's next listing. A stray that blanks
 // its own command line stands in for one, and is not killed while it reads so.
 test("a process whose command line reads empty is not killed, and its group waits for the next check", { skip: noCleanup() }, async () => {
   const t = await setup();

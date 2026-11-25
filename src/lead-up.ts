@@ -97,8 +97,7 @@ function resume(ws: Workspace, ld: Agent, t: Transport, old: Session, sessionId:
     return false;
   }
   // Up under a new id, the one a later stop records; until now the record stays, so a resume that
-  // fails leaves the next try aimed at the same conversation. The row it
-  // replaced is removed below.
+  // fails leaves the next try aimed at the same conversation. The row it replaced is removed below.
   // Launches still marked keep their marks, now on the new id.
   if (marks && back.id) replaceStopped(ws, ld.name, t, back.id);
   else if (back.id) moveRecord(ws, ld.name, back.id, lastStopped(ws, ld.name)?.failed ?? []);

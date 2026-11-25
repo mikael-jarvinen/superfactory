@@ -390,8 +390,9 @@ function snapshot(ws: Workspace, sessions: SessionCache, stacks: StackChecks, re
       review: r.state !== null && IN_REVIEW.has(r.state) ? reviews.get(prKey(p)) : null,
       assignees: reviews.get(prKey(p))?.assignees ?? [],
     })),
-    // The card carries the design's slideset, from design-review through the build. An item has one once a designer has sent it for review. No "approved" mark: on a card
-    // in building or fixing it read as if the PR were approved.
+    // The card carries the design's slideset, from design-review through the build. An item has one
+    // once a designer has sent it for review. No "approved" mark: on a card in building or fixing
+    // it read as if the PR were approved.
     design: r.design?.slides ? { slides: r.design.slides, canvas: r.design.canvas } : null,
   }));
   // A state the workspace has turned off (colleague-review, with colleague_review false) has no

@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { counts, dayOf, daysEnding, pacing, peopleRank, type Person, type Pr, readCache, refreshCache, report, type Review, toPr } from "../src/board/github.js";
 import type { Workspace } from "../src/workspace.js";
 
-// Reviews per day and PRs approved per day, by person. The counting is a pure function of the cached PRs.
+// Reviews per day and PRs approved per day, by person. The counting is a pure function of the
+// cached PRs.
 
 const who = (login: string, bot = false): Person => ({ login, name: login, avatar: "", bot });
 const rv = (login: string, state: string, at: string, more: Partial<Review> = {}): Review => ({ state, at, author: who(login), factory: false, ...more });

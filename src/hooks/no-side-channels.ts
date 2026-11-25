@@ -4,10 +4,10 @@
 // deny rules do not apply. Which tools reach it is decided when the settings are rendered.
 //
 // Slack is read-only, and only for the lead and the assistants. The guard keeps agents from sending
-// messages on their own, not from reading. So the reads below
-// pass for those two roles, by exact name: an allow-list, so a tool the connector adds later is
-// refused until someone names it here. Every other Slack tool, posting above all, is refused for every
-// role, and builders, reviewers and designers get no Slack at all.
+// messages on their own, not from reading. So the reads below pass for those two roles, by exact
+// name: an allow-list, so a tool the connector adds later is refused until someone names it here.
+// Every other Slack tool, posting above all, is refused for every role, and builders, reviewers and
+// designers get no Slack at all.
 import { parseArgs } from "node:util";
 import type { HookResult } from "../settings.js";
 import { capitalize } from "../util.js";

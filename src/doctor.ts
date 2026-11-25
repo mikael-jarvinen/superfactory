@@ -239,7 +239,8 @@ export function workspaceFiles(ws: Workspace): Check[] {
 // ---------------------------------------------------------------- the state store
 
 // Turning colleague review off strands an item already in it: nothing moves anything into it, and
-// pr-open-for-review refuses. A real inconsistency, so MISSING, and doctor exits 1. One line, only where the switch is off.
+// pr-open-for-review refuses. A real inconsistency, so MISSING, and doctor exits 1. One line, only
+// where the switch is off.
 export function stateChecks(ws: Workspace): Check[] {
   if (usesState(ws, "colleague-review")) return [];
   const left = stranded(ws, allRecs(ws)).map((r) => r.ticket);

@@ -138,8 +138,8 @@ test("refreshHosted, for the daemon: the settings rendered again and the current
   assert.ok(!existsSync(currentAppendixPath(ws.runDir, "vega")));
 });
 
-// The daemon's resume at boot respawns on a settings failure, so a render that throws first must not
-// leave the session on its old brief.
+// The daemon's resume at boot respawns on a settings failure, so a render that throws first must
+// not leave the session on its old brief.
 test("refreshHosted writes the brief before the settings, so a render that throws leaves it written", () => {
   const { dir, ws } = workspace();
   (ws.config.roles[agentOrDie(ws, "vega").role] as { settings: string }).settings = join(dir, "gone.json");
@@ -172,8 +172,8 @@ test("a builder's current brief reads its repo: files from the checkout of the r
   assert.match(currentAppendix(ws, bea, join(dir, "elsewhere")) ?? "", /web's agents file/, "else its first repo's");
 });
 
-// roleAppendix with no repo must not throw on a repo: file, or the wake takes that as undefined and a
-// hosted builder is never sent its brief as it is now.
+// roleAppendix with no repo must not throw on a repo: file, or the wake takes that as undefined and
+// a hosted builder is never sent its brief as it is now.
 test("a hosted builder's current brief reads its repo: files from its first repo, as dispatch does", () => {
   const { ws } = workspace();
   const bea = { ...agentOrDie(ws, "bea"), host: "far" };

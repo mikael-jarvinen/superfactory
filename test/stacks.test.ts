@@ -446,7 +446,8 @@ createServer((_, res) => res.end("ok")).listen(Number(process.argv[2]), "127.0.0
   assert.match(late.stderr, /did not answer below 400 within 1 s/);
 });
 
-// An item recorded to an assistant can take a stack: release messaging needs one for its screenshots.
+// An item recorded to an assistant can take a stack: release messaging needs one for its
+// screenshots.
 test("an assistant's item gets the slot it names: never the reserved one, a pinned one, or one with work in progress", () => {
   const { dir, ws, wt } = setup();
   const up = (cwd: string, ...args: string[]) => factory(dir, ["stack", "up", ...args], { cwd });

@@ -37,18 +37,20 @@ function save(ws: Workspace, name: string, given: Stopped): void {
 
 // rows: the listing at the stop, when it could be had. A launch still marked as never come up keeps
 // its mark across the stop, while its row is listed and has shown nothing; the mark is all that
-// keeps a row whose host clock is ahead from passing as newer than the stop. Without a listing every mark is carried.
+// keeps a row whose host clock is ahead from passing as newer than the stop. Without a listing
+// every mark is carried.
 export function noteStopped(ws: Workspace, name: string, s: Session | null, rows?: Session[]): void {
-  // a row with no name is no agent's (down wrote stopped-.json)
+  // a row with no name is no agent's, so no stopped-.json is written for it
   if (!s?.id || !name) return;
   const st = seen(ws, name, lastStopped(ws, name), rows);
   const failed = held(st, rows, s.id);
   save(ws, name, { id: s.id, at: new Date().toISOString(), ...(failed.length ? { failed, unrun: st?.unrun } : {}) });
 }
 
-// The marks that still stand: a launch whose row is listed and has not shown it ran, except the
-// row now taking the record. Every writer of a record carries these, so no path drops one. A listing
-// that failed or came back empty shows nothing either way, so every mark is kept: a mark kept too long costs a skipped row, one dropped can wake a dead launch.
+// The marks that still stand: a launch whose row is listed and has not shown it ran, except the row
+// now taking the record. Every writer of a record carries these, so no path drops one. A listing
+// that failed or came back empty shows nothing either way, so every mark is kept: a mark kept too
+// long costs a skipped row, one dropped can wake a dead launch.
 function held(st: Stopped | null | undefined, rows: Session[] | undefined, except: string): string[] {
   const listed = rows?.length ? rows : null;
   return (st?.failed ?? []).filter((id) => id !== except && (!listed || listed.some((r) => r.id === id && !ran(r, st))));
@@ -97,8 +99,8 @@ export function lastStopped(ws: Workspace, name: string): Stopped | null {
 }
 
 // The agent's rows a launch is about to add to, by id, read before it starts: what a failed launch
-// added is what was not there, with no clock compared (a remote listing's startedAt
-// is another host's clock). null when the listing cannot be had.
+// added is what was not there, with no clock compared (a remote listing's startedAt is another
+// host's clock). null when the listing cannot be had.
 export function rowsBefore(t: Pick<Transport, "sessions">, name: string): Session[] | null {
   try {
     return t.sessions(true).filter((r) => r.name === name && r.kind === "background");
@@ -108,10 +110,10 @@ export function rowsBefore(t: Pick<Transport, "sessions">, name: string): Sessio
 }
 
 // A launch that never came up, so a wake still resumes the session stopped last rather than its row
-// (the listing keeps that row, started after the stop, and resumable took it for
-// a newer conversation). The row is kept for \`claude logs\`; its id is noted here, with any other
-// row of the agent that was not listed before the launch. With no record, the newest row from
-// before is written as the one to resume, so the dead launch is not it either.
+// (the listing keeps that row, started after the stop, and resumable would take it for a newer
+// conversation). The row is kept for \`claude logs\`; its id is noted here, with any other row of
+// the agent that was not listed before the launch. With no record, the newest row from before is
+// written as the one to resume, so the dead launch is not it either.
 export function noteFailedLaunch(ws: Workspace, name: string, t: Pick<Transport, "sessions">, launchId: string, before: Session[] | null): void {
   const was = new Set((before ?? []).map((r) => r.id));
   const ids = new Set<string>();
@@ -152,11 +154,10 @@ export function moveRecord(ws: Workspace, name: string, id: string, failed: Iter
 
 export const forgetStopped = (ws: Workspace, name: string) => rmSync(file(ws, name), { force: true });
 
-// Rows a new conversation replaced that a caller with a deadline could not stop and remove (a hook's
-// wake). They live in a file of their own, beside the record, so no
-// writer of the record drops them, and the next caller with no deadline (up, a CLI wake, stop,
-// down, restart-lead, a launch) stops and removes them (rows pile up
-// otherwise). A stale id is never a wake candidate.
+// Rows a new conversation replaced that a caller with a deadline could not stop and remove (a
+// hook's wake). They live in a file of their own, beside the record, so no writer of the record
+// drops them, and the next caller with no deadline (up, a CLI wake, stop, down, restart-lead, a
+// launch) stops and removes them (rows pile up otherwise). A stale id is never a wake candidate.
 const staleFile = (ws: Workspace, name: string) => join(ws.runDir, `stale-${name}.json`);
 
 export function staleIds(ws: Workspace, name: string): string[] {
@@ -188,11 +189,11 @@ function dropStale(ws: Workspace, name: string, ids: string[]): void {
   if (now.some((id) => ids.includes(id))) saveStale(ws, name, now.filter((id) => !ids.includes(id)));
 }
 
-// For a caller with no deadline: the stale rows are stopped and removed, and their ids returned. One
-// live again is no longer stale, and is left; one no longer listed is gone already; the one the record
-// names is the conversation, and is never removed (a stale row resumed by
-// hand, then stopped, would go with its conversation). A listing that failed or came back empty shows
-// nothing, and every id is kept, as are those whose removal failed.
+// For a caller with no deadline: the stale rows are stopped and removed, and their ids returned.
+// One live again is no longer stale, and is left; one no longer listed is gone already; the one the
+// record names is the conversation, and is never removed (a stale row resumed by hand, then
+// stopped, would go with its conversation). A listing that failed or came back empty shows nothing,
+// and every id is kept, as are those whose removal failed.
 export function sweepStale(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, rows?: Session[]): string[] {
   const ids = staleIds(ws, name);
   if (!ids.length || !name) return [];
@@ -224,8 +225,8 @@ export function sweepStale(ws: Workspace, name: string, t: Pick<Transport, "sess
   return removed;
 }
 
-// The command that starts an agent fresh, for when its conversation cannot come back
-// (a refusal that says only "factory wake" sends people back into the command that just failed).
+// The command that starts an agent fresh, for when its conversation cannot come back (a refusal
+// that says only "factory wake" sends people back into the command that just failed).
 export const freshCommand = (a: Pick<Agent, "name" | "role">): string =>
   a.role === "lead" ? "factory up --fresh"
     : a.role === "reviewer" ? `factory review --name ${a.name} --force`
@@ -242,13 +243,13 @@ export const ran = (r: Session, st?: Stopped | null): boolean =>
 const startMs = (r: Session): number =>
   typeof r.startedAt === "number" ? r.startedAt : Date.parse(String(r.startedAt ?? r.createdAt ?? ""));
 
-// The row a resume is for: the one stopped last when the factory stopped it, else the newest.
-// A recorded row that is gone is said, never replaced by an older one. The record lives on the box
+// The row a resume is for: the one stopped last when the factory stopped it, else the newest. A
+// recorded row that is gone is said, never replaced by an older one. The record lives on the box
 // that stopped it, so a launch from another box does not forget it; a row started after the stop
-// (another conversation, launched since) makes it stale, and the newest is the one.
-// A row chosen because a marked launch ran comes with the marks still held: once it is up, the
-// caller passes them to supersede. Nothing is replaced before then, so a wake that resumes nothing
-// leaves the record and the stopped row as they were.
+// (another conversation, launched since) makes it stale, and the newest is the one. A row chosen
+// because a marked launch ran comes with the marks still held: once it is up, the caller passes
+// them to supersede. Nothing is replaced before then, so a wake that resumes nothing leaves the
+// record and the stopped row as they were.
 export function resumable(ws: Workspace, name: string, rows: Session[], newest: (r: Session[]) => Session | null):
   { s: Session | null; failed?: string[] } | { gone: string } {
   // the record's own id is never stale: a writer that names it again has taken it back
@@ -258,15 +259,15 @@ export function resumable(ws: Workspace, name: string, rows: Session[], newest: 
   if (!st) return { s: newest(rows) };
   const at = Date.parse(st.at);
   // a noted launch holds its mark until its row shows it ran: a state only a session that came up
-  // reaches (done, blocked, stopped), or a worker's pid. A row still "working" with no pid after the
-  // launch gave up, or one with no state, has shown nothing and stays marked.
+  // reaches (done, blocked, stopped), or a worker's pid. A row still "working" with no pid after
+  // the launch gave up, or one with no state, has shown nothing and stays marked.
   const marked = new Set(st.failed ?? []);
   const failed = new Set([...marked].filter((id) => !rows.some((r) => r.id === id && ran(r, st))));
   // A marked launch that has run since came up after the stop, whatever its host's clock says of
   // its start. It replaces the record once up, as cameUp does for one seen live, so a later wake
-  // does not read the mark again once the row is back to "working".
-  // The stopped row is no candidate then: its start and the marked row's are not compared, as a
-  // remote clock can put the launch before it; the rows are those started since.
+  // does not read the mark again once the row is back to "working". The stopped row is no candidate
+  // then: its start and the marked row's are not compared, as a remote clock can put the launch
+  // before it; the rows are those started since.
   const after = (r: Session) => r.id !== st.id && !marked.has(r.id ?? "") && startMs(r) > at;
   const since = rows.filter((r) => !!r.id && marked.has(r.id) && !failed.has(r.id));
   if (since.length) {
@@ -277,15 +278,14 @@ export function resumable(ws: Workspace, name: string, rows: Session[], newest: 
   return s ? { s } : { gone: st.id };
 }
 
-// A new conversation replaces the one stopped last, and remove its row, which no wake will resume
-// now, so stopped rows do not build up in the listing. A row that is live again is
-// left alone. Any launch still marked keeps its mark: the new conversation is then the record, the
-// session a wake resumes, rather than no record and the newest row, which can be a launch that never
-// came up, or a fresh launch.
+// A new conversation replaces the one stopped last, and removes its row, which no wake will resume
+// now, so stopped rows do not build up in the listing. A row that is live again is left alone. Any
+// launch still marked keeps its mark: the new conversation is then the record, the session a wake
+// resumes, rather than no record and the newest row, which can be a launch that never came up.
 // stale: the row a respawn came back from under another id, which goes too (rows pile up
-// otherwise); it came up, so it keeps no mark. listed: a listing already
-// had, for a caller with no time for another; none is made then, and no row is removed (wake's
-// deadline), so the stale rows wait for a later step.
+// otherwise); it came up, so it keeps no mark. listed: a listing already had, for a caller with no
+// time for another; none is made then, and no row is removed (wake's deadline), so the stale rows
+// wait for a later step.
 export function replaceStopped(ws: Workspace, name: string, t: Pick<Transport, "sessions" | "alive" | "stop">, newId?: string, stale?: string, listed?: Session[]): void {
   let rows: Session[] | undefined = listed;
   if (!listed)

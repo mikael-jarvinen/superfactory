@@ -83,10 +83,10 @@ export function tryReadTail(path: string, bytes = TAIL_BYTES): Message[] | null 
   return readChunk(path, bytes)?.rows ?? null;
 }
 
-// The newest n rows (n = 0: all the tail holds), continuous across one rollover. `post` renames
-// the log to .1 past a megabyte, so right after a rollover the log holds a row or two and the page
-// showed only those. While the log is short enough to be read whole and holds fewer
-// than n rows, the tail of .1 comes before it. Tails only, of both.
+// The newest n rows (n = 0: all the tail holds), continuous across one rollover. `post` renames the
+// log to .1 past a megabyte, so right after a rollover the log holds a row or two and the page
+// showed only those. While the log is short enough to be read whole and holds fewer than n rows,
+// the tail of .1 comes before it. Tails only, of both.
 export function readRecent(path: string, n: number): Message[] {
   const cur = tailOf(path);
   let rows = cur.rows;

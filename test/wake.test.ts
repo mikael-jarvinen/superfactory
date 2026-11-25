@@ -427,7 +427,7 @@ test("the respawn's budget is what is left after the settings are rendered", () 
     let w = wake(ws, bea, { t: offBea(given), deadline: clock + 20_000 + 1_200 });
     assert.deepEqual([w, given], [{ is: "failed", why: "out of time before respawning b1" }, []], "1 200 ms less 500 is under the 1 000 a respawn needs");
     w = wake(ws, bea, { t: offBea(given), deadline: clock + 20_000 + 3_000 });
-    assert.deepEqual(given, [2_500], "the 500 the render took comes off, and no more"); // CodeRabbit on #127
+    assert.deepEqual(given, [2_500], "the 500 the render took comes off, and no more");
   } finally {
     Date.now = real;
   }
@@ -519,8 +519,8 @@ test("only a hosted agent's settings explain a failed send", () => {
   }
 });
 
-// Waiting work has no record, so the dispatch that makes one titles it, and no card
-// shows a bare key. --title wins; else the summary the queue watcher last read; else it says how.
+// Waiting work has no record, so the dispatch that makes one titles it, and no card shows a bare
+// key. --title wins; else the summary the queue watcher last read; else it says how.
 test("a dispatch titles a new record: --title, else the queue's last read of the tracker", () => {
   const { ws, put } = fakeFleet(TOML + `
 [roles.designer]
@@ -608,9 +608,9 @@ name = "RPE Training App"
   assert.equal(trackerTitle(ws, "LOCAL-gone"), undefined);
 });
 
-// queued is no longer a state. A record written while it was one is off the board,
-// and the approval it carries is kept: a builder dispatched on it gets the approved design, and a
-// designer dispatched on it gets the last round's links.
+// queued is no longer a state. A record written while it was one is off the board, and the approval
+// it carries is kept: a builder dispatched on it gets the approved design, and a designer
+// dispatched on it gets the last round's links.
 test("a queued record with an approval loads as off, approval intact, and a dispatch reads it back", () => {
   const { ws } = fakeFleet(TOML + `
 [roles.designer]
@@ -664,9 +664,8 @@ role = "designer"
   assert.equal(JSON.parse(readFileSync(join(ws, "state", "TEST-21.json"), "utf8")).state, "designing");
 });
 
-// A builder with several repos and no stack, kept on its live
-// session by a dispatch without --repo, keeps the stack of the repo its worktree is in, not the
-// default repo's.
+// A builder with several repos and no stack, kept on its live session by a dispatch without --repo,
+// keeps the stack of the repo its worktree is in, not the default repo's.
 test("a dispatch kept on the live session keeps its worktree's stack, not the default repo's", () => {
   const { ws, put } = fakeFleet(TOML + `
 [[agents]]
@@ -697,7 +696,8 @@ repos = ["web", "api"]
   assert.match(r.stdout, /kit is still on TEST-40 .*so it keeps its context/);
   assert.deepEqual([rec().state, rec().stack, rec().worktree], ["building", "api", wt], "api's stack, where the worktree is; not web's, the default");
   assert.doesNotMatch(r.stdout, /ignored/, "no --repo given, nothing ignored");
-  // a fix round: a --repo that names another repo is said to be ignored; one naming the worktree's is not
+  // a fix round: a --repo that names another repo is said to be ignored; one naming the worktree's
+  // is not
   for (const args of [["pr-open", "--pr", "acme/api#1", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "2 high"]])
     assert.equal(factory(ws, ["state", "TEST-40", ...args]).status, 0);
   r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "web"]);

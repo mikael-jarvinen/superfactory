@@ -1,5 +1,5 @@
-// A stop that removed the row it had just stopped would leave wake to respawn the newest row left: an
-// older conversation, on its older command line, without its --append-system-prompt-file. A stop
+// A stop that removed the row it had just stopped would leave wake to respawn the newest row left:
+// an older conversation, on its older command line, without its --append-system-prompt-file. A stop
 // keeps the row and records its id, and wake resumes that one or none.
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -108,7 +108,7 @@ test("a stopped row with no name records nothing", () => {
   const { ws } = fleet();
   const w = openWorkspace(ws, {});
   noteStopped(w, "", { id: "x1", name: undefined });
-  assert.ok(!existsSync(join(w.runDir, "stopped-.json")), "down wrote stopped-.json for a nameless row (Marie on #130)");
+  assert.ok(!existsSync(join(w.runDir, "stopped-.json")), "down wrote stopped-.json for a nameless row");
 });
 
 test("a fresh launch removes the stopped row it replaces, and a record older than a launch elsewhere is not resumed", () => {
@@ -131,7 +131,7 @@ test("a fresh launch removes the stopped row it replaces, and a record older tha
   assert.equal(lastStopped(w, "rae"), null);
 });
 
-test("down records the row that was live, not a dead duplicate listed after it (CodeRabbit on #130)", () => {
+test("down records the row that was live, not a dead duplicate listed after it", () => {
   const { ws, run } = fleet();
   // a row the listing still shows but whose pid is gone: listed by default, not alive, and last
   const db = join(ws, "db.json");
@@ -191,8 +191,8 @@ for (const how of ["a stop", "a launch that came up"] as const)
     assert.equal("s" in which ? which.s?.id : "gone", "cur1");
   });
 
-// A launch down stopped unrun that came up late, seen by no factory command while live, then ended by
-// a raw `claude stop`, must not stay unrun and never be resumed.
+// A launch down stopped unrun that came up late, seen by no factory command while live, then ended
+// by a raw `claude stop`, must not stay unrun and never be resumed.
 test("a launch down stopped unrun that shows a pid later reads as having run", () => {
   const ws = tempWorkspace(TOML);
   after(() => rmSync(ws, { recursive: true, force: true }));
@@ -211,8 +211,8 @@ test("a launch down stopped unrun that shows a pid later reads as having run", (
   assert.equal("s" in which ? which.s?.id : "gone", "A");
 });
 
-// down does not mark a launch unrun when its row shows a pid, the evidence it ran: the stop clears the
-// pid, and the wake would resume the recorded session instead.
+// down does not mark a launch unrun when its row shows a pid, the evidence it ran: the stop clears
+// the pid, and the wake would resume the recorded session instead.
 test("a down leaves a marked launch that showed a pid read as having run", () => {
   const { ws, run, calls } = fleet();
   const w = openWorkspace(ws, {});
