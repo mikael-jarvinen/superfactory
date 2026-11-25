@@ -284,7 +284,7 @@ test("a released slot still in use is not taken, and the refusal says who uses i
   assert.match(r.stderr, /but still in use: eve's session is working in A-1/);
   assert.deepEqual(calls(dir), [], "nothing is destroyed while it is in use");
 
-  // once that session is done, the next up takes the slot as before
+  // once that session is done, the next up takes the slot
   listing("done");
   assert.match(ok(up(a3), "A-3"), /solo slot 1 \(taken from an item in review\): web=A-3/);
   assert.deepEqual(calls(dir), ["destroy solo 1 web=A-1 api=-", "up solo 1 web=A-3 api=-"]);
@@ -465,7 +465,7 @@ test("an assistant's item gets the slot it names: never the reserved one, a pinn
   assert.deepEqual(loadRec(ws, "LOCAL-launch")?.assistant_slot && { ...loadRec(ws, "LOCAL-launch")!.assistant_slot, at: "-" },
     { agent: "val", stack: "solo", slot: 2, at: "-" });
   assert.deepEqual(calls(dir), ["up solo 2 web=LOCAL-launch api=-"]);
-  // the builder's own allocation goes on as before: no free slot is left for fay
+  // the builder's own allocation is unchanged: no free slot is left for fay
   assert.match(up(wt("web", "A-2", "fay")).stderr, /every slot of solo open to fay is taken/);
 
   // a slot of an item in review is taken, as a builder would take it

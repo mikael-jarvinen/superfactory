@@ -21,13 +21,14 @@ addEventListener('DOMContentLoaded', () => {
   });
 });
 
-// The JSON a board API answers. A refusal throws the board's own error when it sent one, else its
-// HTTP status; a board that cannot be reached at all throws with no message.
+// The JSON a board API answers, or a throw that says why there is none: the board's own error when
+// a refusal carries one, else the refusal's HTTP status; "its answer is not JSON" for a success
+// whose body does not parse; and no message when the board cannot be reached at all.
 async function getJSON(url){
   let res;
   try { res = await fetch(url, {cache:'no-store'}); } catch { throw new Error(''); }
-  if(!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
-  return res.json();
+  if(!res.ok) throw new Error((await res.json().catch(() => null))?.error || `HTTP ${res.status}`);
+  try { return await res.json(); } catch { throw new Error('its answer is not JSON'); }
 }
 
 // The pulse goes stale and the header says why, when there is a why.
@@ -36,12 +37,18 @@ function notAnswering(e){
   document.getElementById('at').textContent = e && e.message ? `not answering: ${e.message}` : 'not answering';
 }
 
+// The board answered: the pulse is live again and the header shows the answer's time.
+function answered(d){
+  document.getElementById('pulse').classList.remove('stale');
+  document.getElementById('at').textContent = d.at;
+}
+
 // Fetch url every two seconds and hand the JSON to render; the pulse says whether the board answers.
 function poll(url, render){
   async function tick(){
     let d;
     try { d = await getJSON(url); } catch(e) { notAnswering(e); return; }
-    document.getElementById('pulse').classList.remove('stale'); document.getElementById('at').textContent = d.at;
+    answered(d);
     render(d);
   }
   tick(); setInterval(tick, 2000);

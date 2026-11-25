@@ -361,7 +361,7 @@ const click = (doc: Document, sel: string) => (doc.querySelector(sel) as HTMLEle
 test("week and month: labelled bars of averages, a tooltip of the spread, and the change from the period before", async () => {
   const d = JSON.parse(JSON.stringify(report(workspace(), new TranscriptUsage(), Date.parse("2026-11-18T09:00:00Z"))));
   const { doc, state } = await page(d);
-  assert.equal(doc.getElementById("per")!.hidden, true, "all time first, as before");
+  assert.equal(doc.getElementById("per")!.hidden, true, "all time first");
   click(doc, '[data-period="week"]');
   assert.equal(doc.getElementById("all")!.hidden, true);
   assert.deepEqual([...doc.querySelectorAll(".wk .d")].map((x) => x.textContent), ["Week of 16 Nov so far", "Week of 9 Nov", "Week of 2 Nov"]);

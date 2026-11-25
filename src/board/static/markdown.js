@@ -2,7 +2,7 @@
 // lists, bare URLs as links), parsed by marked and then cleaned by DOMPurify. Both are vendored next
 // to this file, at the versions their headers name. What a message cannot do: raw HTML in it is shown
 // as text, never rendered, and a link or an image goes only to http or https; any other scheme is
-// left as the text that was written. Single line breaks stay line breaks, as before.
+// left as the text that was written. Single line breaks stay line breaks.
 const md = (() => {
   const web = /^https?:\/\//i;
   const parser = new marked.Marked({gfm: true, breaks: true, renderer: {

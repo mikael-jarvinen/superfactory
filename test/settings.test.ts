@@ -153,7 +153,7 @@ test("a stack's PATH takes the sender's prepended directories out, and only thos
   assert.deepEqual(sessionEnv(ws, agentOrDie(ws, "dot"), tia.PATH, tia.SF_PATH_PREPEND), { DOCS: "1", PATH: system, SF_PATH_PREPEND: "" });
   for (const name of ["cal", "ada", "rae"])
     assert.deepEqual(sessionEnv(ws, agentOrDie(ws, name), tia.PATH, tia.SF_PATH_PREPEND), { PATH: system, SF_PATH_PREPEND: "" }, name);
-  // and with no sender's run to take out, they keep the launcher's PATH, as before
+  // and with no sender's run to take out, they keep the launcher's PATH
   assert.equal(sessionEnv(ws, agentOrDie(ws, "cal"), system, ""), undefined);
   assert.deepEqual(sessionEnv(ws, agentOrDie(ws, "dot"), system, ""), { DOCS: "1" });
   // a sender with no stack prepended nothing, so nothing comes out: the system PATH stays whole behind bea's own

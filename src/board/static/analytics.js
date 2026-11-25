@@ -290,7 +290,7 @@ function render(d){
   async function tick(){
     let d;
     try { d = await getJSON('/api/analytics'); } catch(e) { notAnswering(e); return; }
-    document.getElementById('pulse').classList.remove('stale'); document.getElementById('at').textContent = d.at;
+    answered(d);
     render(d);
   }
   tick(); setInterval(tick, 30000);

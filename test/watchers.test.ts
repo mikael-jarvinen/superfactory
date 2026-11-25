@@ -111,7 +111,7 @@ test("the queue heartbeat is written only on evidence that the tracker was read"
 });
 
 // A run that searched for the Jira tool before the connector arrived reads the tracker on the next
-// run. One retry, and a second unavailable is the outage it was before.
+// run. One retry, and a second unavailable is an outage.
 test("the queue reads once more when its first run finds no tracker", () => {
   const { run, logs, read } = watcherWorkspace();
 
@@ -740,7 +740,7 @@ test("the review watcher tells the lead about new review comments, once, and not
   assert.equal(statSync(logs("reviews.heartbeat")).mtimeMs, before);
   assert.match(read("reviews.log"), /reviews: cannot read the review comments: HTTP 502/);
 
-  // The queue watcher no longer reads review comments, so nothing is told twice.
+  // The queue watcher does not read review comments, so nothing is told twice.
   r = run(["watch", "queue"], [{ stdout: "QUEUE:\n" }], routes(answer([old, ask, replied, finding], [question], [label])));
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.doesNotMatch(readFileSync(join(ws, "gh.log"), "utf8"), /graphql/);

@@ -339,9 +339,9 @@ test("a gh alias or extension is refused, and so is making one", () => {
   assert.deepEqual(wrong, []);
 });
 
-// The guard's matcher was Bash|Read|Grep, so the GitHub MCP tools merged, closed and commented past
-// it. Now a merge, close or undraft is checked as its gh command, a comment needs the marker, a
-// commit to a protected branch is refused, an unknown write is refused, and reads pass.
+// The GitHub MCP tools reach the guard as gh does: a merge, close or undraft is checked as its gh
+// command, a comment needs the marker, a commit to a protected branch is refused, an unknown write
+// is refused, and reads pass.
 test("the GitHub MCP tools are held to the gh rules", () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
@@ -399,8 +399,8 @@ test("the GitHub MCP tools are held to the gh rules", () => {
     ["issue_write", { ...api, method: "update", issue_number: 8702, state: "closed" }, lead]);
   allowed.push(["issue_write", { ...api, method: "update", issue_number: 8701, state: "closed" }, lead]);
   // state=open reopens, as gh pr reopen and gh issue reopen do; updating a PR's branch writes to
-  // its head, which must be a branch the role may write 8704 is a PR into the factory's own repo
-  // from a product repo's default branch
+  // its head, which must be a branch the role may write.
+  // 8704 is a PR into the factory's own repo from a product repo's default branch.
   const heads: Record<string, [string, string]> = { "8701": ["acme/api", "feat/x"], "8702": ["acme/api", "main"], "8703": ["acme/workspace", "main"], "8704": ["acme/api", "main"] };
   const withHeads: GuardContext = { ...pr, prHead: (_r, n) => heads[n] ?? null };
   refused.push(["update_pull_request", { ...api, pullNumber: 8701, state: "open" }, pr],
@@ -447,9 +447,8 @@ test("the GitHub MCP tools are held to the gh rules", () => {
   assert.equal(call("mcp__plane__update_issue", { state: "closed" }).code, 0);
 });
 
-// A gh or git run by path skipped protect, because a path outside the trusted bin dirs was taken
-// for a project script, and a command word from a variable matched no check. Now a path is read by
-// its basename, and a variable or substitution as the command word is refused.
+// A gh or git run by path is read by its basename, wherever the path points, and a variable or
+// substitution as the command word is refused.
 test("a gh or git by path is checked as itself, and one from a variable is refused", () => {
   const lead: GuardContext = { ...pr, role: "lead" };
   const refused = ["~/.local/bin/gh pr merge 8701 -R acme/api", "/home/turing/.local/bin/gh pr close 8701 -R acme/api",
@@ -925,9 +924,9 @@ test("gh issue state changes are checked as gh pr, and the review's false refusa
   assert.deepEqual(wrong, []);
 });
 
-// Wrappers and shells ran gh past every check: nice, setsid, stdbuf, flock, env -S, find -exec,
-// ssh, a shell reading its script from a pipe, a here-string, a heredoc or a <( ... ), and a
-// substitution inside quotes or a <( ... ). Each is now read through to its command.
+// Wrappers and shells are read through to the command they run: nice, setsid, stdbuf, flock, env
+// -S, find -exec, ssh, a shell reading its script from a pipe, a here-string, a heredoc or a
+// <( ... ), and a substitution inside quotes or a <( ... ).
 test("gh run through a wrapper, a substitution or a shell on stdin is checked", () => {
   const lead: GuardContext = { ...pr, role: "lead" };
   const M = "gh pr merge 1 -R acme/api";
@@ -1237,7 +1236,7 @@ const BASH_SHAPES: [string, string, string][] = [
   [OK, "--web=true opens the browser", "gh pr comment 5 -R acme/api --web=true --body hi"],
   [OK, "--web=false then --web", "gh pr comment 5 -R acme/api --web=false --web"],
   [OK, "--web=false with a marked body", "gh pr comment 5 -R acme/api --web=false --body '> Written by agent. ok'"],
-  // -b=VALUE is VALUE, as pflag reads it; -bVALUE and -b VALUE as before
+  // -b=VALUE is VALUE, as pflag reads it, as are -bVALUE and -b VALUE
   [OK, "-b= with a marked body", "gh pr comment 5 -R acme/api -b='> Written by agent. ok'"],
   [NO, "-b= with an unmarked body", "gh pr comment 5 -R acme/api -b=hi"],
   [OK, "-b with a marked body attached", "gh pr comment 5 -R acme/api '-b> Written by agent. ok'"],

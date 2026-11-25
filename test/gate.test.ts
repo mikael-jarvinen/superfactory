@@ -307,7 +307,7 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
   const ready = (over: Routes) => run(green({ [st]: skippedHere, [rv]: { stdout: [] }, ...over }), ["pr-ready", "web", String(N)]);
   const EARLIER = /CodeRabbit reviewed an earlier head, bbbbbbb, not aaaaaaa; later versions go without its review/;
 
-  // never reviewed: refused, with the same ask as before
+  // never reviewed: refused, with the ask to review
   const oldStatus = `api repos/${REMOTE}/commits/${OLD}/status`;
   const oldRuns = `api repos/${REMOTE}/commits/${OLD}/check-runs?per_page=100&page=1`;
   const oldPulls = `api repos/${REMOTE}/commits/${OLD}/pulls?per_page=100&page=1`;
@@ -447,7 +447,7 @@ test("pr-wait waits on a review bot it asked, timed from the ask, not the head",
   assert.match(r.stderr, /waiting \(\d+s\) on: CodeRabbit has not reviewed aaaaaaa: it has posted nothing at this head/);
   assert.match(r.stdout, /^SENDABLE/m);
 
-  // asked longer ago than the grace: refused as before
+  // asked longer ago than the grace: refused
   r = run(over([TRIGGER]), ["pr-wait", "web", String(N), HEAD]);
   assert.equal(r.status, 1, r.stderr);
   assert.equal(r.calls.filter((c) => c === POST).length, 0);
@@ -921,7 +921,7 @@ test("demo --before --base-ref accepts a stacked PR's base and still refuses an 
   const unrelated = commit("b.txt", "unrelated\n");
   g("switch", "-q", "upper");
 
-  // Detached at the base branch's head: refused without --base-ref, as before; accepted with it.
+  // Detached at the base branch's head: refused without --base-ref, accepted with it.
   g("switch", "-q", "--detach", "origin/lower");
   assert.equal(beforeSha(dir).sha, undefined, "without --base-ref only main counts");
   assert.deepEqual(beforeSha(dir, "lower"), { sha: lower, base: "origin/lower" });
@@ -940,7 +940,7 @@ test("demo --before --base-ref accepts a stacked PR's base and still refuses an 
   g("update-ref", "refs/remotes/origin/same", same);
   g("switch", "-q", "--detach", "origin/same");
   assert.equal(beforeSha(dir, "same").sha, same, "--base-ref's head first");
-  assert.equal(beforeSha(dir).sha, g("rev-parse", "origin/main"), "without --base-ref, main as before");
+  assert.equal(beforeSha(dir).sha, g("rev-parse", "origin/main"), "without --base-ref, main");
 
   // --base-ref names a branch on origin; a sha or a branch never fetched is refused outright.
   assert.throws(() => beforeSha(dir, lower), /is not a branch on origin/);

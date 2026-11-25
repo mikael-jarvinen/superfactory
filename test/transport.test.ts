@@ -228,7 +228,7 @@ test("on Linux a listing past 64 MB is claude's, not systemd-run's, and one unde
   process.env.CLAUDE_BIN = claude;
   try {
     assert.throws(() => local.sessions(), { message: `\`claude agents --json\` failed: claude agents wrote more than the ${64 * 1024 * 1024} bytes of output that are read` });
-    // 20 MB, past the 16 MB the async listing used to read.
+    // 20 MB, past 16 MB: the listing is read whole up to its 64 MB cap.
     writeFileSync(claude, `#!/bin/sh\nprintf '[{"id":"s1","name":"bea","kind":"background","state":"idle"}'\nhead -c ${20 * 1024 * 1024} /dev/zero | tr '\\0' ' '\necho ']'\n`);
     assert.equal(local.sessions().length, 1);
     assert.deepEqual(await local.sessionsAsync(), local.sessions());

@@ -193,7 +193,7 @@ function render(d){
 async function load(){
   let d;
   try { d = await getJSON(apiUrl()); } catch(e) { notAnswering(e); return; }
-  document.getElementById('pulse').classList.remove('stale'); document.getElementById('at').textContent = d.at;
+  answered(d);
   hideTip();
   render(d);
 }

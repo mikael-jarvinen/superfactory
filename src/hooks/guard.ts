@@ -819,7 +819,7 @@ function checkBranchWrite(repo: string, branch: string, ctx: GuardContext, why: 
 // product repo it follows the rule for any branch write, so a PR whose head is the default branch
 // or a protected one is refused, as is one whose head cannot be read. That holds for a PR into the
 // factory's own repo too: its head may be a fork's, a product repo's default branch. There a head
-// that cannot be read stays allowed, as before: it is almost always the factory's own.
+// that cannot be read stays allowed: it is almost always the factory's own.
 function checkPrHeadWrite(repo: string, n: string, ctx: GuardContext): void {
   const ownBase = ctx.ownRepos.some((r) => r.toLowerCase() === repo.toLowerCase());
   if (!/^\d+$/.test(n)) return ownBase ? undefined : refuse(`updating a branch of ${repo} needs the PR's number, so the guard can read its head`);
@@ -1400,7 +1400,7 @@ function checkGhProtect(words: string[], ctx: GuardContext): void {
 export const MCP_COMMENT_TOOLS = /^mcp__.+?__(add_issue_comment|create_issue_comment|update_issue_comment|add_reply_to_pull_request_comment|reply_to_pull_request_comment|add_comment_to_pending_review|add_pull_request_review_comment(_to_pending_review)?|create_pull_request_review_comment|update_pull_request_review_comment|update_pull_request_comment|pull_request_review_write|create_pull_request_review|update_pull_request_review|create_pending_pull_request_review|submit_pending_pull_request_review|create_and_submit_pull_request_review)$/i;
 
 // A comment tool's call: its body, and each comments[].body a review carries, must start with the
-// marker. The second argument is the tool input, or (as before) the body alone.
+// marker. The second argument is the tool input, or the body alone.
 export function mcpCommentVerdict(tool: string, input: unknown): string | null {
   if (!MCP_COMMENT_TOOLS.test(tool)) return null;
   const tin = input !== null && typeof input === "object" ? (input as Record<string, unknown>) : { body: input };
@@ -2238,8 +2238,8 @@ function shortOption(name: string, o: string): { next: boolean; unknown: boolean
 }
 
 // Whether the words after an option this cannot read may run gh: gh or a shell by name, a word that
-// names gh, or one from a variable or a substitution before what looks like a comment write
-// (sudo --frob x $G pr comment).
+// names gh, or one from a variable or a substitution before what looks like a comment write (sudo
+// --frob x $G pr comment).
 const mayRunGh = (rest: string[]): boolean =>
   rest.some((x, k) =>
     x === "gh" || SHELLS.has(posix.basename(x.replace(/^\\/, "")).toLowerCase()) || namesGh(x) ||

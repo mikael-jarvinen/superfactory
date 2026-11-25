@@ -54,8 +54,8 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
   if (all instanceof Unreachable) return { is: "unknown", why: all.brief };
   // Not findSession: it prefers a row alive() passes, and locally that is a host-wide check, so a
   // stale "done" row would beat the newest stopped session. The session the factory stopped is
-  // resumed by its id, and never an older row in its place (stopped.ts). with no deadline, rows a
-  // hook's wake left are removed first, and are no candidates after
+  // resumed by its id, and never an older row in its place (stopped.ts).
+  // With no deadline, rows a hook's wake left are removed first, and are no candidates after.
   const swept = o.deadline === undefined ? sweepStale(ws, agent.name, t, all) : [];
   const which = resumable(ws, agent.name, all.filter((r) => isAgentSession(agent.name)(r) && !swept.includes(r.id ?? "")), newest);
   if ("gone" in which)

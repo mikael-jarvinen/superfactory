@@ -94,7 +94,7 @@ test("a resumed lead is up even when taking the old entry off the list fails", (
   assert.throws(() => bringUpLead(ws, ld, fake([stopped()], { stopBug: true }).t, false, () => {}, 1), TypeError, "a bug in stop is no die: it throws");
 });
 
-test("a resume that fails falls back to respawn, as before", () => {
+test("a resume that fails falls back to respawn", () => {
   const { t, respawned } = fake([stopped()], { startFails: true });
   const said: string[] = [];
   bringUpLead(ws, ld, t, false, (l) => said.push(l), 1);
@@ -591,8 +591,8 @@ for (const via of ["wake", "up"] as const)
     }
   });
 
-// The cleanup after a wake's respawn needs a listing and a stop, which a near deadline leaves no
-// time for: none is started, the record still moves, and the old row waits.
+// The cleanup after a wake's respawn needs a listing and a stop. With a deadline, none is started:
+// the record still moves, and the old row waits.
 for (const leftS of [30, 120])
 test(`a wake with a deadline ${leftS} s off starts no listing or stop after its respawn, and still moves the record`, () => {
   const t0 = Date.now();
