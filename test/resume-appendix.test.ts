@@ -1,4 +1,4 @@
-// Otto on Claude Code 2.1.327: --resume and respawn keep the system prompt a session started with and
+// As of Claude Code 2.1.327, --resume and respawn keep the system prompt a session started with and
 // ignore any --append-system-prompt(-file) given then. So a brief edited since a session started
 // reaches it only through the SessionStart hook (hooks/appendix.ts), from the agent's current
 // appendix file, which every start writes and every resume and wake writes again first.
@@ -138,8 +138,8 @@ test("refreshHosted, for the daemon: the settings rendered again and the current
   assert.ok(!existsSync(currentAppendixPath(ws.runDir, "vega")));
 });
 
-// Marie on #131 at 5aba50fc: the daemon's resume at boot respawns on a settings failure, so a render
-// that threw first left the session on its old brief.
+// The daemon's resume at boot respawns on a settings failure, so a render that throws first must not
+// leave the session on its old brief.
 test("refreshHosted writes the brief before the settings, so a render that throws leaves it written", () => {
   const { dir, ws } = workspace();
   (ws.config.roles[agentOrDie(ws, "vega").role] as { settings: string }).settings = join(dir, "gone.json");
@@ -172,8 +172,8 @@ test("a builder's current brief reads its repo: files from the checkout of the r
   assert.match(currentAppendix(ws, bea, join(dir, "elsewhere")) ?? "", /web's agents file/, "else its first repo's");
 });
 
-// Marie on #131 at 9a65bf8e: roleAppendix with no repo threw on a repo: file, the wake took that as
-// undefined, and a hosted builder was never sent its brief as it is now.
+// roleAppendix with no repo must not throw on a repo: file, or the wake takes that as undefined and a
+// hosted builder is never sent its brief as it is now.
 test("a hosted builder's current brief reads its repo: files from its first repo, as dispatch does", () => {
   const { ws } = workspace();
   const bea = { ...agentOrDie(ws, "bea"), host: "far" };
@@ -226,8 +226,8 @@ test("up resumes the lead with its brief as it is now written for the hook, on r
   assert.match(String(h.respawned[0]?.appendix), /edited since/);
 });
 
-// Marie on #131 at 9a65bf8e: the settings were rendered first, so a render that threw skipped the
-// appendix, and the lead came back on its old brief with only the settings warning said.
+// A settings render that throws must not skip the appendix, or the lead comes back on its old brief
+// with only the settings warning said.
 test("up's respawn writes the lead's brief as it is now even when its settings cannot be rendered", () => {
   const { dir, ws } = workspace();
   writeFileSync(join(dir, "briefs", "ada.md"), "ada's brief, edited since\n");

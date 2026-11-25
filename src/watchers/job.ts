@@ -100,7 +100,7 @@ export interface ClaudeRun {
 
 // launchd starts a missed run in a dark wake that lasts seconds, the Mac sleeps again mid-run, and
 // on waking the timeout has long passed. A run that outlived its timeout by more than this was
-// frozen, not stuck. On 2026-10-20 every "exit=127" in the failures log was one of these.
+// frozen, not stuck: it ends "exit=127" in the failures log.
 const SLEPT_MARGIN_S = 120;
 
 // The run's reply and exit. A run killed at its timeout counts as failed. A `claude -p` can start
@@ -120,7 +120,7 @@ export function runClaude(ws: Workspace, job: Job, prompt: string, tools: string
   return { status: r.status, stdout: r.stdout, seconds, slept };
 }
 
-// On 2026-11-12 and 13 seven watcher runs found no Jira tool. In a `claude -p` the claude.ai
+// In a `claude -p` the claude.ai
 // connectors arrive a few seconds after the session starts, later on a network still waking from
 // sleep, and a run that searched for the tool before they arrived ended unavailable while the next
 // one read Jira. So a run that cannot reach the tracker gets one more run, half a minute later; a
@@ -143,9 +143,9 @@ export function runFailure(job: Job, r: ClaudeRun): string | null {
   return r.status === TIMED_OUT ? `${job} TIMED OUT after ${r.seconds}s` : `${job} FAILED exit=${r.status}`;
 }
 
-// On 2026-10-23 a queue run started in a 45-second dark wake, and its `gh pr list` hung on the
-// network when the laptop slept again. It was still hanging 3h20m later, and launchd starts no run
-// while one is alive, so every queue run after it was skipped. A watcher's `gh` call has a bound.
+// A run started in a 45-second dark wake can hang a `gh` call on the network when the laptop sleeps
+// again, for hours, and launchd starts no run while one is alive, so every run after it is skipped.
+// A watcher's `gh` call has a bound.
 const GH_TIMEOUT_S = 60;
 
 export interface GhRun extends RunResult {

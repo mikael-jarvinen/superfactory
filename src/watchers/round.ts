@@ -122,8 +122,7 @@ export function gatherFacts(ws: Workspace, at = Date.now()): Facts {
       // The round checks whether a blocked item is still truly blocked. A
       // blocked item that names a ticket it waits on ("held behind CL-2247 merge") stays blocked
       // silently after that ticket merges. When a named blocker has reached done, say so once, so
-      // the dependent is re-dispatched rather than forgotten -- CL-2246 sat blocked for days behind
-      // a dependency that had already merged.
+      // the dependent is re-dispatched rather than forgotten.
       if (s === "blocked" && r.asked_you?.question) {
         // Any key-shaped token in the question; the done-record filter below makes over-matching
         // harmless, since a word that is not a tracked ticket is never a done record.

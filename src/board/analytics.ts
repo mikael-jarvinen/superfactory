@@ -636,7 +636,7 @@ export function report(ws: Workspace, usage: TranscriptUsage, now = Date.now()):
     .map((a) => a.name);
   const recs = new Map(allRecs(ws).map((r) => [r.ticket, r]));
   return {
-    // queued was a state until 2026-11-18, and older events still name it.
+    // queued was once a state, and older events still name it.
     states: ["queued", OFF, ...STATES],
     now,
     all: bucket(closed.values(), open),

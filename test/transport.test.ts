@@ -75,7 +75,7 @@ echo "backgrounded · abc123 · rae"
   assert.ok(existsSync(currentAppendixPath(ws.runDir, "bea")));
   local.start({ ...req, appendix: null, args });
   assert.equal(readFileSync(join(dir, "args"), "utf8"), "--bg P\n");
-  // and leaves no current copy for a later resume to be handed (Marie on #131)
+  // and leaves no current copy for a later resume to be handed
   assert.ok(!existsSync(currentAppendixPath(ws.runDir, "bea")));
 });
 

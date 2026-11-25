@@ -6,8 +6,7 @@ import { join } from "node:path";
 import { counts, dayOf, daysEnding, pacing, peopleRank, type Person, type Pr, readCache, refreshCache, report, type Review, toPr } from "../src/board/github.js";
 import type { Workspace } from "../src/workspace.js";
 
-// Mikael, 2026-11-23: "how many reviews happen per day, how many PRs get approved per day and
-// grouped by person." The counting is a pure function of the cached PRs.
+// Reviews per day and PRs approved per day, by person. The counting is a pure function of the cached PRs.
 
 const who = (login: string, bot = false): Person => ({ login, name: login, avatar: "", bot });
 const rv = (login: string, state: string, at: string, more: Partial<Review> = {}): Review => ({ state, at, author: who(login), factory: false, ...more });
@@ -197,7 +196,7 @@ test("a read stops while the fleet's GraphQL points run low, and goes on from th
   }
 });
 
-// Mikael, 2026-11-23: "In PR traffic and review traffic I also want to view the amount of lines changed."
+// PR traffic and review traffic also show the lines changed.
 test("lines changed: merged PRs' additions plus deletions per day by repo, and each review counts its PR's size", () => {
   const prs = [
     pr({ number: 1, merged: "2026-11-19T10:00:00Z", closed: "2026-11-19T10:00:00Z", state: "MERGED", additions: 120, deletions: 30,
@@ -267,8 +266,7 @@ test("a page GitHub's gateway gives up on (HTTP 502) is asked again at half the 
   }
 });
 
-// Mikael, 2026-11-25: "About the GH analytics's PR traffic, it colors the columns based on repos, but I
-// want to also view by PR author."
+// PR traffic colours its columns by repo, and can also be viewed by PR author.
 test("PR traffic by author: the same counts per PR author, adding up to the repo totals, and an author table", () => {
   const prs = [
     pr({ number: 1, author: who("niilo"), created: "2026-11-18T06:00:00Z", merged: "2026-11-19T10:00:00Z", closed: "2026-11-19T10:00:00Z", state: "MERGED", additions: 100, deletions: 20 }),
@@ -299,7 +297,7 @@ test("PR traffic by author: the same counts per PR author, adding up to the repo
   assert.equal(Object.hasOwn(r.byAuthor.opened, "dependabot"), false, "bots hidden: not an author either");
 });
 
-// Mikael, 2026-11-25: one colour per person across PR and review traffic, by one rank of both.
+// One colour per person across PR and review traffic, by one rank of both.
 test("people rank: PRs opened plus reviews that count, bots' PRs only with bots shown", () => {
   const prs = [
     pr({ number: 1, author: who("niilo"), reviews: [rv("lundis", "APPROVED", "2026-11-19T09:00:00Z"), rv("niilo", "COMMENTED", "2026-11-19T09:30:00Z")] }),

@@ -1,6 +1,6 @@
 // PreToolUse hook for Bash and the GitHub MCP tools, run as `factory hook marked-comments`. The
 // factory's sessions post under the human's token login, so the review watcher tells a comment of
-// theirs from the human's own only by the marker it starts with (superfactory#119, L2). The protect
+// theirs from the human's own only by the marker it starts with. The protect
 // guard holds the lead and builders to it; this holds every other role: an assistant runs no guard,
 // and a reviewer's readonly guard does not see the MCP tools. A body must start with the marker or
 // be a bot trigger, and be in the call itself.

@@ -205,8 +205,8 @@ test("a worktree whose slot was destroyed is named as holding none", () => {
   assert.equal(slotless(ws, "none-such", "APP-1", web1), null, "a stack the config does not run");
 });
 
-// Mikael, 2026-10-20: "Tickets that are already in review should not reserve a stack and agent." The
-// slot stays up for the review until another item needs it; a fix round takes it back if it is still there.
+// A ticket already in review reserves no stack or agent. The slot stays up for the review until
+// another item needs it; a fix round takes it back if it is still there.
 test("an item in review releases its slot: still up, taken back by its fix round, else taken by the next item", () => {
   const { dir, ws, wt } = setup();
   const up = (cwd: string) => factory(dir, ["stack", "up"], { cwd });
@@ -251,9 +251,9 @@ test("an item in review releases its slot: still up, taken back by its fix round
   assert.deepEqual(calls(dir), []);
 });
 
-// CL-2342, twice on 2026-11-25: another item's up took a released slot while its builder was still
-// testing on it. A released slot is refused while its item is back at work or a session is working in
-// its worktree, and the refusal names who.
+// Another item's up must not take a released slot while its builder is still testing on it. A
+// released slot is refused while its item is back at work or a session is working in its worktree,
+// and the refusal names who.
 test("a released slot still in use is not taken, and the refusal says who uses it", () => {
   const { dir, ws, wt } = setup();
   const up = (cwd: string, ...a: string[]) => factory(dir, ["stack", "up", ...a], { cwd });
@@ -446,8 +446,7 @@ createServer((_, res) => res.end("ok")).listen(Number(process.argv[2]), "127.0.0
   assert.match(late.stderr, /did not answer below 400 within 1 s/);
 });
 
-// LOCAL-stack-up-for-assistants, 2026-11-25: release messaging needs a stack for its screenshots, and
-// stack up refused an item recorded to an assistant; the lead had to record it to an idle builder.
+// An item recorded to an assistant can take a stack: release messaging needs one for its screenshots.
 test("an assistant's item gets the slot it names: never the reserved one, a pinned one, or one with work in progress", () => {
   const { dir, ws, wt } = setup();
   const up = (cwd: string, ...args: string[]) => factory(dir, ["stack", "up", ...args], { cwd });

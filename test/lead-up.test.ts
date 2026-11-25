@@ -104,7 +104,7 @@ test("a resume that fails falls back to respawn, as before", () => {
 });
 
 // The respawn reruns the old command line, whose --settings is this file: rendered again first, a lead
-// stopped before an upgrade comes back with the current hooks (CodeRabbit on #124).
+// stopped before an upgrade comes back with the current hooks.
 test("a lead respawned here comes back with its settings rendered again", () => {
   const file = settingsFile(ws, ld);
   writeFileSync(file, "{}\n");
@@ -115,7 +115,7 @@ test("a lead respawned here comes back with its settings rendered again", () => 
 });
 
 // A role whose template is gone must not keep the lead down: it comes back on the settings last
-// rendered, and the failure is said (CodeRabbit on #127).
+// rendered, and the failure is said.
 test("a lead whose settings cannot be rendered is respawned anyway, and the failure said loudly", () => {
   const w = openWorkspace(dir, {});
   const role = w.config.roles[lead(w).role] as { settings: string };
@@ -182,7 +182,7 @@ test("a lead whose brief is missing is refused before anything is resumed, respa
   assert.deepEqual([r.started, r.respawned, r.removed], [[], [], []]);
 });
 
-// Niilo, 2026-11-18: restart-lead resumes the conversation it just stopped, by its id. The newest
+// restart-lead resumes the conversation it just stopped, by its id. The newest
 // row by the listing's clues can be an older thread, here one whose transcript was touched last.
 test("restart-lead resumes the lead it stopped, by id, and refuses when that row is gone", () => {
   const today = stopped({ id: "5e7a0b12", sessionId: "today-uuid", startedAt: 2000 });
@@ -204,7 +204,7 @@ test("restart-lead resumes the lead it stopped, by id, and refuses when that row
     assert.deepEqual([gone.started, gone.respawned], [[], []], "neither the older thread nor a fresh one");
 
     // a lead launched since the stop, from another box whose run dir has no record: the record is
-    // stale, and the newest row is the conversation (Marie on #130)
+    // stale, and the newest row is the conversation
     noteStopped(ws, ld.name, stopped({ id: "aa11bb22", startedAt: 1000 }));
     const later = stopped({ id: "c0ffee00", sessionId: "later-uuid", startedAt: Date.now() + 60_000 });
     const other = fake([stopped({ id: "aa11bb22", sessionId: "stale-uuid", startedAt: 1000 }), later]);
@@ -275,7 +275,6 @@ test("a launch that never comes up does not make its row the one a wake resumes 
   }
 });
 
-// Marie's gate on #130 at 5e10c7e0
 const record = (st: { id: string; at: string; failed?: string[] }) => {
   mkdirSync(ws.runDir, { recursive: true });
   writeFileSync(join(ws.runDir, `stopped-${ld.name}.json`), JSON.stringify(st));
@@ -569,8 +568,8 @@ test("a launch that ran and comes back under a new id takes the record, marks an
   }
 });
 
-// Marie on #130 at f62a6b10: a respawn that came back under a new id left the old row listed,
-// stopped, and such rows piled up.
+// A respawn that comes back under a new id must not leave the old row listed, stopped, for such rows
+// to pile up.
 for (const via of ["wake", "up"] as const)
   test(`a respawn by ${via} that comes back under a new id takes the old row off the list`, () => {
     const t0 = Date.now();
@@ -592,8 +591,8 @@ for (const via of ["wake", "up"] as const)
     }
   });
 
-// CodeRabbit on #130 at d1c64cc6: the cleanup after a wake's respawn listed and stopped with no
-// regard for the deadline. Short of time for both, the record still moves; the old row waits.
+// The cleanup after a wake's respawn lists and stops within the deadline. Short of time for both, the
+// record still moves; the old row waits.
 for (const leftS of [30, 120])
 test(`a wake with a deadline ${leftS} s off starts no listing or stop after its respawn, and still moves the record`, () => {
   const t0 = Date.now();
@@ -618,7 +617,7 @@ test(`a wake with a deadline ${leftS} s off starts no listing or stop after its 
       return { ok: true, said: "respawned", why: "" };
     };
     // 30 s: time for the listing and the respawn only. 120 s: time for a cleanup listing too, but a
-    // stop after it has no bound, so none starts either way (CodeRabbit on #130 at b77aae5c).
+    // stop after it has no bound, so none starts either way.
     const w = wake(ws, ld, { t: f.t, waitS: 1, pollMs: 10, deadline: Date.now() + leftS * 1000 });
     assert.equal(w.is, "woke", JSON.stringify(w));
     assert.equal(after, 0, "no full listing after the respawn");
@@ -768,7 +767,7 @@ test("a row a deadline wake left goes at the next wake with no deadline, and is 
     assert.equal(w.is, "woke", JSON.stringify(w));
     assert.deepEqual(f.removed, [], "the hook's wake stops nothing");
     assert.deepEqual(staleIds(), ["runA"], "the old row is noted for later");
-    // runA2 ends: the next hook wake resumes runA2, never the stale runA (Niilo on #130 at c2ef44e3)
+    // runA2 ends: the next hook wake resumes runA2, never the stale runA
     const a2 = rows.find((r) => r.id === "runA2");
     if (a2) Object.assign(a2, { alive: false, state: "stopped" });
     f.respawned.length = 0;

@@ -58,8 +58,8 @@ const FIRST: ReadonlySet<Target> = new Set(["designing", "building"]);
 export const BUSY: ReadonlySet<string> = new Set(["designing", "building", "fixing"]);
 // A design sent for approval frees its designer, as a PR in review frees its builder.
 export const WAITING_ON_YOU: ReadonlySet<string> = new Set(["design-review", "your-review", "blocked"]);
-// States that move only when the lead moves them. LOCAL-eventapi-form-spike sat in pr-open for five
-// days because nothing aged these.
+// States that move only when the lead moves them, so an item can sit in one for days unless
+// something ages them.
 export const WAITING_ON_LEAD: ReadonlySet<string> = new Set(["pr-open", "agent-review", "gate"]);
 // An item in review reserves no stack and no agent, so both can work on something else. An item here frees its builder and its stack slot.
 export const IN_REVIEW: ReadonlySet<string> = new Set(["your-review", "colleague-review"]);

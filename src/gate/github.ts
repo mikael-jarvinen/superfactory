@@ -9,8 +9,8 @@ export const ghBin = () => process.env.GH_BIN || "gh";
 
 export const gh = (...args: string[]): RunResult => run(ghBin(), args);
 
-// GitHub refuses a PR's diff past 20000 lines with HTTP 406, however few files it touches:
-// lyyti-events#894 was 52. Then the diff comes from the repo's checkout instead, origin/<base>...<head>
+// GitHub refuses a PR's diff past 20000 lines with HTTP 406, however few files it touches. Then the
+// diff comes from the repo's checkout instead, origin/<base>...<head>
 // after a fetch of the base, and of the PR's head when the checkout lacks it. Never a shallow fetch:
 // .git/shallow is shared by every worktree of the checkout. `local` says where the diff came from.
 const TOO_LARGE = /HTTP 406|too_large|exceeded the maximum number of lines/;

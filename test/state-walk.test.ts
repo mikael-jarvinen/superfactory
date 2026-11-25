@@ -87,12 +87,12 @@ test("transition output and refusal messages", () => {
   r = factory(ws, ["state", "LOCAL-gone", "off"]);
   assert.equal(r.stderr, "factory: LOCAL-gone has no record; a new item goes off the board only with --title \"<what it is>\", " +
     "so `state --off` can show it\n");
-  // LOCAL work has no backlog to wait in, so it is recorded off the board, titled (Niilo on #129)
+  // LOCAL work has no backlog to wait in, so it is recorded off the board, titled
   r = factory(ws, ["state", "LOCAL-gone", "off", "--title", "Retire the old export"]);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, "LOCAL-gone: (new) -> off  agent=-  no Jira ticket\n");
   assert.equal(factory(ws, ["state", "--off"]).stdout, "  LOCAL-gone   agent=-        Retire the old export\n");
-  // Niilo on #129: off the board from building frees the builder; the log still says who it was.
+  // Off the board from building frees the builder; the log still says who it was.
   assert.equal(factory(ws, ["state", "LOCAL-built", "building", "--agent", "bea"]).status, 0);
   assert.equal(factory(ws, ["state", "LOCAL-built", "off"]).stdout, "LOCAL-built: building -> off  agent=-  no Jira ticket\n");
   assert.equal(JSON.parse(readFileSync(join(ws, "state", "LOCAL-built.json"), "utf8")).agent, null);
@@ -107,7 +107,7 @@ test("transition output and refusal messages", () => {
   assert.match(last, /^\{"at": "[^"]+", "event": "dropped", "from_state": "off", "note": "not asked for", "ticket": "LOCAL-gone"\}$/);
 });
 
-// Mikael split lyyti-classic#8754 off LOCAL-reports-petes-design, and the PR stayed on both cards.
+// A PR split off an item into one of its own stays on both cards.
 test("state --remove-pr takes a PR off an item and logs it", () => {
   const ws = tempWorkspace();
   after(() => rmSync(ws, { recursive: true, force: true }));

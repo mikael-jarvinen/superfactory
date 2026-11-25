@@ -618,7 +618,7 @@ function gitParts(words: string[], ctx: GuardContext): [string, string[]] {
       const low = val.toLowerCase();
       const pager = low.startsWith("core.pager") && ctx.policy === "readonly" && val.includes("=") && !["=cat", "=less", "="].some((e) => val.endsWith(e));
       if (low.startsWith("alias.") || low.startsWith("core.hookspath") || low.startsWith("core.fsmonitor") || pager) refuse(`git -c ${val} is not allowed`);
-      // a setting whose value git runs as a command is checked as that command (#124, round 9)
+      // a setting whose value git runs as a command is checked as that command
       if (GIT_COMMAND_CONFIG.test(low) && val.includes("=")) checkCommand(val.slice(val.indexOf("=") + 1).replace(/^!/, ""), ctx);
       i += w === "-c" ? 2 : 1;
       continue;
@@ -942,7 +942,7 @@ function checkLeadMerge(args: string[]): void {
 const HOW_TO_CLOSE = "a product PR closes only once the human has named that exact PR and the lead has recorded it with " +
   "`factory allow-close <repo-key> <n> --words \"<the human's words>\"`";
 
-// The comment rule (superfactory#119). A comment the factory's sessions post goes out under the
+// The comment rule. A comment the factory's sessions post goes out under the
 // human's token login, so the review watcher tells it from the human's own by the marker it starts
 // with. A comment write passes only when its body is in the command and starts with the marker, or
 // is a bot trigger; a body from a file, a $(...) or a variable cannot be checked here.
@@ -1598,7 +1598,7 @@ function sshCommand(args: string[]): string {
 // Refused: a glob or brace character, quoted or not ({env,gh,...}, /usr/bin/e?v), any other ~ form
 // (~+, ~-, ~user), a variable, a substitution or a backtick, which the shell expands into anything.
 //
-// Then the program is the file that runs, not its spelling (round 9: rsh and slogin are ssh, rbash
+// Then the program is the file that runs, not its spelling (rsh and slogin are ssh, rbash
 // is bash, /usr/lib/git-core/git-push is git push): a bare name is looked up on PATH, a path is the
 // file itself, and its realpath's basename names it. gh, git, git-<sub> (as git <sub>), ssh, find and
 // the shells are themselves wherever they live; busybox, which is all of them, is refused. Any other
@@ -1885,9 +1885,8 @@ function checkProtect({ words: raw, reads, stdin = [], piped = false, redirected
 
 // ---------------------------------------------------------------- secret files
 //
-// Every role, both policies. A key in lyyti-classic's lyyti-config.php reached a transcript twice, on
-// 2026-10-20 and 2026-10-21, both times through a grep whose redaction missed. So no command prints a
-// secret file's contents, filtered or not. What cannot print it stays allowed: test -f, ls, stat,
+// Every role, both policies. A grep's redaction can miss a key, so no command prints a secret file's
+// contents, filtered or not. What cannot print it stays allowed: test -f, ls, stat,
 // grep -q/-l/-c, writing it by redirect, editing it in place with sed -i, and copying a template into
 // it. The stack scripts write .env inside `factory stack up`, which the guard never sees into.
 
@@ -2750,7 +2749,7 @@ function backtickBodies(text: string): string[] {
   return out;
 }
 
-// The comment rule alone (superfactory#119, N1): a command that names no gh cannot post through it,
+// The comment rule alone: a command that names no gh cannot post through it,
 // and nothing here refuses for any other reason, so the hook never takes a tool away.
 export function commentVerdict(cmd: string): string | null {
   if (!namesGh(cmd)) return null;

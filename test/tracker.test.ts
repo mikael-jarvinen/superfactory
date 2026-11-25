@@ -113,7 +113,7 @@ key = "OPS"
   ]);
 });
 
-// The rule Mikko set: issue tracking is off unless asked for. A Jira workspace, or one with no
+// Issue tracking is off unless asked for. A Jira workspace, or one with no
 // tracker, has no ticket or wiki command, no /tickets or /wiki page, no API and no header link.
 for (const [name, toml] of [["jira", TOML], ["none", NO_TRACKER]] as const)
   test(`off by default: a ${name} workspace has no local tracker anywhere`, async () => {

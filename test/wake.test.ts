@@ -167,7 +167,7 @@ test("factory wake: already live, woken, or not", () => {
   assert.match(r.stderr, /cal has no session to wake/);
 });
 
-// A respawn reruns the old command line, whose --settings is this file (CodeRabbit on #124).
+// A respawn reruns the old command line, whose --settings is this file.
 test("a woken session comes back with its settings rendered again", () => {
   const { ws, put } = fakeFleet();
   put("all.json", [sess("b1", "bea")]);
@@ -404,7 +404,7 @@ test("a respawn leaves room for one listing after it", () => {
 });
 
 // The render runs between the budget check and the respawn: the respawn is given what is left after
-// it, and a render that leaves too little fails the wake rather than run past it (CodeRabbit on #127).
+// it, and a render that leaves too little fails the wake rather than run past it.
 const offBea = (respawned: (number | undefined)[]) => ({
   where: "here",
   sessions: (all = false) => (all ? [sess("b1", "bea")] : []),
@@ -519,7 +519,7 @@ test("only a hosted agent's settings explain a failed send", () => {
   }
 });
 
-// Niilo on #129: waiting work has no record, so the dispatch that makes one titles it, and no card
+// Waiting work has no record, so the dispatch that makes one titles it, and no card
 // shows a bare key. --title wins; else the summary the queue watcher last read; else it says how.
 test("a dispatch titles a new record: --title, else the queue's last read of the tracker", () => {
   const { ws, put } = fakeFleet(TOML + `
@@ -554,7 +554,7 @@ role = "designer"
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual([rec("TEST-30").state, rec("TEST-30").title], ["building", "Rename the export"], "the builder's record has the tracker's title");
   assert.doesNotMatch(r.stdout, /no title/);
-  // a fix round on the live session keeps it, and takes --title all the same (CodeRabbit on #129)
+  // a fix round on the live session keeps it, and takes --title all the same
   const wt = (JSON.parse(readFileSync(join(ws, "state", "TEST-30.json"), "utf8")) as { worktree: string }).worktree;
   put("live.json", [sess("new1", "bea", { state: "idle", cwd: wt })]);
   for (const args of [["pr-open", "--pr", "acme/web#1", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "2 high"]])
@@ -565,7 +565,7 @@ role = "designer"
   assert.equal(rec("TEST-30").title, "Rename the export, round two", "--title on the live session's round");
   assert.equal(factory(ws, ["state", "TEST-30", "blocked", "--evidence", "parked for the next case"]).status, 0);
   // taken off the board with its session left running, it goes back on as building, not fixing,
-  // which off the board cannot reach (CodeRabbit on #129)
+  // which off the board cannot reach
   assert.equal(factory(ws, ["state", "TEST-30", "off"]).status, 0);
   r = factory(ws, ["dispatch", "bea", "TEST-30"]);
   assert.equal(r.status, 0, r.stderr);
@@ -608,7 +608,7 @@ name = "RPE Training App"
   assert.equal(trackerTitle(ws, "LOCAL-gone"), undefined);
 });
 
-// Mikael, 2026-11-18: queued is no longer a state. A record written while it was one is off the board,
+// queued is no longer a state. A record written while it was one is off the board,
 // and the approval it carries is kept: a builder dispatched on it gets the approved design, and a
 // designer dispatched on it gets the last round's links.
 test("a queued record with an approval loads as off, approval intact, and a dispatch reads it back", () => {
@@ -664,7 +664,7 @@ role = "designer"
   assert.equal(JSON.parse(readFileSync(join(ws, "state", "TEST-21.json"), "utf8")).state, "designing");
 });
 
-// CodeRabbit on #129 at 5b7ae81f: a builder with several repos and no stack, kept on its live
+// A builder with several repos and no stack, kept on its live
 // session by a dispatch without --repo, keeps the stack of the repo its worktree is in, not the
 // default repo's.
 test("a dispatch kept on the live session keeps its worktree's stack, not the default repo's", () => {
@@ -697,7 +697,7 @@ repos = ["web", "api"]
   assert.match(r.stdout, /kit is still on TEST-40 .*so it keeps its context/);
   assert.deepEqual([rec().state, rec().stack, rec().worktree], ["building", "api", wt], "api's stack, where the worktree is; not web's, the default");
   assert.doesNotMatch(r.stdout, /ignored/, "no --repo given, nothing ignored");
-  // a fix round: a --repo that names another repo is said to be ignored; one naming the worktree's is not (Marie on #129)
+  // a fix round: a --repo that names another repo is said to be ignored; one naming the worktree's is not
   for (const args of [["pr-open", "--pr", "acme/api#1", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "2 high"]])
     assert.equal(factory(ws, ["state", "TEST-40", ...args]).status, 0);
   r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "web"]);
@@ -708,14 +708,14 @@ repos = ["web", "api"]
   assert.equal(r.status, 0, r.stderr);
   assert.doesNotMatch(r.stdout, /ignored/);
   // a session in no local repo's worktree (a hosted builder's path, say): the record's stack, and
-  // the --repo it overrides is said, with where the stack came from (Marie on #129)
+  // the --repo it overrides is said, with where the stack came from
   put("live.json", [sess("new1", "kit", { state: "idle", cwd: "/far/worktrees/TEST-40" })]);
   r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "web"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^--repo web ignored: kit is kept on api, the stack TEST-40's record has$/m);
 
   // A builder with a stack of its own: --repo is checked against its worktree's repo, never against
-  // the stack's name (Marie on #129: bea in web's worktree with --repo web was told it was ignored).
+  // the stack's name (bea in web's worktree with --repo web was told it was ignored).
   mkdirSync(join(ws, "briefs"), { recursive: true });
   writeFileSync(join(ws, "briefs", "app.md"), "the app stack's brief");
   r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "web", "--title", "On the web"]);

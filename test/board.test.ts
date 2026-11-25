@@ -183,8 +183,7 @@ test("the message page refuses a cross-site post", { skip: noInboxLock }, async 
   assert.deepEqual(readTail(ws.messages).map((r) => r.text), ["do something"]);
 });
 
-// Mikael, 2026-11-16: "What's the link to the third design slideset. The task card on the board does
-// not contain it." A card carries the design's slides and canvas from design-review through the build.
+// A card carries the design's slides and canvas from design-review through the build.
 test("the server: a card carries its design's slides and canvas once it has them", { skip: noInboxLock }, async () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));

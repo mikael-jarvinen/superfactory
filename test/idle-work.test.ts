@@ -21,7 +21,7 @@ const FLEET: Agent[] = [
   reviewer("kepler"),
 ];
 
-// Mikael, 2026-11-18: waiting work lives in the backlog, which the lead reads, so a free builder is
+// Waiting work lives in the backlog, which the lead reads, so a free builder is
 // not flagged here, and an item off the board is no work for anyone.
 test("an item off the board is never flagged, a free builder of its stack or not", () => {
   assert.deepEqual(idleWork([rec("CL-1", null as unknown as string, "events")], FLEET, new Set()), []);

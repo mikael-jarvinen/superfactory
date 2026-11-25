@@ -9,8 +9,6 @@
 //
 // The words on screen are a presenter's narration, for a colleague who never saw the ticket; the
 // lead writes it in the brief from the ticket, and you change only the wording to fit the screen.
-// Mikael, 2026-11-17: "I would need a narration written for a new feature demo. These current texts
-// I don't understand, is it telling what it's doing now?"
 // - `camera.title('...')` opens the video with a card: what the feature is and what problem it solves.
 // - `camera.caption('...')` puts a line at the bottom: what the viewer is looking at and why it
 //   matters, never which click is happening.

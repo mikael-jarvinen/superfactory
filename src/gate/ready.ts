@@ -226,9 +226,8 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
         const age = Math.round(sinceHead([...(runs ?? []).map((c) => c.started_at), ...sts.map((x) => x.created_at)]));
         const runTitle = latestRun?.status === "completed" ? (latestRun.output?.title ?? "") : "";
         const skipped = st ? (SKIPPED.test(desc) ? `its status here says "${desc}"` : "") : SKIPPED.test(runTitle) ? `its check here says "${runTitle}"` : "";
-        // Its check-run still running is it reviewing, however long since the ask: on lyyti-classic#8641,
-        // 2026-11-12, it was still in progress when the grace from the ask ran out, and pr-wait gave up.
-        // pr-wait's own limit bounds the wait.
+        // Its check-run still running is it reviewing, however long since the ask: it can still be in
+        // progress when the grace from the ask runs out. pr-wait's own limit bounds the wait.
         if (latestRun && latestRun.status !== "completed") {
           fail(`${bot.status} is reviewing ${short} (its check here is ${latestRun.status}${latestRun.output?.title ? `: ${latestRun.output.title}` : ""})`, "waits");
         } else {

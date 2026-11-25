@@ -102,8 +102,7 @@ test("one query for every PR, and its answer read back per PR", () => {
   assert.equal(parseAnswer(keys, "not json").size, 0);
 });
 
-// Mikael, 2026-11-23: "when there is a PR and it's assigned to somebody, I want to see the name and
-// GH profile picture next to the PR link."
+// A PR assigned to somebody shows their name and GitHub profile picture next to the PR link.
 test("assignees come in the same query, each with a small avatar and the name, or the login without one", () => {
   assert.match(prQuery(["o/r#1"]), /assignees\(first: 10\) \{ nodes \{ login name avatarUrl\(size: 40\) \} \}/);
   const s = reviewStatus(pr({ assignees: { nodes: [
