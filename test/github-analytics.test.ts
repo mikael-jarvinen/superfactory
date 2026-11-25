@@ -266,3 +266,35 @@ test("a page GitHub's gateway gives up on (HTTP 502) is asked again at half the 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Mikael, 2026-11-25: "About the GH analytics's PR traffic, it colors the columns based on repos, but I
+// want to also view by PR author."
+test("PR traffic by author: the same counts per PR author, adding up to the repo totals, and an author table", () => {
+  const prs = [
+    pr({ number: 1, author: who("niilo"), created: "2026-11-18T06:00:00Z", merged: "2026-11-19T10:00:00Z", closed: "2026-11-19T10:00:00Z", state: "MERGED", additions: 100, deletions: 20 }),
+    pr({ number: 2, author: who("niilo"), repo: "portal", created: "2026-11-19T07:00:00Z" }),
+    pr({ number: 3, author: who("sami"), created: "2026-11-18T07:00:00Z", closed: "2026-11-20T10:00:00Z", state: "CLOSED" }),
+    pr({ number: 4, author: who("kim"), created: "2026-11-01T07:00:00Z" }), // opened before the range, still open
+    pr({ number: 5, author: null, created: "2026-11-20T07:00:00Z" }), // a deleted account
+    pr({ number: 6, author: who("dependabot", true), created: "2026-11-19T07:00:00Z" }),
+  ];
+  const r = report(prs, { days: 3, repos: ["classic", "portal"], bots: false, now: NOW });
+  assert.deepEqual(r.byAuthor.opened, { niilo: [1, 1, 0], sami: [1, 0, 0], ghost: [0, 0, 1] });
+  assert.deepEqual(r.byAuthor.merged, { niilo: [0, 1, 0] });
+  assert.deepEqual(r.byAuthor.closed, { sami: [0, 0, 1] });
+  assert.deepEqual(r.byAuthor.lines, { niilo: [0, 120, 0] });
+  assert.deepEqual(r.byAuthor.added, { niilo: [0, 100, 0] });
+  assert.deepEqual(r.byAuthor.open, { niilo: [1, 1, 1], sami: [1, 1, 0], kim: [1, 1, 1], ghost: [0, 0, 1] });
+  // grouped by author or by repo, every metric adds up the same each day
+  const total = (per: Record<string, number[]>) => r.days.map((_, i) => Object.values(per).reduce((a, v) => a + (v[i] ?? 0), 0));
+  for (const m of ["opened", "merged", "closed", "open", "lines", "added", "deleted"] as const)
+    assert.deepEqual(total(r.byAuthor[m]), total(r.traffic[m]), m);
+  // the table: the range's own PRs per author, most opened first; kim's only PR predates the range
+  assert.deepEqual(r.authors.map((a) => [a.login, a.opened, a.merged, a.closed, a.lines, a.added, a.deleted]), [
+    ["niilo", 2, 1, 0, 120, 100, 20], ["ghost", 1, 0, 0, 0, 0, 0], ["sami", 1, 0, 1, 0, 0, 0], ["kim", 0, 0, 0, 0, 0, 0],
+  ]);
+  // with bots shown, the bot's PR is traffic and an author like anyone's
+  const withBots = report(prs, { days: 3, repos: ["classic", "portal"], bots: true, now: NOW });
+  assert.deepEqual(withBots.byAuthor.opened.dependabot, [0, 1, 0]);
+  assert.equal(Object.hasOwn(r.byAuthor.opened, "dependabot"), false, "bots hidden: not an author either");
+});
