@@ -35,7 +35,7 @@ import { claudeConfigDir } from "../transport.js";
 import { realpathLoose } from "../util.js";
 import type { Workspace } from "../workspace.js";
 import { worktreePath } from "../worktree.js";
-import { probeFor, type RemoteRead, type Runner, sshRunner } from "./remote-transcripts.js";
+import { parseReply, probeFor, type RemoteRead, type Runner, sshRunner } from "./remote-transcripts.js";
 
 export interface Tokens {
   input: number;
@@ -114,6 +114,13 @@ interface Call {
   tokens: Tokens;
 }
 
+// A transcript's calls, by the file they came from: `host:path` for another host's.
+interface Read {
+  file: string;
+  agent: string | null;
+  calls: Call[];
+}
+
 interface FileRead {
   offset: number;
   agent: string | null;
@@ -155,8 +162,8 @@ export class TranscriptUsage {
   // The calls in every transcript of a project dir, with the name of the session each came from.
   // A subagent's transcript, under <session>/subagents/, is its session's. A transcript last written
   // before `since` holds no call any item could own, and is not read at all.
-  read(dir: string, since = -Infinity): { agent: string | null; calls: Call[] }[] {
-    const out: { agent: string | null; calls: Call[] }[] = [];
+  read(dir: string, since = -Infinity): Read[] {
+    const out: Read[] = [];
     let names: string[];
     try {
       names = readdirSync(dir);
@@ -166,7 +173,7 @@ export class TranscriptUsage {
     for (const f of names) {
       if (!f.endsWith(".jsonl") || !fresh(join(dir, f), since)) continue;
       const main = this.readOne(join(dir, f));
-      out.push({ agent: main.agent, calls: main.calls });
+      out.push({ file: join(dir, f), agent: main.agent, calls: main.calls });
       const sub = join(dir, f.slice(0, -".jsonl".length), "subagents");
       let subs: string[] = [];
       try {
@@ -174,20 +181,27 @@ export class TranscriptUsage {
       } catch {
         // no subagents
       }
-      for (const s of subs.filter((x) => fresh(join(sub, x), since))) out.push({ agent: main.agent, calls: this.readOne(join(sub, s)).calls });
+      for (const s of subs.filter((x) => fresh(join(sub, x), since))) out.push({ file: join(sub, s), agent: main.agent, calls: this.readOne(join(sub, s)).calls });
     }
     return out;
   }
 
   // The calls in a cwd's transcripts on a host, as of its last read: read() for another machine.
-  readOn(host: string, cwd: string): { agent: string | null; calls: Call[] }[] {
-    const out: { agent: string | null; calls: Call[] }[] = [];
+  readOn(host: string, cwd: string): Read[] {
+    const out: Read[] = [];
     for (const f of this.hosts.get(host)?.listing[cwd] ?? []) {
       const main = this.state(`${host}:${f.p}`);
-      out.push({ agent: main.agent, calls: main.calls });
-      for (const s of f.subs) out.push({ agent: main.agent, calls: this.state(`${host}:${s}`).calls });
+      out.push({ file: `${host}:${f.p}`, agent: main.agent, calls: main.calls });
+      for (const s of f.subs) out.push({ file: `${host}:${s}`, agent: main.agent, calls: this.state(`${host}:${s}`).calls });
     }
     return out;
+  }
+
+  // A read that could not start: every host it was for fails with it, keeping what each had read.
+  fail(host: string, why: string): void {
+    const h = this.hosts.get(host) ?? { read_at: null, error: null, files: 0, listing: {}, busy: null };
+    this.hosts.set(host, h);
+    h.error = why;
   }
 
   hostRead(host: string): HostRead | null {
@@ -206,8 +220,7 @@ export class TranscriptUsage {
     for (const [k, st] of this.files) if (k.startsWith(prefix)) offsets[k.slice(prefix.length)] = st.offset;
     h.busy = run(probeFor({ cwds, since, offsets }))
       .then((out) => {
-        const r = JSON.parse(out) as RemoteRead;
-        if (!r || typeof r.listing !== "object" || typeof r.data !== "object") throw new Error("its reply has no listing");
+        const r = parseReply(out);
         for (const [p, d] of Object.entries(r.data)) {
           const st = this.state(prefix + p);
           if (d.reset || d.off < st.offset) Object.assign(st, { offset: 0, agent: null, ids: new Map(), calls: [] });
@@ -296,6 +309,9 @@ export class TranscriptUsage {
 // session started there is the builder's, on whatever item it was on), each on the machine it runs on. A local
 // cwd is given as its projects/ dir, and one on a host as the cwd itself, which that host turns into
 // its own dir. A cwd shared by several agents is read once: its sessions carry their agent's name.
+// A dir that is both an item's worktree and some agent's cwd is the item's, as the worktree's
+// sessions are all that item's; report() also counts each file once, for dirs that are the same only
+// on the host (a symlink, or two cwds the dir name spells alike), with the items' sources first.
 interface Source {
   host: string | null;
   dir: string;
@@ -305,11 +321,12 @@ interface Source {
 function sources(ws: Workspace, items: string[]): Source[] {
   const out = new Map<string, Source>();
   const add = (host: string | null, cwd: string, item: string | null) => {
-    if (host) {
-      if (!out.has(`${host}:${cwd}`)) out.set(`${host}:${cwd}`, { host, dir: cwd, item });
-      return;
-    }
-    for (const p of new Set([cwd, realpathLoose(cwd)])) if (!out.has(projectDirFor(p))) out.set(projectDirFor(p), { host, dir: projectDirFor(p), item });
+    const put = (key: string, dir: string) => {
+      const had = out.get(key);
+      if (!had || (had.item === null && item !== null)) out.set(key, { host, dir, item });
+    };
+    if (host) return put(`${host}:${cwd}`, cwd);
+    for (const p of new Set([cwd, realpathLoose(cwd)])) put(projectDirFor(p), projectDirFor(p));
   };
   for (const a of ws.config.agents) {
     if (a.role === "builder") {
@@ -324,17 +341,26 @@ function sources(ws: Workspace, items: string[]): Source[] {
     const cwd = roleOf(ws, a).cwd;
     if (cwd) add(a.host ?? null, cwd, null);
   }
-  return [...out.values()].filter((s) => s.host || existsSync(s.dir));
+  return [...out.values()].filter((s) => s.host || existsSync(s.dir)).sort((a, b) => Number(a.item === null) - Number(b.item === null));
 }
 
 // Reads every host's transcripts that the workspace's sessions wrote there, all hosts at once. `run`
 // is for tests; the board reads over ssh. Resolves when every read has finished or failed.
+// What cannot even be asked (the events log, the config) is every host's error, and is logged.
 export function refreshHosts(ws: Workspace, usage: TranscriptUsage, run?: (host: string) => Runner): Promise<void> {
-  const tls = timelines(ws);
-  if (!tls.length) return Promise.resolve();
-  const since = Math.min(...tls.map((t) => (t.steps[0] as Step).at));
   const byHost = new Map<string, string[]>();
-  for (const s of sources(ws, tls.map((t) => t.ticket))) if (s.host) byHost.set(s.host, [...(byHost.get(s.host) ?? []), s.dir]);
+  let since: number;
+  try {
+    const tls = timelines(ws);
+    if (!tls.length) return Promise.resolve();
+    since = Math.min(...tls.map((t) => (t.steps[0] as Step).at));
+    for (const s of sources(ws, tls.map((t) => t.ticket))) if (s.host) byHost.set(s.host, [...(byHost.get(s.host) ?? []), s.dir]);
+  } catch (e) {
+    const why = `the board could not work out what to read: ${e instanceof Error ? e.message : String(e)}`;
+    console.error(`analytics: ${why}`);
+    for (const h of Object.keys(ws.config.hosts)) usage.fail(h, why);
+    return Promise.resolve();
+  }
   return Promise.all([...byHost].map(([host, cwds]) =>
     usage.refresh(host, cwds, since, run ? run(host) : sshRunner(ws.config.hosts[host]?.ssh ?? "")))).then(() => undefined);
 }
@@ -577,8 +603,12 @@ export function report(ws: Workspace, usage: TranscriptUsage, now = Date.now()):
   const fleet = new Set(ws.config.agents.map((a) => a.name));
   const unattributed: Record<string, Tokens> = {};
   const byTicket = new Map(tls.map((t) => [t.ticket, t]));
-  for (const { host, dir, item } of tls.length ? sources(ws, tls.map((t) => t.ticket)) : []) {
+  const srcs = tls.length ? sources(ws, tls.map((t) => t.ticket)) : [];
+  const counted = new Set<string>();
+  for (const { host, dir, item } of srcs) {
     for (const f of host ? usage.readOn(host, dir) : usage.read(dir, since)) {
+      if (counted.has(f.file)) continue;
+      counted.add(f.file);
       if (!item && !(f.agent && fleet.has(f.agent))) continue;
       for (const c of f.calls) {
         if (c.at < since) continue;
@@ -604,7 +634,8 @@ export function report(ws: Workspace, usage: TranscriptUsage, now = Date.now()):
     }
   }
   const hosts: Record<string, HostRead> = {};
-  for (const h of Object.keys(ws.config.hosts)) hosts[h] = usage.hostRead(h) ?? { read_at: null, error: null, files: 0 };
+  // only hosts with something to read: one with none is never read, and is no one's reason
+  for (const h of new Set(srcs.flatMap((x) => (x.host ? [x.host] : [])))) hosts[h] = usage.hostRead(h) ?? { read_at: null, error: null, files: 0 };
   // a host read once keeps counting what it read, though a later read failed
   const unread = (h: string | null | undefined) => !!h && hosts[h]?.read_at == null;
   const left_out = ws.config.agents

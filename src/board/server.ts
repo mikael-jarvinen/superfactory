@@ -554,8 +554,9 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
     if (reading || Date.now() - readAt < ANALYTICS_EVERY || !Object.keys(ws.config.hosts).length) return;
     readAt = Date.now();
     reading = refreshHosts(ws, usage, opts.transcripts)
-      .catch(() => {
-        // each host's failure is its own, in the report; this is the events log failing to read
+      .catch((e: unknown) => {
+        // refreshHosts records each host's failure itself; anything here is a bug, so it is logged
+        console.error(`analytics: reading other hosts failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
       })
       .finally(() => {
         reading = null;

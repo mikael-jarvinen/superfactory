@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import vm from "node:vm";
 import { JSDOM } from "jsdom";
 import { projectDirFor, quantile, refreshHosts, report, stat, TranscriptUsage, weekOf } from "../src/board/analytics.js";
-import type { RemoteQuery, Runner } from "../src/board/remote-transcripts.js";
+import { parseReply, type RemoteQuery, type Runner, sshRunner } from "../src/board/remote-transcripts.js";
 import { serve } from "../src/board/server.js";
 import { appendEvent, saveRec } from "../src/state.js";
 import { openWorkspace, type Workspace } from "../src/workspace.js";
@@ -554,7 +555,7 @@ test("agents on another host count, read over its runner, incrementally, and are
   await refreshHosts(ws, fresh, () => () => Promise.resolve("not json"));
   const r4 = report(ws, fresh, NOW);
   assert.deepEqual(r4.left_out.sort(), ["cal", "rae"]);
-  assert.match(r4.hosts["far"]!.error!, /JSON/);
+  assert.match(r4.hosts["far"]!.error!, /not the script.s: "not json"/);
 });
 
 test("the board reads other hosts in the background, and its page says who is not counted yet", async () => {
@@ -589,4 +590,71 @@ test("the board reads other hosts in the background, and its page says who is no
     await new Promise((r) => setTimeout(r, 20));
   }
   assert.match(w.document.body.textContent!, /Not counted yet: (cal, rae|rae, cal) \(far is still being read\)/);
+});
+
+test("a host's file is counted once, as its item's, however many cwds list it; a host with nothing to read is no one's reason", async () => {
+  const { ws, far, farDir } = hostedWorkspace();
+  const wt = worktreePath("/far/api", "LOCAL-h");
+  // a session with no name, which only the dir says is the item's
+  writeFileSync(join(farDir(wt), "u1.jsonl"), call("2026-11-05T02:00:00Z", "u1", { output_tokens: 100 }) + "\n");
+  // ada, listed before cal, sits in cal's worktree itself; rae in a path the dir name spells alike
+  const cfg = readFileSync(join(ws.dir, "factory.toml"), "utf8").replace(`name = "ada"`, `name = "ada"
+host = "far"
+cwd = "${wt}"`).replace(`cwd = "/far/rae"`, `cwd = "${wt.replace("/far/api/.claude", "/far.api/_claude")}"`) + `
+[hosts.near]
+url = "http://127.0.0.1:9"
+token_file = "token"
+hash_files = ["daemon.toml", "workspace.toml"]
+`;
+  writeFileSync(join(ws.dir, "factory.toml"), cfg);
+  const ws2 = openWorkspace(ws.dir);
+  const usage = new TranscriptUsage();
+  await refreshHosts(ws2, usage, () => python(far));
+  const r = report(ws2, usage, NOW);
+  const it = r.items.find((i) => i.ticket === "LOCAL-h")!;
+  assert.equal(it.states["building"]!.tokens.output, 43 + 100, "once, and the item's, not ada's: the unnamed session too");
+  assert.equal(it.states["pr-open"]!.tokens.output, 6);
+  assert.equal(r.unattributed["ada"], undefined);
+  assert.equal(r.unattributed["rae"], undefined);
+  assert.equal(r.unattributed["?"], undefined);
+  assert.deepEqual(Object.keys(r.hosts), ["far"], "near has no agent, so it is never read and never named");
+});
+
+test("what stops a host read before it starts is that host's error, and is logged", async () => {
+  const { ws, far } = hostedWorkspace();
+  writeFileSync(join(ws.stateDir, "BROKEN.json"), "{ not json");
+  const usage = new TranscriptUsage();
+  const logged: string[] = [];
+  const was = console.error;
+  console.error = (...a: unknown[]) => void logged.push(a.join(" "));
+  try {
+    await refreshHosts(ws, usage, () => python(far));
+  } finally {
+    console.error = was;
+  }
+  assert.match(usage.hostRead("far")?.error ?? "", /could not work out what to read: .*JSON/);
+  assert.match(logged.join("\n"), /analytics: the board could not work out what to read/);
+});
+
+test("ssh: what a login shell prints first is skipped, a reply that is not the script's says what it was, and a refused key says why", async () => {
+  const bin = mkdtempSync(join(tmpdir(), "sf-ssh-"));
+  const stub = (body: string) => {
+    writeFileSync(join(bin, "ssh"), `#!/bin/sh\ncat >/dev/null\n${body}\n`);
+    chmodSync(join(bin, "ssh"), 0o755);
+  };
+  const path = process.env["PATH"];
+  process.env["PATH"] = `${bin}:${path}`;
+  try {
+    stub(`echo "Welcome to far"; printf '\\n--sf-transcripts--\\n{"listing":{"/x":[]},"data":{}}'`);
+    const usage = new TranscriptUsage();
+    await usage.refresh("far", ["/x"], 0, sshRunner("far"));
+    assert.deepEqual(usage.hostRead("far"), { read_at: usage.hostRead("far")!.read_at, error: null, files: 0 });
+    stub(`echo "conda: command not found"`);
+    await assert.rejects(sshRunner("far")("x").then(parseReply), /not the script's: "conda: command not found/);
+    stub(`echo "far: Permission denied (publickey)." >&2; exit 255`);
+    await assert.rejects(sshRunner("far")("x"), /exited 255: far: Permission denied \(publickey\)\. \(the board has no ssh agent/);
+  } finally {
+    process.env["PATH"] = path;
+  }
+  assert.throws(() => parseReply('\n--sf-transcripts--\n{"listing"'), /not JSON .*: "\{\\"listing\\""/);
 });

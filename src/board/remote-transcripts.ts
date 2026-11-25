@@ -43,6 +43,7 @@ def project(cwd):
     base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     return os.path.join(base, "projects", re.sub(r"[^A-Za-z0-9]", "-", cwd))
 
+MARK = "--sf-transcripts--"
 KEEP = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 
 def slim(line):
@@ -119,8 +120,25 @@ def main(q):
                 for p in [f["p"]] + f["subs"]:
                     take(p, q["offsets"].get(p, 0), data)
         listing[cwd] = seen
-    sys.stdout.write(json.dumps({"listing": listing, "data": data}, separators=(",", ":")))
+    sys.stdout.write("\n" + MARK + "\n" + json.dumps({"listing": listing, "data": data}, separators=(",", ":")))
 `;
+
+// What a login shell prints on its own (a motd, an rc file's echo) comes before the script's
+// reply, which starts after the script's marker line.
+const MARK = "\n--sf-transcripts--\n";
+
+export function parseReply(out: string): RemoteRead {
+  const at = out.lastIndexOf(MARK);
+  if (at < 0) throw new Error(`its reply is not the script's: ${JSON.stringify(out.slice(0, 200))}`);
+  let r: RemoteRead;
+  try {
+    r = JSON.parse(out.slice(at + MARK.length)) as RemoteRead;
+  } catch (e) {
+    throw new Error(`its reply is not JSON (${(e as Error).message}): ${JSON.stringify(out.slice(at + MARK.length, at + MARK.length + 200))}`);
+  }
+  if (!r || typeof r.listing !== "object" || typeof r.data !== "object") throw new Error("its reply has no listing");
+  return r;
+}
 
 // The script with its query, which goes in as base64 so no byte of a path can end the literal.
 export const probeFor = (q: RemoteQuery): string =>
@@ -129,7 +147,9 @@ export const probeFor = (q: RemoteQuery): string =>
 export const READ_TIMEOUT_MS = 180_000;
 
 // ssh in batch mode, so a missing key fails rather than prompts, and compressed, as the first read
-// sends tens of megabytes of JSON. `dest` is config.ts's checked destination, never an option.
+// sends tens of megabytes of JSON. `dest` is config.ts's checked destination, never an option. The
+// board runs as a service, with no ssh agent, so the key must be one ssh finds itself: an
+// IdentityFile in ~/.ssh/config for the destination, or a default identity, with no passphrase.
 export function sshRunner(dest: string, timeoutMs = READ_TIMEOUT_MS): Runner {
   return (script) =>
     new Promise((resolve, reject) => {
@@ -147,7 +167,11 @@ export function sshRunner(dest: string, timeoutMs = READ_TIMEOUT_MS): Runner {
       p.on("close", (code, signal) => {
         clearTimeout(timer);
         if (code === 0) resolve(Buffer.concat(out).toString("utf8"));
-        else reject(new Error(`ssh ${dest} ${signal ? `was killed (${signal}) after ${timeoutMs / 1000} s` : `exited ${code}`}${err.trim() ? `: ${err.trim().split("\n").slice(-1)[0]}` : ""}`));
+        else {
+          const last = err.trim().split("\n").slice(-1)[0] ?? "";
+          const hint = /permission denied|publickey/i.test(last) ? " (the board has no ssh agent: give the destination an IdentityFile with no passphrase in ~/.ssh/config)" : "";
+          reject(new Error(`ssh ${dest} ${signal ? `was killed (${signal}) after ${timeoutMs / 1000} s` : `exited ${code}`}${last ? `: ${last}` : ""}${hint}`));
+        }
       });
       p.stdin.on("error", () => {
         // the close handler says why
