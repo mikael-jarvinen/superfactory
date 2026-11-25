@@ -5,7 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { probeAll, stacksFile } from "../board/server.js";
 import type { Repo, Stack } from "../config.js";
-import { loadRec } from "../state.js";
+import { loadRec, saveRec } from "../state.js";
 import type { Workspace } from "../workspace.js";
 import { die, now, pyDumps, realpathLoose, run, sleep } from "../util.js";
 import { git, HTTPS, registeredWorktrees, worktreePath } from "../worktree.js";
@@ -382,10 +382,18 @@ export function stackUp(ws: Workspace, w: Where, out: Out = console.log): void {
   if (at?.checkout && w.slot === undefined)
     die(`${at.wt} is ${ws.config.human.name}'s checkout, not a work item's worktree. Give --slot N for a slot of the base branches.`);
   const caller = at && !at.checkout ? at : null;
+  // An assistant's item (release messaging's screenshots, an old-code "before" stack) gets a slot only
+  // when it names one. The named slot goes through the same refusals as any: never the reserved slot,
+  // never one pinned to a builder, never one holding another item's work in progress; a slot of an
+  // item in review is taken as a builder would take it.
+  let assistant = false;
   if (caller) {
     const ag = ws.config.agents.find((a) => a.name === caller.agent);
     if (!caller.agent) die(`${caller.wt} is no builder's: state/${caller.ticket}.json is missing or names no agent. A slot goes only to a builder's work item.`);
-    if (!ag || ag.role !== "builder") die(`${caller.ticket} is recorded to ${caller.agent}, who is not a builder`);
+    assistant = ag?.role === "assistant";
+    if (!ag || (ag.role !== "builder" && !assistant)) die(`${caller.ticket} is recorded to ${caller.agent}, who is not a builder`);
+    if (assistant && w.slot === undefined)
+      die(`${caller.ticket} is recorded to ${caller.agent}, an assistant: name the slot with --slot N, one no builder's work in progress holds (\`factory stack status\`)`);
   } else if (w.slot === undefined) die("run `factory stack up` from a work item's worktree, or give --slot N for a slot of the base branches");
   const stack = stackFor(ws, w.stack, caller);
   const item = caller ? itemWorktrees(ws, stack, caller) : {};
@@ -424,6 +432,14 @@ export function stackUp(ws: Workspace, w: Where, out: Out = console.log): void {
     reg.slots[String(n)] = { created: prev?.created ?? now(), worktrees: plan };
     saveRegistry(ws, stack.key, reg);
     exportStacks(ws);
+    if (assistant && caller) {
+      const rec = loadRec(ws, caller.ticket);
+      if (rec) {
+        rec.assistant_slot = { agent: caller.agent as string, stack: stack.key, slot: n, at: now() };
+        saveRec(ws, rec);
+        out(`  ${caller.ticket} records that ${caller.agent}, an assistant, holds ${stack.key} slot ${n}`);
+      }
+    }
     return { slot: n, placement: plan };
   });
   mustRun(ws, stack, slot, placement, "up", `\nThe slot stays placed. Fix it and run up again, or free it with \`factory stack destroy\`.`, w.args);
@@ -476,10 +492,19 @@ export function stackDestroy(ws: Workspace, w: Where, out: Out = console.log): v
   withLock(ws, r.stack.key, out, () => {
     const reg = loadRegistry(ws, r.stack.key);
     refuseOthers(ws, r, reg);
-    mustRun(ws, r.stack, r.slot, reg.slots[String(r.slot)]?.worktrees ?? {}, "destroy", "", w.args);
+    const held = reg.slots[String(r.slot)]?.worktrees ?? {};
+    mustRun(ws, r.stack, r.slot, held, "destroy", "", w.args);
     delete reg.slots[String(r.slot)];
     saveRegistry(ws, r.stack.key, reg);
     exportStacks(ws);
+    // An assistant's hold on the slot ends with it.
+    for (const ticket of new Set(Object.values(held).map((wt) => basename(wt)))) {
+      const rec = loadRec(ws, ticket);
+      if (rec?.assistant_slot && rec.assistant_slot.stack === r.stack.key && rec.assistant_slot.slot === r.slot) {
+        rec.assistant_slot = null;
+        saveRec(ws, rec);
+      }
+    }
   });
   out(`${r.stack.key} slot ${r.slot} destroyed and free. Its worktrees are kept.`);
 }

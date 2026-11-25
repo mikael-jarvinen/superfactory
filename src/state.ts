@@ -98,6 +98,9 @@ export interface Rec {
   prs?: Pr[];
   // message: the queue id of the posted question this block waits on, when it was posted without the ticket
   asked_you: { question: string | null; at: string; message?: string | null } | null;
+  // A slot an assistant brought up for this item with `factory stack up --slot N` (screenshots for
+  // release messaging, an old-code "before" stack); cleared when the slot is destroyed.
+  assistant_slot?: { agent: string; stack: string; slot: number; at: string } | null;
   since: string | null;
   created: string;
   blocked_from: State | null;

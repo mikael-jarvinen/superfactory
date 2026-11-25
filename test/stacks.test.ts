@@ -11,7 +11,7 @@ import { leftWork, reviewOnly } from "../src/fleet.js";
 import { allRecs, loadRec, saveRec, transition } from "../src/state.js";
 import { alive } from "../src/stacks/process.js";
 import { run } from "../src/util.js";
-import { slotless } from "../src/stacks/engine.js";
+import { releaseForReview, slotless } from "../src/stacks/engine.js";
 import { ensureWorktree, git } from "../src/worktree.js";
 import { openWorkspace, type Workspace } from "../src/workspace.js";
 import { CLI, factory, tempWorkspace } from "./helpers.js";
@@ -74,6 +74,14 @@ stack = "solo"
 name = "fay"
 role = "builder"
 stack = "solo"
+
+[roles.assistant]
+cwd = "assistants"
+settings = "assistant"
+
+[[agents]]
+name = "val"
+role = "assistant"
 
 [tracker]
 kind = "none"
@@ -397,4 +405,37 @@ createServer((_, res) => res.end("ok")).listen(Number(process.argv[2]), "127.0.0
   const late = factory(dir, ["stack", "wait-http", `http://127.0.0.1:${port}/`, "--timeout", "1"]);
   assert.equal(late.status, 1);
   assert.match(late.stderr, /did not answer below 400 within 1 s/);
+});
+
+// LOCAL-stack-up-for-assistants, 2026-11-25: release messaging needs a stack for its screenshots, and
+// stack up refused an item recorded to an assistant; the lead had to record it to an idle builder.
+test("an assistant's item gets the slot it names: never the reserved one, a pinned one, or one with work in progress", () => {
+  const { dir, ws, wt } = setup();
+  const up = (cwd: string, ...args: string[]) => factory(dir, ["stack", "up", ...args], { cwd });
+  const mine = wt("web", "LOCAL-launch", "val");
+  assert.match(up(mine).stderr, /LOCAL-launch is recorded to val, an assistant: name the slot with --slot N/);
+  assert.match(up(mine, "--stack", "solo", "--slot", "0").stderr, /solo slot 0 is reserved/);
+  ok(up(wt("web", "A-1", "eve")), "eve's item");
+  assert.match(up(mine, "--stack", "solo", "--slot", "1").stderr, /solo slot 1 holds A-1, eve's/, "work in progress is never taken");
+  assert.match(up(wt("api", "LOCAL-launch", "val"), "--stack", "app", "--slot", "1").stderr, /app slot 1 is pinned to bea/);
+  assert.deepEqual(calls(dir), ["up solo 1 web=A-1 api=-"]);
+
+  const out = ok(up(mine, "--stack", "solo", "--slot", "2"), "a free slot, named");
+  assert.match(out, /solo slot 2 \(asked for\): web=LOCAL-launch/);
+  assert.match(out, /LOCAL-launch records that val, an assistant, holds solo slot 2/);
+  assert.deepEqual(loadRec(ws, "LOCAL-launch")?.assistant_slot && { ...loadRec(ws, "LOCAL-launch")!.assistant_slot, at: "-" },
+    { agent: "val", stack: "solo", slot: 2, at: "-" });
+  assert.deepEqual(calls(dir), ["up solo 2 web=LOCAL-launch api=-"]);
+  // the builder's own allocation goes on as before: no free slot is left for fay
+  assert.match(up(wt("web", "A-2", "fay")).stderr, /every slot of solo open to fay is taken/);
+
+  // a slot of an item in review is taken, as a builder would take it
+  releaseForReview(ws, "A-1", () => {});
+  const before = wt("web", "LOCAL-before", "val");
+  assert.match(ok(up(before, "--stack", "solo", "--slot", "1"), "a released slot"), /solo slot 1 \(asked for\)[\s\S]*taking slot 1 from A-1, which is in review/);
+
+  // destroying the slot ends the assistant's hold on it
+  ok(factory(dir, ["stack", "destroy", "--stack", "solo", "--slot", "2"]), "destroy");
+  assert.equal(loadRec(ws, "LOCAL-launch")?.assistant_slot, null);
+  assert.equal(loadRec(ws, "LOCAL-before")?.assistant_slot?.slot, 1, "the other hold stays");
 });
