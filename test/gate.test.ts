@@ -223,7 +223,8 @@ test("pr-send's gate read waits out what time clears, and stops at once on what 
 });
 
 // Every PR is a draft until its item reaches undrafting(ws), and CodeRabbit skips drafts with a green status. With
-// no review bot required, that is only named, and pr-wait is not offered, as it asks only the review_bot.
+// no review bot required, that is only named, and the remark says to ask it by hand, as pr-wait asks only a
+// review_bot whose trigger it knows.
 test("a review bot that skipped the draft is named as having reviewed nothing", () => {
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
   const skipped = (context: string) => green({ [st]: { stdout: { statuses: [{ context, state: "success", description: "Review skipped: draft pull request" }] } } });
@@ -232,7 +233,12 @@ test("a review bot that skipped the draft is named as having reviewed nothing", 
   assert.match(r.stdout, /status 'CodeRabbit' is green only because it skipped a draft and reviewed nothing -- ask it for a review by hand; no \[gate\] review_bot is set, so `factory pr-wait` asks no bot/);
   // a review_bot set, and this is another bot: pr-wait would ask the review_bot, not this one
   r = gateWorkspace('review_bot = "coderabbitai"\n').run(skipped("OtherBot"), ["pr-ready", "web", String(N)]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /status 'OtherBot' is green only because it skipped a draft and reviewed nothing -- ask it for a review by hand; `factory pr-wait` asks only the review_bot, coderabbitai/);
+  // a review_bot pr-wait knows no trigger for: pr-wait asks nobody
+  r = gateWorkspace('review_bot = "sourcery"\n').run(skipped("OtherBot"), ["pr-ready", "web", String(N)]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /status 'OtherBot' is green only because it skipped a draft and reviewed nothing -- ask it for a review by hand; `factory pr-wait` asks no bot, as it knows no trigger for the review_bot, sourcery/);
 });
 
 // The head commit, the PR's comments since it (one reply per read), and posting the trigger.

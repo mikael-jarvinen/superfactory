@@ -219,7 +219,7 @@ export function conversation(repo: Repo, n: number, head: string, botLogin: stri
     if (bot) {
       if (/rate limited/i.test(body) && t > (talk.limitedAt ?? 0)) talk.limitedAt = t;
       // "Action performed" or "Actions performed", as it writes either, and "Action not completed"
-      if (/Actions? (not )?(performed|completed)/i.test(body) && t > (talk.answeredAt ?? 0)) talk.answeredAt = t;
+      if (/\bActions? (not )?(performed|completed)\b/i.test(body) && t > (talk.answeredAt ?? 0)) talk.answeredAt = t;
     } else {
       const cmd = commandOf(body);
       if (t > (talk.asked.get(cmd) ?? 0)) talk.asked.set(cmd, t);
