@@ -74,10 +74,14 @@ usage: factory [--workspace <dir>] <command> [options]
                                   new one starts in the same worktree from the handoff
                                   (<worktree>.handoff.md). Past pr-open it records fixing, and
                                   is refused until the handoff holds findings at the branch's
-                                  head; --findings-checked skips that check, which a worktree on a
-                                  host or another machine cannot get. An item whose session is
-                                  off starts a fresh one, never its old conversation. --force
-                                  stops a session mid-turn.
+                                  head. A worktree on a host or another machine cannot be read:
+                                  --findings-checked passes it there; a worktree here is checked
+                                  whatever it says. Another builder's building or pr-open item
+                                  needs --force, and its fix round \`factory state KEY fixing
+                                  --agent <agent>\` first; neither while that builder's session is
+                                  in the item's worktree. An item whose session is off starts a
+                                  fresh one, never its old conversation. --force stops a session
+                                  mid-turn.
                                   For a designer: a design session in the designers' cwd, no
                                   worktree, from the backlog or off the board (records designing) or design-review
                                   (another round, on the live session, else a fresh one).
@@ -342,6 +346,32 @@ function blockedCardLines(ws: Workspace, ticket: string): string[] {
   return lines;
 }
 
+// A redo or a fix round stays with the item's builder: another agent takes a redo over on --force,
+// and a fix round once `factory state` gives it the item (a forced run on a sent PR is no round).
+// Neither goes to it while the builder's session is in the item's worktree, --force or not. This
+// is checked before any session is stopped, so a refusal stops nothing.
+const HANDOVER: [string, (s: Rec["state"]) => boolean, (ticket: string, to: string) => string][] = [
+  ["redo", (s) => REDO.has(s), () => "dispatch with --force"],
+  ["fix round", (s) => s !== null && s !== "fixing" && TRANSITIONS[s].has("fixing"), (ticket, to) => `\`factory state ${ticket} fixing --agent ${to}\` first`],
+];
+function handedOver(ws: Workspace, ticket: string, name: string, force: boolean): void {
+  const rec = loadRec(ws, ticket);
+  const by = rec?.agent;
+  if (!rec || !by || by === name) return;
+  const kind = HANDOVER.find(([, is]) => is(rec.state));
+  if (!kind) return;
+  const builder = ws.config.agents.find((a) => a.name === by);
+  if (builder) {
+    const bt = transportFor(ws, builder);
+    const bs = findSession(bt, by);
+    if (bt.alive(bs) && basename((bs.cwd ?? "").replace(/\/+$/, "")) === ticket)
+      throw new FactoryError(`${ticket} is ${rec.state}, built by ${by}, whose session (${bs.id}) is in its worktree. ` +
+        `Its ${kind[0]} is ${by}'s; to hand it to ${name}, \`factory stop ${by}\` first.`);
+  }
+  if (!force)
+    throw new FactoryError(`${ticket} is ${rec.state}, built by ${by}; its ${kind[0]} is ${by}'s. To hand it to ${name}, ${kind[2](ticket, name)}.`);
+}
+
 function cmdDispatch(ws: Workspace, argv: string[]) {
   const { v, p } = args("dispatch", argv, { repo: { type: "string" }, "prompt-file": { type: "string" }, title: { type: "string" }, force: { type: "boolean" }, "findings-checked": { type: "boolean" } }, [2, 2]);
   const [name, ticket] = p as [string, string];
@@ -376,6 +406,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   // would go with it.
   const t = transportFor(ws, ag);
   const s = findSession(t, name);
+  handedOver(ws, ticket, name, force);
   let fixRound = false;
   let redo = false;
   if (t.alive(s)) {
@@ -487,15 +518,9 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   // PR is a verification or a re-brief, never told to fix.
   const fixOff = !force && cur !== null && cur !== "building" && cur !== "fixing" && TRANSITIONS[cur].has("fixing");
   const toFixing = fixRound ? cur !== "fixing" : fixOff;
-  // A fix round stays with its author: another agent takes it over only by `factory state` first.
-  if (fixOff && rec?.agent && rec.agent !== name)
-    throw new FactoryError(`${ticket} is ${cur}, built by ${rec.agent}; its fix round is ${rec.agent}'s. ` +
-      `To hand it to ${name}, \`factory state ${ticket} fixing --agent ${name}\` first.`);
-  // and so does a redo: another agent takes it over on --force only
-  if (!force && REDO.has(cur) && rec?.agent && rec.agent !== name)
-    throw new FactoryError(`${ticket} is ${cur}, built by ${rec.agent}; its redo is ${rec.agent}'s. ` +
-      `To hand it to ${name}, dispatch with --force.`);
   if (!DISPATCHABLE.has(cur) && !force && !fixRound && !redo && !fixOff) throw notDispatchable(ticket, cur);
+  // only a live session's fix round has findings to lose
+  if (checked && !fixRound) console.log(`--findings-checked ignored: no live session's fix round on ${ticket}, so nothing to check`);
   const { appendix, given } = inputs();
   const { wt, how } = t.worktree({ agent: ag, repo, ticket, toolWritten: ws.config.worktree.toolWritten });
   // A hosted builder has no stack, so there is no slot to check.

@@ -498,14 +498,14 @@ test("only a hosted agent's settings explain a failed send", () => {
 // The fix session a dispatch recorded on an item.
 const fixSession = (ws: string, key: string) => (JSON.parse(readFileSync(join(ws, "state", `${key}.json`), "utf8")) as { fix_session: string }).fix_session;
 
-// A checkout of web with one commit and the briefs a builder on the app stack reads.
-function webRepo(ws: string) {
+// A checkout of web (or another repo) with one commit and the briefs a builder on the app stack reads.
+function webRepo(ws: string, name = "web") {
   mkdirSync(join(ws, "briefs"), { recursive: true });
   writeFileSync(join(ws, "briefs", "app.md"), "the app stack's brief");
-  const web = join(ws, "repos", "web");
+  const web = join(ws, "repos", name);
   mkdirSync(web, { recursive: true });
   writeFileSync(join(web, "AGENTS.md"), "the repo's brief");
-  const origin = join(ws, "web-origin.git");
+  const origin = join(ws, `${name}-origin.git`);
   execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
   for (const a of [["init", "-q", "-b", "main"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
     ["remote", "add", "origin", origin], ["push", "-q", "origin", "main"]])
@@ -594,6 +594,43 @@ test("every redo and every fix round stops the item's session and starts a fresh
   assert.match(r.stderr, /bea is mid-turn on TEST-50 \(new6\).*dispatch again once it is idle/s);
   assert.ok(!calls().includes("stop new6"));
   assert.equal(starts().length, 6);
+});
+
+test("another builder takes an item over only off its builder's session, and a refusal stops nothing", () => {
+  const { ws, put, calls } = fakeFleet();
+  webRepo(ws);
+  webRepo(ws, "api");
+  const rec = (k: string) => JSON.parse(readFileSync(join(ws, "state", `${k}.json`), "utf8")) as { state: string; agent: string; worktree: string };
+  assert.equal(factory(ws, ["dispatch", "bea", "TEST-56"]).status, 0);
+  const wt = rec("TEST-56").worktree;
+  // bea's session is in the item's worktree: refused, --force or not
+  put("live.json", [sess("b1", "bea", { state: "idle", cwd: wt })]);
+  for (const f of [[], ["--force"]]) {
+    const r = factory(ws, ["dispatch", "cal", "TEST-56", ...f]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /TEST-56 is building, built by bea, whose session \(b1\) is in its worktree\. Its redo is bea's; to hand it to cal, `factory stop bea` first\./);
+  }
+  // bea off: a building item is handed over on --force only
+  rmSync(join(ws, "live.json"), { force: true });
+  let r = factory(ws, ["dispatch", "cal", "TEST-56"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /TEST-56 is building, built by bea; its redo is bea's\. To hand it to cal, dispatch with --force\./);
+  // cal idle on its own item in review: the refusal comes before cal's session is stopped
+  r = factory(ws, ["dispatch", "cal", "TEST-60"]);
+  assert.equal(r.status, 0, r.stderr);
+  const calSession = /cal started \((\w+)\)/.exec(r.stdout)![1]!;
+  for (const a of [["pr-open", "--pr", "acme/api#3", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "b"], ["gate", "--evidence", "c"], ["your-review", "--reviewed", "abc1234abc1234"]])
+    assert.equal(factory(ws, ["state", "TEST-60", ...a]).status, 0, a.join(" "));
+  put("live.json", [sess(calSession, "cal", { state: "idle", cwd: rec("TEST-60").worktree })]);
+  r = factory(ws, ["dispatch", "cal", "TEST-56"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /its redo is bea's/);
+  assert.ok(!calls().includes(`stop ${calSession}`), "a refused handover stops nothing");
+  // --force hands it over; a redo has no findings to check
+  r = factory(ws, ["dispatch", "cal", "TEST-56", "--force", "--findings-checked"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /--findings-checked ignored: no live session's fix round on TEST-56, so nothing to check/);
+  assert.equal(rec("TEST-56").agent, "cal");
 });
 
 test("a building item whose session is off is briefed as a redo; a done item is never dispatched", () => {
