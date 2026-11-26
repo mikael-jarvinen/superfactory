@@ -175,8 +175,28 @@ export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string,
 
 const leadName = (ws: Workspace) => capitalize(lead(ws).name);
 
-// The handoff a build session leaves for its fix round: beside the worktree, so never committed.
+// The handoff each session on an item leaves for the next, beside the worktree, so never committed:
+// every brief, redo and fix round is a fresh session (cmdDispatch), and this is what it starts from.
 export const handoffPath = (wt: string) => `${wt.replace(/\/+$/, "")}.handoff.md`;
+
+// What the handoff holds, kept short so a fresh session reads it in one go.
+const HANDOFF = "the branch, the head sha, the one command that runs the checks, and what is open";
+
+// A round's findings reach the handoff only through the session they were sent to, before the lead
+// dispatches the fix round, which stops that session. The reviewer's report ends with its Reviewed
+// line, so the findings are stamped with the head they were found at, and a later round can tell
+// them from a round already fixed.
+const REVIEWED_RE = /^Reviewed \S+#\d+ at ([0-9a-f]{7,40})\s*$/gm;
+const findingsRule = (ws: Workspace, next = false) =>
+  `When ${next ? "the next" : "a"} round's findings reach you, do not fix them in this session. Append them to the handoff verbatim ` +
+  `under "## Findings", first the last line of the reviewer's report, "Reviewed <owner/repo>#<N> at <sha>". ` +
+  `Then send ${leadName(ws)} exactly "findings in handoff, ready for the fix round" and end your turn with ` +
+  `nothing left running: the fix round is a fresh session.`;
+
+// Whether the handoff holds findings found at this head: the round the next fix session works on.
+export function findingsAt(text: string, head: string): boolean {
+  return [...text.matchAll(REVIEWED_RE)].some((m) => head.startsWith(m[1]!));
+}
 
 const localNote = (ticket: string) => isLocal(ticket)
   ? " This item has no tracker ticket, and its key is factory bookkeeping: leave it out of the " +
@@ -188,21 +208,23 @@ export function buildingPrompt(ws: Workspace, agent: Agent, ticket: string, hand
     `the worktree on branch ${branchFor(ticket)}. Read the repo rules in this directory, then reply exactly ` +
     `READY and wait for ${leadName(ws)}'s brief. The brief is the whole specification: there is no plan ` +
     `artifact and nothing else is coming. Do not start before it arrives.` +
-    (handoff ? ` When you open the PR, write the handoff for the fix round to ${handoff}: what was built, ` +
-      `decisions and why, where things are, how to run the checks, what is open.` : "") +
+    (handoff ? ` A redo of work already on the branch says so: then read the handoff at ${handoff} first. ` +
+      `When you open the PR, and after each push, write the handoff there: ${HANDOFF}. ` + findingsRule(ws) : "") +
     localNote(ticket);
 }
 
-// A fix round starts fresh in the build's worktree and comes back in through the handoff, which the
-// build session wrote when it opened the PR: what it built, never the findings, which come by message.
+// A fix round starts fresh in the build's worktree and comes back in through the handoff, whose
+// findings the session before it appended (findingsRule).
 export function fixingPrompt(ws: Workspace, agent: Agent, ticket: string, handoff: string): string {
   return `You are ${capitalize(agent.name)}. Your work item is ${ticket}, and this is its FIX ROUND, in a fresh ` +
     `session in the worktree on branch ${branchFor(ticket)}. Read the repo rules in this directory and the ` +
-    `handoff at ${handoff}, which the build session wrote when it opened the PR: what it built, decisions, ` +
-    `where things are and how to run the checks. It can be missing, for an item built before handoffs. The ` +
-    `review findings are not in it: they come by message, from the reviewer or ${leadName(ws)}. Reply exactly ` +
-    `READY and wait for them. Then fix them, run the tests and lint as one command, push, and send the new sha ` +
-    `straight to the reviewer. Later rounds come to this session.` + localNote(ticket);
+    `handoff at ${handoff}: ${HANDOFF}. It can be missing, for an item built before handoffs. Its findings are ` +
+    `this round's only when the sha in their Reviewed line is the branch's head (\`git rev-parse HEAD\`); ` +
+    `older ones are a round already fixed. With this round's findings there, start on them. With none, reply ` +
+    `exactly READY and wait for them by message, and append them to the handoff the same way before you ` +
+    `start. Fix them, run the tests and lint as one command, push, rewrite the handoff with the new head sha ` +
+    `and without the findings, and send the reviewer the new sha with the findings' Reviewed line quoted. ` +
+    findingsRule(ws, true) + localNote(ticket);
 }
 
 export const reviewerPrompt = (ws: Workspace) =>

@@ -512,8 +512,14 @@ function webRepo(ws: string) {
     execFileSync("git", ["-C", web, ...a]);
 }
 
-test("the first fix round stops the build session and starts a fresh one on the handoff; later rounds keep it", () => {
-  const { ws, calls, starts } = fakeFleet();
+// The handoff with a round's findings at the worktree's head, as the session they reached writes it.
+function findings(wt: string, extra = "") {
+  const head = execFileSync("git", ["-C", wt, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  writeFileSync(`${wt}.handoff.md`, `branch TEST, head ${head}\n${extra}\n## Findings\nReviewed acme/web#5 at ${head}\n- a medium\n`);
+}
+
+test("every redo and every fix round stops the item's session and starts a fresh one on the handoff", () => {
+  const { ws, put, calls, starts } = fakeFleet();
   webRepo(ws);
   const rec = () => JSON.parse(readFileSync(join(ws, "state", "TEST-50.json"), "utf8")) as { state: string; worktree: string; fix_session?: string };
   let r = factory(ws, ["dispatch", "bea", "TEST-50", "--title", "Fix the export"]);
@@ -521,39 +527,91 @@ test("the first fix round stops the build session and starts a fresh one on the 
   const wt = rec().worktree;
   const handoff = `${wt}.handoff.md`;
   assert.match(r.stdout, /bea started \(new1\) for TEST-50 as a BUILDING session/);
-  assert.ok(starts()[0]!.includes(`write the handoff for the fix round to ${handoff}`), starts()[0]);
+  assert.ok(starts()[0]!.includes(`write the handoff there: the branch, the head sha`), starts()[0]);
   assert.equal(rec().fix_session, undefined);
-  // a re-brief while building goes to the build session
+  // a redo while building: a fresh building session in the same worktree
   r = factory(ws, ["dispatch", "bea", "TEST-50"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /bea is still on TEST-50 \(new1\), so it keeps its context/);
-  for (const a of [["pr-open", "--pr", "acme/web#5", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"]])
-    assert.equal(factory(ws, ["state", "TEST-50", ...a]).status, 0);
+  assert.match(r.stdout, /^bea's build session on TEST-50 stopped \(new1\); the redo starts fresh in the same worktree$/m);
+  assert.match(r.stdout, /bea started \(new2\) for TEST-50 as a BUILDING session/);
+  assert.match(r.stdout, /the redo: what to change, the branch and its head sha/);
+  assert.ok(starts()[1]!.includes(`read the handoff at ${handoff} first`), starts()[1]);
+  assert.deepEqual([rec().state, rec().worktree], ["building", wt]);
+  assert.equal(factory(ws, ["state", "TEST-50", "pr-open", "--pr", "acme/web#5", "--head", "abc1234abc1234"]).status, 0);
+  // a redo at pr-open is the same: a fresh building session
+  r = factory(ws, ["dispatch", "bea", "TEST-50"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^bea's build session on TEST-50 stopped \(new2\); the redo starts fresh/m);
+  assert.match(r.stdout, /bea started \(new3\) for TEST-50 as a BUILDING session/);
+  assert.equal(rec().state, "pr-open");
+  assert.equal(factory(ws, ["state", "TEST-50", "agent-review", "--evidence", "reviewer briefed"]).status, 0);
 
+  // the round's findings only in the live session: the dispatch refuses, as the stop would lose them
+  r = factory(ws, ["dispatch", "bea", "TEST-50"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /TEST-50\.handoff\.md holds no findings at bea's head [0-9a-f]{12}.*only in bea's session \(new3\)/s);
+  assert.ok(!calls().includes("stop new3"));
+  // findings of a round already fixed are no better
+  writeFileSync(handoff, "## Findings\nReviewed acme/web#5 at 0123456789abcdef\n");
+  assert.notEqual(factory(ws, ["dispatch", "bea", "TEST-50"]).status, 0);
+  findings(wt);
   r = factory(ws, ["dispatch", "bea", "TEST-50"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /^bea's build session on TEST-50 stopped \(new1\); the fix round starts fresh in the same worktree$/m);
-  assert.match(r.stdout, /bea started \(new2\) for TEST-50 as a FIX ROUND session/);
+  assert.match(r.stdout, /^bea's build session on TEST-50 stopped \(new3\); the fix round starts fresh in the same worktree$/m);
+  assert.match(r.stdout, /bea started \(new4\) for TEST-50 as a FIX ROUND session/);
   assert.match(r.stdout, new RegExp(`fix round: it reads the handoff, ${handoff.replace(/[.]/g, "\\.")}`));
-  assert.ok(calls().includes("stop new1") && calls().includes("rm new1"), "the build session is stopped and removed");
-  assert.equal(starts().length, 2);
-  const fix = starts()[1]!;
+  assert.ok(calls().includes("stop new3") && calls().includes("rm new3"), "the build session is stopped and removed");
+  const fix = starts()[3]!;
   assert.match(fix, /--name bea --model opus --effort high .*FIX ROUND, in a fresh session/);
-  assert.ok(fix.includes(`the handoff at ${handoff}`), fix);
-  assert.deepEqual([rec().state, rec().worktree, rec().fix_session], ["fixing", wt, "new2"], "same worktree, the fix session recorded");
+  assert.ok(fix.includes(`handoff at ${handoff}`), fix);
+  assert.match(fix, /the fix round is a fresh session\./);
+  assert.deepEqual([rec().state, rec().worktree, rec().fix_session], ["fixing", wt, "new4"], "same worktree, the fix session recorded");
 
-  // the next round goes to the fix session
+  // the next round, back from review: the fix session is stopped for a fresh one
   assert.equal(factory(ws, ["state", "TEST-50", "agent-review", "--evidence", "round 2 sent"]).status, 0);
+  findings(wt, "round 2");
   r = factory(ws, ["dispatch", "bea", "TEST-50"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /bea is still on TEST-50 \(new2\), so it keeps its context/);
-  assert.equal(starts().length, 2, "no new session");
-  assert.deepEqual([rec().state, rec().fix_session], ["fixing", "new2"]);
-  // and the round after, with the item already fixing
+  assert.match(r.stdout, /^bea's fix session on TEST-50 stopped \(new4\); the fix round starts fresh/m);
+  assert.deepEqual([rec().state, rec().fix_session], ["fixing", "new5"]);
+  // and a round with the item still fixing
   r = factory(ws, ["dispatch", "bea", "TEST-50"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /that is the fix session, which keeps later rounds/);
-  assert.equal(starts().length, 2);
+  assert.match(r.stdout, /^bea's fix session on TEST-50 stopped \(new5\)/m);
+  assert.deepEqual([rec().state, rec().fix_session], ["fixing", "new6"]);
+  assert.equal(starts().length, 6);
+
+  // a session mid-turn is never stopped for a round: the dispatch refuses and stops nothing
+  put("live.json", [sess("new6", "bea", { state: "working", cwd: wt })]);
+  r = factory(ws, ["dispatch", "bea", "TEST-50"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /bea is mid-turn on TEST-50 \(new6\).*dispatch again once it is idle/s);
+  assert.ok(!calls().includes("stop new6"));
+  assert.equal(starts().length, 6);
+});
+
+test("a building item whose session is off is briefed as a redo; a done item is never dispatched", () => {
+  const { ws, put } = fakeFleet();
+  webRepo(ws);
+  assert.equal(factory(ws, ["dispatch", "bea", "TEST-56", "--title", "Redo it"]).status, 0);
+  const wt = (JSON.parse(readFileSync(join(ws, "state", "TEST-56.json"), "utf8")) as { worktree: string }).worktree;
+  rmSync(join(ws, "live.json"));
+  let r = factory(ws, ["dispatch", "bea", "TEST-56"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /next: SendMessage to bea: the redo: what to change, the branch and its head sha/);
+  assert.equal(factory(ws, ["state", "TEST-56", "pr-open", "--pr", "acme/web#10", "--head", "abc1234abc1234"]).status, 0);
+  rmSync(join(ws, "live.json"), { force: true });
+  r = factory(ws, ["dispatch", "bea", "TEST-56"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /as a BUILDING session/);
+  assert.match(r.stdout, /next: SendMessage to bea: the redo: what to change, the branch and its head sha/);
+  assert.equal((JSON.parse(readFileSync(join(ws, "state", "TEST-56.json"), "utf8")) as { state: string }).state, "pr-open");
+  for (const a of [["agent-review", "--evidence", "b"], ["gate", "--evidence", "c"], ["your-review", "--reviewed", "abc1234abc1234"], ["done", "--evidence", "merged"]])
+    assert.equal(factory(ws, ["state", "TEST-56", ...a]).status, 0, a.join(" "));
+  put("live.json", [sess("new2", "bea", { state: "idle", cwd: wt })]);
+  r = factory(ws, ["dispatch", "bea", "TEST-56"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /TEST-56 is done; a dispatch makes no sense there/);
 });
 
 test("a fix round on an item whose session is off starts a fresh one on the handoff", () => {
@@ -600,6 +658,7 @@ test("a fix round whose fresh start fails leaves the item in review, and the sam
   assert.equal(factory(ws, ["dispatch", "bea", "TEST-53", "--title", "Fix it"]).status, 0);
   for (const a of [["pr-open", "--pr", "acme/web#8", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "briefed"]])
     assert.equal(factory(ws, ["state", "TEST-53", ...a]).status, 0);
+  findings((JSON.parse(readFileSync(join(ws, "state", "TEST-53.json"), "utf8")) as { worktree: string }).worktree);
   writeFileSync(join(ws, "bg-fail"), "no start today");
   let r = factory(ws, ["dispatch", "bea", "TEST-53"]);
   assert.notEqual(r.status, 0);
@@ -662,11 +721,12 @@ role = "designer"
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual([rec("TEST-30").state, rec("TEST-30").title], ["building", "Rename the export"], "the builder's record has the tracker's title");
   assert.doesNotMatch(r.stdout, /no title/);
-  // the first fix round stops the build session for a fresh one, and takes --title all the same
+  // the fix round stops the build session for a fresh one, and takes --title all the same
   const wt = (JSON.parse(readFileSync(join(ws, "state", "TEST-30.json"), "utf8")) as { worktree: string }).worktree;
   put("live.json", [sess("new1", "bea", { state: "idle", cwd: wt })]);
   for (const args of [["pr-open", "--pr", "acme/web#1", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "2 high"]])
     assert.equal(factory(ws, ["state", "TEST-30", ...args]).status, 0);
+  findings(wt);
   r = factory(ws, ["dispatch", "bea", "TEST-30", "--title", "Rename the export, round two"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /bea's build session on TEST-30 stopped \(new1\); the fix round starts fresh in the same worktree/);
@@ -808,6 +868,7 @@ repos = ["web", "api"]
   // is not
   for (const args of [["pr-open", "--pr", "acme/api#1", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "2 high"]])
     assert.equal(factory(ws, ["state", "TEST-40", ...args]).status, 0);
+  findings(wt);
   r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "web"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^--repo web ignored: kit is kept in api's worktree$/m);
@@ -818,7 +879,11 @@ repos = ["web", "api"]
   // a session in no local repo's worktree (a hosted builder's path, say): the record's stack, and
   // the --repo it overrides is said, with where the stack came from
   put("live.json", [sess(fixSession(ws, "TEST-40"), "kit", { state: "idle", cwd: "/far/worktrees/TEST-40" })]);
+  // whose handoff cannot be read here, so its findings are taken on --findings-checked only
   r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "web"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /worktree \/far\/worktrees\/TEST-40 is not here, so the handoff's findings cannot be checked.*--findings-checked/);
+  r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "web", "--findings-checked"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^--repo web ignored: kit is kept on api, the stack TEST-40's record has$/m);
 
@@ -832,6 +897,7 @@ repos = ["web", "api"]
   put("live.json", [sess("new1", "bea", { state: "idle", cwd: bwt })]);
   for (const args of [["pr-open", "--pr", "acme/web#2", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "1 high"]])
     assert.equal(factory(ws, ["state", "TEST-41", ...args]).status, 0);
+  findings(bwt);
   r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "web"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /bea's build session on TEST-41 stopped/);
@@ -840,7 +906,7 @@ repos = ["web", "api"]
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^--repo api ignored: bea is kept in web's worktree$/m);
   put("live.json", [sess(fixSession(ws, "TEST-41"), "bea", { state: "idle", cwd: "/far/worktrees/TEST-41" })]);
-  r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "api"]);
+  r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "api", "--findings-checked"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^--repo api not checked: bea's session is in no local worktree$/m);
 });

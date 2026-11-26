@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { recordAllowClose } from "./allow-close.js";
@@ -9,9 +9,9 @@ import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
 import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owesSession, lead, listing, type Session, stopSession, stopWorktree, waitForName } from "./fleet.js";
 import { Unreachable } from "./remote.js";
-import { agentSessions, transportFor, transports } from "./transport.js";
+import { agentSessions, midTurn, transportFor, transports } from "./transport.js";
 import type { Agent } from "./config.js";
-import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, fixingPrompt, handoffPath, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
+import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, findingsAt, fixingPrompt, handoffPath, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
 import { bringUpLead } from "./lead-up.js";
 import { startedLine, wake } from "./wake.js";
 import { hook as appendixHook } from "./hooks/appendix.js";
@@ -41,7 +41,7 @@ import { cmdStack, STACK_USAGE } from "./stacks/command.js";
 import { cmdTicket, cmdWiki, TICKET_USAGE } from "./tickets/cli.js";
 import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/engine.js";
 import {
-  allRecs, appendEvent, BUSY, OFF, onBoard, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removePr, removeRec, saveRec, showRec, transition, TRANSITIONS, validKey,
+  allRecs, appendEvent, BUSY, OFF, onBoard, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, REDO, removePr, removeRec, saveRec, showRec, transition, TRANSITIONS, validKey,
 } from "./state.js";
 import { trackerTitle } from "./tracker/title.js";
 import { chars, FactoryError, firstSentence, now, pyDumps, pyRepr, run, sleep, squash, wrap } from "./util.js";
@@ -50,7 +50,7 @@ import { runQueue } from "./watchers/queue.js";
 import { runRound } from "./watchers/round.js";
 import { runReviews } from "./watchers/reviews.js";
 import { openWorkspace, resolveWorkspace, type Workspace } from "./workspace.js";
-import { worktreePath } from "./worktree.js";
+import { git, worktreePath } from "./worktree.js";
 
 const USAGE = `factory: start, stop, dispatch and track a fleet of Claude Code sessions.
 
@@ -66,15 +66,18 @@ usage: factory [--workspace <dir>] <command> [options]
   restart-lead                    stop the lead, then up: a fresh session
   status [--all]                  sessions joined with the state store
   sessions [--all] [--fleet]      raw \`claude agents --json\`, or one line per fleet member
-  dispatch <agent> <KEY> [--repo <repo>] [--prompt-file <f>] [--title T] [--force]
+  dispatch <agent> <KEY> [--repo <repo>] [--prompt-file <f>] [--title T] [--force] [--findings-checked]
                                   fresh building session for one item in a per-item worktree.
-                                  Dispatch from the backlog, off the board, building or fixing; anywhere else needs
-                                  --force. A live build session on KEY is re-briefed by message
-                                  while KEY is building. Past building, the first fix round stops
-                                  it and starts a fresh session in the same worktree that reads
-                                  the handoff the build left (<worktree>.handoff.md) and records
-                                  fixing; later rounds go to that fix session. An item whose
-                                  session is off starts a fresh one, never its old conversation.
+                                  Dispatch from the backlog, off the board, building, pr-open or fixing; anywhere else needs
+                                  --force. Every redo and fix round is a fresh session: a live
+                                  session on KEY is stopped (refused while it is mid-turn) and a
+                                  new one starts in the same worktree from the handoff
+                                  (<worktree>.handoff.md). Past pr-open it records fixing, and
+                                  is refused until the handoff holds findings at the branch's
+                                  head; --findings-checked skips that check, which a worktree on a
+                                  host or another machine cannot get. An item whose session is
+                                  off starts a fresh one, never its old conversation. --force
+                                  stops a session mid-turn.
                                   For a designer: a design session in the designers' cwd, no
                                   worktree, from the backlog or off the board (records designing) or design-review
                                   (another round, on the live session, else a fresh one).
@@ -340,9 +343,10 @@ function blockedCardLines(ws: Workspace, ticket: string): string[] {
 }
 
 function cmdDispatch(ws: Workspace, argv: string[]) {
-  const { v, p } = args("dispatch", argv, { repo: { type: "string" }, "prompt-file": { type: "string" }, title: { type: "string" }, force: { type: "boolean" } }, [2, 2]);
+  const { v, p } = args("dispatch", argv, { repo: { type: "string" }, "prompt-file": { type: "string" }, title: { type: "string" }, force: { type: "boolean" }, "findings-checked": { type: "boolean" } }, [2, 2]);
   const [name, ticket] = p as [string, string];
   const force = !!v.force;
+  const checked = !!v["findings-checked"];
   const ag = agentOrDie(ws, name);
   if (!validKey(ws, ticket)) throw new FactoryError(`${pyRepr(ticket)} is ${KEY_HINT}`);
   if (ag.role === "designer") {
@@ -359,19 +363,21 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   let stack = ag.stack ?? repoKey;
   // The brief and the prompt file, read before any session is stopped or started: a missing one
   // refuses with the live session kept. The read is lazy, done once at the first stop or the start,
-  // so a fix round on the live session and the "still on" refusal never need either.
+  // so a refusal before either never needs them.
   const promptFile = str(v["prompt-file"]);
   let read: { appendix: ReturnType<typeof buildAppendix>; given: string | null } | undefined;
   const inputs = () => (read ??= { appendix: buildAppendix(ws, ag, repo.path), given: promptFile ? readFileSync(promptFile, "utf8") : null });
-  // The build of one work item runs in one session. The first fix round stops it and starts a
-  // fresh session in the same worktree, which reads the handoff the build session wrote
-  // (handoffPath) rather than carrying the build's context; the record names that fix session
-  // (fix_session), and later rounds go to it by SendMessage, this only recording the state. A
-  // session whose item is in review holds the builder no longer: a new item stops it here, with the
-  // checks `factory stop` makes.
+  // Every brief, redo and fix round on an item is a fresh session in its worktree: a dispatch on the
+  // item's live session stops it and starts another, which reads the handoff (handoffPath) rather
+  // than carrying the stopped session's context. A fix session is recorded (fix_session). A session
+  // mid-turn is never stopped for this. A session whose item is in review holds the builder no
+  // longer: a new item stops it here, with the checks `factory stop` makes. A fix round stops the
+  // live session only once the round's findings are in the handoff, as they reach that session and
+  // would go with it.
   const t = transportFor(ws, ag);
   const s = findSession(t, name);
   let fixRound = false;
+  let redo = false;
   if (t.alive(s)) {
     const on = basename((s.cwd ?? "").replace(/\/+$/, ""));
     const kept = on === ticket ? loadRec(ws, ticket) : null;
@@ -393,44 +399,66 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
         else if (kept?.stack && asked !== kept.stack) console.log(`--repo ${asked} ignored: ${name} is kept on ${kept.stack}, the stack ${ticket}'s record has`);
       }
     };
-    // the build session, on an item that can go to fixing: the fix round goes to a fresh session in
-    // the same worktree. The inputs are read first, so a refusal stops nothing; the worktree, and
-    // anything left in it, stays. The state moves to fixing only once the fresh session is up, so a
-    // start that fails leaves the item where it was, and the same dispatch, run again, starts it.
-    if (on === ticket && !force && cur && cur !== "building" && kept?.fix_session !== s.id && (cur === "fixing" || TRANSITIONS[cur].has("fixing"))) {
+    // the item's own session, before the review (a redo) or on an item that can go to fixing (a fix
+    // round): either goes to a fresh session in the same worktree. The inputs are read first, so a
+    // refusal stops nothing; the worktree, and anything left in it, stays. The state moves to fixing
+    // only once the fresh session is up, so a start that fails leaves the item where it was, and the
+    // same dispatch, run again, starts it.
+    const isRedo = REDO.has(cur);
+    if (on === ticket && !force && cur && (isRedo || cur === "fixing" || TRANSITIONS[cur].has("fixing"))) {
       keep();
+      if (midTurn(s))
+        throw new FactoryError(`${name} is mid-turn on ${ticket} (${s.id}). Its next brief or round starts a fresh session, ` +
+          `which would cut this turn short: dispatch again once it is idle.`);
       const wasAt = (kept?.worktree ?? "").replace(/\/+$/, "");
       const k = keptRepo ?? allowed.find((r) => worktreePath(ws.config.repos[r]!.path, ticket) === wasAt) ?? (ag.stack ? undefined : kept?.stack ?? undefined);
       if (k && allowed.includes(k)) {
         repo = ws.config.repos[k]!;
         stack = ag.stack ?? k;
       }
+      if (!isRedo && !checked && (ag.host || !existsSync(at)))
+        throw new FactoryError(`${name}'s worktree ${at} is ${ag.host ? `on ${ag.host}` : "not here"}, so the handoff's ` +
+          `findings cannot be checked, and the round would stop ${name}'s session (${s.id}), which may hold the only copy. ` +
+          `Once ${name} has said "findings in handoff", dispatch again with --findings-checked.`);
+      else if (!isRedo && !checked) {
+        const ho = handoffPath(at);
+        let text = "", head = "";
+        try {
+          text = readFileSync(ho, "utf8");
+        } catch {
+          // no handoff yet
+        }
+        const r = git(at, "rev-parse", "HEAD");
+        if (r.status === 0) head = r.stdout.trim();
+        if (!head || !findingsAt(text, head))
+          throw new FactoryError(`${ho} holds no findings at ${name}'s head ${head ? head.slice(0, 12) : "(unread)"}, so this ` +
+            `round's are only in ${name}'s session (${s.id}), which the round would stop. Wait for its "findings in ` +
+            `handoff" line, or have the reviewer resend them to ${name}, then dispatch again.`);
+      }
       inputs();
       stopSession(t, s);
-      console.log(`${name}'s build session on ${ticket} stopped (${s.id}); the fix round starts fresh in the same worktree`);
-      fixRound = true;
+      const which = isRedo ? "build" : kept?.fix_session === s.id ? "fix" : "build";
+      console.log(`${name}'s ${which} session on ${ticket} stopped (${s.id}); the ${isRedo ? "redo" : "fix round"} starts fresh in the same worktree`);
+      redo = isRedo;
+      fixRound = !isRedo;
+    } else if (on === ticket && !force && cur !== null) {
+      throw notDispatchable(ticket, cur);
     } else if (on === ticket && !force) {
       // An item taken off the board while its session ran goes back on as building, as a fresh
       // dispatch would put it; off the board it can go nowhere else.
       keep();
-      if (cur === null)
-        transition(ws, ticket, "building", { agent: name, stack: keptStack, worktree: s.cwd, evidence: `back on the board on the live session ${s.id}, context kept` });
-      // building: a re-brief of the build session, which stays building
-      else if (cur !== "fixing" && cur !== "building")
-        transition(ws, ticket, "fixing", { agent: name, evidence: `fix round sent to the live session ${s.id}, context kept` });
+      transition(ws, ticket, "building", { agent: name, stack: keptStack, worktree: s.cwd, evidence: `back on the board on the live session ${s.id}, context kept` });
       console.log(`${name} is still on ${ticket} (${s.id}), so it keeps its context.`);
-      if (cur === "fixing") console.log(`  that is the fix session, which keeps later rounds`);
       const noSlot = ag.host ? null : slotless(ws, keptStack, ticket, s.cwd ?? "");
-      const brief = cur === "building" ? "the brief" : "the fix brief";
-      if (noSlot) console.log(`  warning: ${noSlot}\n  Put that in ${brief}.`);
-      console.log(`  next: SendMessage ${brief} to ${name}; no new session was started`);
+      if (noSlot) console.log(`  warning: ${noSlot}\n  Put that in the brief.`);
+      console.log(`  next: SendMessage the brief to ${name}; no new session was started`);
       // the session kept is no reason to drop a --title
       titled(ws, ticket, str(v.title));
       return;
     }
     const onState = on ? loadRec(ws, on)?.state : null;
-    if (fixRound) {
-      // stopped above, for the fresh fix session started below
+    if (fixRound || redo) {
+      // stopped above, for the fresh session started below
     } else if (force) {
       inputs();
       console.log(`${name} is running (${s.id}); --force given, stopping it`);
@@ -461,9 +489,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (fixOff && rec?.agent && rec.agent !== name)
     throw new FactoryError(`${ticket} is ${cur}, built by ${rec.agent}; its fix round is ${rec.agent}'s. ` +
       `To hand it to ${name}, \`factory state ${ticket} fixing --agent ${name}\` first.`);
-  if (!DISPATCHABLE.has(cur) && !force && !fixRound && !fixOff)
-    throw new FactoryError(`${ticket} is ${cur}; a dispatch makes no sense there. Use \`factory state\` first, ` +
-      `or --force if you mean it (a verification run on a sent PR, say).`);
+  if (!DISPATCHABLE.has(cur) && !force && !fixRound && !redo && !fixOff) throw notDispatchable(ticket, cur);
   const { appendix, given } = inputs();
   const { wt, how } = t.worktree({ agent: ag, repo, ticket, toolWritten: ws.config.worktree.toolWritten });
   // A hosted builder has no stack, so there is no slot to check.
@@ -478,7 +504,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (rec === null || cur === null) {
     transition(ws, ticket, "building", { agent: name, stack, worktree: wt, evidence: `building session ${started.id}` });
   } else {
-    if (toFixing) transition(ws, ticket, "fixing", { agent: name, evidence: `fix round: fresh session ${started.id}${fixRound ? " for the stopped build session" : ""}` });
+    if (toFixing) transition(ws, ticket, "fixing", { agent: name, evidence: `fix round: fresh session ${started.id}${fixRound ? ` for the stopped session ${s?.id}` : ""}` });
     const r = loadRec(ws, ticket)!;
     r.agent = name;
     r.worktree = wt;
@@ -493,9 +519,13 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   const d = rec?.design;
   if (d?.approved) console.log(`  design approved by ${ws.config.human.name} (${d.approved_at}): slides ${d.slides} canvas ${d.canvas}. The brief carries it.`);
   else if (d) console.log(`  warning: ${ticket} has a design ${ws.config.human.name} has not approved (${d.slides ?? d.canvas ?? "no link"})`);
-  if (fixing) console.log(`  fix round: it reads the handoff, ${handoffPath(wt)}, and waits for the findings: SendMessage them to ${name}`);
-  else console.log(`  next: SendMessage to ${name}: what to build, the scope, and notify_when_idle`);
+  if (fixing) console.log(`  fix round: it reads the handoff, ${handoffPath(wt)}, and fixes the findings there at the branch's head; with none, have the reviewer resend them to ${name}`);
+  else console.log(`  next: SendMessage to ${name}: ${REDO.has(cur) ? "the redo: what to change, the branch and its head sha" : "what to build, the scope"}, and notify_when_idle`);
 }
+
+const notDispatchable = (ticket: string, cur: string | null) =>
+  new FactoryError(`${ticket} is ${cur}; a dispatch makes no sense there. Use \`factory state\` first, ` +
+    `or --force if you mean it (a verification run on a sent PR, say).`);
 
 // A dispatch titles its record: --title, else the tracker's title when the record has none, so no
 // card shows a bare key. LOCAL- work with no title says how to give it one.

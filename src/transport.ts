@@ -141,6 +141,10 @@ export function pidExists(pid: number): boolean {
 // `claude --bg` returns. A pid-less working row younger than STARTING_MS is that start, and live;
 // a stale row is done or blocked, and far older.
 export const STARTING_MS = 30_000;
+// A session in a turn: stopping it cuts the turn short. A worker just launched counts, as it is in
+// its first turn.
+export const midTurn = (s: Session): boolean => s.state === "working";
+
 export function sessionAlive(s: Session | null | undefined): s is Session {
   if (!s || s.kind !== "background" || s.state === "stopped" || s.state === "failed") return false;
   if (typeof s.pid !== "number" || !Number.isInteger(s.pid) || s.pid <= 0)
