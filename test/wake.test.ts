@@ -612,6 +612,11 @@ test("a building item whose session is off is briefed as a redo; a done item is 
   assert.match(r.stdout, /as a BUILDING session/);
   assert.match(r.stdout, /next: SendMessage to bea: the redo: what to change, the branch and its head sha/);
   assert.equal((JSON.parse(readFileSync(join(ws, "state", "TEST-56.json"), "utf8")) as { state: string }).state, "pr-open");
+  // another builder takes the redo over only on --force
+  rmSync(join(ws, "live.json"), { force: true });
+  r = factory(ws, ["dispatch", "cal", "TEST-56"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /TEST-56 is pr-open, built by bea; its redo is bea's\. To hand it to cal, dispatch with --force\./);
   for (const a of [["agent-review", "--evidence", "b"], ["gate", "--evidence", "c"], ["your-review", "--reviewed", "abc1234abc1234"], ["done", "--evidence", "merged"]])
     assert.equal(factory(ws, ["state", "TEST-56", ...a]).status, 0, a.join(" "));
   put("live.json", [sess("new2", "bea", { state: "idle", cwd: wt })]);

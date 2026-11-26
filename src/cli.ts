@@ -491,6 +491,10 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (fixOff && rec?.agent && rec.agent !== name)
     throw new FactoryError(`${ticket} is ${cur}, built by ${rec.agent}; its fix round is ${rec.agent}'s. ` +
       `To hand it to ${name}, \`factory state ${ticket} fixing --agent ${name}\` first.`);
+  // and so does a redo: another agent takes it over on --force only
+  if (!force && REDO.has(cur) && rec?.agent && rec.agent !== name)
+    throw new FactoryError(`${ticket} is ${cur}, built by ${rec.agent}; its redo is ${rec.agent}'s. ` +
+      `To hand it to ${name}, dispatch with --force.`);
   if (!DISPATCHABLE.has(cur) && !force && !fixRound && !redo && !fixOff) throw notDispatchable(ticket, cur);
   const { appendix, given } = inputs();
   const { wt, how } = t.worktree({ agent: ag, repo, ticket, toolWritten: ws.config.worktree.toolWritten });
