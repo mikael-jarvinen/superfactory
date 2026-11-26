@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 import { agentOrDie, findSession, type Session } from "../src/fleet.js";
 import { claudeEnv, claudeScoped, JOB_ENV, SCOPE } from "../src/scope.js";
 import { procStat } from "../src/stacks/process.js";
-import { agentSessions, currentAppendixPath, daemonAlive, local, pick, sessionAlive, STARTING_MS, type Transport } from "../src/transport.js";
+import { agentSessions, daemonAlive, local, pick, sessionAlive, STARTING_MS, type Transport } from "../src/transport.js";
 import { runClaude } from "../src/watchers/job.js";
 import { run } from "../src/util.js";
 import { openWorkspace } from "../src/workspace.js";
@@ -59,7 +59,7 @@ echo "backgrounded · abc123 · rae"
 
   assert.equal(local.start({ ...req, appendix: "the brief\n", args }), "abc123");
   assert.equal(readFileSync(join(dir, "appendix"), "utf8"), "the brief\n");
-  // in logs/run/, which a reboot keeps, and left there for a later respawn of that session
+  // in logs/run/, which a reboot keeps, and left there while the session it started runs
   const first = named();
   assert.equal(dirname(first), ws.runDir);
   assert.match(basename(first), /^appendix-bea-[0-9a-f]{16}\.md$/);
@@ -72,11 +72,8 @@ echo "backgrounded · abc123 · rae"
   assert.equal(readFileSync(named(), "utf8"), "a new brief\n");
   assert.deepEqual(readdirSync(ws.runDir).filter((n) => n.endsWith(".tmp")), []);
   rmSync(join(dir, "appendix"));
-  assert.ok(existsSync(currentAppendixPath(ws.runDir, "bea")));
   local.start({ ...req, appendix: null, args });
   assert.equal(readFileSync(join(dir, "args"), "utf8"), "--bg P\n");
-  // and leaves no current copy for a later resume to be handed
-  assert.ok(!existsSync(currentAppendixPath(ws.runDir, "bea")));
 });
 
 // A reviewer here: `factory review` writes its brief to the file named on the command line.
@@ -108,7 +105,7 @@ test("on Linux every local claude call, each listing included, runs through syst
   const calls = join(dir, "claude-calls");
   writeFileSync(claude, `#!/bin/sh
 echo "$*" >> ${calls}
-case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; respawn) echo "respawned $2" ;; esac
+case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; esac
 `);
   chmodSync(claude, 0o755);
   const scopes = fakeSystemdRun(dir);
@@ -121,17 +118,16 @@ case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; 
   assert.deepEqual(local.sessions(true), []);
   assert.deepEqual(await local.sessionsAsync(), []);
   assert.equal(local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, runDir: ws.runDir, env: process.env, args: () => ["--bg", "P"] }), "abc123");
-  assert.deepEqual(local.respawn("bea", "r0"), { ok: true, said: "respawned r0", why: "respawned r0" });
   local.stop("bea", "r1", true);
-  assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["agents --json --all", "agents --json", "--bg P", "respawn r0", "stop r1", "rm r1"]);
+  assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["agents --json --all", "agents --json", "--bg P", "stop r1", "rm r1"]);
   const scoped = (...a: string[]) => ["systemd-run", ...SCOPE, claude, ...a];
-  assert.deepEqual(lines(scopes), [scoped("agents", "--json", "--all"), scoped("agents", "--json"), scoped("--bg", "P"), scoped("respawn", "r0"), scoped("stop", "r1"), scoped("rm", "r1")], "every call is scoped");
+  assert.deepEqual(lines(scopes), [scoped("agents", "--json", "--all"), scoped("agents", "--json"), scoped("--bg", "P"), scoped("stop", "r1"), scoped("rm", "r1")], "every call is scoped");
 
   rmSync(calls);
   for (const said of [NO_BUS_259, NO_BUS_249]) {
     writeFileSync(join(dir, "scope-fail"), said);
     assert.throws(() => local.sessions(), { message: `systemd-run made no scope for claude agents: ${said}` });
-    assert.throws(() => local.respawn("bea", "r0"), { message: `systemd-run made no scope for claude respawn: ${said}` });
+    assert.throws(() => local.stop("bea", "r0", false), { message: `systemd-run made no scope for claude stop: ${said}` });
     assert.throws(() => local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, runDir: ws.runDir, env: process.env, args: () => ["--bg", "P"] }), /systemd-run made no scope for claude --bg/);
   }
   assert.equal(existsSync(calls), false, "a call that could not be scoped never runs claude bare");
@@ -140,7 +136,8 @@ case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; 
   const gone = join(dir, "no-claude");
   process.env.CLAUDE_BIN = gone;
   const missing = `Failed to find executable ${gone}: No such file or directory`;
-  assert.deepEqual(local.respawn("bea", "r0"), { ok: false, said: "", why: missing }, "a claude systemd-run cannot find is that call's failure, not a scope's");
+  const startP = () => local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, runDir: ws.runDir, env: process.env, args: () => ["--bg", "P"] });
+  assert.throws(startP, { message: `claude --bg failed: ${missing}` }, "a claude systemd-run cannot find is that call's failure, not a scope's");
   assert.throws(() => local.sessions(), { message: `\`claude agents --json\` failed: ${missing}` });
 
   // systemd-run fails before it execs claude, so only its first line of stderr can be a scope's:
@@ -149,7 +146,7 @@ case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; 
   writeFileSync(hooked, `#!/bin/sh\necho "hook failed" >&2\necho "${NO_BUS_249}" >&2\nexit 1\n`);
   chmodSync(hooked, 0o755);
   process.env.CLAUDE_BIN = hooked;
-  assert.deepEqual(local.respawn("bea", "r0"), { ok: false, said: "", why: `hook failed\n${NO_BUS_249}` }, "claude's own failure, not a scope's");
+  assert.throws(startP, { message: `claude --bg failed: hook failed\n${NO_BUS_249}` }, "claude's own failure, not a scope's");
 });
 
 // A scheduler job's label names its calls' scopes (scope.ts), so the reaper can find them, but is
@@ -177,13 +174,12 @@ case "$1" in agents) echo '[]' ;; --bg) echo "backgrounded · abc123 · bea" ;; 
   local.sessions();
   await local.sessionsAsync();
   local.start({ agent: agentOrDie(ws, "bea"), cwd: dir, prompt: "P", phase: undefined, appendix: null, runDir: ws.runDir, env: process.env, args: () => ["--bg", "P"] });
-  local.respawn("bea", "r0");
   local.stop("bea", "r1", false);
   assert.equal(runClaude(ws, "round", "P", ["Read"], join(dir, "round.log")).status, 0);
-  assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["agents job=", "agents job=", "--bg job=", "respawn job=", "stop job=", "-p job="], "claude never sees the job");
+  assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["agents job=", "agents job=", "--bg job=", "stop job=", "-p job="], "claude never sees the job");
   const unit = new RegExp(`^--unit=factory-job-superfactory\\.bea\\.round-${(procStat(process.pid)?.pgid ?? process.pid)}-${process.pid}-\\d+$`);
   const got = lines(scopes);
-  assert.equal(got.length, 6);
+  assert.equal(got.length, 5);
   for (const c of got) assert.match(c[1] as string, unit, c.join(" "));
 });
 
@@ -285,8 +281,8 @@ test("the scope is asked for quietly, so systemd-run's own failure is stderr's f
 });
 
 test("where there is no systemd, claude runs bare", () => {
-  assert.deepEqual(claudeScoped(["respawn", "r0"], "darwin")[1], ["respawn", "r0"]);
-  assert.equal(claudeScoped(["respawn", "r0"], "linux")[0], "systemd-run");
+  assert.deepEqual(claudeScoped(["stop", "r0"], "darwin")[1], ["stop", "r0"]);
+  assert.equal(claudeScoped(["stop", "r0"], "linux")[0], "systemd-run");
 });
 
 test("an agent's session is its newest live one, else its newest, and only its background ones count", () => {

@@ -1,22 +1,23 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { closeSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { after, test } from "node:test";
+import { after, test, type TestContext } from "node:test";
 import { defaultLogsDir } from "../src/config.js";
 import { wakeHookLog } from "../src/failures.js";
 import { agentOrDie } from "../src/fleet.js";
-import { settingsFile } from "../src/launch.js";
+import { settingsFile, startLock } from "../src/launch.js";
+import { tryLock } from "../src/tickets/lock.js";
 import { recipient } from "../src/hooks/wake.js";
 import { ListingTimedOut, Unreachable } from "../src/remote.js";
-import { type Transport, transportFor } from "../src/transport.js";
+import type { StartRequest, Transport } from "../src/transport.js";
 import * as T from "../src/tickets/store.js";
 import { trackerTitle } from "../src/tracker/title.js";
 import { wake } from "../src/wake.js";
 import { queueStateFile } from "../src/watchers/queue.js";
 import { openWorkspace } from "../src/workspace.js";
-import { factory, fakeDaemon, TOML, tempWorkspace } from "./helpers.js";
+import { factory, TOML, tempWorkspace } from "./helpers.js";
 
 const ASSISTANT_TOML = TOML.replace("[tracker]", `[roles.assistant]
 cwd = "assistants"
@@ -43,8 +44,9 @@ hash_files = ["daemon.toml", "workspace.toml"]
 `;
 
 // A claude whose listings come from files: live.json for `agents --json`, all.json for --all. A
-// respawn of an id in respawnable copies after.json over live.json, as the session coming back; a
-// start logs itself. Every call is a line in calls.
+// start (--bg) lists its agent live as new<n>, n counting the starts, unless bg-unlisted exists;
+// bg-fail makes it fail with that file's text, bg-hang makes it hang. A stop takes live.json away.
+// Every call is a line in calls.
 function fakeFleet(toml = TOML) {
   const ws = tempWorkspace(toml);
   after(() => rmSync(ws, { recursive: true, force: true }));
@@ -54,20 +56,24 @@ echo "$*" >> $D/calls
 case "$1" in
   agents) [ -f $D/listing-hang ] && sleep 60
     if [ "$3" = --all ]; then cat $D/all.json 2>/dev/null || echo '[]'; else cat $D/live.json 2>/dev/null || echo '[]'; fi ;;
-  respawn) [ -f $D/respawn-hang ] && sleep 30
-    [ -f $D/respawn-fail ] && { cat $D/respawn-fail >&2; exit 1; }
-    [ -f $D/after.json ] && cp $D/after.json $D/live.json
-    [ -f $D/hang-after-respawn ] && touch $D/listing-hang; echo "respawned $2" ;;
-  --bg) n=; prev=; for a in "$@"; do [ "$prev" = --name ] && n=$a; prev=$a; done
-    printf '[{"id":"new1","name":"%s","kind":"background","state":"idle","pid":${process.pid}}]' "$n" > $D/live.json
-    echo "backgrounded · new1 · $n" ;;
+  --bg) [ -f $D/bg-hang ] && exec sleep 60
+    [ -f $D/bg-fail ] && { cat $D/bg-fail >&2; exit 1; }
+    n=; prev=; for a in "$@"; do [ "$prev" = --name ] && n=$a; prev=$a; done
+    echo x >> $D/starts; id=new$(wc -l < $D/starts | tr -d ' ')
+    [ -f $D/bg-unlisted ] || printf '[{"id":"%s","name":"%s","kind":"background","state":"idle","pid":${process.pid},"cwd":"%s"}]' "$id" "$n" "$PWD" > $D/live.json
+    [ -f $D/hang-after-bg ] && touch $D/listing-hang
+    echo "backgrounded · $id · $n" ;;
+  stop) grep -qs "\"$2\"" $D/live.json && rm -f $D/live.json ;;
+  rm) ;;
   *) exit 1 ;;
 esac
 `);
   writeFileSync(join(ws, "token"), "t".repeat(40));
+  for (const d of ["lead", "reviewers", "assistants"]) mkdirSync(join(ws, d));
   const put = (f: string, rows: unknown[]) => writeFileSync(join(ws, f), JSON.stringify(rows));
   const calls = () => (existsSync(join(ws, "calls")) ? readFileSync(join(ws, "calls"), "utf8").trim().split("\n") : []);
-  return { ws, put, calls };
+  const starts = () => calls().filter((c) => c.startsWith("--bg"));
+  return { ws, put, calls, starts };
 }
 
 // A row as the listing has it for a session with a worker: a pid that exists, this process's.
@@ -83,15 +89,16 @@ test("the recipient is the name without the listing's [ref]", () => {
   assert.equal(recipient(undefined), null);
 });
 
-test("the wake hook respawns the newest session of an agent that is off, then lets the send through", () => {
-  const { ws, put, calls } = fakeFleet();
-  put("all.json", [sess("old1", "bea", { startedAt: 1000 }), sess("new2", "bea", { startedAt: 2000 }), sess("x9", "cal", { startedAt: 3000 })]);
-  put("after.json", [sess("new2", "bea", { startedAt: 2000 })]);
-  const r = wakeHook(ws, "bea [aa11]");
+test("the wake hook starts a reviewer that is off as a fresh session, then lets the send through", () => {
+  const { ws, put, calls, starts } = fakeFleet();
+  // an old conversation is listed, ended: it is never resumed
+  put("all.json", [sess("old1", "rae", { state: "stopped", pid: null })]);
+  const r = wakeHook(ws, "rae [aa11]");
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn new2"]);
+  assert.equal(starts().length, 1);
+  assert.match(starts()[0]!, /--name rae --model opus --effort high .*You are one of Ada's reviewers\. Read CLAUDE\.md, reply exactly READY/);
+  assert.ok(!calls().some((c) => /^(respawn|stop|rm) /.test(c)), "nothing done to the old row in the hook's time");
 });
-
 test("the wake hook leaves a live recipient, and anyone not in the fleet, alone", () => {
   const { ws, put, calls } = fakeFleet();
   put("live.json", [sess("b1", "bea")]);
@@ -99,28 +106,29 @@ test("the wake hook leaves a live recipient, and anyone not in the fleet, alone"
   assert.equal(wakeHook(ws, "bea").status, 0);
   assert.equal(wakeHook(ws, "otto").status, 0);
   assert.equal(wakeHook(ws, "main").status, 0);
-  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), []);
+  assert.deepEqual(calls().filter((c) => c.startsWith("--bg")), []);
   assert.ok(!calls().some((c) => c.includes("--all")), "a live recipient costs one listing, not the stopped ones too");
 });
 
-test("the wake hook blocks the send, saying why, when the recipient does not come back", () => {
-  const { ws, put } = fakeFleet();
+test("the wake hook blocks the send, saying why, when the recipient does not start", () => {
+  const { ws, starts } = fakeFleet();
+  // a builder starts fresh on its item, by the lead's dispatch
   let r = wakeHook(ws, "bea");
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /bea is off and has no session to wake/);
+  assert.equal(r.stderr, "bea is off: a builder starts fresh on its item: `factory dispatch bea <KEY>`. Tell the lead, who starts it with `factory dispatch bea <KEY>`; then send.\n");
+  assert.deepEqual(starts(), [], "wake starts no builder");
 
-  put("all.json", [sess("b1", "bea")]);
-  writeFileSync(join(ws, "respawn-fail"), "no such session");
-  r = wakeHook(ws, "bea");
+  writeFileSync(join(ws, "bg-fail"), "no such model");
+  r = wakeHook(ws, "rae");
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /bea is off and did not wake: respawn of b1 failed: no such session/);
+  assert.match(r.stderr, /^rae is off and did not start: claude --bg failed: no such model\. Try `factory wake rae`, or tell the lead\.\n$/);
 
-  rmSync(join(ws, "respawn-fail"));
-  r = wakeHook(ws, "bea", ["--wait-seconds", "1"]);
+  rmSync(join(ws, "bg-fail"));
+  writeFileSync(join(ws, "bg-unlisted"), "");
+  r = wakeHook(ws, "rae", ["--wait-seconds", "1"]);
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /bea is off and did not wake: respawned b1, and it was not listed live within 1 s/);
+  assert.match(r.stderr, /rae is off and did not start: rae did not appear in `claude agents` within 1s \(launch id new1\)\. Check `claude logs new1`\. Try/);
 });
-
 test("the wake hook lets the send through when the workspace does not load or the event is not JSON, and says so", () => {
   const { ws } = fakeFleet();
   const told = (r: { stdout: string }) => (JSON.parse(r.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext;
@@ -153,32 +161,43 @@ test("a listing that is JSON but no list is a listing that failed, for every cal
   assert.doesNotMatch(r.stderr, /TypeError|\n\s+at /);
 });
 
-test("factory wake: already live, woken, or not", () => {
-  const { ws, put } = fakeFleet();
-  put("all.json", [sess("b1", "bea")]);
-  put("after.json", [sess("b1", "bea")]);
-  let r = factory(ws, ["wake", "bea"]);
+test("factory wake: already live, started fresh, or not", () => {
+  const { ws, put, starts } = fakeFleet(ASSISTANT_TOML);
+  put("all.json", [sess("r0", "rae", { state: "stopped", pid: null })]);
+  let r = factory(ws, ["wake", "rae"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /bea woke: b1 respawned, live as b1, same conversation/);
-  r = factory(ws, ["wake", "bea"]);
-  assert.match(r.stdout, /bea is already live \(b1\)/);
-  r = factory(ws, ["wake", "cal"]);
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /cal has no session to wake/);
+  assert.equal(r.stdout, "rae was off; started a fresh session (new1)\n");
+  r = factory(ws, ["wake", "rae"]);
+  assert.match(r.stdout, /rae is already live \(new1\)/);
+  assert.equal(starts().length, 1);
+  // each role that wake starts: its role's first prompt and the model and effort the config gives now
+  const lines: Record<string, RegExp> = {
+    ada: /--name ada --model opus --effort high --autocompact 1M --permission-mode bypassPermissions .*factory status/,
+    vega: /--name vega --model opus --permission-mode auto You are one of Ada's assistants\. Read CLAUDE\.md, reply exactly READY, and wait for a task from Ada\.$/,
+  };
+  for (const [name, line] of Object.entries(lines)) {
+    rmSync(join(ws, "live.json"));
+    r = factory(ws, ["wake", name]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, new RegExp(`^${name} was off; started a fresh session \\(new\\d\\)\\n$`));
+    assert.match(starts().at(-1)!, line, name);
+  }
+  rmSync(join(ws, "live.json"));
+  for (const name of ["bea", "cal"]) {
+    r = factory(ws, ["wake", name]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.trim(), `${name} did not wake: a builder starts fresh on its item: \`factory dispatch ${name} <KEY>\``);
+  }
+  assert.equal(starts().length, 3);
 });
-
-// A respawn reruns the old command line, whose --settings is this file.
-test("a woken session comes back with its settings rendered again", () => {
-  const { ws, put } = fakeFleet();
-  put("all.json", [sess("b1", "bea")]);
-  put("after.json", [sess("b1", "bea")]);
-  const file = settingsFile(openWorkspace(ws, {}), agentOrDie(openWorkspace(ws, {}), "bea"));
+test("a started session has its settings rendered again", () => {
+  const { ws } = fakeFleet();
+  const file = settingsFile(openWorkspace(ws, {}), agentOrDie(openWorkspace(ws, {}), "rae"));
   writeFileSync(file, "{}\n");
-  const r = factory(ws, ["wake", "bea"]);
+  const r = factory(ws, ["wake", "rae"]);
   assert.equal(r.status, 0, r.stderr);
   assert.ok(JSON.parse(readFileSync(file, "utf8")).hooks?.PreToolUse?.length, "the stale file was rendered again");
 });
-
 test("every role's settings wake the recipient before SendMessage, inside the hook's timeout", () => {
   const dir = tempWorkspace(ASSISTANT_TOML);
   after(() => rmSync(dir, { recursive: true, force: true }));
@@ -192,87 +211,22 @@ test("every role's settings wake the recipient before SendMessage, inside the ho
   }
 });
 
-test("a fix round on an item whose session was stopped idle wakes that session instead of starting one", () => {
-  const { ws, put, calls } = fakeFleet();
-  for (const args of [["building", "--stack", "app", "--agent", "bea"], ["pr-open", "--pr", "acme/web#1", "--head", "abc1234abc1234"],
-    ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "2 high"]]) {
-    const st = factory(ws, ["state", "TEST-3", ...args]);
-    assert.equal(st.status, 0, st.stderr);
-  }
-  const off = sess("b7", "bea", { cwd: join(ws, "repos", "web", ".claude", "worktrees", "TEST-3") });
-  put("all.json", [off]);
-  put("after.json", [off]);
-  const r = factory(ws, ["dispatch", "bea", "TEST-3"]);
-  assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /bea was off; woke b7 \(its conversation kept\)/);
-  assert.match(r.stdout, /bea is still on TEST-3 \(b7\), so it keeps its context/);
-  assert.ok(!calls().some((c) => c.startsWith("--bg")), "no new session");
-});
-
-test("a stopped session on another item is not woken for a dispatch, nor any with --force", () => {
-  const { ws, put, calls } = fakeFleet();
-  put("all.json", [sess("b7", "bea", { cwd: join(ws, "repos", "web", ".claude", "worktrees", "TEST-2") })]);
-  factory(ws, ["dispatch", "bea", "TEST-3"]);
-  put("all.json", [sess("b8", "bea", { cwd: join(ws, "repos", "web", ".claude", "worktrees", "TEST-3") })]);
-  factory(ws, ["dispatch", "bea", "TEST-3", "--force"]);
-  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), []);
-});
-
-test("a named assistant that is off is woken on its conversation; --force starts it fresh", () => {
-  const { ws, put, calls } = fakeFleet(ASSISTANT_TOML);
-  mkdirSync(join(ws, "assistants"));
-  put("all.json", [sess("v1", "vega")]);
-  put("after.json", [sess("v1", "vega")]);
+test("factory assistant <name> starts an assistant that is off fresh, and leaves a live one alone", () => {
+  const { ws, put, calls, starts } = fakeFleet(ASSISTANT_TOML);
+  put("all.json", [sess("v1", "vega", { state: "stopped", pid: null })]);
   let r = factory(ws, ["assistant", "vega"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /vega was off; woke v1 \(its conversation kept\)\n  next: send it the task by message/);
-  assert.ok(!calls().some((c) => c.startsWith("--bg")));
-  rmSync(join(ws, "live.json"));
-  r = factory(ws, ["assistant", "vega", "--force"]);
+  assert.equal(r.stdout, "vega started (new1)\n");
+  assert.equal(starts().length, 1);
+  assert.match(starts()[0]!, /--name vega --model opus --permission-mode auto You are one of Ada's assistants/);
+  // the ended row goes once the fresh one is up
+  assert.ok(calls().includes("stop v1") && calls().includes("rm v1"), calls().join("\n"));
+  put("live.json", [sess("new1", "vega")]);
+  r = factory(ws, ["assistant", "vega"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn v1"]);
-  assert.ok(calls().some((c) => c.startsWith("--bg")), "--force starts a fresh one");
+  assert.match(r.stdout, /vega is already running \(new1\); send it the task by message/);
+  assert.equal(starts().length, 1);
 });
-
-test("the session a wake respawns is the one last active by its transcript, not the one started last", () => {
-  const { ws, put, calls } = fakeFleet();
-  const cfg = join(ws, "claude-config");
-  fakeDaemon(cfg);
-  const proj = join(cfg, "projects", "-w-bea-dir");
-  mkdirSync(proj, { recursive: true });
-  const row = (id: string, startedAt: number) => sess(id, "bea", { startedAt, cwd: "/w/bea.dir", sessionId: `${id}-uuid` });
-  writeFileSync(join(proj, "old1-uuid.jsonl"), "{}\n");
-  writeFileSync(join(proj, "new2-uuid.jsonl"), "{}\n");
-  utimesSync(join(proj, "new2-uuid.jsonl"), 2000, 2000);
-  utimesSync(join(proj, "old1-uuid.jsonl"), 5000, 5000);
-  put("all.json", [row("old1", 1000), row("new2", 2000)]);
-  put("after.json", [row("old1", 1000)]);
-  let r = factory(ws, ["wake", "bea"], { env: { CLAUDE_CONFIG_DIR: cfg } });
-  assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn old1"], "old1 started first but talked last");
-  // With no transcript to go by, the one started last.
-  rmSync(join(ws, "live.json"));
-  rmSync(proj, { recursive: true });
-  put("after.json", [row("new2", 2000)]);
-  r = factory(ws, ["wake", "bea"], { env: { CLAUDE_CONFIG_DIR: cfg } });
-  assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn old1", "respawn new2"]);
-});
-
-test("a named assistant that does not wake is not started fresh; --force starts it fresh", () => {
-  const { ws, put, calls } = fakeFleet(ASSISTANT_TOML);
-  mkdirSync(join(ws, "assistants"));
-  put("all.json", [sess("v1", "vega")]);
-  writeFileSync(join(ws, "respawn-fail"), "session v1 is gone");
-  let r = factory(ws, ["assistant", "vega"]);
-  assert.equal(r.status, 1, r.stdout);
-  assert.match(r.stderr, /vega was off and did not wake: respawn of v1 failed: session v1 is gone\. Nothing was started/);
-  assert.ok(!calls().some((c) => c.startsWith("--bg")), "no fresh session without --force");
-  r = factory(ws, ["assistant", "vega", "--force"]);
-  assert.equal(r.status, 0, r.stderr);
-  assert.ok(calls().some((c) => c.startsWith("--bg")), "--force starts a fresh one");
-});
-
 test("a session on a host wakes only agents on its own host, and lets a message to any other through", () => {
   const { ws, put, calls } = fakeFleet(HOSTED_TOML);
   // the lead and bea are on the primary, which a host cannot list: nothing is asked, the send goes
@@ -281,34 +235,32 @@ test("a session on a host wakes only agents on its own host, and lets a message 
     assert.equal(r.status, 0, `${to}: ${r.stderr}`);
   }
   assert.deepEqual(calls(), []);
-  // rae is on far too, so far's own claude wakes it, with no settle
-  put("all.json", [sess("r1", "rae")]);
-  put("after.json", [sess("r1", "rae")]);
+  // rae is on far too, so far's own claude starts it, with no settle, in its cwd there
+  writeFileSync(join(ws, "factory.toml"), HOSTED_TOML.replace('cwd = "/far/rae"', `cwd = "${join(ws, "reviewers")}"`));
   const t0 = Date.now();
   const r = wakeHook(ws, "rae", ["--from-host", "far"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn r1"]);
+  assert.equal(calls().filter((c) => c.startsWith("--bg") && c.includes("--name rae")).length, 1);
   assert.ok(Date.now() - t0 < 10_000, "no settle for a wake on the sender's own machine");
 });
 
-test("the wake hook answers inside its timeout: a respawn that hangs, or a session that never lists live, blocks in time", () => {
-  const { ws, put } = fakeFleet();
-  put("all.json", [sess("b1", "bea")]);
-  writeFileSync(join(ws, "respawn-hang"), "");
+test("the wake hook answers inside its timeout: a start that hangs, or a session that never lists live, blocks in time", () => {
+  const { ws } = fakeFleet();
+  writeFileSync(join(ws, "bg-hang"), "");
   let t0 = Date.now();
-  let r = wakeHook(ws, "bea", ["--timeout-seconds", "32"]);
+  let r = wakeHook(ws, "rae", ["--timeout-seconds", "50"]);
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /bea is off and did not wake/);
-  assert.ok(Date.now() - t0 < 32_000, `the hung respawn took ${Date.now() - t0} ms`);
+  assert.match(r.stderr, /rae is off and did not start: claude --bg did not finish in the \d+ s it had/);
+  assert.ok(Date.now() - t0 < 50_000, `the hung start took ${Date.now() - t0} ms`);
 
-  rmSync(join(ws, "respawn-hang"));
+  rmSync(join(ws, "bg-hang"));
+  writeFileSync(join(ws, "bg-unlisted"), "");
   t0 = Date.now();
-  r = wakeHook(ws, "bea", ["--timeout-seconds", "32"]);
+  r = wakeHook(ws, "rae", ["--timeout-seconds", "50"]);
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /respawned b1, and it was not listed live in the time the hook has/);
-  assert.ok(Date.now() - t0 < 32_000, `the wait took ${Date.now() - t0} ms`);
+  assert.match(r.stderr, /rae is off and did not start: rae did not appear in `claude agents`/);
+  assert.ok(Date.now() - t0 < 50_000, `the wait took ${Date.now() - t0} ms`);
 });
-
 test("a hosted agent's settings tell the wake hook its host", () => {
   const dir = tempWorkspace(HOSTED_TOML);
   after(() => rmSync(dir, { recursive: true, force: true }));
@@ -328,33 +280,17 @@ test("a local listing that hangs is cut off and the send let through, as for a h
   const t0 = Date.now();
   const r = wakeHook(ws, "bea");
   assert.equal(r.status, 0, r.stderr);
-  assert.ok(!calls().some((c) => c.startsWith("respawn")), "nothing is woken on a guess");
+  assert.ok(!calls().some((c) => c.startsWith("--bg")), "nothing is started on a guess");
   assert.ok(Date.now() - t0 < 30_000, `the hung listing took ${Date.now() - t0} ms`);
 });
 
-test("a listing that hangs after the respawn leaves the recipient unknown, and the send is let through", () => {
-  const { ws, put, calls } = fakeFleet();
-  put("all.json", [sess("b1", "bea")]);
-  put("after.json", [sess("b1", "bea")]);
-  writeFileSync(join(ws, "hang-after-respawn"), "");
-  const r = wakeHook(ws, "bea", ["--wait-seconds", "1", "--settle-seconds", "0"]);
+test("a listing that hangs after the start leaves the recipient unknown, and the send is let through", () => {
+  const { ws, starts } = fakeFleet();
+  writeFileSync(join(ws, "hang-after-bg"), "");
+  const r = wakeHook(ws, "rae", ["--wait-seconds", "1", "--settle-seconds", "0"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls().filter((c) => c.startsWith("respawn")), ["respawn b1"]);
+  assert.equal(starts().length, 1);
 });
-
-test("a remote respawn left too little time fails rather than run past it", () => {
-  const dir = tempWorkspace(HOSTED_TOML);
-  after(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(join(dir, "token"), "t".repeat(40));
-  const ws = openWorkspace(dir, {});
-  const t = transportFor(ws, agentOrDie(ws, "rae"));
-  const t0 = Date.now();
-  const r = t.respawn("rae", "r1", 5_500);
-  assert.equal(r.ok, false);
-  assert.match(r.why, /5500 ms is too little for a respawn on far/);
-  assert.ok(Date.now() - t0 < 1_000, "nothing was asked");
-});
-
 test("the hook's own error lets the send through, logged and told to the sender", () => {
   const { ws, put } = fakeFleet();
   // a listing that is JSON but no list: the listing fails
@@ -387,64 +323,104 @@ test("a local listing that timed out says so, not that a host is unknown", () =>
   assert.equal(new Unreachable("far", "ECONNREFUSED").message, "host far is unknown: ECONNREFUSED");
 });
 
-test("a respawn leaves room for one listing after it", () => {
+test("a start leaves room for the listings after it, and one left too little time fails rather than run past it", () => {
   const dir = tempWorkspace(HOSTED_TOML);
   after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, "token"), "t".repeat(40));
   const ws = openWorkspace(dir, {});
-  let given: number | undefined;
+  mkdirSync(join(dir, "reviewers"));
+  const given: (number | undefined)[] = [];
   const far = {
     where: "far",
-    sessions: (all = false) => (all ? [sess("r1", "rae")] : []),
+    sessions: () => [],
     alive: (s: unknown) => !!s && (s as { alive?: unknown }).alive === true,
-    respawn: (_n: string, _id: string, ms?: number) => ((given = ms), { ok: false, said: "", why: "stop here" }),
+    start: (req: StartRequest) => (given.push(req.timeoutMs), assert.fail("stop here")),
   } as unknown as Transport;
-  wake(ws, agentOrDie(ws, "rae"), { t: far, deadline: Date.now() + 60_000 });
-  assert.ok(given !== undefined && given <= 40_000 && given > 39_000, `respawn given ${given} ms of 60 000: 20 000 for a listing comes off`);
+  assert.throws(() => wake(ws, agentOrDie(ws, "rae"), { t: far, deadline: Date.now() + 60_000 }), /stop here/);
+  assert.ok(given.length === 1 && given[0]! <= 20_000 && given[0]! > 19_000, `start given ${given[0]} ms of 60 000: 20 000 for each of two listings comes off`);
+  // under a host's child slack and a second, nothing is asked
+  const w = wake(ws, agentOrDie(ws, "rae"), { t: far, deadline: Date.now() + 40_000 + 5_500 });
+  assert.deepEqual(w, { is: "failed", why: "out of time before starting rae" });
+  assert.equal(given.length, 1);
 });
-
-// The render runs between the budget check and the respawn: the respawn is given what is left after
-// it, and a render that leaves too little fails the wake rather than run past it.
-const offBea = (respawned: (number | undefined)[]) => ({
-  where: "here",
-  sessions: (all = false) => (all ? [sess("b1", "bea")] : []),
-  alive: () => false,
-  respawn: (_n: string, _id: string, ms?: number) => (respawned.push(ms), { ok: false, said: "", why: "stop here" }),
-}) as unknown as Transport;
-
-test("the respawn's budget is what is left after the settings are rendered", () => {
-  const ws = openWorkspace(fakeFleet().ws, {});
-  const bea = agentOrDie(ws, "bea");
-  const role = ws.config.roles[bea.role] as { settings: string };
-  const tmpl = role.settings;
-  const real = Date.now;
-  let clock = real();
-  Date.now = () => clock;
+// One start of an agent at a time: a wake that finds another start under way waits for it, and
+// one whose time runs out first fails, saying so, never starting a second session under the name.
+test("a wake waits on the agent's start lock, and fails without starting when it runs out of time", () => {
+  const dir = tempWorkspace(HOSTED_TOML);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "token"), "t".repeat(40));
+  const ws = openWorkspace(dir, {});
+  mkdirSync(join(dir, "reviewers"));
+  let asked = 0;
+  const far = { where: "far", sessions: () => (asked++, []), alive: () => false, start: () => assert.fail("no start under another's lock") } as unknown as Transport;
+  const fd = tryLock(startLock(ws, "rae"));
+  assert.notEqual(fd, null);
   try {
-    // reading the template for the render takes 500 ms
-    Object.defineProperty(role, "settings", { get: () => ((clock += 500), tmpl), configurable: true });
-    const given: (number | undefined)[] = [];
-    let w = wake(ws, bea, { t: offBea(given), deadline: clock + 20_000 + 1_200 });
-    assert.deepEqual([w, given], [{ is: "failed", why: "out of time before respawning b1" }, []], "1 200 ms less 500 is under the 1 000 a respawn needs");
-    w = wake(ws, bea, { t: offBea(given), deadline: clock + 20_000 + 3_000 });
-    assert.deepEqual(given, [2_500], "the 500 the render took comes off, and no more");
+    const w = wake(ws, agentOrDie(ws, "rae"), { t: far, deadline: Date.now() + 1_500 });
+    assert.deepEqual(w, { is: "failed", why: "another start of rae is under way; out of time waiting for it" });
+    assert.equal(asked, 0, "not even listed while another start holds the lock");
   } finally {
-    Date.now = real;
+    closeSync(fd!);
   }
 });
 
-test("a woken session whose settings cannot be rendered fails the wake, saying why", () => {
-  const dir = fakeFleet().ws;
+// The library's calls to claude go to this fake one until the test ends.
+function useClaude(t: TestContext, dir: string) {
+  const was = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = join(dir, "bin", "claude");
+  t.after(() => (was === undefined ? delete process.env.CLAUDE_BIN : (process.env.CLAUDE_BIN = was)));
+}
+// flock(1) is util-linux's; lock.ts's darwin path is covered by the lock tests that need no child.
+const noFlock = process.platform !== "linux" && "holding the lock from another process uses flock(1), on Linux";
+// Holds the agent's start lock from another process, as a second start would, for ms; resolves once
+// it is held.
+function holdStartLock(ws: ReturnType<typeof openWorkspace>, name: string, ms: number, then = "") {
+  const held = join(ws.dir, `held-${name}`);
+  mkdirSync(ws.runDir, { recursive: true });
+  const c = spawn("flock", [startLock(ws, name), "sh", "-c", `touch ${held}; sleep ${ms / 1000}; ${then}`], { stdio: "ignore" });
+  after(() => c.kill());
+  const until = Date.now() + 5_000;
+  while (!existsSync(held)) if (Date.now() > until) assert.fail("the lock was never held"); else execFileSync("sleep", ["0.02"]);
+  return c;
+}
+test("a wake behind another start waits for it, then finds its session live and starts none", { skip: noFlock }, (t) => {
+  const { ws: dir, put, starts } = fakeFleet();
   const ws = openWorkspace(dir, {});
-  const bea = agentOrDie(ws, "bea");
-  (ws.config.roles[bea.role] as { settings: string }).settings = join(dir, "gone.json");
-  const given: (number | undefined)[] = [];
-  const w = wake(ws, bea, { t: offBea(given) });
-  assert.equal(w.is, "failed");
-  assert.match((w as { why: string }).why, /bea's settings could not be rendered: .*gone\.json/);
-  assert.deepEqual(given, [], "nothing respawned");
+  // the other start lists rae live just before it lets go
+  writeFileSync(join(dir, "rae-row.json"), JSON.stringify([sess("first", "rae", { state: "idle" })]));
+  holdStartLock(ws, "rae", 800, `cp ${join(dir, "rae-row.json")} ${join(dir, "live.json")}`);
+  put("live.json", []);
+  useClaude(t, dir);
+  const t0 = Date.now();
+  const w = wake(ws, agentOrDie(ws, "rae"));
+  assert.ok(Date.now() - t0 >= 600, "waited for the other start");
+  assert.equal(w.is, "live", JSON.stringify(w));
+  assert.equal((w as { s: { id: string } }).s.id, "first");
+  assert.deepEqual(starts(), [], "no second session under the name");
+});
+test("a dispatch's start waits on the agent's start lock too", { skip: noFlock }, () => {
+  const { ws: dir, starts } = fakeFleet();
+  webRepo(dir);
+  const ws = openWorkspace(dir, {});
+  holdStartLock(ws, "bea", 800);
+  const t0 = Date.now();
+  const r = factory(dir, ["dispatch", "bea", "TEST-54", "--title", "Wait"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(Date.now() - t0 >= 600, "started only once the lock was let go");
+  assert.equal(starts().length, 1);
 });
 
+test("a started session whose settings cannot be rendered fails the wake, saying why", (t) => {
+  const dir = fakeFleet().ws;
+  useClaude(t, dir);
+  const ws = openWorkspace(dir, {});
+  const rae = agentOrDie(ws, "rae");
+  (ws.config.roles[rae.role] as { settings: string }).settings = join(dir, "gone.json");
+  const w = wake(ws, rae);
+  assert.equal(w.is, "failed");
+  assert.match((w as { why: string }).why, /^settings for rae: \S+gone\.json does not exist$/);
+  assert.ok(!existsSync(join(dir, "starts")), "nothing started");
+});
 test("a listing that breaks, rather than cannot be had, is thrown on and not taken for unknown", () => {
   const dir = tempWorkspace(HOSTED_TOML);
   after(() => rmSync(dir, { recursive: true, force: true }));
@@ -519,6 +495,138 @@ test("only a hosted agent's settings explain a failed send", () => {
   }
 });
 
+// The fix session a dispatch recorded on an item.
+const fixSession = (ws: string, key: string) => (JSON.parse(readFileSync(join(ws, "state", `${key}.json`), "utf8")) as { fix_session: string }).fix_session;
+
+// A checkout of web with one commit and the briefs a builder on the app stack reads.
+function webRepo(ws: string) {
+  mkdirSync(join(ws, "briefs"), { recursive: true });
+  writeFileSync(join(ws, "briefs", "app.md"), "the app stack's brief");
+  const web = join(ws, "repos", "web");
+  mkdirSync(web, { recursive: true });
+  writeFileSync(join(web, "AGENTS.md"), "the repo's brief");
+  const origin = join(ws, "web-origin.git");
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+  for (const a of [["init", "-q", "-b", "main"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
+    ["remote", "add", "origin", origin], ["push", "-q", "origin", "main"]])
+    execFileSync("git", ["-C", web, ...a]);
+}
+
+test("the first fix round stops the build session and starts a fresh one on the handoff; later rounds keep it", () => {
+  const { ws, calls, starts } = fakeFleet();
+  webRepo(ws);
+  const rec = () => JSON.parse(readFileSync(join(ws, "state", "TEST-50.json"), "utf8")) as { state: string; worktree: string; fix_session?: string };
+  let r = factory(ws, ["dispatch", "bea", "TEST-50", "--title", "Fix the export"]);
+  assert.equal(r.status, 0, r.stderr);
+  const wt = rec().worktree;
+  const handoff = `${wt}.handoff.md`;
+  assert.match(r.stdout, /bea started \(new1\) for TEST-50 as a BUILDING session/);
+  assert.ok(starts()[0]!.includes(`write the handoff for the fix round to ${handoff}`), starts()[0]);
+  assert.equal(rec().fix_session, undefined);
+  // a re-brief while building goes to the build session
+  r = factory(ws, ["dispatch", "bea", "TEST-50"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /bea is still on TEST-50 \(new1\), so it keeps its context/);
+  for (const a of [["pr-open", "--pr", "acme/web#5", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"]])
+    assert.equal(factory(ws, ["state", "TEST-50", ...a]).status, 0);
+
+  r = factory(ws, ["dispatch", "bea", "TEST-50"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^bea's build session on TEST-50 stopped \(new1\); the fix round starts fresh in the same worktree$/m);
+  assert.match(r.stdout, /bea started \(new2\) for TEST-50 as a FIX ROUND session/);
+  assert.match(r.stdout, new RegExp(`fix round: it reads the handoff, ${handoff.replace(/[.]/g, "\\.")}`));
+  assert.ok(calls().includes("stop new1") && calls().includes("rm new1"), "the build session is stopped and removed");
+  assert.equal(starts().length, 2);
+  const fix = starts()[1]!;
+  assert.match(fix, /--name bea --model opus --effort high .*FIX ROUND, in a fresh session/);
+  assert.ok(fix.includes(`the handoff at ${handoff}`), fix);
+  assert.deepEqual([rec().state, rec().worktree, rec().fix_session], ["fixing", wt, "new2"], "same worktree, the fix session recorded");
+
+  // the next round goes to the fix session
+  assert.equal(factory(ws, ["state", "TEST-50", "agent-review", "--evidence", "round 2 sent"]).status, 0);
+  r = factory(ws, ["dispatch", "bea", "TEST-50"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /bea is still on TEST-50 \(new2\), so it keeps its context/);
+  assert.equal(starts().length, 2, "no new session");
+  assert.deepEqual([rec().state, rec().fix_session], ["fixing", "new2"]);
+  // and the round after, with the item already fixing
+  r = factory(ws, ["dispatch", "bea", "TEST-50"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /that is the fix session, which keeps later rounds/);
+  assert.equal(starts().length, 2);
+});
+
+test("a fix round on an item whose session is off starts a fresh one on the handoff", () => {
+  const { ws, starts } = fakeFleet();
+  webRepo(ws);
+  assert.equal(factory(ws, ["dispatch", "bea", "TEST-51", "--title", "Fix it"]).status, 0);
+  rmSync(join(ws, "live.json"));
+  for (const a of [["pr-open", "--pr", "acme/web#6", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "briefed"], ["fixing", "--evidence", "2 high"]])
+    assert.equal(factory(ws, ["state", "TEST-51", ...a]).status, 0);
+  const r = factory(ws, ["dispatch", "bea", "TEST-51"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /bea started \(new2\) for TEST-51 as a FIX ROUND session/);
+  assert.match(starts()[1]!, /FIX ROUND, in a fresh session .*TEST-51\.handoff\.md/);
+  assert.equal(fixSession(ws, "TEST-51"), "new2");
+});
+
+test("a bare dispatch on an item in review whose session is off starts its fix round; --force does not", () => {
+  const { ws, starts } = fakeFleet();
+  webRepo(ws);
+  const rec = () => JSON.parse(readFileSync(join(ws, "state", "TEST-52.json"), "utf8")) as { state: string; fix_session?: string };
+  assert.equal(factory(ws, ["dispatch", "bea", "TEST-52", "--title", "Fix it"]).status, 0);
+  rmSync(join(ws, "live.json"));
+  for (const a of [["pr-open", "--pr", "acme/web#7", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "briefed"]])
+    assert.equal(factory(ws, ["state", "TEST-52", ...a]).status, 0);
+  // forced, on a sent PR: a verification or re-brief run, not a fix round
+  let r = factory(ws, ["dispatch", "bea", "TEST-52", "--force"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /as a BUILDING session/);
+  assert.doesNotMatch(starts()[1]!, /FIX ROUND/);
+  assert.deepEqual([rec().state, rec().fix_session], ["agent-review", undefined], "still in review, no fix session recorded");
+  rmSync(join(ws, "live.json"));
+  // bare: after a stop it works as it does with the build session live
+  r = factory(ws, ["dispatch", "bea", "TEST-52"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /bea started \(new3\) for TEST-52 as a FIX ROUND session/);
+  assert.match(starts()[2]!, /FIX ROUND, in a fresh session/);
+  assert.deepEqual([rec().state, rec().fix_session], ["fixing", "new3"]);
+});
+
+test("a fix round whose fresh start fails leaves the item in review, and the same dispatch run again starts it", () => {
+  const { ws, starts } = fakeFleet();
+  webRepo(ws);
+  const state = () => (JSON.parse(readFileSync(join(ws, "state", "TEST-53.json"), "utf8")) as { state: string }).state;
+  assert.equal(factory(ws, ["dispatch", "bea", "TEST-53", "--title", "Fix it"]).status, 0);
+  for (const a of [["pr-open", "--pr", "acme/web#8", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "briefed"]])
+    assert.equal(factory(ws, ["state", "TEST-53", ...a]).status, 0);
+  writeFileSync(join(ws, "bg-fail"), "no start today");
+  let r = factory(ws, ["dispatch", "bea", "TEST-53"]);
+  assert.notEqual(r.status, 0);
+  assert.equal(state(), "agent-review", "not left in fixing with no session");
+  rmSync(join(ws, "bg-fail"));
+  r = factory(ws, ["dispatch", "bea", "TEST-53"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /as a FIX ROUND session/);
+  assert.equal(state(), "fixing");
+  assert.equal(starts().length, 3);
+});
+
+test("a bare dispatch never takes another agent's fix round", () => {
+  const { ws, starts } = fakeFleet();
+  webRepo(ws);
+  assert.equal(factory(ws, ["dispatch", "bea", "TEST-55", "--title", "Mine"]).status, 0);
+  rmSync(join(ws, "live.json"));
+  for (const a of [["pr-open", "--pr", "acme/web#9", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "briefed"]])
+    assert.equal(factory(ws, ["state", "TEST-55", ...a]).status, 0);
+  const r = factory(ws, ["dispatch", "cal", "TEST-55"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /TEST-55 is agent-review, built by bea; its fix round is bea's\. To hand it to cal, `factory state TEST-55 fixing --agent cal` first\./);
+  assert.equal(starts().length, 1);
+  const rec = JSON.parse(readFileSync(join(ws, "state", "TEST-55.json"), "utf8")) as { agent: string; state: string };
+  assert.deepEqual([rec.agent, rec.state], ["bea", "agent-review"]);
+});
+
 // Waiting work has no record, so the dispatch that makes one titles it, and no card shows a bare
 // key. --title wins; else the summary the queue watcher last read; else it says how.
 test("a dispatch titles a new record: --title, else the queue's last read of the tracker", () => {
@@ -554,14 +662,14 @@ role = "designer"
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual([rec("TEST-30").state, rec("TEST-30").title], ["building", "Rename the export"], "the builder's record has the tracker's title");
   assert.doesNotMatch(r.stdout, /no title/);
-  // a fix round on the live session keeps it, and takes --title all the same
+  // the first fix round stops the build session for a fresh one, and takes --title all the same
   const wt = (JSON.parse(readFileSync(join(ws, "state", "TEST-30.json"), "utf8")) as { worktree: string }).worktree;
   put("live.json", [sess("new1", "bea", { state: "idle", cwd: wt })]);
   for (const args of [["pr-open", "--pr", "acme/web#1", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "2 high"]])
     assert.equal(factory(ws, ["state", "TEST-30", ...args]).status, 0);
   r = factory(ws, ["dispatch", "bea", "TEST-30", "--title", "Rename the export, round two"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /bea is still on TEST-30 .*so it keeps its context/);
+  assert.match(r.stdout, /bea's build session on TEST-30 stopped \(new1\); the fix round starts fresh in the same worktree/);
   assert.equal(rec("TEST-30").title, "Rename the export, round two", "--title on the live session's round");
   assert.equal(factory(ws, ["state", "TEST-30", "blocked", "--evidence", "parked for the next case"]).status, 0);
   // taken off the board with its session left running, it goes back on as building, not fixing,
@@ -709,7 +817,7 @@ repos = ["web", "api"]
   assert.doesNotMatch(r.stdout, /ignored/);
   // a session in no local repo's worktree (a hosted builder's path, say): the record's stack, and
   // the --repo it overrides is said, with where the stack came from
-  put("live.json", [sess("new1", "kit", { state: "idle", cwd: "/far/worktrees/TEST-40" })]);
+  put("live.json", [sess(fixSession(ws, "TEST-40"), "kit", { state: "idle", cwd: "/far/worktrees/TEST-40" })]);
   r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "web"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^--repo web ignored: kit is kept on api, the stack TEST-40's record has$/m);
@@ -726,12 +834,12 @@ repos = ["web", "api"]
     assert.equal(factory(ws, ["state", "TEST-41", ...args]).status, 0);
   r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "web"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /bea is still on TEST-41 .*so it keeps its context/);
+  assert.match(r.stdout, /bea's build session on TEST-41 stopped/);
   assert.doesNotMatch(r.stdout, /--repo web/, "web is the worktree's repo: nothing ignored");
   r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "api"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^--repo api ignored: bea is kept in web's worktree$/m);
-  put("live.json", [sess("new1", "bea", { state: "idle", cwd: "/far/worktrees/TEST-41" })]);
+  put("live.json", [sess(fixSession(ws, "TEST-41"), "bea", { state: "idle", cwd: "/far/worktrees/TEST-41" })]);
   r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "api"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^--repo api not checked: bea's session is in no local worktree$/m);

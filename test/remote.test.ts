@@ -76,7 +76,6 @@ createServer((req, res) => {
     if (req.url === "/agents/rae/start") return send(200, { id: "launched1" });
     const id = body ? JSON.parse(body).id : null;
     if (id === "r422") return send(422, { error: "not that one" }); // a session route: a 422 here is no refusal
-    if (req.url === "/agents/rae/respawn") return send(200, { ok: true, said: "back" });
     if (req.url === "/agents/rae/stop") return send(200, {});
     const q = body ? JSON.parse(body) : {};
     const wt = "/far/" + q.repo + "/.claude/worktrees/" + q.ticket;
@@ -209,21 +208,13 @@ test("the remote transport: each operation is a request to the host's daemon", a
   assert.deepEqual(rows.map((s) => [s.id, t.alive(s)]), [["r1", true], ["r0", false]], "alive is the daemon's word");
   const id = t.start({ agent: rae, cwd: "/far/rae", prompt: "hello", appendix: "the appendix", runDir: ws.runDir, phase: undefined, args: () => assert.fail("rendered on the host, not here"), env: { SECRET: "x" } });
   assert.equal(id, "launched1");
-  assert.deepEqual(t.respawn("rae", "r0"), { ok: true, said: "back", why: "back" });
-  // a wake's respawn carries the brief, for the daemon to write there (refreshHosted)
-  t.respawn("rae", "r0", undefined, "the brief now");
   t.stop("rae", "r1", true);
   assert.deepEqual(d.requests().map((r) => [r.method, r.url, r.body]), [
     ["GET", "/agents?all=1", null],
     ["POST", "/agents/rae/start", { cwd: "/far/rae", prompt: "hello", appendix: "the appendix", phase: null }],
-    ["POST", "/agents/rae/respawn", { id: "r0" }],
-    ["POST", "/agents/rae/respawn", { id: "r0", appendix: "the brief now" }],
     ["POST", "/agents/rae/stop", { id: "r1", remove: true }],
   ]);
-  // a 422 on a session route is an unknown host: respawn falls back, stop throws Unreachable
-  const no = t.respawn("rae", "r422");
-  assert.equal(no.ok, false);
-  assert.match(no.why, /^host far is unknown: HTTP 422 not that one$/);
+  // a 422 on a session route is an unknown host: stop throws Unreachable
   assert.throws(() => t.stop("rae", "r422", false), (e: unknown) => e instanceof Unreachable && /HTTP 422 not that one/.test(e.message));
   assert.deepEqual(await t.sessionsAsync().then((r) => (Array.isArray(r) ? r.map((s) => s.id) : r.why)), ["r1", "r0"]);
   assert.deepEqual(hostChecks(ws), [{ status: "ok", what: `host far at ${d.url} answers, for rae` }]);
@@ -281,7 +272,6 @@ test("waiting for a started session, a host that cannot be asked on one poll is 
     sessionsAsync: () => assert.fail("not used"),
     alive: (s): s is Session => !!s && s.alive === true,
     start: () => "launched1",
-    respawn: () => assert.fail("not used"),
     stop: () => assert.fail("not used"),
     worktree: () => assert.fail("not used"),
     worktreeLeft: () => assert.fail("not used"),
@@ -348,7 +338,10 @@ role = "${role}"`).replace("[tracker]", roles);
     writeFileSync(join(dir, "briefs", "rae.md"), "rae's brief\n");
     const r = factory(dir, [...argv]);
     assert.equal(r.status, 0, `${role}: ${r.stderr}`);
-    assert.deepEqual(d.requests().filter((q) => q.method === "POST").map((q) => q.url), ["/agents/rae/stop", "/agents/rae/start"], `${role}: the live rae is replaced`);
+    const posts = d.requests().filter((q) => q.method === "POST");
+    // the live r1 is stopped and removed, the new one started, and the ended row r0 removed once it is up
+    assert.deepEqual(posts.map((q) => [q.url, q.body?.id ?? null, q.body?.remove ?? null]),
+      [["/agents/rae/stop", "r1", true], ["/agents/rae/start", null, null], ["/agents/rae/stop", "r0", true]], `${role}: the live rae is replaced`);
     const start = d.requests().find((q) => q.url === "/agents/rae/start");
     assert.equal(start?.body?.appendix, "<!-- briefs/rae.md -->\nrae's brief\n", `${role}: the start carries the brief`);
   }
