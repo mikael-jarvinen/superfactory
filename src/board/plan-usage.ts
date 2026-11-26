@@ -1,12 +1,16 @@
 // The plan's own weekly utilization, as Claude Code's /usage shows it, sampled for the weekly usage
-// chart (weekly.ts). The board asks the same endpoint /usage does, with the login Claude Code keeps
-// in its config dir, read afresh on each poll, since Claude Code refreshes it. The board never
+// chart (weekly.ts). The board asks the same endpoint /usage does, with the login Claude Code keeps,
+// read afresh on each poll, since Claude Code refreshes it: on macOS its Keychain item, read with
+// `security` as Claude Code reads it, else .credentials.json in its config dir. The board never
 // refreshes the login itself, as a refresh replaces the token Claude Code holds, and it keeps no copy:
 // the token goes in the request's header and nowhere else, and no error carries it. An expired login
 // waits for Claude Code's next refresh.
 //
 // Each sample is appended to state/plan-usage.jsonl: when, the weekly percent, and the reset it names.
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { claudeConfigDir } from "../transport.js";
 import type { Workspace } from "../workspace.js";
@@ -24,11 +28,43 @@ export type PlanFetch = () => Promise<{ percent: number; resets_at: number }>;
 export const POLL_EVERY = 12 * 60_000;
 const URL = "https://api.anthropic.com/api/oauth/usage";
 
-export function oauthUsage(configDir: () => string = claudeConfigDir, fetchFn: typeof fetch = fetch): PlanFetch {
+// The Keychain item Claude Code keeps its login in on macOS: the service carries a hash of the
+// config dir when one is set apart from the default, and the account is the user's name.
+export function keychainItem(env: NodeJS.ProcessEnv = process.env, configDir: () => string = claudeConfigDir): { service: string; account: string } {
+  const apart = env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+  const dir = apart !== undefined ? apart : env.CLAUDE_CONFIG_DIR ? configDir() : "";
+  const hash = dir ? "-" + createHash("sha256").update(dir.normalize("NFC")).digest("hex").slice(0, 8) : "";
+  let user = "";
+  try {
+    user = env.USER || userInfo().username;
+  } catch {
+    // no user name
+  }
+  return { service: `Claude Code-credentials${hash}`, account: /^[a-zA-Z0-9._-]+$/.test(user) ? user : "claude-code-user" };
+}
+
+// The Keychain item's text, or null when there is none; `security` prints it to its stdout only.
+export type Keychain = () => Promise<string | null>;
+const macKeychain: Keychain = () =>
+  new Promise((resolve) => {
+    const { service, account } = keychainItem();
+    execFile("security", ["find-generic-password", "-a", account, "-w", "-s", service], { encoding: "utf8", timeout: 10_000 }, (err, out) =>
+      resolve(err ? null : out.trim() || null),
+    );
+  });
+
+export function oauthUsage(
+  configDir: () => string = claudeConfigDir,
+  fetchFn: typeof fetch = fetch,
+  keychain: Keychain | null = process.platform === "darwin" ? macKeychain : null,
+): PlanFetch {
   return async () => {
     let token: unknown, expires: unknown;
+    let text: string | null = null;
+    if (keychain) text = await keychain().catch(() => null);
     try {
-      const c = JSON.parse(readFileSync(join(configDir(), ".credentials.json"), "utf8"))?.claudeAiOauth;
+      text ??= readFileSync(join(configDir(), ".credentials.json"), "utf8");
+      const c = JSON.parse(text)?.claudeAiOauth;
       token = c?.accessToken;
       expires = c?.expiresAt;
     } catch {

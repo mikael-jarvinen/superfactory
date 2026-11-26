@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import vm from "node:vm";
 import { JSDOM } from "jsdom";
 import { ACCOUNT, refreshHosts, type Read, TranscriptUsage } from "../src/board/analytics.js";
-import { oauthUsage, PlanUsage, type Sample } from "../src/board/plan-usage.js";
+import { keychainItem, oauthUsage, PlanUsage, type Sample } from "../src/board/plan-usage.js";
 import type { Runner } from "../src/board/remote-transcripts.js";
 import { serve } from "../src/board/server.js";
 import { costOf, WEEK, weekly } from "../src/board/weekly.js";
@@ -104,6 +105,10 @@ test("the weekly estimate: the resets from a refusal, the limit from the hit wee
   assert.deepEqual(at(R0 + WEEK + 6 * HOUR), [80]);
   assert.deepEqual(at(R0 + 2 * WEEK), [100, 0], "a week's end at its full figure, and the reset back at 0");
   assert.deepEqual(at(R0 + 3 * WEEK + 21 * HOUR), [45], "the copied call counted once");
+  assert.deepEqual(at(R0 + 3 * WEEK + 20 * HOUR), [30], "a point counts what was spent before its time");
+  assert.deepEqual(at(R0 + 3 * WEEK + 20 * HOUR + 15 * 60_000), [45], "a point every quarter hour, so on every local midnight");
+  // a hit week that started before Claude Code's cleanup may have lost its first sessions
+  assert.deepEqual(weekly(reads(), [], NOW + 8 * 24 * HOUR).weeks.map((x) => x.start), [R0 + WEEK, R0 + 2 * WEEK]);
   assert.deepEqual(w.estimate.at(-1), [NOW, 45], "up to now");
   assert.deepEqual(w.hits, [R0 + WEEK + 50 * HOUR, R0 + 2 * WEEK + 48 * HOUR], "the first refusal of each week on the chart");
   assert.equal(Math.round(w.week_cost), 45);
@@ -139,7 +144,7 @@ test("the plan's figure is read with Claude Code's login, which no error and no 
     seen.push({ url, headers: init.headers as Record<string, string> });
     return answer();
   }) as typeof fetch;
-  const read = oauthUsage(() => cfg, fake);
+  const read = oauthUsage(() => cfg, fake, null);
   const plan = new PlanUsage(join(cfg, "samples.jsonl"));
 
   await plan.poll(read, () => 1000);
@@ -171,6 +176,28 @@ test("the plan's figure is read with Claude Code's login, which no error and no 
   assert.equal(seen.length, 5, "an expired login is not sent");
   assert.equal(plan.samples().length, 1, "a failed poll stores nothing");
   assert.ok(!readFileSync(join(cfg, "samples.jsonl"), "utf8").includes(TOKEN));
+});
+
+test("on macOS the login is Claude Code's Keychain item, the file when there is none", async () => {
+  const cfg = tempDir();
+  const auth: string[] = [];
+  const fake = (async (_url: string, init: RequestInit) => {
+    auth.push((init.headers as Record<string, string>)["Authorization"]!);
+    return Response.json({ seven_day: { utilization: 1, resets_at: "2026-12-02T11:00:00Z" } });
+  }) as typeof fetch;
+  const login = (t: string) => JSON.stringify({ claudeAiOauth: { accessToken: t, expiresAt: Date.now() + HOUR } });
+  writeFileSync(join(cfg, ".credentials.json"), login("from-file"));
+  let item: string | null = login("from-keychain");
+  const read = oauthUsage(() => cfg, fake, async () => item);
+  await read();
+  item = null;
+  await read();
+  assert.deepEqual(auth, ["Bearer from-keychain", "Bearer from-file"]);
+
+  assert.deepEqual(keychainItem({ USER: "someone" }), { service: "Claude Code-credentials", account: "someone" });
+  const hash = createHash("sha256").update("/x/cfg").digest("hex").slice(0, 8);
+  assert.deepEqual(keychainItem({ USER: "a b", CLAUDE_CONFIG_DIR: "/x/cfg" }, () => "/x/cfg"), { service: `Claude Code-credentials-${hash}`, account: "claude-code-user" });
+  assert.equal(keychainItem({ USER: "m", CLAUDE_CONFIG_DIR: "/x/cfg", CLAUDE_SECURESTORAGE_CONFIG_DIR: "" }).service, "Claude Code-credentials");
 });
 
 const python = (far: string, scripts: string[]): Runner => (script) =>
@@ -212,7 +239,11 @@ hash_files = ["daemon.toml", "workspace.toml"]
 
 test("the weekly chart is served and drawn: two lines, the limit, and each week's Friday and Sunday", async () => {
   const cfg = tempDir();
+  const was = process.env.CLAUDE_CONFIG_DIR;
   process.env.CLAUDE_CONFIG_DIR = cfg;
+  after(() => {
+    process.env.CLAUDE_CONFIG_DIR = was;
+  });
   const proj = join(cfg, "projects", "-p");
   mkdirSync(proj, { recursive: true });
   const now = Date.now();

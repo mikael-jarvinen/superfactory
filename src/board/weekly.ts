@@ -18,10 +18,14 @@ import type { Call, Hit, Read } from "./analytics.js";
 import type { Sample } from "./plan-usage.js";
 
 export const WEEK = 7 * 86_400_000;
-const HOUR = 3_600_000;
-// How far back the account's transcripts are read: three weeks on the chart and the hit weeks
-// before them, which Claude Code's own cleanup keeps for about a month.
-export const WEEKLY_SINCE = 6 * WEEK;
+// The estimate's step. Every UTC offset in use is a whole number of quarter hours, so a point falls
+// on every local midnight, and the table's Friday and Sunday figures are exact in any time zone.
+const STEP = 15 * 60_000;
+// How far back the account's transcripts are read, and the oldest a hit week may start. Claude
+// Code deletes a transcript not written for cleanupPeriodDays, 30 by default: a week that started
+// before then may have lost its first sessions and would count short, pulling the limit down.
+// Three weeks of chart fit inside it.
+export const WEEKLY_SINCE = 30 * 86_400_000;
 
 // API prices in dollars per million tokens: input, output, cache read, cache write kept 5 minutes,
 // cache write kept an hour. A model not listed is priced as the first; a call with no model
@@ -58,7 +62,8 @@ export interface Weekly {
   limit: number | null;
   spread: number | null;
   weeks: HitWeek[];
-  // Hourly points [time, percent] of the estimate, back to 0 at each reset, up to now.
+  // Points [time, percent] of the estimate every quarter hour, each what was spent before its
+  // time, up to now. At each reset come two: the full week, then 0.
   estimate: [number, number][];
   // The plan's own samples [time, percent].
   actual: [number, number][];
@@ -124,7 +129,8 @@ export function weekly(reads: Read[], samples: Sample[], now: number, actualErro
     if (wStart < oldest || hit < wStart) continue;
     out.weeks.push({ start: wStart, hit, cost: spent(wStart, hit) });
   }
-  const costs = out.weeks.map((w) => w.cost).filter((c) => c > 0);
+  out.weeks = out.weeks.filter((w) => w.cost > 0);
+  const costs = out.weeks.map((w) => w.cost);
   if (costs.length) {
     const mean = costs.reduce((a, b) => a + b, 0) / costs.length;
     out.limit = mean;
@@ -137,14 +143,15 @@ export function weekly(reads: Read[], samples: Sample[], now: number, actualErro
   for (const c of calls) if (c.at >= curStart && c.at <= now) out.week_tokens += c.tokens.input + c.tokens.output + c.tokens.cache_read + c.tokens.cache_write;
 
   if (out.limit) {
-    const pct = (t: number) => (spent(weekStart(t), t) / (out.limit as number)) * 100;
+    const limit = out.limit;
+    const pct = (from: number, t: number) => Math.round((spent(from, t) / limit) * 1e4) / 100;
     const stop = Math.min(now, end);
-    for (let t = start; t <= stop; t += HOUR) {
-      // the last hour before a reset ends at its full week, and the reset starts at 0
-      if (t > start && (t - start) % WEEK === 0) out.estimate.push([t, (spent(t - WEEK, t) / out.limit) * 100]);
-      out.estimate.push([t, pct(t)]);
+    const times = new Set<number>([start, ...out.resets.filter((r) => r <= stop), stop]);
+    for (let t = Math.ceil(start / STEP) * STEP; t <= stop; t += STEP) times.add(t);
+    for (const t of [...times].sort((a, b) => a - b)) {
+      if (t > start && (t - start) % WEEK === 0) out.estimate.push([t, pct(t - WEEK, t)]);
+      out.estimate.push([t, pct(weekStart(t), t)]);
     }
-    if (stop > start && (stop - start) % HOUR) out.estimate.push([stop, pct(stop)]);
   }
 
   const shown = samples.filter((s) => s.at >= start && s.at <= now).sort((a, b) => a.at - b.at);

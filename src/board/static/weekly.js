@@ -141,10 +141,11 @@
       const cells = [...ends, e].map(t => {
         if(t == null) return `<td>–</td>`;
         if(t > d.now) return t === e && d.now < e ? `<td class="so">${pct(valueAt(d.estimate, d.now))} <small>so far</small></td>` : `<td>–</td>`;
-        // at the reset itself the series is back to 0, so the week's end is read just before it
-        const at = t === e ? t - 1 : t;
-        const a = valueAt(d.actual, at, GAP);
-        return `<td>${pct(valueAt(d.estimate, at))}${a != null ? `<small>${pct(a)} actual</small>` : ''}</td>`;
+        // the estimate has a point at each local midnight, and at the reset a full week's point
+        // before its 0; the plan's figure at the reset is its last sample before it
+        const e1 = t === e ? (d.estimate.find(p => p[0] === e) ?? [0, valueAt(d.estimate, e - 1)])[1] : valueAt(d.estimate, t);
+        const a = valueAt(d.actual, t === e ? t - 1 : t, GAP);
+        return `<td>${pct(e1)}${a != null ? `<small>${pct(a)} actual</small>` : ''}</td>`;
       });
       rows.push(`<tr><td class="k">${esc(day(s, {day: 'numeric', month: 'short'}))} – ${esc(day(e, {day: 'numeric', month: 'short'}))}</td>${cells.join('')}</tr>`);
     }

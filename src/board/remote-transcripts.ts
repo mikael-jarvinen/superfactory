@@ -126,28 +126,26 @@ def files(d, since):
         got.append({"p": p, "subs": [s for s in subs if fresh(s, since)]})
     return got
 
+def collect(dirs, since, offsets, data):
+    seen = []
+    for d in dirs:
+        for f in files(d, since):
+            seen.append(f)
+            for p in [f["p"]] + f["subs"]:
+                take(p, offsets.get(p, 0), data)
+    return seen
+
 def main(q):
     listing, data = {}, {}
     for cwd in q["cwds"]:
-        seen = []
-        for d in dict.fromkeys([project(cwd), project(os.path.realpath(cwd))]):
-            for f in files(d, q["since"]):
-                seen.append(f)
-                for p in [f["p"]] + f["subs"]:
-                    take(p, q["offsets"].get(p, 0), data)
-        listing[cwd] = seen
+        dirs = dict.fromkeys([project(cwd), project(os.path.realpath(cwd))])
+        listing[cwd] = collect(dirs, q["since"], q["offsets"], data)
     if q.get("all") is not None:
         try:
-            dirs = sorted(os.listdir(projects()))
+            dirs = [os.path.join(projects(), n) for n in sorted(os.listdir(projects()))]
         except OSError:
             dirs = []
-        seen = []
-        for n in dirs:
-            for f in files(os.path.join(projects(), n), q["all"]):
-                seen.append(f)
-                for p in [f["p"]] + f["subs"]:
-                    take(p, q["offsets"].get(p, 0), data)
-        listing["*"] = seen
+        listing["*"] = collect(dirs, q["all"], q["offsets"], data)
     sys.stdout.write("\n" + MARK + "\n" + json.dumps({"listing": listing, "data": data}, separators=(",", ":")))
 `;
 
