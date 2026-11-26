@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, test } from "node:test";
-import { type Cursor, leaveNote, notesLog, postMessage, readCursor, unsent, unsentNotes, writeCursor } from "../src/board/inbox.js";
+import { type Cursor, leaveNote, Receipts, notesLog, postMessage, readCursor, unsent, unsentNotes, writeCursor } from "../src/board/inbox.js";
 import { openWorkspace, type Workspace } from "../src/workspace.js";
 import { tempWorkspace } from "./helpers.js";
 
@@ -104,4 +106,22 @@ test("the watchers' notes log replaced other than by rotation is read on past th
   replace(notesLog(ws), readFileSync(notesLog(ws), "utf8"));
   leaveNote(ws, "three");
   assert.deepEqual(notesPass(ws, first.cursor).printed, ["three"]);
+});
+
+// The lead reads its messages with `board --inbox --once` run from Bash, so a message reaches it in
+// the tool_result of a user entry with array content: delivered there, seen at the next reply.
+test("a message read through a Bash tool_result is delivered, then seen at the next assistant entry", () => {
+  const dir = mkdtempSync(join(tmpdir(), "receipts-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const t = join(dir, "lead.jsonl");
+  const put = (d: unknown) => appendFileSync(t, JSON.stringify(d) + "\n");
+  put({ type: "assistant", message: { content: [{ type: "tool_use", id: "tu1", name: "Bash", input: { command: "factory board --inbox --once" } }] } });
+  put({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu1", content: "[m:abc123] are we on?" }] } });
+  put({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu2", content: [{ type: "text", text: "[m:def456] and this" }] }] } });
+  const r = new Receipts();
+  r.read(t);
+  assert.deepEqual([r.receipt("abc123"), r.receipt("def456"), r.receipt("0f0f0f")], ["delivered", "delivered", "sent"]);
+  put({ type: "assistant", message: { content: [{ type: "text", text: "yes" }] } });
+  r.read(t);
+  assert.deepEqual([r.receipt("abc123"), r.receipt("def456")], ["seen", "seen"]);
 });

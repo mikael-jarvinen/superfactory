@@ -6,8 +6,9 @@
 // the board reads receipts from.
 //
 // With --inbox, which only the lead gets, a Stop also checks the message page inbox. If nothing
-// holds it, the stop is blocked once with the instruction to arm it, so an expired monitor is
-// re-armed at the next stop at the latest.
+// holds it, the stop is blocked once with the instruction to arm it: one background
+// `board --inbox --once`, which holds the inbox until a message comes and wakes the session only
+// then. Nothing re-arms it on a timer.
 //
 // A hook that fails must not cost the session anything, so every error ends in exit 0.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -33,9 +34,10 @@ export function leadStatus(ws: Workspace): { words?: string; transcript?: string
 
 export const armText = (ws: Workspace) =>
   `The message page inbox is not armed, so ${ws.config.human.name}'s messages and the watchers' notes are waiting for it. ` +
-  `Arm it now: Monitor with command \`${factoryCommand()} --workspace ${shq(ws.dir)} board --inbox\`, timeout_ms 1800000, ` +
-  `description "message page" (load Monitor with ToolSearch first if it is deferred). ` +
-  `Re-arm it on every expiry notice. Then carry on with whatever you were doing.`;
+  `Arm it now: run \`${factoryCommand()} --workspace ${shq(ws.dir)} board --inbox --once\` with Bash, run_in_background true. ` +
+  `It holds the inbox and exits 0 with what came the moment a message or note arrives, which wakes you: run it again first, then act on what came. ` +
+  `If it exits non-zero, it says why (another holder has the inbox, or the lock is broken): do not run it again, and tell ${ws.config.human.name} either way, since a holder you did not start may be one whose output nobody reads. ` +
+  `No timeout and no re-arm on a timer. Then carry on with whatever you were doing.`;
 
 const idleText = (work: string[]) =>
   `There is work waiting while you go idle:\n` +
@@ -62,6 +64,7 @@ const BASH_WORDS: [RegExp, string][] = [
   [/\bfactory say\b/, "writing to you"],
   [/\bfactory (pr-|delta-range)/, "checking a PR"],
   [/\bfactory stack\b/, "minding stacks"],
+  [/\bboard --inbox\b/, "listening"],
   [/\bfactory\b/, "updating the board"],
   [/\bgh pr\b/, "checking a PR"],
   [/\bgh\b/, "checking GitHub"],

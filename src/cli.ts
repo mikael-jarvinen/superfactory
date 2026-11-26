@@ -134,8 +134,9 @@ usage: factory [--workspace <dir>] <command> [options]
                                   append-only and unbounded.
   board [--stop]                  start the board in the background, or stop it
   board --serve                   run the board in this process
-  board --inbox                   print each new message from the message page, for a monitor in
-                                  the lead's session. One holds the inbox at a time.
+  board --inbox [--once]          print each new message from the message page, for the lead's
+                                  session. One holds the inbox at a time. --once exits after the
+                                  first message or note, for a background command that wakes it.
   pr-ready <repo> <n>
                                   may this PR be sent? Every question about its current head sha; a
                                   missing answer is a failure. <repo> is a key of [repos] or its
@@ -863,9 +864,10 @@ function cmdHandled(ws: Workspace, argv: string[]) {
 }
 
 function cmdBoard(ws: Workspace, argv: string[]) {
-  const { v } = args("board", argv, { stop: { type: "boolean" }, serve: { type: "boolean" }, inbox: { type: "boolean" } }, [0, 0]);
+  const { v } = args("board", argv, { stop: { type: "boolean" }, serve: { type: "boolean" }, inbox: { type: "boolean" }, once: { type: "boolean" } }, [0, 0]);
   if ([v.stop, v.serve, v.inbox].filter(Boolean).length > 1) throw new UsageError("board: give one of --stop, --serve or --inbox");
-  if (v.inbox) followInbox(ws);
+  if (v.once && !v.inbox) throw new UsageError("board: --once goes with --inbox");
+  if (v.inbox) followInbox(ws, undefined, !!v.once);
   else if (v.serve) runBoard(ws);
   else if (v.stop) stopBoard(ws);
   else startBoard(ws);
