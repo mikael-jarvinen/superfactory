@@ -308,8 +308,14 @@ test("the weekly chart is served and drawn: two lines, the limit, and each week'
   assert.deepEqual(d.token_kinds, ["input", "output", "cache_read", "cache_write"]);
   // and the page's own stylesheet draws it there, on the body rows too, not only the header's;
   // jsdom resolves no var() in a border, and which rule wins is what is checked, not its colour
+  const sheet = readFileSync(new URL("../src/board/static/analytics.css", import.meta.url), "utf8");
+  // jsdom weighs a selector list by its strongest selector, where a browser weighs the one that
+  // matched: a list would pass here and draw no divider on the body rows, so the table's borders
+  // keep one selector to a rule
+  for (const [, sel] of sheet.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{[^{}]*border-left[^{}]*\}/g))
+    if (sel!.includes(".wtbl")) assert.ok(!sel!.includes(","), `one selector to a .wtbl border rule: ${sel!.trim()}`);
   const css = doc.createElement("style");
-  css.textContent = readFileSync(new URL("../src/board/static/analytics.css", import.meta.url), "utf8").replace(/var\(--[\w-]+\)/g, "#ccc");
+  css.textContent = sheet.replace(/var\(--[\w-]+\)/g, "#ccc");
   doc.head.append(css);
   const ruled = (c: Element) => w.getComputedStyle(c).borderLeftStyle === "solid";
   for (const r of doc.querySelectorAll("#wtable tbody tr, #wtable thead tr:last-child"))

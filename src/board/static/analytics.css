@@ -120,7 +120,7 @@ tr.none td.k b{color:var(--faint)}
 .wtbl tr.grp th{font-size:11px;color:var(--mute);border-bottom:0;padding-bottom:0}
 .wtbl .tk{color:var(--dim)}
 .wtbl td.tk{border-left:0}
-/* one selector to a rule here: jsdom, which the tests draw the page in, weighs a list by its strongest */
+/* one selector to a rule, as the served-chart test in weekly.test.ts says why */
 .wtbl tr.grp th.tk{border-left:1px solid var(--line-soft)}
 .wtbl td.tk.tk1{border-left:1px solid var(--line-soft)}
 .wtbl th.tk1{border-left:1px solid var(--line-soft)}
