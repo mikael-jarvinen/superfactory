@@ -120,7 +120,10 @@ tr.none td.k b{color:var(--faint)}
 .wtbl tr.grp th{font-size:11px;color:var(--mute);border-bottom:0;padding-bottom:0}
 .wtbl .tk{color:var(--dim)}
 .wtbl td.tk{border-left:0}
-.wtbl tr.grp th.tk,.wtbl .tk1{border-left:1px solid var(--line-soft)}
+/* one selector to a rule here: jsdom, which the tests draw the page in, weighs a list by its strongest */
+.wtbl tr.grp th.tk{border-left:1px solid var(--line-soft)}
+.wtbl td.tk.tk1{border-left:1px solid var(--line-soft)}
+.wtbl th.tk1{border-left:1px solid var(--line-soft)}
 .sw.limk{width:16px;height:2px;border-radius:0;background:var(--dim)}
 .wtbl td small.tkl{display:none}
 @media (max-width:640px){

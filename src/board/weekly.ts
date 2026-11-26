@@ -14,9 +14,8 @@
 // limit in tokens: an estimate as well, and a looser one, since a week of cheap cache reads spends
 // more tokens on the limit than a week of output. The actual line is the plan's own weekly
 // utilization, as /usage shows it, which the board samples (plan-usage.ts); each sample also says
-// what 1% cost this week, a check on the
-// estimate. What the transcripts do not hold, claude.ai and other machines' sessions, counts in the
-// actual line only.
+// what 1% cost this week, a check on the estimate. What the transcripts do not hold, claude.ai and
+// other machines' sessions, counts in the actual line only.
 import { addTokens, noTokens, type Call, type Hit, type Read, type Tokens } from "./analytics.js";
 import type { Sample } from "./plan-usage.js";
 

@@ -306,6 +306,14 @@ test("the weekly chart is served and drawn: two lines, the limit, and each week'
   assert.match(doc.querySelector("#wtable tbody tr")!.textContent!, /100%/, "the hit week spent all of it");
   assert.ok([...doc.querySelectorAll("#wtable tbody tr, #wtable thead tr:last-child")].every((r) => r.querySelectorAll(".tk1").length === 1 && r.querySelector(".tk1") === r.querySelector(".tk")), "the divider on the first token column of each row");
   assert.deepEqual(d.token_kinds, ["input", "output", "cache_read", "cache_write"]);
+  // and the page's own stylesheet draws it there, on the body rows too, not only the header's;
+  // jsdom resolves no var() in a border, and which rule wins is what is checked, not its colour
+  const css = doc.createElement("style");
+  css.textContent = readFileSync(new URL("../src/board/static/analytics.css", import.meta.url), "utf8").replace(/var\(--[\w-]+\)/g, "#ccc");
+  doc.head.append(css);
+  const ruled = (c: Element) => w.getComputedStyle(c).borderLeftStyle === "solid";
+  for (const r of doc.querySelectorAll("#wtable tbody tr, #wtable thead tr:last-child"))
+    assert.deepEqual([...r.children].map(ruled), [false, false, false, false, true, false, false], "a divider before the token columns only");
   // the hit week's tokens at its reset, with their split on hover
   const atReset = doc.querySelector("#wtable tbody tr td.tk:last-child")!;
   assert.equal(atReset.textContent, "5.00M");
