@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { HUMAN_KIND, isHuman, type Message, rowImages } from "../messages.js";
 import { tryLock } from "../tickets/lock.js";
 import type { Workspace } from "../workspace.js";
-import { chars, now, pyDumps, sleep } from "../util.js";
+import { chars, FactoryError, now, pyDumps, sleep } from "../util.js";
 
 // What the human can type on the page. `factory say` has no limit: the lead's instructions keep it short.
 export const MAX_CHARS = 20_000;
@@ -12,12 +12,12 @@ export const MAX_CHARS = 20_000;
 export const inboxLock = (ws: Workspace) => join(ws.runDir, "inbox.lock");
 const cursorFile = (ws: Workspace) => join(ws.runDir, "inbox.cursor");
 
-// What the watchers have for the lead: one JSON row a line, printed by the inbox monitor after the
+// What the watchers have for the lead: one JSON row a line, printed by the inbox holder after the
 // human's messages. It is not the message log, so none of it shows on the page.
 export const notesLog = (ws: Workspace) => join(ws.stateDir, "lead-notes.jsonl");
 const notesCursorFile = (ws: Workspace) => join(ws.runDir, "notes.cursor");
 
-// For a watcher: leaves the text for the lead's inbox monitor. Nothing is lost while no monitor is
+// For a watcher: leaves the text for the lead's inbox holder. Nothing is lost while no holder is
 // armed; the next one prints it, and the lead's Stop hook and the watchdog say it is not armed.
 export function leaveNote(ws: Workspace, text: string): void {
   mkdirSync(ws.stateDir, { recursive: true });
@@ -68,13 +68,13 @@ export const pageText = (ws: Workspace, row: Message): string =>
   [`[from the message page] [m:${row.id}] ${row.text ?? ""}`.trimEnd(),
     ...rowImages(row).map((f) => `[image saved at: ${join(attachmentsDir(ws), f)}]`)].join("\n");
 
-// The inbox has one owner at a time, and the owner holds the lock: `factory board --inbox`, run as
-// a monitor in the lead's session. The lock dies with its holder, and the next monitor carries on
-// from the cursor, so a message is printed once.
+// The inbox has one holder at a time, and the holder has the lock: `factory board --inbox`, run in
+// the lead's session, with --once as a background command. The lock dies with its holder, and the
+// next holder carries on from the cursor, so a message is printed once.
 //
 // The lock is src/tickets/lock.ts's tryLock: a flock that goes when its descriptor closes.
 
-// For the lead's Stop hook: is a monitor listening? Taking the lock is the only way to ask, so a
+// For the lead's Stop hook: is a holder listening? Taking the lock is the only way to ask, so a
 // free lock is taken and dropped at once. Anything that stops the question being asked counts as
 // held, so a broken probe never nags the session.
 export function inboxHeld(ws: Workspace): boolean {
@@ -91,7 +91,7 @@ export function inboxHeld(ws: Workspace): boolean {
 
 // Where the inbox has got to in a log, as the log's inode and a byte offset. The inode is what
 // notices `say` rotating the message log: an offset alone is only caught while the new file is
-// still shorter than it, and the cursor can sit still for days while no monitor is armed. last is
+// still shorter than it, and the cursor can sit still for days while no holder is armed. last is
 // the id of the last row printed: a log replaced other than by rotation is read on past it, not
 // printed again from the top.
 export interface Cursor {
@@ -154,7 +154,7 @@ function* linesOf(path: string, ino: number, offset: number, size: number): Gene
 // Each complete line of the log past the cursor, with the cursor after it. With no cursor it starts
 // at the end. A torn last line is not yielded, and the cursor never moves past it. A log rolled to
 // .1 since the cursor was written is read to its end first: lines can wait there for hours while no
-// monitor is armed. A log replaced or cut short any other way, a cleanup's rewrite say, is read from
+// holder is armed. A log replaced or cut short any other way, a cleanup's rewrite say, is read from
 // past the row whose id is the cursor's last, or from the top if that row is not in it: a line
 // repeated rather than lost.
 function* linesAfter(path: string, cursor: Cursor | null, idOf: (line: string) => string | null): Generator<{ line: string | null; cursor: Cursor }> {
@@ -213,7 +213,7 @@ export function* unsent(ws: Workspace, cursor: Cursor | null): Generator<{ row: 
 
 // The notes past their cursor, as the text the lead reads. A note is for the lead whenever it was
 // left, so with no cursor it starts at the beginning of the log: a note left before the first
-// monitor ever armed is still printed. The tag is what the receipts look for.
+// holder ever armed is still printed. The tag is what the receipts look for.
 export function* unsentNotes(ws: Workspace, cursor: Cursor | null): Generator<{ text: string | null; cursor: Cursor }> {
   let last = cursor?.last;
   for (const u of linesAfter(notesLog(ws), cursor ?? { ino: -1, offset: 0 }, (l) => idOf(parse<{ id?: unknown }>(l)))) {
@@ -239,11 +239,11 @@ function writeLine(line: string): void {
 }
 
 // `factory board --inbox`: each new message from the page, and each note a watcher left, as
-// stdout, which a monitor in the lead's session turns into an event within a second. Printed
-// before the cursor moves, so a kill in between repeats a line rather than losing it. Runs until
-// killed, or with once until the first pass that printed anything: a background command in the
-// lead's session then wakes it only when there is something to read, and holds the inbox until
-// then.
+// stdout, which the lead's session reads as an event. Printed before the cursor moves, so a kill in
+// between repeats a line rather than losing it. Runs until killed, or with once until the first
+// pass that printed anything: a background command in the lead's session then wakes it only when
+// there is something to read, and holds the inbox until then. With once, an inbox another holder
+// has is an error (exit 3), so the lead is told not to start another, never invited to rerun.
 export function followInbox(ws: Workspace, out: (line: string) => void = writeLine, once = false): void {
   let fd = tryLock(inboxLock(ws));
   for (const until = Date.now() + 3000; fd === null && Date.now() < until;) {
@@ -251,7 +251,9 @@ export function followInbox(ws: Workspace, out: (line: string) => void = writeLi
     fd = tryLock(inboxLock(ws));
   }
   if (fd === null) {
-    out("the message page inbox is already armed in another monitor; this one stops");
+    const said = "the message page inbox is already held by another `board --inbox`; this one stops";
+    if (once) throw new FactoryError(`${said}. Do not start another while that one runs.`, 3);
+    out(said);
     return;
   }
   let cursor = readCursor(ws);
