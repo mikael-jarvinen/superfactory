@@ -416,11 +416,13 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
         repo = ws.config.repos[k]!;
         stack = ag.stack ?? k;
       }
-      if (!isRedo && !checked && (ag.host || !existsSync(at)))
+      const unreadable = ag.host || !existsSync(at);
+      if (!isRedo && unreadable && !checked)
         throw new FactoryError(`${name}'s worktree ${at} is ${ag.host ? `on ${ag.host}` : "not here"}, so the handoff's ` +
           `findings cannot be checked, and the round would stop ${name}'s session (${s.id}), which may hold the only copy. ` +
           `Once ${name} has said "findings in handoff", dispatch again with --findings-checked.`);
-      else if (!isRedo && !checked) {
+      else if (!isRedo && !unreadable) {
+        if (checked) console.log(`--findings-checked not needed: ${name}'s worktree is here, so the handoff is checked`);
         const ho = handoffPath(at);
         let text = "", head = "";
         try {

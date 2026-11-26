@@ -444,6 +444,25 @@ test("a builder with a host: dispatch makes its worktree there and stop looks th
   assert.throws(() => t.checkout({ ...ws.config.repos.api!, key: "gone" }), (e: unknown) => e instanceof Unreachable && /HTTP 422 not a refusal/.test(e.message));
 });
 
+test("a hosted builder's fix round refuses on a handoff it cannot read, until --findings-checked", async () => {
+  const dir = workspace(hostedCal("http://placeholder:1"));
+  const d = await fakeDaemon(dir, sha(join(dir, "daemon.toml"), join(dir, "workspace.toml")));
+  after(() => d.proc.kill());
+  writeFileSync(join(dir, "factory.toml"), hostedCal(d.url));
+  mkdirSync(join(dir, "briefs"));
+  writeFileSync(join(dir, "briefs", "app.md"), "the brief\n");
+  assert.equal(factory(dir, ["dispatch", "cal", "TEST-1"]).status, 0);
+  for (const a of [["pr-open", "--pr", "acme/api#3", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "briefed"]])
+    assert.equal(factory(dir, ["state", "TEST-1", ...a]).status, 0, a.join(" "));
+  let r = factory(dir, ["dispatch", "cal", "TEST-1"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /cal's worktree \/far\/api\/\.claude\/worktrees\/TEST-1 is on far, so the handoff's findings cannot be checked/);
+  assert.ok(!d.requests().some((q) => q.url === "/agents/cal/stop"), "nothing stopped");
+  r = factory(dir, ["dispatch", "cal", "TEST-1", "--findings-checked"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /as a FIX ROUND session/);
+});
+
 // cal is live on TEST-1. A new item stops it only once the brief and the prompt file are read: with
 // either missing, the dispatch refuses and the session is left running, whether TEST-1 is in review
 // or --force is given.

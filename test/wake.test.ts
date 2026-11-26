@@ -551,6 +551,12 @@ test("every redo and every fix round stops the item's session and starts a fresh
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /TEST-50\.handoff\.md holds no findings at bea's head [0-9a-f]{12}.*only in bea's session \(new3\)/s);
   assert.ok(!calls().includes("stop new3"));
+  // a worktree here is checked whatever --findings-checked says
+  r = factory(ws, ["dispatch", "bea", "TEST-50", "--findings-checked"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stdout, /--findings-checked not needed: bea's worktree is here/);
+  assert.match(r.stderr, /holds no findings at bea's head/);
+  assert.ok(!calls().includes("stop new3"));
   // findings of a round already fixed are no better
   writeFileSync(handoff, "## Findings\nReviewed acme/web#5 at 0123456789abcdef\n");
   assert.notEqual(factory(ws, ["dispatch", "bea", "TEST-50"]).status, 0);
