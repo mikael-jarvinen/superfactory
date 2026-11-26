@@ -7,14 +7,13 @@ import { followInbox } from "./board/inbox.js";
 import { markHandledMany, queueCards as waitingCards, queueTrouble } from "./board/queue.js";
 import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
-import { lastStopped, noteRan, noteStopped, noteUnrun, ran, staleIds, sweepStale } from "./stopped.js";
 import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owesSession, lead, listing, type Session, stopSession, stopWorktree, waitForName } from "./fleet.js";
 import { Unreachable } from "./remote.js";
-import { agentSessions, type Transport, transportFor, transports } from "./transport.js";
+import { agentSessions, transportFor, transports } from "./transport.js";
 import type { Agent } from "./config.js";
-import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
+import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, fixingPrompt, handoffPath, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
 import { bringUpLead } from "./lead-up.js";
-import { wake, wakeForRound, wokeLine } from "./wake.js";
+import { startedLine, wake } from "./wake.js";
 import { hook as appendixHook } from "./hooks/appendix.js";
 import { hook as guardHook } from "./hooks/guard.js";
 import { hook as noDialogsHook } from "./hooks/no-dialogs.js";
@@ -42,7 +41,7 @@ import { cmdStack, STACK_USAGE } from "./stacks/command.js";
 import { cmdTicket, cmdWiki, TICKET_USAGE } from "./tickets/cli.js";
 import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/engine.js";
 import {
-  allRecs, appendEvent, BUSY, OFF, onBoard, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removePr, removeRec, saveRec, showRec, transition, validKey,
+  allRecs, appendEvent, BUSY, OFF, onBoard, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removePr, removeRec, saveRec, showRec, transition, TRANSITIONS, validKey,
 } from "./state.js";
 import { trackerTitle } from "./tracker/title.js";
 import { chars, FactoryError, firstSentence, now, pyDumps, pyRepr, run, sleep, squash, wrap } from "./util.js";
@@ -57,31 +56,32 @@ const USAGE = `factory: start, stop, dispatch and track a fleet of Claude Code s
 
 usage: factory [--workspace <dir>] <command> [options]
 
-  doctor [--resume-probe]         what this machine and workspace lack to run the fleet: one
+  doctor                          what this machine and workspace lack to run the fleet: one
                                   \`ok\` or \`MISSING ... [fix: ...]\` line per check, derived from
                                   config, then each stack script's own doctor. Reads only.
-                                  Exit 1 when anything is missing. --resume-probe also starts
-                                  and resumes a throwaway \`claude -p\` session (two model
-                                  turns) to check a resumed session is handed its brief.
-  up [--fresh]                    start the board, and the lead (resuming its thread if one exists);
+                                  Exit 1 when anything is missing.
+  up                              start the board, and the lead (always a fresh session if it is off);
                                   in the background, bring up every stack slot that does not answer
   down                            stop every fleet session and the board
-  restart-lead [--fresh]          stop the lead, then up
+  restart-lead                    stop the lead, then up: a fresh session
   status [--all]                  sessions joined with the state store
   sessions [--all] [--fleet]      raw \`claude agents --json\`, or one line per fleet member
   dispatch <agent> <KEY> [--repo <repo>] [--prompt-file <f>] [--title T] [--force]
                                   fresh building session for one item in a per-item worktree.
                                   Dispatch from the backlog, off the board, building or fixing; anywhere else needs
-                                  --force. A live session already on KEY keeps its context, and
-                                  so does one that is off, woken unless --force.
+                                  --force. A live build session on KEY is re-briefed by message
+                                  while KEY is building. Past building, the first fix round stops
+                                  it and starts a fresh session in the same worktree that reads
+                                  the handoff the build left (<worktree>.handoff.md) and records
+                                  fixing; later rounds go to that fix session. An item whose
+                                  session is off starts a fresh one, never its old conversation.
                                   For a designer: a design session in the designers' cwd, no
                                   worktree, from the backlog or off the board (records designing) or design-review
-                                  (another round).
-  wake <agent>                    bring back an agent whose session is off (stopped idle, or retired
-                                  by Claude's daemon): respawn the session \`stop\` stopped last, by
-                                  id, else its newest; same conversation, same command line. Wait
-                                  until it is listed live. Exit 1 when it does not come back, or when
-                                  the session stopped last is no longer listed.
+                                  (another round, on the live session, else a fresh one).
+  wake <agent>                    start a lead, reviewer or assistant whose session is off: a fresh
+                                  session with the config's model, effort, window and brief, never
+                                  its old conversation. Wait until it is listed live. A builder or
+                                  designer starts through dispatch. Exit 1 when it does not come up.
   stop <agent> [--force] [--remove-worktree]
                                   stop a teammate; refuses on uncommitted or unpushed work. Keeps
                                   its session listed, stopped, for wake, and the worktree unless
@@ -90,8 +90,8 @@ usage: factory [--workspace <dir>] <command> [options]
                                   a fresh reviewer for one review: the first free one
   assistant [name] [--prompt-file <f>] [--force]
                                   start a lead assistant (vega or cruz; first free if unnamed) to
-                                  take the lead's non-code work, then brief it by message. A named
-                                  one that is off is woken on its conversation; --force starts fresh
+                                  take the lead's non-code work, then brief it by message. Always
+                                  a fresh session; --force restarts one that is running
   state <KEY>                     show one record
   state <KEY> --title "<words>"   what it is about, for the board. No transition.
   state <KEY> --remove-pr owner/repo#N [--note N]
@@ -354,39 +354,36 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   const allowed = ag.repos;
   const repoKey = str(v.repo) ?? (allowed[0] as string);
   if (!allowed.includes(repoKey)) throw new FactoryError(`${name} works in [${allowed.map(pyRepr).join(", ")}]; --repo ${repoKey} is another stack`);
-  const repo = ws.config.repos[repoKey]!;
-  const stack = ag.stack ?? repoKey;
+  let repo = ws.config.repos[repoKey]!;
+  let stack = ag.stack ?? repoKey;
   // The brief and the prompt file, read before any session is stopped or started: a missing one
   // refuses with the live session kept. The read is lazy, done once at the first stop or the start,
   // so a fix round on the live session and the "still on" refusal never need either.
   const promptFile = str(v["prompt-file"]);
   let read: { appendix: ReturnType<typeof buildAppendix>; given: string | null } | undefined;
   const inputs = () => (read ??= { appendix: buildAppendix(ws, ag, repo.path), given: promptFile ? readFileSync(promptFile, "utf8") : null });
-  // A builder keeps its session across the rounds of one work item and is cleared only when it
-  // starts a different one. A fix round on the item the live session is already on keeps that
-  // session and its context: the brief goes to it by SendMessage, and this only records the state.
-  // A session whose item is in review holds the builder no longer: a new item stops it here, with
-  // the checks `factory stop` makes.
+  // The build of one work item runs in one session. The first fix round stops it and starts a
+  // fresh session in the same worktree, which reads the handoff the build session wrote
+  // (handoffPath) rather than carrying the build's context; the record names that fix session
+  // (fix_session), and later rounds go to it by SendMessage, this only recording the state. A
+  // session whose item is in review holds the builder no longer: a new item stops it here, with the
+  // checks `factory stop` makes.
   const t = transportFor(ws, ag);
-  const onItem = (x: Session) => basename((x.cwd ?? "").replace(/\/+$/, "")) === ticket;
-  let s = findSession(t, name);
-  // A session on KEY that was stopped idle comes back for the fix round.
-  if (!t.alive(s) && !force) s = wakeForRound(ws, ag, t, onItem) ?? s;
+  const s = findSession(t, name);
+  let fixRound = false;
   if (t.alive(s)) {
     const on = basename((s.cwd ?? "").replace(/\/+$/, ""));
-    if (on === ticket && !force) {
-      // An item taken off the board while its session ran goes back on as building, as a fresh
-      // dispatch would put it; off the board it can go nowhere else.
-      const kept = loadRec(ws, ticket);
-      const cur = kept?.state ?? null;
-      // The stack is the kept worktree's: the repo it is in, else what the record has. The repo
-      // this dispatch defaults to can be another.
-      const at = (s.cwd ?? "").replace(/\/+$/, "");
-      const keptRepo = allowed.find((k) => worktreePath(ws.config.repos[k]!.path, ticket) === at);
-      const keptStack = ag.stack ?? keptRepo ?? kept?.stack ?? stack;
-      // A kept round stays where its worktree is, whatever --repo says; a --repo naming another repo
-      // is said, never dropped silently. --repo is a repo key, so it is checked against the
-      // worktree's repo, or, for a builder whose stack is a repo, the record's.
+    const kept = on === ticket ? loadRec(ws, ticket) : null;
+    const cur = kept?.state ?? null;
+    // On its own item, the session's worktree stays the item's, whatever --repo says. The stack is
+    // the worktree's: the repo it is in, else what the record has. The repo this dispatch defaults
+    // to can be another. A --repo naming another repo is said, never dropped silently. --repo is a
+    // repo key, so it is checked against the worktree's repo, or, for a builder whose stack is a
+    // repo, the record's.
+    const at = (s.cwd ?? "").replace(/\/+$/, "");
+    const keptRepo = allowed.find((k) => worktreePath(ws.config.repos[k]!.path, ticket) === at);
+    const keptStack = ag.stack ?? keptRepo ?? kept?.stack ?? stack;
+    const keep = () => {
       const asked = str(v.repo);
       if (asked) {
         if (keptRepo) {
@@ -394,20 +391,46 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
         } else if (ag.stack) console.log(`--repo ${asked} not checked: ${name}'s session is in no local worktree`);
         else if (kept?.stack && asked !== kept.stack) console.log(`--repo ${asked} ignored: ${name} is kept on ${kept.stack}, the stack ${ticket}'s record has`);
       }
+    };
+    // the build session, on an item that can go to fixing: the fix round goes to a fresh session in
+    // the same worktree. The state moves first, so a refusal stops nothing; the worktree, and
+    // anything left in it, stays.
+    if (on === ticket && !force && cur && cur !== "building" && kept?.fix_session !== s.id && (cur === "fixing" || TRANSITIONS[cur].has("fixing"))) {
+      keep();
+      const wasAt = (kept?.worktree ?? "").replace(/\/+$/, "");
+      const k = keptRepo ?? allowed.find((r) => worktreePath(ws.config.repos[r]!.path, ticket) === wasAt) ?? (ag.stack ? undefined : kept?.stack ?? undefined);
+      if (k && allowed.includes(k)) {
+        repo = ws.config.repos[k]!;
+        stack = ag.stack ?? k;
+      }
+      inputs();
+      if (cur !== "fixing") transition(ws, ticket, "fixing", { agent: name, evidence: `fix round: build session ${s.id} stopped for a fresh one` });
+      stopSession(t, s);
+      console.log(`${name}'s build session on ${ticket} stopped (${s.id}); the fix round starts fresh in the same worktree`);
+      fixRound = true;
+    } else if (on === ticket && !force) {
+      // An item taken off the board while its session ran goes back on as building, as a fresh
+      // dispatch would put it; off the board it can go nowhere else.
+      keep();
       if (cur === null)
         transition(ws, ticket, "building", { agent: name, stack: keptStack, worktree: s.cwd, evidence: `back on the board on the live session ${s.id}, context kept` });
-      else if (cur !== "fixing")
+      // building: a re-brief of the build session, which stays building
+      else if (cur !== "fixing" && cur !== "building")
         transition(ws, ticket, "fixing", { agent: name, evidence: `fix round sent to the live session ${s.id}, context kept` });
       console.log(`${name} is still on ${ticket} (${s.id}), so it keeps its context.`);
+      if (cur === "fixing") console.log(`  that is the fix session, which keeps later rounds`);
       const noSlot = ag.host ? null : slotless(ws, keptStack, ticket, s.cwd ?? "");
-      if (noSlot) console.log(`  warning: ${noSlot}\n  Put that in the fix brief.`);
-      console.log(`  next: SendMessage the fix brief to ${name}; no new session was started`);
+      const brief = cur === "building" ? "the brief" : "the fix brief";
+      if (noSlot) console.log(`  warning: ${noSlot}\n  Put that in ${brief}.`);
+      console.log(`  next: SendMessage ${brief} to ${name}; no new session was started`);
       // the session kept is no reason to drop a --title
       titled(ws, ticket, str(v.title));
       return;
     }
     const onState = on ? loadRec(ws, on)?.state : null;
-    if (force) {
+    if (fixRound) {
+      // stopped above, for the fresh fix session started below
+    } else if (force) {
       inputs();
       console.log(`${name} is running (${s.id}); --force given, stopping it`);
       stopSession(t, s);
@@ -436,24 +459,30 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   // A hosted builder has no stack, so there is no slot to check.
   const noSlot = ag.host ? null : slotless(ws, stack, ticket, wt);
   if (noSlot) console.log(`  warning: ${noSlot}`);
-  const prompt = (given ?? buildingPrompt(ws, ag, ticket)) + (noSlot ? `\n\n${noSlot}` : "");
+  // A session started on an item past building is its fix round (one whose fix session went off
+  // starts another), and reads the handoff; a build session is told to write it.
+  const fixing = fixRound || (cur !== null && cur !== "building");
+  const firstPrompt = fixing ? fixingPrompt(ws, ag, ticket, handoffPath(wt)) : buildingPrompt(ws, ag, ticket, handoffPath(wt));
+  const prompt = (given ?? firstPrompt) + (noSlot ? `\n\n${noSlot}` : "");
   const started = launch(ws, ag, wt, prompt, appendix?.text ?? null, "build");
   if (rec === null || cur === null) {
     transition(ws, ticket, "building", { agent: name, stack, worktree: wt, evidence: `building session ${started.id}` });
   } else {
     rec.agent = name;
     rec.worktree = wt;
+    if (fixing) rec.fix_session = started.id;
     saveRec(ws, rec);
     appendEvent(ws, { t: now(), ticket, from: cur, to: cur, agent: name, evidence: `re-dispatched (building session ${started.id})`, note: how, pr: rec.pr ?? null });
   }
   titled(ws, ticket, str(v.title));
-  console.log(`${name} started (${started.id}) for ${ticket} as a BUILDING session`);
+  console.log(`${name} started (${started.id}) for ${ticket} as a ${fixing ? "FIX ROUND" : "BUILDING"} session`);
   console.log(`  worktree ${wt} (${how})`);
   console.log(`  appendix ${appendix ? appendix.labels.join(", ") : "-"}`);
   const d = rec?.design;
   if (d?.approved) console.log(`  design approved by ${ws.config.human.name} (${d.approved_at}): slides ${d.slides} canvas ${d.canvas}. The brief carries it.`);
   else if (d) console.log(`  warning: ${ticket} has a design ${ws.config.human.name} has not approved (${d.slides ?? d.canvas ?? "no link"})`);
-  console.log(`  next: SendMessage to ${name}: what to build or fix, the scope, and notify_when_idle`);
+  if (fixing) console.log(`  fix round: it reads the handoff, ${handoffPath(wt)}; send it the findings only if they are not there`);
+  else console.log(`  next: SendMessage to ${name}: what to build, the scope, and notify_when_idle`);
 }
 
 // A dispatch titles its record: --title, else the tracker's title when the record has none, so no
@@ -496,9 +525,7 @@ function dispatchDesigner(ws: Workspace, ag: Agent, ticket: string, force: boole
   const ready = () => onDemand(ws, ag, () => (promptFile ? readFileSync(promptFile, "utf8") : designerPrompt(ws, ag, ticket)));
   let go: (() => Session) | undefined;
   const t = transportFor(ws, ag);
-  let s = findSession(t, name);
-  // The session that drew the last round, stopped idle since, is woken for this one.
-  if (!t.alive(s) && !force && rec?.agent === name && rec.session) s = wakeForRound(ws, ag, t, (x) => x.id === rec.session) ?? s;
+  const s = findSession(t, name);
   if (t.alive(s)) {
     const on = allRecs(ws).find((r) => r.agent === name && r.session === s.id);
     if (on?.ticket === ticket && !force) {
@@ -539,12 +566,9 @@ function cmdWake(ws: Workspace, argv: string[]): number {
     case "live":
       console.log(`${name} is already live (${w.s.id})`);
       return 0;
-    case "woke":
-      console.log(`${name} woke: ${w.from} respawned, live as ${w.s.id}, same conversation`);
+    case "started":
+      console.log(startedLine(name, w.s.id));
       return 0;
-    case "none":
-      console.error(`${name} has no session to wake; start it the factory way`);
-      return 1;
     case "failed":
     case "unknown":
       console.error(`${name} did not wake: ${w.why}`);
@@ -568,11 +592,8 @@ function cmdStop(ws: Workspace, argv: string[]) {
     const left = builderLeft(ws, ag, t, cwd);
     if (left) throw new FactoryError(left);
   }
-  // The row stays, so a wake resumes this conversation by its id (stopped.ts).
+  // The row stays listed for `claude logs`; the agent's next start removes it (stopped.ts).
   stopSession(t, s, false);
-  const after = rowsNow(t);
-  noteStopped(ws, name, s, after);
-  sweepStale(ws, name, t, after);
   console.log(`stopped ${name} (${s.id})`);
   const remove = !!v["remove-worktree"] && !v["keep-worktree"];
   // The worktree stays unless asked for: a worktree can hold a running stack and its database.
@@ -630,19 +651,6 @@ function cmdAssistant(ws: Workspace, argv: string[]) {
     names = [want];
   }
   const promptFile = str(v["prompt-file"]);
-  // A named assistant that was stopped idle is mid-conversation with the lead, so it is woken. One
-  // that does not wake is not started fresh, which would lose that conversation, unless --force.
-  if (want && !v.force) {
-    const ag = agentOrDie(ws, want);
-    const w = wake(ws, ag);
-    if (w.is === "woke") {
-      console.log(wokeLine(want, w.from));
-      console.log(`  next: send it the task by message, or pass --force for a fresh session`);
-      return;
-    }
-    if (w.is === "failed" && w.fresh) throw new FactoryError(`${want} was off and did not wake: ${w.why}.`);
-    if (w.is === "failed" || w.is === "unknown") throw new FactoryError(`${want} was off and did not wake: ${w.why}. Nothing was started, so its conversation is kept; \`factory wake ${want}\` tries again, and --force starts a fresh session without it.`);
-  }
   const ready = (name: string) => onDemand(ws, agentOrDie(ws, name), () => (promptFile ? readFileSync(promptFile, "utf8") : assistantPrompt(ws)));
   const busy: string[] = [];
   for (const name of names) {
@@ -673,19 +681,20 @@ function cmdAssistant(ws: Workspace, argv: string[]) {
   throw new FactoryError(`every assistant is busy: ${busy.join(", ")}. Message one, or pass --force to restart the first.`);
 }
 
-function up(ws: Workspace, fresh: boolean) {
+function up(ws: Workspace) {
   const ld = lead(ws);
   // the board's stacks panel reads this export, so write it before the board's first check
   exportStacks(ws);
   startBoard(ws, true);
   const boot = startBoot(ws);
   if (boot) console.log(`stacks: any slot that does not answer comes up in the background; see ${boot}`);
-  bringUpLead(ws, ld, transportFor(ws, ld), fresh);
+  bringUpLead(ws, ld, transportFor(ws, ld));
 }
 
 function cmdUp(ws: Workspace, argv: string[]) {
-  const { v } = args("up", argv, { fresh: { type: "boolean" } }, [0, 0]);
-  up(ws, !!v.fresh);
+  // --fresh is taken and changes nothing: every start of the lead is fresh
+  args("up", argv, { fresh: { type: "boolean" } }, [0, 0]);
+  up(ws);
 }
 
 // Prints each host that could not be asked, and returns 1 if there was any.
@@ -699,15 +708,6 @@ function sayUnknown(rows: Iterable<Session[] | Unreachable>, so: string): number
   return code;
 }
 
-// The full listing for a stop's record, or none when it cannot be had (stopped.ts).
-function rowsNow(t: Pick<Transport, "sessions">): Session[] | undefined {
-  try {
-    return t.sessions(true);
-  } catch {
-    return undefined;
-  }
-}
-
 function cmdDown(ws: Workspace, argv: string[]) {
   args("down", argv, {}, [0, 0]);
   const rows = new Map(transports(ws).map((t) => [t.where, listing(t)]));
@@ -715,56 +715,24 @@ function cmdDown(ws: Workspace, argv: string[]) {
   for (const { t, hits } of agentSessions(ws, (where) => rows.get(where)))
     for (const s of hits) {
       console.log(`stopping ${s.name} (${s.id})`);
-      // only a row live at the stop is the one to bring back: a dead duplicate listed after it
-      // must not replace its record
-      const sid = s.id ?? "", sname = s.name ?? "";
-      const st = lastStopped(ws, sname);
-      const marked = !!sid && !!st?.failed?.includes(sid);
-      // what the row showed before the stop clears its pid
-      const showed = ran(s, st);
-      const live = t.alive(s);
-      // a launch marked as never come up is stopped too, so one up late does not outlive the down,
-      // and keeps its mark: its "stopped" is ours, no evidence that it ran. One that had shown it
-      // ran (a pid, though dead) is not unrun: its stop is read as it is.
-      if (marked && !live && !showed) noteUnrun(ws, sname, sid);
-      // and one a down before marked unrun that has shown it ran since leaves unrun before the stop
-      // clears its pid
-      if (marked && showed && st?.unrun?.includes(sid)) noteRan(ws, sname, [s]);
       stopSession(t, s, false);
-      if (live) noteStopped(ws, s.name ?? "", s, hits);
     }
-  // rows a hook's wake left (stopped.ts), once every session is stopped
-  // One listing per host, taken only once an agent there has any, and kept when it fails: a host
-  // that does not answer costs one timeout, not one per agent.
-  const after = new Map<string, Session[] | undefined>();
-  for (const { agent, t } of agentSessions(ws, (where) => rows.get(where))) {
-    if (!staleIds(ws, agent.name).length) continue;
-    if (!after.has(t.where)) after.set(t.where, rowsNow(t));
-    // a host whose listing failed shows nothing: its ids are kept, and it is not asked again, which
-    // sweepStale would do given no rows
-    const listed = after.get(t.where);
-    const removed = sweepStale(ws, agent.name, t, listed ?? []);
-    if (listed && removed.length) after.set(t.where, listed.filter((r) => !removed.includes(r.id ?? "")));
-  }
   stopBoard(ws, true);
   return code;
 }
 
 function cmdRestartLead(ws: Workspace, argv: string[]) {
-  const { v } = args("restart-lead", argv, { fresh: { type: "boolean" } }, [0, 0]);
+  args("restart-lead", argv, { fresh: { type: "boolean" } }, [0, 0]);
   const name = lead(ws).name;
   const t = via(ws, name);
   const s = findSession(t, name);
   if (t.alive(s)) {
     stopSession(t, s, false);
-    const after = rowsNow(t);
-    noteStopped(ws, name, s, after);
-    sweepStale(ws, name, t, after);
     // wait for the supervisor to report it stopped, or up sees it as running
     for (let i = 0; i < 20 && t.alive(findSession(t, name)); i++) sleep(1000);
     console.log(`stopped ${name}`);
   }
-  up(ws, !!v.fresh);
+  up(ws);
 }
 
 function cmdSessions(ws: Workspace, argv: string[]) {
@@ -1019,8 +987,8 @@ function cmdSchedule(ws: Workspace, argv: string[]): number {
 
 // The board port check binds, which is asynchronous, so this one finishes after main returns.
 function cmdDoctor(ws: Workspace, argv: string[]) {
-  const { v } = args("doctor", argv, { "resume-probe": { type: "boolean" } }, [0, 0]);
-  doctor(ws, console.log, { resumeProbe: v["resume-probe"] === true }).then((code) => {
+  args("doctor", argv, {}, [0, 0]);
+  doctor(ws, console.log).then((code) => {
     if (code) console.error("factory: something is missing; each MISSING line says how to fix it");
     process.exitCode = code;
   }, (e: unknown) => {

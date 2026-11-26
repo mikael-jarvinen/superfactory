@@ -1,12 +1,12 @@
 import { readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import type { Agent, GitOver, Role } from "./config.js";
-import { lead, type Session, waitForName } from "./fleet.js";
+import { lead, pollForName, type Session } from "./fleet.js";
+import { Unreachable } from "./remote.js";
 import { renderSettings } from "./settings.js";
 import { branchFor, isLocal } from "./state.js";
-import { noteFailedLaunch, replaceStopped, rowsBefore } from "./stopped.js";
-import { type Transport, transportFor, writeCurrentAppendix } from "./transport.js";
-import { worktreesDir } from "./worktree.js";
+import { clearEnded } from "./stopped.js";
+import { type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
 import { capitalize, die } from "./util.js";
 
@@ -64,45 +64,6 @@ export function settingsFile(ws: Workspace, agent: Agent): string {
     name: agent.name, role: agent.role, template: role.settings, cwd: role.cwd, extraHooks: role.extraHooks, permissionMode: role.permissionMode,
     env: sessionEnv(ws, agent), ...(agent.host ? { host: agent.host } : {}),
   });
-}
-
-// Before a session is resumed or respawned. A respawn reruns a session's old command line, whose
-// --settings names the file settingsFile renders, so the file is rendered again first: a session
-// stopped before an upgrade comes back with the current hooks, the guard's matcher among them. And
-// its current appendix is written, which the SessionStart hook hands the resumed session
-// (hooks/appendix.ts), since claude keeps the system prompt a session started with and reads no new
-// appendix then (as of Claude Code 2.1.327). A hosted agent's are written on its host, from the
-// respawn request (refreshHosted). An appendix of undefined leaves the copy written last. The
-// appendix is written first: up respawns a lead whose settings cannot be rendered, on the last
-// render, and that lead still gets its brief as it is now.
-export function refreshSession(ws: Workspace, agent: Agent, appendix: string | null | undefined): void {
-  if (agent.host) return;
-  if (appendix !== undefined) writeCurrentAppendix(ws.runDir, agent.name, appendix);
-  settingsFile(ws, agent);
-}
-
-// For the daemon, before it respawns a hosted agent whose request carries `appendix`: what
-// refreshSession above does for a local one. A respawn reruns the old command line, whose
-// --settings names the file rendered here, and claude reads no new appendix on a resume, so the
-// SessionStart hook gives the one written here (as of Claude Code 2.1.327). Throws when the
-// settings cannot be rendered; the daemon answers that as a failed respawn. The appendix is written
-// first, as refreshSession does: the daemon's resume at boot respawns anyway on a settings failure,
-// and the session still gets its brief as it is now.
-export function refreshHosted(ws: Workspace, agent: Agent, appendix: string | null): void {
-  writeCurrentAppendix(ws.runDir, agent.name, appendix);
-  settingsFile(ws, agent);
-}
-
-// The appendix a session of the agent has now, from its brief files, as its launch reads them: a
-// builder's repo: files from the checkout of the repo whose worktree it runs in (dispatch reads them
-// from repo.path), every other role's as roleAppendix has it. A builder whose cwd is in no repo's
-// worktrees reads them from its first repo's: a hosted one's cwd is on its host, and dispatch reads
-// its repo: files from the repo's path here too.
-export function currentAppendix(ws: Workspace, agent: Agent, cwd: string | undefined): string | null {
-  if (agent.role !== "builder") return roleAppendix(ws, agent);
-  const repos = agent.repos.map((k) => ws.config.repos[k]!).filter(Boolean);
-  const repo = repos.find((r) => cwd && (cwd + "/").startsWith(worktreesDir(r.path) + "/")) ?? repos[0];
-  return buildAppendix(ws, agent, repo?.path)?.text ?? null;
 }
 
 export function buildAppendix(ws: Workspace, agent: Agent, repoDir: string | undefined): { text: string; labels: string[] } | null {
@@ -174,43 +135,60 @@ export const GIT_HTTPS_ENV = {
 // for "ssh", so its pushes use the checkout's origin and the machine's own key.
 export const gitEnv = (over: GitOver = "https"): Record<string, string> => (over === "ssh" ? {} : GIT_HTTPS_ENV);
 
-export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string, appendix: string | null = null, phase: Phase = undefined, t: Transport = transportFor(ws, agent)): Session {
-  const before = rowsBefore(t, agent.name);
+// wait, for a caller with a deadline: how long to wait for the session to be listed live (90 s),
+// the epoch ms of the last listing, and how long the start itself may take.
+export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string, appendix: string | null = null, phase: Phase = undefined, t: Transport = transportFor(ws, agent),
+  wait: { waitS?: number; pollMs?: number; lastPollAt?: number; startMs?: number } = {}): Session {
   const sid = t.start({
     agent, cwd, prompt, appendix, phase, runDir: ws.runDir,
     args: (appendixPath) => launchArgs(ws, agent, prompt, appendixPath, phase),
     env: { ...process.env, ...GIT_HTTPS_ENV },
+    ...(wait.startMs ? { timeoutMs: wait.startMs } : {}),
   });
-  const s = waitForName(t, agent.name);
+  const waitS = wait.waitS ?? 90;
+  const s = pollForName(t, agent.name, waitS, wait.pollMs, wait.lastPollAt);
+  // Started, and then the listing could not be had: the session may well be up, so this is
+  // unknown, not a failed start.
+  if (s instanceof Unreachable) throw new Unreachable(s.host, s.why, `${agent.name} was started (launch id ${sid}), and then ${s.message}`);
   if (!s) {
     const there = agent.host ? ` on host ${t.where}` : "";
     const also = agent.host ? ` there, and \`factory doctor\` for whether ${t.where} answers` : "";
-    // a note that cannot be written must not hide the launch id die gives
-    try {
-      noteFailedLaunch(ws, agent.name, t, sid, before);
-    } catch (e) {
-      console.error(`WARNING: ${agent.name}'s failed launch ${sid} could not be noted (${(e as Error).message}); a wake may resume its row`);
-    }
-    die(`${agent.name} did not appear in \`claude agents\`${there} within 90s (launch id ${sid}). Check \`claude logs ${sid}\`${also}.`);
+    die(`${agent.name} did not appear in \`claude agents\`${there} within ${Math.round(waitS)}s (launch id ${sid}). Check \`claude logs ${sid}\`${also}.`);
   }
-  // a new conversation, up: the one stopped last is no longer the one to resume, nor kept listed.
-  // A launch that never came up keeps both, the only way back, and its row is noted as no newer
-  // conversation.
-  replaceStopped(ws, agent.name, t, s.id);
+  // The agent's ended rows go once a start is up (stopped.ts); a caller with a deadline (the hook's
+  // wake) has no time for the listing and the removals, and leaves them to the next start.
+  if (wait.lastPollAt === undefined || wait.lastPollAt === Infinity) clearEnded(agent.name, t, s.id);
   return s;
 }
 
 const leadName = (ws: Workspace) => capitalize(lead(ws).name);
 
-export function buildingPrompt(ws: Workspace, agent: Agent, ticket: string): string {
-  let p = `You are ${capitalize(agent.name)}. Your work item is ${ticket}. This is a BUILDING session in ` +
+// The handoff a build session leaves for its fix round: beside the worktree, so never committed.
+export const handoffPath = (wt: string) => `${wt.replace(/\/+$/, "")}.handoff.md`;
+
+const localNote = (ticket: string) => isLocal(ticket)
+  ? " This item has no tracker ticket, and its key is factory bookkeeping: leave it out of the " +
+    "PR title and the commit message, which are the description alone."
+  : "";
+
+export function buildingPrompt(ws: Workspace, agent: Agent, ticket: string, handoff?: string): string {
+  return `You are ${capitalize(agent.name)}. Your work item is ${ticket}. This is a BUILDING session in ` +
     `the worktree on branch ${branchFor(ticket)}. Read the repo rules in this directory, then reply exactly ` +
     `READY and wait for ${leadName(ws)}'s brief. The brief is the whole specification: there is no plan ` +
-    `artifact and nothing else is coming. Do not start before it arrives.`;
-  if (isLocal(ticket))
-    p += " This item has no tracker ticket, and its key is factory bookkeeping: leave it out of the " +
-      "PR title and the commit message, which are the description alone.";
-  return p;
+    `artifact and nothing else is coming. Do not start before it arrives.` +
+    (handoff ? ` When you open the PR, write the handoff for the fix round to ${handoff}: what was built, ` +
+      `decisions and why, where things are, how to run the checks, what is open.` : "") +
+    localNote(ticket);
+}
+
+// A fix round starts fresh in the build's worktree and comes back in through the handoff.
+export function fixingPrompt(ws: Workspace, agent: Agent, ticket: string, handoff: string): string {
+  return `You are ${capitalize(agent.name)}. Your work item is ${ticket}, and this is its FIX ROUND, in a fresh ` +
+    `session in the worktree on branch ${branchFor(ticket)}. Read the repo rules in this directory and the ` +
+    `handoff at ${handoff}, which holds what the build did and the review findings. Fix them, run the tests ` +
+    `and lint as one command, push, and send the new sha straight to the reviewer. Later rounds come to this ` +
+    `session. If the handoff is missing or holds no findings, reply exactly READY and wait for ` +
+    `${leadName(ws)}'s brief.` + localNote(ticket);
 }
 
 export const reviewerPrompt = (ws: Workspace) =>

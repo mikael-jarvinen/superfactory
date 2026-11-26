@@ -3,7 +3,7 @@
 // host's daemon (remote.ts).
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Agent, Repo } from "./config.js";
@@ -28,6 +28,8 @@ export interface StartRequest {
   phase: Phase;
   args: (appendixPath: string | null) => string[];
   env: NodeJS.ProcessEnv;
+  // How long the start may take, for a caller with a deadline (the hook's wake).
+  timeoutMs?: number;
 }
 
 // A builder's worktree for one item, under one of its repos' checkouts.
@@ -61,11 +63,6 @@ export interface Transport {
   alive(s: Session | null | undefined): s is Session;
   // The launch id claude printed, or "?".
   start(req: StartRequest): string;
-  // said: claude's stdout. why: its stderr (else stdout), read when the session does not come back.
-  // Within timeoutMs; one too short for a respawn is a failure, not a longer call.
-  // appendix: the agent's current appendix, which a host's daemon writes before it respawns (the
-  // local side writes it itself; refreshSession in launch.ts); undefined sends none.
-  respawn(name: string, id: string, timeoutMs?: number, appendix?: string | null): { ok: boolean; said: string; why: string };
   stop(name: string, id: string, remove: boolean): void;
   // The worktree for the item, made or reused (worktree.ts's ensureWorktree); throws when it cannot.
   worktree(q: WorktreeRequest): { wt: string; how: string };
@@ -183,18 +180,12 @@ export const local: Transport = {
   },
   alive: sessionAlive,
   start(req) {
-    // A start with no appendix removes the current copy too, so a later resume is handed none.
-    let path: string | null = null;
-    if (req.appendix) path = appendixFile(req.runDir, req.agent.name, req.appendix);
-    else writeCurrentAppendix(req.runDir, req.agent.name, null);
+    const path = req.appendix ? appendixFile(req.runDir, req.agent.name, req.appendix) : null;
     const argv = req.args(path);
-    const r = scopeCheck(argv, run(...claudeScoped(argv), { cwd: req.cwd, env: claudeEnv(req.env) }, `claude ${argv[0]}`));
+    const r = scopeCheck(argv, run(...claudeScoped(argv), { cwd: req.cwd, env: claudeEnv(req.env), ...(req.timeoutMs ? { timeout: req.timeoutMs } : {}) }, `claude ${argv[0]}`));
+    if (r.status === 124 && req.timeoutMs) die(`claude --bg did not finish in the ${Math.round(req.timeoutMs / 1000)} s it had`);
     if (r.status !== 0) die(`claude --bg failed: ${r.stderr.trim() || r.stdout.trim()}`);
     return /backgrounded · (\w+) · /.exec(r.stdout)?.[1] ?? "?";
-  },
-  respawn(_name, id, timeoutMs) {
-    const r = scoped(["respawn", id], timeoutMs);
-    return { ok: r.status === 0, said: r.stdout.trim(), why: r.stderr.trim() || r.stdout.trim() };
   },
   stop(_name, id, remove) {
     scoped(["stop", id]);
@@ -223,31 +214,10 @@ export const local: Transport = {
   },
 };
 
-// A session's appendix file. `claude respawn` reruns the session's old command line, and claude
-// refuses a --append-system-prompt-file that is gone, so the file lives in the workspace's
-// logs/run/, which a reboot keeps as it does not keep /tmp. It is named by its content: a respawn
-// reads the brief its session started with even after the brief changed, and a brief launched again
+// The file a start passes as --append-system-prompt-file, in the workspace's logs/run/, which a
+// reboot keeps as it does not keep /tmp. It is named by its content, so a brief launched again
 // unchanged reuses its file. Written beside it and renamed, so a reader never sees half of one.
-// Where an agent's current appendix is kept, by name alone, for the SessionStart hook that gives a
-// resumed session its brief again (hooks/appendix.ts): a session's own appendix file is named by its
-// text, so a resumed one cannot tell which is current.
-export const currentAppendixPath = (runDir: string, name: string): string => join(runDir, `appendix-${name}-current.md`);
-
-// Writes an agent's current appendix, or removes it when the agent has none.
-export function writeCurrentAppendix(runDir: string, name: string, text: string | null): void {
-  const path = currentAppendixPath(runDir, name);
-  if (text === null) return rmSync(path, { force: true });
-  mkdirSync(runDir, { recursive: true });
-  if (existsSync(path) && readFileSync(path, "utf8") === text) return;
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, text);
-  renameSync(tmp, path);
-}
-
-// The file a start passes as --append-system-prompt-file, and the agent's current appendix with it:
-// every start writes this, a host daemon's too, so the current copy is never older than the last start.
 export function appendixFile(runDir: string, name: string, text: string): string {
-  writeCurrentAppendix(runDir, name, text);
   mkdirSync(runDir, { recursive: true });
   const path = join(runDir, `appendix-${name}-${createHash("sha256").update(text).digest("hex").slice(0, 16)}.md`);
   if (!existsSync(path) || readFileSync(path, "utf8") !== text) {
@@ -300,9 +270,6 @@ export function pick(t: Transport, hits: Session[]): Session | null {
   const newest = byNewest(hits);
   return newest.find((s) => t.alive(s)) ?? newest[0] ?? null;
 }
-
-// The newest of them, live or not: the one a wake respawns, the one last active where that is known.
-export const newest = (hits: Session[]): Session | null => byNewest(hits)[0] ?? null;
 
 export const isAgentSession = (name: string) => (s: Session) => s.kind === "background" && s.name === name;
 

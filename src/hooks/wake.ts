@@ -1,5 +1,6 @@
-// PreToolUse hook for SendMessage, in every session's settings: wakes a recipient that is off, then
-// lets the send through. A recipient known to be off that does not wake blocks the send with why;
+// PreToolUse hook for SendMessage, in every session's settings: starts a fresh session for a
+// recipient that is off (wake.ts), then lets the send through. A recipient known to be off that
+// does not come up blocks the send with why;
 // one not in the fleet, or whose listing cannot be had, passes. The hook never stops a message by
 // its own error: failOpen lets it through and says so. From a host (--from-host) it wakes only
 // agents on that host, and after a send to any other fails as not reachable it says to have the
@@ -108,14 +109,12 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
     case "live":
     case "unknown":
       return { code: 0 };
-    case "woke":
+    case "started":
       if (settle > 0) sleep(settle * 1000);
       return { code: 0 };
-    case "none":
-      return { code: 2, stderr: `${to} is off and has no session to wake. Start it the factory way (dispatch, review or assistant), then send.\n` };
     case "failed":
-      // a conversation that cannot come back: another wake fails the same way
-      if (w.fresh) return { code: 2, stderr: `${to} is off and cannot wake: ${w.why}. Tell the lead, who starts it fresh with \`${w.fresh}\`; then send.\n` };
-      return { code: 2, stderr: `${to} is off and did not wake: ${w.why}. Try \`factory wake ${to}\`, or tell the lead.\n` };
+      // a builder or designer, which wake does not start: another try fails the same way
+      if (w.fresh) return { code: 2, stderr: `${to} is off: ${w.why}. Tell the lead, who starts it with \`${w.fresh}\`; then send.\n` };
+      return { code: 2, stderr: `${to} is off and did not start: ${w.why.replace(/\.$/, "")}. Try \`factory wake ${to}\`, or tell the lead.\n` };
   }
 }
