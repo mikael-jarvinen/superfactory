@@ -10,7 +10,10 @@
 // <session>/subagents/, leaving out any last written before that time, and it sends back each file's
 // lines after its offset, up to the last whole line. Of those lines it keeps only what the board
 // reads, the session name and each assistant call's id, time and usage, so the bulk of a transcript
-// never crosses the network. A file shorter than its offset was rewritten, and is sent from its start.
+// never crosses the network: for the weekly usage (weekly.ts) also each call's model and hour-long
+// cache writes, and the reset a call the weekly limit refused named. A file shorter than its offset
+// was rewritten, and is sent from its start. With `all`, every projects/ dir is listed too, under
+// "*", and a file listed twice is sent once.
 //
 // Measured with 3.1 GB of transcripts, 3,834 files in the fleet's cwds: the first read takes 8 s and
 // sends 38 MB, and each read after it 0.35 s, almost all of it the listing. The board reads in the
@@ -21,6 +24,8 @@ export interface RemoteQuery {
   cwds: string[];
   since: number;
   offsets: Record<string, number>;
+  // Also every projects/ dir, listed under "*", leaving out files last written before this time.
+  all?: number;
 }
 
 export interface RemoteFile {
@@ -39,9 +44,11 @@ export type Runner = (script: string) => Promise<string>;
 export const PROBE = String.raw`
 import base64, json, os, re, sys
 
+def projects():
+    return os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects")
+
 def project(cwd):
-    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-    return os.path.join(base, "projects", re.sub(r"[^A-Za-z0-9]", "-", cwd))
+    return os.path.join(projects(), re.sub(r"[^A-Za-z0-9]", "-", cwd))
 
 MARK = "--sf-transcripts--"
 KEEP = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
@@ -63,10 +70,19 @@ def slim(line):
     if d.get("type") != "assistant" or not isinstance(u, dict):
         return None
     usage = {k: u[k] for k in KEEP if isinstance(u.get(k), (int, float)) and not isinstance(u.get(k), bool)}
-    return json.dumps({"type": "assistant", "timestamp": d.get("timestamp"), "requestId": d.get("requestId"),
-                       "uuid": d.get("uuid"), "message": {"id": m.get("id"), "usage": usage}}, separators=(",", ":"))
+    cc = u.get("cache_creation")
+    if isinstance(cc, dict) and isinstance(cc.get("ephemeral_1h_input_tokens"), (int, float)):
+        usage["cache_creation"] = {"ephemeral_1h_input_tokens": cc["ephemeral_1h_input_tokens"]}
+    out = {"type": "assistant", "timestamp": d.get("timestamp"), "requestId": d.get("requestId"),
+           "uuid": d.get("uuid"), "message": {"id": m.get("id"), "model": m.get("model"), "usage": usage}}
+    q = d.get("quotaLimits")
+    if isinstance(q, dict) and q.get("rateLimitType") == "seven_day":
+        out["quotaLimits"] = {k: q.get(k) for k in ("rateLimitType", "status", "resetsAt")}
+    return json.dumps(out, separators=(",", ":"))
 
 def take(path, off, out):
+    if path in out:
+        return
     try:
         size = os.stat(path).st_size
     except OSError:
@@ -120,6 +136,18 @@ def main(q):
                 for p in [f["p"]] + f["subs"]:
                     take(p, q["offsets"].get(p, 0), data)
         listing[cwd] = seen
+    if q.get("all") is not None:
+        try:
+            dirs = sorted(os.listdir(projects()))
+        except OSError:
+            dirs = []
+        seen = []
+        for n in dirs:
+            for f in files(os.path.join(projects(), n), q["all"]):
+                seen.append(f)
+                for p in [f["p"]] + f["subs"]:
+                    take(p, q["offsets"].get(p, 0), data)
+        listing["*"] = seen
     sys.stdout.write("\n" + MARK + "\n" + json.dumps({"listing": listing, "data": data}, separators=(",", ":")))
 `;
 
