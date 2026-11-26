@@ -6,6 +6,7 @@ import { Unreachable } from "./remote.js";
 import { renderSettings } from "./settings.js";
 import { branchFor, isLocal } from "./state.js";
 import { clearEnded } from "./stopped.js";
+import { withLock } from "./tickets/lock.js";
 import { type Transport, transportFor } from "./transport.js";
 import type { Workspace } from "./workspace.js";
 import { capitalize, die } from "./util.js";
@@ -135,10 +136,19 @@ export const GIT_HTTPS_ENV = {
 // for "ssh", so its pushes use the checkout's origin and the machine's own key.
 export const gitEnv = (over: GitOver = "https"): Record<string, string> => (over === "ssh" ? {} : GIT_HTTPS_ENV);
 
+// One start of an agent at a time: a start, its wait to be listed and its removal of the agent's
+// ended rows run under this lock, so two starts never make two sessions under one name and the
+// removal never takes a start that is not yet live. A caller that checks for a live session first
+// (wake) takes it around the check, and passes locked.
+export const startLock = (ws: Workspace, name: string) => join(ws.runDir, `start-${name}.lock`);
+const START_LOCK_WAIT_MS = 150_000;
+
 // wait, for a caller with a deadline: how long to wait for the session to be listed live (90 s),
 // the epoch ms of the last listing, and how long the start itself may take.
 export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string, appendix: string | null = null, phase: Phase = undefined, t: Transport = transportFor(ws, agent),
-  wait: { waitS?: number; pollMs?: number; lastPollAt?: number; startMs?: number } = {}): Session {
+  wait: { waitS?: number; pollMs?: number; lastPollAt?: number; startMs?: number; locked?: boolean } = {}): Session {
+  if (!wait.locked)
+    return withLock(startLock(ws, agent.name), () => launch(ws, agent, cwd, prompt, appendix, phase, t, { ...wait, locked: true }), START_LOCK_WAIT_MS);
   const sid = t.start({
     agent, cwd, prompt, appendix, phase, runDir: ws.runDir,
     args: (appendixPath) => launchArgs(ws, agent, prompt, appendixPath, phase),
@@ -181,14 +191,16 @@ export function buildingPrompt(ws: Workspace, agent: Agent, ticket: string, hand
     localNote(ticket);
 }
 
-// A fix round starts fresh in the build's worktree and comes back in through the handoff.
+// A fix round starts fresh in the build's worktree and comes back in through the handoff, which the
+// build session wrote when it opened the PR: what it built, never the findings, which come by message.
 export function fixingPrompt(ws: Workspace, agent: Agent, ticket: string, handoff: string): string {
   return `You are ${capitalize(agent.name)}. Your work item is ${ticket}, and this is its FIX ROUND, in a fresh ` +
     `session in the worktree on branch ${branchFor(ticket)}. Read the repo rules in this directory and the ` +
-    `handoff at ${handoff}, which holds what the build did and the review findings. Fix them, run the tests ` +
-    `and lint as one command, push, and send the new sha straight to the reviewer. Later rounds come to this ` +
-    `session. If the handoff is missing or holds no findings, reply exactly READY and wait for ` +
-    `${leadName(ws)}'s brief.` + localNote(ticket);
+    `handoff at ${handoff}, which the build session wrote when it opened the PR: what it built, decisions, ` +
+    `where things are and how to run the checks. It can be missing, for an item built before handoffs. The ` +
+    `review findings are not in it: they come by message, from the reviewer or ${leadName(ws)}. Reply exactly ` +
+    `READY and wait for them. Then fix them, run the tests and lint as one command, push, and send the new sha ` +
+    `straight to the reviewer. Later rounds come to this session.` + localNote(ticket);
 }
 
 export const reviewerPrompt = (ws: Workspace) =>

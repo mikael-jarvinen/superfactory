@@ -100,5 +100,6 @@ test("the build session is told where to write the handoff, and the fix round wh
   const f = fixingPrompt(w, bea, "TEST-1", handoffPath(wt));
   assert.match(f, /FIX ROUND, in a fresh session/);
   assert.match(f, /the handoff at \/w\/repos\/web\/\.claude\/worktrees\/TEST-1\.handoff\.md/);
-  assert.match(f, /If the handoff is missing or holds no findings, reply exactly READY and wait for Ada's brief/);
+  assert.match(f, /The review findings are not in it: they come by message, from the reviewer or Ada\. Reply exactly READY and wait for them/);
+  assert.doesNotMatch(f, /holds what the build did and the review findings/);
 });

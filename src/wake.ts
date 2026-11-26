@@ -11,12 +11,14 @@
 // A start is listed live within a few seconds, and on a host its Remote Control name takes up to
 // 10 s more to be addressable from another machine, hence WAKE_SETTLE_S.
 import type { Agent } from "./config.js";
+import { closeSync } from "node:fs";
 import { findSession, type Session } from "./fleet.js";
-import { assistantPrompt, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
+import { assistantPrompt, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf, startLock } from "./launch.js";
+import { tryLock } from "./tickets/lock.js";
 import { freshCommand } from "./stopped.js";
 import { ask, CHILD_SLACK_MS, Unreachable } from "./remote.js";
 import { LISTING_TIMEOUT_MS, type Transport, transportFor } from "./transport.js";
-import { FactoryError } from "./util.js";
+import { FactoryError, sleep } from "./util.js";
 import type { Workspace } from "./workspace.js";
 
 export const WAKE_SETTLE_S = 15;
@@ -49,9 +51,31 @@ export function firstPrompt(ws: Workspace, agent: Agent): string | null {
   }
 }
 
+// Under the agent's start lock (launch.ts), the check for a live session included: a second wake
+// while the first one's start is under way waits for it and then finds it live, never starting a
+// second session under the same name.
 export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
-  const t = o.t ?? transportFor(ws, agent);
   const left = () => (o.deadline ?? Infinity) - Date.now();
+  const lock = startLock(ws, agent.name);
+  let fd: number | null;
+  try {
+    while ((fd = tryLock(lock)) === null) {
+      if (left() < 1000) return { is: "failed", why: `another start of ${agent.name} is under way; out of time waiting for it` };
+      sleep(50);
+    }
+  } catch (e) {
+    if (e instanceof FactoryError) return { is: "failed", why: e.message };
+    throw e;
+  }
+  try {
+    return wakeLocked(ws, agent, o, left);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function wakeLocked(ws: Workspace, agent: Agent, o: WakeOptions, left: () => number): Woken {
+  const t = o.t ?? transportFor(ws, agent);
   // A listing that cannot be had, a local one that timed out included, leaves the recipient unknown.
   const live = ask(() => findSession(t, agent.name));
   if (live instanceof Unreachable) return { is: "unknown", why: live.brief };
@@ -69,7 +93,7 @@ export function wake(ws: Workspace, agent: Agent, o: WakeOptions = {}): Woken {
     const waitS = Math.min(o.waitS ?? 90, waitMs / 1000);
     const bounded = left() !== Infinity;
     s = launch(ws, agent, roleOf(ws, agent).cwd as string, prompt, appendix, undefined, t,
-      { waitS, pollMs: o.pollMs, lastPollAt: bounded ? Date.now() + waitMs : Infinity, ...(bounded ? { startMs: waitMs } : {}) });
+      { waitS, pollMs: o.pollMs, lastPollAt: bounded ? Date.now() + waitMs : Infinity, locked: true, ...(bounded ? { startMs: waitMs } : {}) });
   } catch (e) {
     // a start whose listing could not be had after it (launch.ts); a start refused is failed
     if (e instanceof Unreachable) return { is: "unknown", why: e.message };

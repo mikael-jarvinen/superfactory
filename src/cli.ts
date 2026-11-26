@@ -393,8 +393,9 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
       }
     };
     // the build session, on an item that can go to fixing: the fix round goes to a fresh session in
-    // the same worktree. The state moves first, so a refusal stops nothing; the worktree, and
-    // anything left in it, stays.
+    // the same worktree. The inputs are read first, so a refusal stops nothing; the worktree, and
+    // anything left in it, stays. The state moves to fixing only once the fresh session is up, so a
+    // start that fails leaves the item where it was, and the same dispatch, run again, starts it.
     if (on === ticket && !force && cur && cur !== "building" && kept?.fix_session !== s.id && (cur === "fixing" || TRANSITIONS[cur].has("fixing"))) {
       keep();
       const wasAt = (kept?.worktree ?? "").replace(/\/+$/, "");
@@ -404,7 +405,6 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
         stack = ag.stack ?? k;
       }
       inputs();
-      if (cur !== "fixing") transition(ws, ticket, "fixing", { agent: name, evidence: `fix round: build session ${s.id} stopped for a fresh one` });
       stopSession(t, s);
       console.log(`${name}'s build session on ${ticket} stopped (${s.id}); the fix round starts fresh in the same worktree`);
       fixRound = true;
@@ -451,7 +451,12 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
       throw new FactoryError(`${name} is recorded as ${r.state} on ${r.ticket}. Finish or re-state that first.`);
   const rec = loadRec(ws, ticket);
   const cur = rec?.state ?? null;
-  if (!DISPATCHABLE.has(cur) && !force)
+  // An item in review whose session is off (after a reboot or an idle stop) takes a fix round the
+  // same way as one whose build session is live. With --force it does not: a forced run on a sent
+  // PR is a verification or a re-brief, never told to fix.
+  const fixOff = !force && cur !== null && cur !== "building" && cur !== "fixing" && TRANSITIONS[cur].has("fixing");
+  const toFixing = fixRound ? cur !== "fixing" : fixOff;
+  if (!DISPATCHABLE.has(cur) && !force && !fixRound && !fixOff)
     throw new FactoryError(`${ticket} is ${cur}; a dispatch makes no sense there. Use \`factory state\` first, ` +
       `or --force if you mean it (a verification run on a sent PR, say).`);
   const { appendix, given } = inputs();
@@ -459,20 +464,22 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   // A hosted builder has no stack, so there is no slot to check.
   const noSlot = ag.host ? null : slotless(ws, stack, ticket, wt);
   if (noSlot) console.log(`  warning: ${noSlot}`);
-  // A session started on an item past building is its fix round (one whose fix session went off
-  // starts another), and reads the handoff; a build session is told to write it.
-  const fixing = fixRound || (cur !== null && cur !== "building");
+  // A fix round, or a fixing item whose fix session went off, reads the handoff; any other session
+  // is a building one, told to write it.
+  const fixing = fixRound || fixOff || cur === "fixing";
   const firstPrompt = fixing ? fixingPrompt(ws, ag, ticket, handoffPath(wt)) : buildingPrompt(ws, ag, ticket, handoffPath(wt));
   const prompt = (given ?? firstPrompt) + (noSlot ? `\n\n${noSlot}` : "");
   const started = launch(ws, ag, wt, prompt, appendix?.text ?? null, "build");
   if (rec === null || cur === null) {
     transition(ws, ticket, "building", { agent: name, stack, worktree: wt, evidence: `building session ${started.id}` });
   } else {
-    rec.agent = name;
-    rec.worktree = wt;
-    if (fixing) rec.fix_session = started.id;
-    saveRec(ws, rec);
-    appendEvent(ws, { t: now(), ticket, from: cur, to: cur, agent: name, evidence: `re-dispatched (building session ${started.id})`, note: how, pr: rec.pr ?? null });
+    if (toFixing) transition(ws, ticket, "fixing", { agent: name, evidence: `fix round: fresh session ${started.id}${fixRound ? " for the stopped build session" : ""}` });
+    const r = loadRec(ws, ticket)!;
+    r.agent = name;
+    r.worktree = wt;
+    if (fixing) r.fix_session = started.id;
+    saveRec(ws, r);
+    if (!toFixing) appendEvent(ws, { t: now(), ticket, from: cur, to: cur, agent: name, evidence: `re-dispatched (${fixing ? "fix" : "building"} session ${started.id})`, note: how, pr: r.pr ?? null });
   }
   titled(ws, ticket, str(v.title));
   console.log(`${name} started (${started.id}) for ${ticket} as a ${fixing ? "FIX ROUND" : "BUILDING"} session`);
@@ -481,7 +488,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   const d = rec?.design;
   if (d?.approved) console.log(`  design approved by ${ws.config.human.name} (${d.approved_at}): slides ${d.slides} canvas ${d.canvas}. The brief carries it.`);
   else if (d) console.log(`  warning: ${ticket} has a design ${ws.config.human.name} has not approved (${d.slides ?? d.canvas ?? "no link"})`);
-  if (fixing) console.log(`  fix round: it reads the handoff, ${handoffPath(wt)}; send it the findings only if they are not there`);
+  if (fixing) console.log(`  fix round: it reads the handoff, ${handoffPath(wt)}, and waits for the findings: SendMessage them to ${name}`);
   else console.log(`  next: SendMessage to ${name}: what to build, the scope, and notify_when_idle`);
 }
 

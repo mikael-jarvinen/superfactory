@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { defaultLogsDir } from "../src/config.js";
 import { wakeHookLog } from "../src/failures.js";
 import { agentOrDie } from "../src/fleet.js";
-import { settingsFile } from "../src/launch.js";
+import { settingsFile, startLock } from "../src/launch.js";
+import { tryLock } from "../src/tickets/lock.js";
 import { recipient } from "../src/hooks/wake.js";
 import { ListingTimedOut, Unreachable } from "../src/remote.js";
 import type { StartRequest, Transport } from "../src/transport.js";
@@ -342,6 +343,27 @@ test("a start leaves room for the listings after it, and one left too little tim
   assert.deepEqual(w, { is: "failed", why: "out of time before starting rae" });
   assert.equal(given.length, 1);
 });
+// One start of an agent at a time: a wake that finds another start under way waits for it, and
+// one whose time runs out first fails, saying so, never starting a second session under the name.
+test("a wake waits on the agent's start lock, and fails without starting when it runs out of time", () => {
+  const dir = tempWorkspace(HOSTED_TOML);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "token"), "t".repeat(40));
+  const ws = openWorkspace(dir, {});
+  mkdirSync(join(dir, "reviewers"));
+  let asked = 0;
+  const far = { where: "far", sessions: () => (asked++, []), alive: () => false, start: () => assert.fail("no start under another's lock") } as unknown as Transport;
+  const fd = tryLock(startLock(ws, "rae"));
+  assert.notEqual(fd, null);
+  try {
+    const w = wake(ws, agentOrDie(ws, "rae"), { t: far, deadline: Date.now() + 1_500 });
+    assert.deepEqual(w, { is: "failed", why: "another start of rae is under way; out of time waiting for it" });
+    assert.equal(asked, 0, "not even listed while another start holds the lock");
+  } finally {
+    closeSync(fd!);
+  }
+});
+
 test("a started session whose settings cannot be rendered fails the wake, saying why", () => {
   const dir = fakeFleet().ws;
   const ws = openWorkspace(dir, {});
@@ -499,6 +521,48 @@ test("a fix round on an item whose session is off starts a fresh one on the hand
   assert.match(r.stdout, /bea started \(new2\) for TEST-51 as a FIX ROUND session/);
   assert.match(starts()[1]!, /FIX ROUND, in a fresh session .*TEST-51\.handoff\.md/);
   assert.equal(fixSession(ws, "TEST-51"), "new2");
+});
+
+test("a bare dispatch on an item in review whose session is off starts its fix round; --force does not", () => {
+  const { ws, starts } = fakeFleet();
+  webRepo(ws);
+  const rec = () => JSON.parse(readFileSync(join(ws, "state", "TEST-52.json"), "utf8")) as { state: string; fix_session?: string };
+  assert.equal(factory(ws, ["dispatch", "bea", "TEST-52", "--title", "Fix it"]).status, 0);
+  rmSync(join(ws, "live.json"));
+  for (const a of [["pr-open", "--pr", "acme/web#7", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "briefed"]])
+    assert.equal(factory(ws, ["state", "TEST-52", ...a]).status, 0);
+  // forced, on a sent PR: a verification or re-brief run, not a fix round
+  let r = factory(ws, ["dispatch", "bea", "TEST-52", "--force"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /as a BUILDING session/);
+  assert.doesNotMatch(starts()[1]!, /FIX ROUND/);
+  assert.deepEqual([rec().state, rec().fix_session], ["agent-review", undefined], "still in review, no fix session recorded");
+  rmSync(join(ws, "live.json"));
+  // bare: after a stop it works as it does with the build session live
+  r = factory(ws, ["dispatch", "bea", "TEST-52"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /bea started \(new3\) for TEST-52 as a FIX ROUND session/);
+  assert.match(starts()[2]!, /FIX ROUND, in a fresh session/);
+  assert.deepEqual([rec().state, rec().fix_session], ["fixing", "new3"]);
+});
+
+test("a fix round whose fresh start fails leaves the item in review, and the same dispatch run again starts it", () => {
+  const { ws, starts } = fakeFleet();
+  webRepo(ws);
+  const state = () => (JSON.parse(readFileSync(join(ws, "state", "TEST-53.json"), "utf8")) as { state: string }).state;
+  assert.equal(factory(ws, ["dispatch", "bea", "TEST-53", "--title", "Fix it"]).status, 0);
+  for (const a of [["pr-open", "--pr", "acme/web#8", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "briefed"]])
+    assert.equal(factory(ws, ["state", "TEST-53", ...a]).status, 0);
+  writeFileSync(join(ws, "bg-fail"), "no start today");
+  let r = factory(ws, ["dispatch", "bea", "TEST-53"]);
+  assert.notEqual(r.status, 0);
+  assert.equal(state(), "agent-review", "not left in fixing with no session");
+  rmSync(join(ws, "bg-fail"));
+  r = factory(ws, ["dispatch", "bea", "TEST-53"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /as a FIX ROUND session/);
+  assert.equal(state(), "fixing");
+  assert.equal(starts().length, 3);
 });
 
 // Waiting work has no record, so the dispatch that makes one titles it, and no card shows a bare
