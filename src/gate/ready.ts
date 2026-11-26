@@ -187,9 +187,10 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
       const desc = s.description ?? "-";
       if (s.state === "success") {
         // A review bot that skips drafts reports the skip as a success. Every PR is a draft until its
-        // item reaches undrafting(ws) in state.ts, so its review has to be asked for by hand.
+        // item reaches undrafting(ws) in state.ts, so its review has to be asked for by hand. The
+        // workspace's own review_bot is read below, not here, and `pr-wait` asks that bot alone.
         if (/skipped/i.test(desc) && /draft/i.test(desc)) {
-          const ask = /coderabbit/i.test(s.context) ? "run `factory pr-wait`, which asks it once; never post the trigger by hand" : "ask it for a review by hand";
+          const ask = botLogin ? `ask it for a review by hand; \`factory pr-wait\` asks only the review_bot, ${botLogin}` : "ask it for a review by hand; no [gate] review_bot is set, so `factory pr-wait` asks no bot";
           remarks.push(`status '${s.context}' is green only because it skipped a draft and reviewed nothing -- ${ask}`);
         } else if (/rate limit|skipped|no review|not run/i.test(desc)) remarks.push(`status '${s.context}' is GREEN but says: ${desc} -- a pass that read nothing`);
       } else {
