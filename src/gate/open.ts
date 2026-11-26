@@ -10,6 +10,7 @@ import { COLLEAGUE_REVIEW_OFF, loadRec, recPrs, transition, undrafting } from ".
 import type { Workspace } from "../workspace.js";
 import { FactoryError } from "../util.js";
 import { api, gh, prDiff, prView, resolveRepo } from "./github.js";
+import { reviewThreads } from "./ready.js";
 import { waitForBotReview } from "./reviewbot.js";
 import { translationsAt } from "./translations.js";
 
@@ -69,6 +70,16 @@ export function openForReview(ws: Workspace, ticket: string, out: (line: string)
     }
     if (head !== x.head) throw refused(`nothing opened: ${x.remote}#${x.n} moved from ${x.head.slice(0, 7)} to ${head.slice(0, 7)} while waiting for its review`);
   }
+  // The bot's review can land, findings and all, while it is waited on. So the threads are read
+  // again once every head is reviewed, and a draft with any unresolved one does not open, as the
+  // gate would not send it.
+  const threads: string[] = [];
+  for (const x of open.filter((o) => o.draft)) {
+    const t = reviewThreads(resolveRepo(ws, x.remote), x.n);
+    if (!t) threads.push(`${x.remote}#${x.n}: COULD NOT READ its review threads -- not the same thing as there being none`);
+    else if (t.unresolved.length) threads.push(`${x.remote}#${x.n}: unresolved review threads: ${t.unresolved.join(", ")}`);
+  }
+  if (threads.length) throw refused(`nothing opened:\n${threads.map((b) => `  ${b}`).join("\n")}`);
   for (const x of open) {
     if (!x.draft) {
       out(`${x.remote}#${x.n} is already open`);

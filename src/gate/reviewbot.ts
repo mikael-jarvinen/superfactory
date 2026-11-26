@@ -15,7 +15,7 @@
 import type { Repo } from "../config.js";
 import type { Workspace } from "../workspace.js";
 import { FactoryError, sleep } from "../util.js";
-import { type CheckRun, checkRuns, conversation, gh, prView, reviews, statuses, Unreadable } from "./github.js";
+import { type CheckRun, checkRuns, conversation, gh, holdAsk, prView, reviews, statuses, Unreadable } from "./github.js";
 import { graceS, NOT_A_REVIEW, RATE_LIMITED, REVIEWED_RUN, reviewBotOf } from "./ready.js";
 import { seconds } from "./send.js";
 
@@ -70,6 +70,9 @@ export function botReview(ws: Workspace, repo: Repo, n: number): BotReview {
     const t = body ? talk.asked.get(body) : undefined;
     return t === undefined ? undefined : Math.round((Date.now() - t) / 1000);
   };
+  // Never ask over an ask it has not answered, or before its rate limit says a review is available.
+  const hold = holdAsk(talk);
+  const asking = (r: BotReview): BotReview => (r.post && hold ? { ...r, post: undefined, text: `${r.text}; not asking again: ${hold}` } : r);
 
   // Rate limited: its latest word, by status, check-run or a reply, is the limit, with nothing asked
   // since. An ask made after it is waited on as an ask; limited again, it says so again.
@@ -82,17 +85,17 @@ export function botReview(ws: Workspace, repo: Repo, n: number): BotReview {
   const asked = ago(bot.trigger);
   if (limitedAt > 0 && limitedAt >= lastAsk) {
     const text = `${bot.status} is rate limited and has not reviewed ${short}`;
-    return { head, reviewed: false, text, post: asked === undefined || asked >= seconds("FACTORY_REVIEW_RETRY", 900) ? bot.trigger : undefined };
+    return asking({ head, reviewed: false, text, post: asked === undefined || asked >= seconds("FACTORY_REVIEW_RETRY", 900) ? bot.trigger : undefined });
   }
   const full = ago(bot.full);
   if (bot.full && full !== undefined)
     return full < graceS()
       ? { head, reviewed: false, text: `${bot.status} was asked for "${bot.full}" at ${short} ${full}s ago` }
       : { head, reviewed: false, fatal: true, text: `${bot.status} was asked for "${bot.full}" at ${short} ${full}s ago and has not reviewed it -- read its reply on the PR` };
-  if (asked === undefined) return { head, reviewed: false, text: `${bot.status} has not reviewed ${short}`, post: bot.trigger };
+  if (asked === undefined) return asking({ head, reviewed: false, text: `${bot.status} has not reviewed ${short}`, post: bot.trigger });
   if (asked < graceS()) return { head, reviewed: false, text: `${bot.status} was asked for "${bot.trigger}" at ${short} ${asked}s ago` };
   // The incremental review brought nothing: it had nothing new to review since its last one.
-  if (bot.full) return { head, reviewed: false, text: `"${bot.trigger}" brought no review of ${short} in ${asked}s`, post: bot.full };
+  if (bot.full) return asking({ head, reviewed: false, text: `"${bot.trigger}" brought no review of ${short} in ${asked}s`, post: bot.full });
   return { head, reviewed: false, fatal: true, text: `${bot.status} was asked for "${bot.trigger}" at ${short} ${asked}s ago and has not reviewed it` };
 }
 
