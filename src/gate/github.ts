@@ -179,22 +179,62 @@ export interface Conversation {
   // trigger body -> ms since the epoch of its latest ask after the head commit
   asked: Map<string, number>;
   limitedAt?: number;
+  // the latest ask of the bot for a review, in any of its forms, and its latest reply to a command
+  lastAsk?: number;
+  answeredAt?: number;
+  // when its rate limit says the next review is available
+  nextReviewAt?: number;
+}
+
+// A comment as the bot reads it: an agent's comment opens with the marker line the guard holds it to.
+export const commandOf = (body: string) => body.trim().replace(/^>\s*Written by agent\.\s*/i, "").trim();
+
+// "Next included review available in 32 minutes", in CodeRabbit's summary comment, which it edits
+// in place: counted from that edit.
+const NEXT_REVIEW = /Next included review available in ([^.*]+)/i;
+function untilNext(text: string): number | undefined {
+  const m = NEXT_REVIEW.exec(text);
+  if (!m) return undefined;
+  let ms = 0;
+  for (const [, v, unit] of (m[1] as string).matchAll(/(\d+)\s*(hour|minute|second)s?/gi))
+    ms += Number(v) * (/^h/i.test(unit as string) ? 3_600_000 : /^m/i.test(unit as string) ? 60_000 : 1000);
+  return ms || undefined;
 }
 
 export function conversation(repo: Repo, n: number, head: string, botLogin: string): Conversation | undefined {
   const at = api<{ commit?: { committer?: { date?: string } } }>(`repos/${repo.remote}/commits/${head}`)?.commit?.committer?.date;
-  const comments = at ? api<{ body?: string; created_at?: string; user?: { login?: string } | null }[]>(`repos/${repo.remote}/issues/${n}/comments?since=${at}&per_page=100`) : undefined;
+  const comments = at ? api<{ body?: string; created_at?: string; updated_at?: string; user?: { login?: string } | null }[]>(`repos/${repo.remote}/issues/${n}/comments?since=${at}&per_page=100`) : undefined;
   if (!at || !Array.isArray(comments)) return undefined;
   const talk: Conversation = { asked: new Map() };
+  const ask = new RegExp(`^@${botLogin}\\s+(full\\s+)?review\\b`, "i");
   for (const c of comments) {
+    const body = c.body?.trim() ?? "";
+    const bot = (c.user?.login ?? "").replace(/\[bot\]$/, "") === botLogin;
+    // its summary comment is older than the head, but edited since: `since` reads by the last edit
+    const wait = bot ? untilNext(body.replace(/<[^>]*>/g, " ")) : undefined;
+    const edited = Date.parse(c.updated_at ?? c.created_at ?? "");
+    if (wait !== undefined && Number.isFinite(edited) && edited + wait > (talk.nextReviewAt ?? 0)) talk.nextReviewAt = edited + wait;
     const t = Date.parse(c.created_at ?? "");
     if (!Number.isFinite(t) || (c.created_at ?? "") <= at) continue;
-    const body = c.body?.trim() ?? "";
-    if ((c.user?.login ?? "").replace(/\[bot\]$/, "") === botLogin) {
+    if (bot) {
       if (/rate limited/i.test(body) && t > (talk.limitedAt ?? 0)) talk.limitedAt = t;
-    } else if (t > (talk.asked.get(body) ?? 0)) {
-      talk.asked.set(body, t);
+      if (/Action (not )?(performed|completed)/i.test(body) && t > (talk.answeredAt ?? 0)) talk.answeredAt = t;
+    } else {
+      const cmd = commandOf(body);
+      if (t > (talk.asked.get(cmd) ?? 0)) talk.asked.set(cmd, t);
+      if (ask.test(cmd) && t > (talk.lastAsk ?? 0)) talk.lastAsk = t;
     }
   }
   return talk;
+}
+
+// Why the bot must not be asked for a review now, or undefined when it may be: an ask at this head
+// it has not answered yet, or a rate limit that names when its next review is available. Each ask
+// it cannot take is a refusal on the PR for everyone reading it.
+export function holdAsk(talk: Conversation, now = Date.now()): string | undefined {
+  if (talk.lastAsk !== undefined && (talk.answeredAt ?? 0) < talk.lastAsk)
+    return `asked ${Math.round((now - talk.lastAsk) / 1000)}s ago and not answered yet`;
+  if (talk.nextReviewAt !== undefined && now < talk.nextReviewAt)
+    return `rate limited, its next review available in ${Math.ceil((talk.nextReviewAt - now) / 60_000)} min`;
+  return undefined;
 }

@@ -230,7 +230,7 @@ test("a review bot that skipped the draft is named as having reviewed nothing", 
   const r = run(green({ [st]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review skipped: draft pull request" }] } } }),
     ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /status 'CodeRabbit' is green only because it skipped a draft and reviewed nothing -- comment "@coderabbitai review" on the PR/);
+  assert.match(r.stdout, /status 'CodeRabbit' is green only because it skipped a draft and reviewed nothing -- run `factory pr-wait`, which asks it once; never post the trigger by hand/);
 });
 
 // The head commit, the PR's comments since it (one reply per read), and posting the trigger.
@@ -254,7 +254,7 @@ test("a required review bot must have reviewed the head: pr-ready refuses, pr-wa
   const rabbit = (state: string, description: string) => ({ stdout: { statuses: [{ context: "CodeRabbit", state, description, created_at: "2026-01-01T10:00:10Z" }] } });
   const review = (commit: string) => ({ user: { login: "coderabbitai[bot]" }, commit_id: commit, state: "COMMENTED", body: REVIEW_BODY });
   const ready = (over: Routes, env: NodeJS.ProcessEnv = {}) => run(green(over), ["pr-ready", "web", String(N)], env);
-  const ASK = /-- comment "@coderabbitai review" on the PR, then run this again/;
+  const ASK = /-- run `factory pr-wait`, which asks it once; never post the trigger by hand/;
 
   let r = ready({ [st]: rabbit("success", "Review completed") });
   assert.equal(r.status, 0, r.stdout);
@@ -314,7 +314,7 @@ test("a review bot that reviewed an earlier head of the PR lets later heads pass
   const onlyThisPr = { [oldPulls]: { stdout: [{ number: N }] } };
   let r = ready({ [commits]: { stdout: [{ sha: OLD }, { sha: HEAD }] }, [oldStatus]: { stdout: { statuses: [] } }, [oldRuns]: checkRuns() });
   assert.equal(r.status, 1, r.stdout);
-  assert.match(r.stdout, /CodeRabbit has not reviewed aaaaaaa: its status here says "Review skipped: draft pull request" -- comment "@coderabbitai review" on the PR, then run this again/);
+  assert.match(r.stdout, /CodeRabbit has not reviewed aaaaaaa: its status here says "Review skipped: draft pull request" -- run `factory pr-wait`, which asks it once; never post the trigger by hand/);
 
   // reviewed an earlier head, by a review, by an inline comment of its own, or by its finished
   // check-run there, which GitHub ties to this PR: a rebase it had already reviewed
@@ -581,7 +581,7 @@ test("a review bot that skipped the draft still refuses the PR, its neutral chec
   }), ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 1, r.stdout);
   assert.match(r.stdout, /check 'CodeRabbit' concluded neutral/);
-  assert.match(r.stdout, /CodeRabbit has not reviewed aaaaaaa: its status here says "Review skipped: draft pull request" -- comment "@coderabbitai review" on the PR, then run this again/);
+  assert.match(r.stdout, /CodeRabbit has not reviewed aaaaaaa: its status here says "Review skipped: draft pull request" -- run `factory pr-wait`, which asks it once; never post the trigger by hand/);
   assert.doesNotMatch(r.stdout, /rate limited/);
 });
 
@@ -1005,6 +1005,8 @@ test("pr-wait-coderabbit asks for the review of the head and waits it out, rate 
   const asked = (body: string, created_at: string) => ({ body, created_at, user: { login: "mikael" } });
   // its reply to an ask while limited
   const limitedReply = (created_at: string) => ({ body: "<details>\n<summary>Action not completed</summary>\n\nReview rate limited.\n</details>", created_at, user: { login: "coderabbitai[bot]" } });
+  // its reply to an ask it took: an incremental review with nothing new brings no review object
+  const performed = (created_at: string) => ({ body: "<details>\n<summary>Action performed</summary>\n\nReview finished.\n</details>", created_at, user: { login: "coderabbitai[bot]" } });
   const skipped = { [st]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review skipped: draft pull request" }] } } };
   const limited = { [st]: { stdout: { statuses: [] } }, [cr]: checkRuns(check("test"), rabbitRun("Review rate limited")) };
   const wait = (over: Routes, env: NodeJS.ProcessEnv = {}) => run(green(over), ["pr-wait-coderabbit", "web", String(N)], { FACTORY_REVIEW_POLL: "0", ...env });
@@ -1038,7 +1040,7 @@ test("pr-wait-coderabbit asks for the review of the head and waits it out, rate 
 
   // "@coderabbitai review" is incremental: when it brings nothing within the grace, a full review
   r = wait({ ...skipped, [rv]: [{ stdout: [] }, { stdout: [] }, { stdout: [review] }],
-    ...asking([asked("@coderabbitai review", ago(3600))], [asked("@coderabbitai review", ago(3600)), asked("@coderabbitai full review", ago(1))]),
+    ...asking([asked("@coderabbitai review", ago(3600)), performed(ago(3590))], [asked("@coderabbitai review", ago(3600)), performed(ago(3590)), asked("@coderabbitai full review", ago(1))]),
     [FULL]: { stdout: `https://github.com/${REMOTE}/pull/${N}#issuecomment-2\n` } });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(posts(r.calls), 0);
@@ -1116,4 +1118,71 @@ test("a diff GitHub refuses as too large is read from the checkout, and the pros
   assert.match(r.stdout, /diff read from .*repos\/web: GitHub refuses it as over 20000 lines/);
   assert.match(r.stdout, /35 added prose\/comment lines against 2 of code/);
   assert.doesNotMatch(r.stdout + r.stderr, /could not read the diff|COULD NOT READ the diff/);
+});
+
+// Each ask CodeRabbit cannot take is a refusal on the PR. The factory asks once per head, and never
+// over its review, an ask it has not answered, or a rate limit that says when its next review is
+// available.
+test("CodeRabbit is asked once per head, by the factory, and never over its review, an unanswered ask or its rate limit", () => {
+  const { run } = gateWorkspace('review_bot = "coderabbitai"\n');
+  const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
+  const rv = `api repos/${REMOTE}/pulls/${N}/reviews?per_page=100&page=1`;
+  const review = { user: { login: "coderabbitai[bot]" }, commit_id: HEAD, state: "COMMENTED", body: REVIEW_BODY };
+  const now = (s = 0) => new Date(Date.now() - s * 1000).toISOString();
+  const byHand = { body: "> Written by agent.\n\n@coderabbitai review", created_at: now(30), user: { login: "mikael" } };
+  const posts = (calls: string[]) => calls.filter((c) => c === POST).length;
+  const nothing = { [st]: { stdout: { statuses: [] } } };
+  const prWait = (over: Routes) => run(green({ ...nothing, ...over }), ["pr-wait", "web", String(N), HEAD]);
+  const waitCr = (over: Routes, env: NodeJS.ProcessEnv = {}) => run(green(over), ["pr-wait-coderabbit", "web", String(N)], { FACTORY_REVIEW_POLL: "0", ...env });
+
+  // already reviewed at this head: nothing asked, by either
+  let r = waitCr({ ...nothing, [rv]: { stdout: [review] }, ...asking([]) });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(posts(r.calls), 0);
+  r = prWait({ [rv]: { stdout: [review] }, ...asking([]) });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(posts(r.calls), 0);
+
+  // asked by hand and not answered yet: neither asks again, both wait for its review
+  r = prWait({ [rv]: [{ stdout: [] }, { stdout: [review] }], ...asking([byHand]) });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(posts(r.calls), 0, "an ask by hand is an ask");
+  assert.match(r.stdout, /^SENDABLE/m);
+  r = waitCr({ ...nothing, [rv]: [{ stdout: [] }, { stdout: [review] }], ...asking([byHand]) });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(posts(r.calls), 0);
+
+  // never asked and not reviewed: pr-wait asks, once, and sends when its review lands
+  r = prWait({ [rv]: [{ stdout: [] }, { stdout: [] }, { stdout: [review] }], ...asking([], [{ ...TRIGGER, created_at: now(1) }]) });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(posts(r.calls), 1);
+  assert.match(r.stderr, /pr-wait: posted "@coderabbitai review" to ask for a review of aaaaaaa/);
+  assert.match(r.stdout, /^SENDABLE/m);
+
+  // rate limited, its summary saying when the next review is available: not asked before then,
+  // though the last ask is older than FACTORY_REVIEW_RETRY
+  const refused = { body: "<summary>Action not completed</summary>\n\nReview rate limited.", created_at: now(1190), user: { login: "coderabbitai[bot]" } };
+  const summary = { body: "> [!WARNING]\n> ## Review limit reached\n> **Next included review available in 30 minutes.**", created_at: "2026-01-01T09:00:00Z", updated_at: now(60), user: { login: "coderabbitai[bot]" } };
+  r = waitCr({ ...nothing, [rv]: { stdout: [] }, ...asking([{ ...TRIGGER, created_at: now(1200) }, refused, summary]) }, { FACTORY_REVIEW_WAIT_LIMIT: "0" });
+  assert.equal(r.status, 3, r.stderr);
+  assert.equal(posts(r.calls), 0);
+  assert.match(r.stderr, /CodeRabbit is rate limited and has not reviewed aaaaaaa; not asking again: rate limited, its next review available in 29 min/);
+});
+
+// The review pr-open-for-review waits for can bring findings with it: their threads keep the PR a draft.
+test("pr-open-for-review opens nothing while the review it waited for left unresolved threads", () => {
+  const { ws, run } = gateWorkspace('review_bot = "coderabbitai"\n');
+  assert.equal(factory(ws, ["state", "WEB-1", "your-review", "--reviewed", HEAD]).status, 0);
+  const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
+  const reviewed = { [st]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review completed" }] } } };
+  const threads = (...nodes: unknown[]) => ({ "api graphql": { stdout: { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false }, nodes } } } } } } });
+
+  let r = run(green({ ...reviewed, ...threads({ isResolved: true, path: "src/a.ts", line: 3 }, { isResolved: false, path: "src/b.ts", line: 9 }) }), ["pr-open-for-review", "WEB-1"]);
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /pr-open-for-review: REFUSED -- nothing opened:\n {2}acme\/web#7: unresolved review threads: src\/b\.ts:9/);
+  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [], "nothing opened");
+
+  r = run(green({ ...reviewed, ...threads({ isResolved: true, path: "src/b.ts", line: 9 }) }), ["pr-open-for-review", "WEB-1"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.calls.filter((c) => c.startsWith("pr ready")), [`pr ready ${N} --repo ${REMOTE}`]);
 });

@@ -64,7 +64,7 @@ function sinceHead(times: (string | null | undefined)[]): number {
 // since its last review ("@coderabbitai full review" "Reviews every file in the pull request again
 // from scratch", docs.coderabbit.ai/reference/review-commands). pr-wait-coderabbit uses it.
 const KNOWN_BOTS: Record<string, { status: string; ask: string; trigger?: string; full?: string }> = {
-  coderabbitai: { status: "CodeRabbit", ask: 'comment "@coderabbitai review" on the PR', trigger: "@coderabbitai review", full: "@coderabbitai full review" },
+  coderabbitai: { status: "CodeRabbit", ask: 'run `factory pr-wait`, which asks it once; never post the trigger by hand', trigger: "@coderabbitai review", full: "@coderabbitai full review" },
 };
 export const reviewBotOf = (login: string): { status: string; ask: string; trigger?: string; full?: string } => KNOWN_BOTS[login] ?? { status: login, ask: `ask ${login} for a review of this head` };
 
@@ -189,7 +189,7 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
         // A review bot that skips drafts reports the skip as a success. Every PR is a draft until its
         // item reaches undrafting(ws) in state.ts, so its review has to be asked for by hand.
         if (/skipped/i.test(desc) && /draft/i.test(desc)) {
-          const ask = /coderabbit/i.test(s.context) ? 'comment "@coderabbitai review" on the PR' : "ask it for a review by hand";
+          const ask = /coderabbit/i.test(s.context) ? "run `factory pr-wait`, which asks it once; never post the trigger by hand" : "ask it for a review by hand";
           remarks.push(`status '${s.context}' is green only because it skipped a draft and reviewed nothing -- ${ask}`);
         } else if (/rate limit|skipped|no review|not run/i.test(desc)) remarks.push(`status '${s.context}' is GREEN but says: ${desc} -- a pass that read nothing`);
       } else {
@@ -207,7 +207,7 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
     const short = sha.slice(0, 7);
     const st = sts.find(isBot);
     const desc = st?.description ?? "-";
-    const ask = `${bot.ask}, then run this again`;
+    const ask = bot.trigger ? bot.ask : `${bot.ask}, then run this again`;
     const latestRun = (runs ?? []).filter(isBotRun).sort((a, b) => (a.started_at ?? "").localeCompare(b.started_at ?? "")).at(-1);
     // With no status of its own, its finished check-run is its review: after a rebase that carries
     // over a diff it already reviewed, it says "Already reviewed the last commit" and posts no
@@ -360,7 +360,7 @@ interface Threads {
   unresolved: string[];
 }
 
-function reviewThreads(repo: Repo, n: number): Threads | undefined {
+export function reviewThreads(repo: Repo, n: number): Threads | undefined {
   const [owner, name] = repo.remote.split("/");
   const query = `{repository(owner:"${owner}",name:"${name}"){pullRequest(number:${n}){reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved path line}}}}}`;
   type Node = { isResolved: boolean; path: string; line: number | null };
