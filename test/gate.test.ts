@@ -227,16 +227,21 @@ test("pr-send's gate read waits out what time clears, and stops at once on what 
 // review_bot whose trigger it knows.
 test("a review bot that skipped the draft is named as having reviewed nothing", () => {
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
-  const skipped = (context: string) => green({ [st]: { stdout: { statuses: [{ context, state: "success", description: "Review skipped: draft pull request" }] } } });
+  const rv = `api repos/${REMOTE}/pulls/${N}/reviews?per_page=100&page=1`;
+  // with a review_bot set, it has reviewed the head, so the PR is sendable and only remarked on
+  const skipped = (context: string, bot?: string) => green({
+    [st]: { stdout: { statuses: [{ context, state: "success", description: "Review skipped: draft pull request" }] } },
+    ...(bot ? { [rv]: { stdout: [{ user: { login: `${bot}[bot]` }, commit_id: HEAD, state: "COMMENTED", body: REVIEW_BODY }] } } : {}),
+  });
   let r = gateWorkspace().run(skipped("CodeRabbit"), ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /status 'CodeRabbit' is green only because it skipped a draft and reviewed nothing -- ask it for a review by hand; no \[gate\] review_bot is set, so `factory pr-wait` asks no bot/);
   // a review_bot set, and this is another bot: pr-wait would ask the review_bot, not this one
-  r = gateWorkspace('review_bot = "coderabbitai"\n').run(skipped("OtherBot"), ["pr-ready", "web", String(N)]);
+  r = gateWorkspace('review_bot = "coderabbitai"\n').run(skipped("OtherBot", "coderabbitai"), ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /status 'OtherBot' is green only because it skipped a draft and reviewed nothing -- ask it for a review by hand; `factory pr-wait` asks only the review_bot, coderabbitai/);
   // a review_bot pr-wait knows no trigger for: pr-wait asks nobody
-  r = gateWorkspace('review_bot = "sourcery"\n').run(skipped("OtherBot"), ["pr-ready", "web", String(N)]);
+  r = gateWorkspace('review_bot = "sourcery"\n').run(skipped("OtherBot", "sourcery"), ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /status 'OtherBot' is green only because it skipped a draft and reviewed nothing -- ask it for a review by hand; `factory pr-wait` asks no bot, as it knows no trigger for the review_bot, sourcery/);
 });
