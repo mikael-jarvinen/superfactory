@@ -5,9 +5,6 @@
 //                                 with `alive`, which only that machine can tell
 //   POST /agents/<name>/start     {cwd, prompt, appendix, phase} -> {id}; the daemon renders the
 //                                 claude command line from its own copy of the config
-//   POST /agents/<name>/respawn   {id, appendix?} -> {ok, said, why}; with appendix (text or null),
-//                                 the daemon renders the agent's settings and writes its current
-//                                 appendix first (launch.ts's refreshHosted), as a local respawn does
 //   POST /agents/<name>/stop      {id, remove}
 //
 // A builder with a host has its repos' checkouts there too, and its worktrees are made and checked
@@ -192,16 +189,9 @@ export function remote(h: Host): Transport {
     },
     // The appendix goes as text, and the daemon writes it and renders the command line there.
     start(req) {
-      const r = callSync(h, "POST", agentPath(req.agent.name, "start"), { cwd: req.cwd, prompt: req.prompt, appendix: req.appendix, phase: req.phase ?? null }, 60_000);
+      const r = callSync(h, "POST", agentPath(req.agent.name, "start"), { cwd: req.cwd, prompt: req.prompt, appendix: req.appendix, phase: req.phase ?? null },
+        req.timeoutMs ? Math.max(1_000, Math.min(60_000, req.timeoutMs - CHILD_SLACK_MS)) : 60_000);
       return typeof r.body.id === "string" ? r.body.id : "?";
-    },
-    // Inside timeoutMs, its child's slack included.
-    respawn(name, id, timeoutMs, appendix) {
-      const ms = timeoutMs === undefined ? 60_000 : Math.min(60_000, timeoutMs - CHILD_SLACK_MS);
-      if (ms < 1_000) return { ok: false, said: "", why: `${timeoutMs} ms is too little for a respawn on ${h.name}` };
-      const r = ask(() => callSync(h, "POST", agentPath(name, "respawn"), { id, ...(appendix !== undefined ? { appendix } : {}) }, ms));
-      if (r instanceof Unreachable) return { ok: false, said: "", why: r.message };
-      return { ok: r.body.ok === true, said: String(r.body.said ?? ""), why: String(r.body.why ?? r.body.said ?? "") };
     },
     stop(name, id, remove) {
       callSync(h, "POST", agentPath(name, "stop"), { id, remove }, 30_000);

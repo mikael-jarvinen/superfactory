@@ -3,7 +3,7 @@
 // Four jobs. The queue watcher, only when there is a tracker to read. The review watcher, every five
 // minutes unless [watchers] reviews_every_minutes says otherwise (0 turns it off): it runs no model,
 // so its cadence costs GitHub calls and nothing else. The round, once an hour. And `factory up`, at login and twice an hour: the daemon retires a session that sat idle for a
-// day and then exits, and `up` respawns the lead from its last thread when nothing is running and
+// day and then exits, and `up` starts the lead fresh when nothing is running and
 // prints one line when something is.
 //
 // Rendered into logs/run/launchd/, like the session settings: they carry this machine's absolute

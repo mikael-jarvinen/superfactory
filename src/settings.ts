@@ -7,7 +7,6 @@ import { isSettingsPath } from "./config.js";
 import { lead } from "./fleet.js";
 import { POLICIES, type Policy, TMP_ROOTS } from "./hooks/guard.js";
 import { WAKE_HOOK_TIMEOUT_S } from "./hooks/wake.js";
-import { currentAppendixPath } from "./transport.js";
 import type { Workspace } from "./workspace.js";
 import { die } from "./util.js";
 
@@ -212,10 +211,6 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
   add("PreToolUse", "SendMessage", wakeArgs, WAKE_HOOK_TIMEOUT_S);
   // a failed send from a host, to an agent it cannot wake, is explained
   if (s.host) for (const ev of ["PostToolUse", "PostToolUseFailure"]) add(ev, "SendMessage", wakeArgs, 10);
-  // A resumed or respawned session keeps the appendix it started with and reads no new one (as of
-  // Claude Code 2.1.327), so every role is handed its current one when it comes back
-  // (hooks/appendix.ts). The file is this machine's: a host renders its own agents' settings.
-  add("SessionStart", "resume", ["hook", "appendix", "--file", currentAppendixPath(ws.runDir, s.name)], 10);
   for (const h of names) {
     if (h === "wake" || h === "appendix") continue;
     if (h === "guard") {

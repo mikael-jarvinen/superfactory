@@ -1,5 +1,5 @@
 // On Linux, every claude call the fleet makes runs in a scope of its own under agents.slice: the
-// transport's (listings, start, respawn, stop, rm) and a watcher's `claude -p`. doctor's
+// transport's (listings, start, stop, rm) and a watcher's `claude -p`. doctor's
 // `claude auth status` stays bare. A call that finds no supervisor may start it, a listing or a
 // one-shot run included, and a process stays in its parent's cgroup:
 // unscoped, the supervisor, every session and every build under it would share the caller's unit
