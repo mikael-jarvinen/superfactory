@@ -187,8 +187,7 @@ export function ready(ws: Workspace, repo: Repo, n: number): Verdict {
       const desc = s.description ?? "-";
       if (s.state === "success") {
         // A review bot that skips drafts reports the skip as a success. Every PR is a draft until its
-        // item reaches undrafting(ws) in state.ts, so its review has to be asked for by hand: `pr-wait`
-        // asks only a review_bot whose trigger it knows (KNOWN_BOTS), and never this one.
+        // item reaches undrafting(ws) in state.ts, so its review has to be asked for by hand.
         if (/skipped/i.test(desc) && /draft/i.test(desc)) {
           const why = bot?.trigger ? `\`factory pr-wait\` asks only the review_bot, ${botLogin}`
             : botLogin ? `\`factory pr-wait\` asks no bot, as it knows no trigger for the review_bot, ${botLogin}`

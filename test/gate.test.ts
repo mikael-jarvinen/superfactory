@@ -16,6 +16,8 @@ const REMOTE = "acme/web";
 const N = 7;
 const HEAD = "a".repeat(40);
 const PR_FIELDS = "headRefOid,headRefName,state,isDraft,mergeable,mergeStateStatus,baseRefName,url,title,body";
+// What CodeRabbit's own review says; each of its replies in a review thread is a review with no body.
+const REVIEW_BODY = "**Actionable comments posted: 1**";
 const BODY = "Why it changed.\n\n<!-- pr-media:begin -->\n## Demo\nNo visual change.\n<!-- pr-media:end -->\n";
 
 const check = (name: string, o: Record<string, unknown> = {}) => ({
@@ -248,8 +250,6 @@ test("a review bot that skipped the draft is named as having reviewed nothing", 
 
 // The head commit, the PR's comments since it (one reply per read), and posting the trigger.
 const POST = `pr comment ${N} --repo ${REMOTE} --body @coderabbitai review`;
-// What CodeRabbit's own review says; each of its replies in a review thread is a review with no body.
-const REVIEW_BODY = "**Actionable comments posted: 1**";
 const TRIGGER = { body: "@coderabbitai review", created_at: "2026-01-01T10:01:00Z" };
 const asking = (...reads: unknown[][]): Routes => ({
   [`api repos/${REMOTE}/commits/${HEAD}`]: { stdout: { commit: { committer: { date: "2026-01-01T09:59:00Z" } } } },
@@ -1065,6 +1065,11 @@ test("pr-wait-coderabbit asks for the review of the head and waits it out, rate 
   assert.equal(r.status, 0, r.stderr);
   assert.equal(posts(r.calls), 0);
   assert.equal(posts(r.calls, FULL), 1);
+  // a word that only ends in "actions" is no answer: the ask stays held, and no full review is asked
+  r = wait({ ...skipped, [rv]: { stdout: [] }, ...asking([asked("@coderabbitai review", ago(3600)), performed(ago(3590), "Transactions performed")]) }, { FACTORY_REVIEW_WAIT_LIMIT: "0" });
+  assert.equal(posts(r.calls), 0);
+  assert.equal(posts(r.calls, FULL), 0, r.stderr);
+  assert.match(r.stderr, /not answered yet/);
   // and a full review that brought nothing either is for a person to read
   r = wait({ ...skipped, [rv]: { stdout: [] }, ...asking([asked("@coderabbitai review", ago(7200)), asked("@coderabbitai full review", ago(3600))]) });
   assert.equal(r.status, 1, r.stderr);

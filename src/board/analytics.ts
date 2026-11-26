@@ -44,8 +44,8 @@ export interface Tokens {
   cache_write: number;
 }
 
-const noTokens = (): Tokens => ({ input: 0, output: 0, cache_read: 0, cache_write: 0 });
-const addTokens = (a: Tokens, b: Tokens) => {
+export const noTokens = (): Tokens => ({ input: 0, output: 0, cache_read: 0, cache_write: 0 });
+export const addTokens = (a: Tokens, b: Tokens) => {
   a.input += b.input;
   a.output += b.output;
   a.cache_read += b.cache_read;
