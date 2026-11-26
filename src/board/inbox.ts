@@ -241,8 +241,10 @@ function writeLine(line: string): void {
 // `factory board --inbox`: each new message from the page, and each note a watcher left, as
 // stdout, which a monitor in the lead's session turns into an event within a second. Printed
 // before the cursor moves, so a kill in between repeats a line rather than losing it. Runs until
-// killed.
-export function followInbox(ws: Workspace, out: (line: string) => void = writeLine): void {
+// killed, or with once until the first pass that printed anything: a background command in the
+// lead's session then wakes it only when there is something to read, and holds the inbox until
+// then.
+export function followInbox(ws: Workspace, out: (line: string) => void = writeLine, once = false): void {
   let fd = tryLock(inboxLock(ws));
   for (const until = Date.now() + 3000; fd === null && Date.now() < until;) {
     sleep(100);
@@ -255,15 +257,20 @@ export function followInbox(ws: Workspace, out: (line: string) => void = writeLi
   let cursor = readCursor(ws);
   let notes = readCursorAt(notesCursorFile(ws));
   for (;;) {
+    let printed = false;
     for (const u of unsent(ws, cursor)) {
-      if (u.row) out(pageText(ws, u.row));
+      if (u.row) { out(pageText(ws, u.row)); printed = true; }
       writeCursor(ws, u.cursor);
       cursor = u.cursor;
     }
     for (const u of unsentNotes(ws, notes)) {
-      if (u.text) out(u.text);
+      if (u.text) { out(u.text); printed = true; }
       writeCursorAt(notesCursorFile(ws), u.cursor);
       notes = u.cursor;
+    }
+    if (once && printed) {
+      closeSync(fd);
+      return;
     }
     sleep(250);
   }

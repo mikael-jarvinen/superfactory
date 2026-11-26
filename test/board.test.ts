@@ -66,6 +66,35 @@ test("the inbox: held detection, the monitor, the watchers' notes, and the next 
   assert.match(c.out, /already armed in another monitor; this one stops/);
 });
 
+// --once, for a background command in the lead's session: it holds the inbox while it waits, exits
+// with what came on the first pass that printed anything, and hands its cursor to the next.
+test("the inbox --once: holds while waiting, exits on the first message, prints nothing twice", { skip: noInboxLock }, async () => {
+  const dir = tempWorkspace();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const ws = openWorkspace(dir);
+  const once = () => {
+    const mon = spawn(process.execPath, [CLI, "--workspace", dir, "board", "--inbox", "--once"], { env: { ...process.env, SF_NOTIFY: "0" } });
+    const m = { mon, out: "" };
+    mon.stdout.on("data", (b: Buffer) => (m.out += b));
+    after(() => mon.kill());
+    return m;
+  };
+  const a = once();
+  await until("the wait to hold the inbox", () => inboxHeld(ws));
+  await new Promise((r) => setTimeout(r, 600));
+  assert.equal(a.mon.exitCode, null, "nothing came, so it still waits");
+  postMessage(ws, "wake up");
+  await until("the wait to exit", () => a.mon.exitCode !== null);
+  assert.equal(a.mon.exitCode, 0);
+  assert.match(a.out, /\[from the message page\] \[m:[0-9a-f]{6}\] wake up\n$/);
+  await until("the lock to go with it", () => !inboxHeld(ws));
+  leaveNote(ws, "[round]\nafter the first wait");
+  const b = once();
+  await until("the second wait to exit", () => b.mon.exitCode !== null);
+  assert.ok(!b.out.includes("wake up"), `nothing printed twice:\n${b.out}`);
+  assert.match(b.out, /after the first wait/);
+});
+
 test("the server: pages, the snapshot, posting, and only the tail of the log", { skip: noInboxLock }, async () => {
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));

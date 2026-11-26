@@ -72,7 +72,7 @@ test("a stopped lead is resumed with a first turn that arms the message page inb
   const [s] = started;
   assert.equal(s!.cwd, "/x/lead", "resumed where the conversation was");
   assert.equal(s!.prompt, resumePrompt(ws));
-  assert.match(s!.prompt, /Monitor with command `.* board --inbox`/);
+  assert.match(s!.prompt, /`.* board --inbox --once` with Bash, run_in_background true/);
   const i = s!.args.indexOf("--resume");
   assert.deepEqual(s!.args.slice(i, i + 3), ["--resume", UUID, s!.prompt], "the session id, then the prompt last");
   assert.equal(s!.args[0], "--bg");

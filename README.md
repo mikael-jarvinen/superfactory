@@ -137,7 +137,7 @@ The lead:
 | `factory state <KEY> <new-state>` | Move a work item. `factory state --list` shows every open one. Work nobody is doing yet waits in the tracker's backlog, not on the board, and a dispatch brings it on. LOCAL- work, with no backlog to wait in, is recorded off the board with `factory state <KEY> off --title "<what it is>"`, and `factory state --off` lists it. |
 | `factory drop <LOCAL-key>` | Delete a local work item's record. |
 | `factory say "<text>"` | Post to the message page. |
-| `factory board --inbox` | Follow the message page, for a monitor in the lead's session. |
+| `factory board --inbox [--once]` | Follow the message page for the lead's session. `--once` exits after the first message or note, so a background command wakes the lead only then. |
 | `factory pr-wait <repo> <n> <sha>` | Wait for the gate, then send the PR. |
 | `factory pr-ready`, `pr-send`, `delta-range` | The gate's parts, one at a time. |
 | `factory pr-comment ...` | Reply inside a review bot's thread. |
