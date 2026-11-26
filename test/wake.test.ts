@@ -512,8 +512,8 @@ function webRepo(ws: string) {
     execFileSync("git", ["-C", web, ...a]);
 }
 
-test("the first fix round stops the build session and starts a fresh one on the handoff; later rounds keep it", () => {
-  const { ws, calls, starts } = fakeFleet();
+test("every redo and every fix round stops the item's session and starts a fresh one on the handoff", () => {
+  const { ws, put, calls, starts } = fakeFleet();
   webRepo(ws);
   const rec = () => JSON.parse(readFileSync(join(ws, "state", "TEST-50.json"), "utf8")) as { state: string; worktree: string; fix_session?: string };
   let r = factory(ws, ["dispatch", "bea", "TEST-50", "--title", "Fix the export"]);
@@ -521,39 +521,51 @@ test("the first fix round stops the build session and starts a fresh one on the 
   const wt = rec().worktree;
   const handoff = `${wt}.handoff.md`;
   assert.match(r.stdout, /bea started \(new1\) for TEST-50 as a BUILDING session/);
-  assert.ok(starts()[0]!.includes(`write the handoff for the fix round to ${handoff}`), starts()[0]);
+  assert.ok(starts()[0]!.includes(`write the handoff there: the branch, the head sha`), starts()[0]);
   assert.equal(rec().fix_session, undefined);
-  // a re-brief while building goes to the build session
+  // a redo while building: a fresh building session in the same worktree
   r = factory(ws, ["dispatch", "bea", "TEST-50"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /bea is still on TEST-50 \(new1\), so it keeps its context/);
+  assert.match(r.stdout, /^bea's build session on TEST-50 stopped \(new1\); the redo starts fresh in the same worktree$/m);
+  assert.match(r.stdout, /bea started \(new2\) for TEST-50 as a BUILDING session/);
+  assert.match(r.stdout, /the redo: what to change, the branch and its head sha/);
+  assert.ok(starts()[1]!.includes(`read the handoff at ${handoff} first`), starts()[1]);
+  assert.deepEqual([rec().state, rec().worktree], ["building", wt]);
   for (const a of [["pr-open", "--pr", "acme/web#5", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"]])
     assert.equal(factory(ws, ["state", "TEST-50", ...a]).status, 0);
 
   r = factory(ws, ["dispatch", "bea", "TEST-50"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /^bea's build session on TEST-50 stopped \(new1\); the fix round starts fresh in the same worktree$/m);
-  assert.match(r.stdout, /bea started \(new2\) for TEST-50 as a FIX ROUND session/);
+  assert.match(r.stdout, /^bea's build session on TEST-50 stopped \(new2\); the fix round starts fresh in the same worktree$/m);
+  assert.match(r.stdout, /bea started \(new3\) for TEST-50 as a FIX ROUND session/);
   assert.match(r.stdout, new RegExp(`fix round: it reads the handoff, ${handoff.replace(/[.]/g, "\\.")}`));
-  assert.ok(calls().includes("stop new1") && calls().includes("rm new1"), "the build session is stopped and removed");
-  assert.equal(starts().length, 2);
-  const fix = starts()[1]!;
+  assert.ok(calls().includes("stop new2") && calls().includes("rm new2"), "the build session is stopped and removed");
+  const fix = starts()[2]!;
   assert.match(fix, /--name bea --model opus --effort high .*FIX ROUND, in a fresh session/);
-  assert.ok(fix.includes(`the handoff at ${handoff}`), fix);
-  assert.deepEqual([rec().state, rec().worktree, rec().fix_session], ["fixing", wt, "new2"], "same worktree, the fix session recorded");
+  assert.ok(fix.includes(`handoff at ${handoff}`), fix);
+  assert.match(fix, /The next round is a fresh session/);
+  assert.deepEqual([rec().state, rec().worktree, rec().fix_session], ["fixing", wt, "new3"], "same worktree, the fix session recorded");
 
-  // the next round goes to the fix session
+  // the next round, back from review: the fix session is stopped for a fresh one
   assert.equal(factory(ws, ["state", "TEST-50", "agent-review", "--evidence", "round 2 sent"]).status, 0);
   r = factory(ws, ["dispatch", "bea", "TEST-50"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /bea is still on TEST-50 \(new2\), so it keeps its context/);
-  assert.equal(starts().length, 2, "no new session");
-  assert.deepEqual([rec().state, rec().fix_session], ["fixing", "new2"]);
-  // and the round after, with the item already fixing
+  assert.match(r.stdout, /^bea's fix session on TEST-50 stopped \(new3\); the fix round starts fresh/m);
+  assert.deepEqual([rec().state, rec().fix_session], ["fixing", "new4"]);
+  // and a round with the item still fixing
   r = factory(ws, ["dispatch", "bea", "TEST-50"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /that is the fix session, which keeps later rounds/);
-  assert.equal(starts().length, 2);
+  assert.match(r.stdout, /^bea's fix session on TEST-50 stopped \(new4\)/m);
+  assert.deepEqual([rec().state, rec().fix_session], ["fixing", "new5"]);
+  assert.equal(starts().length, 5);
+
+  // a session mid-turn is never stopped for a round: the dispatch refuses and stops nothing
+  put("live.json", [sess("new5", "bea", { state: "working", cwd: wt })]);
+  r = factory(ws, ["dispatch", "bea", "TEST-50"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /bea is mid-turn on TEST-50 \(new5\).*dispatch again once it is idle/s);
+  assert.ok(!calls().includes("stop new5"));
+  assert.equal(starts().length, 5);
 });
 
 test("a fix round on an item whose session is off starts a fresh one on the handoff", () => {
@@ -662,7 +674,7 @@ role = "designer"
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual([rec("TEST-30").state, rec("TEST-30").title], ["building", "Rename the export"], "the builder's record has the tracker's title");
   assert.doesNotMatch(r.stdout, /no title/);
-  // the first fix round stops the build session for a fresh one, and takes --title all the same
+  // the fix round stops the build session for a fresh one, and takes --title all the same
   const wt = (JSON.parse(readFileSync(join(ws, "state", "TEST-30.json"), "utf8")) as { worktree: string }).worktree;
   put("live.json", [sess("new1", "bea", { state: "idle", cwd: wt })]);
   for (const args of [["pr-open", "--pr", "acme/web#1", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "reviewer briefed"], ["fixing", "--evidence", "2 high"]])

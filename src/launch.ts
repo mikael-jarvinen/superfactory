@@ -175,8 +175,12 @@ export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string,
 
 const leadName = (ws: Workspace) => capitalize(lead(ws).name);
 
-// The handoff a build session leaves for its fix round: beside the worktree, so never committed.
+// The handoff each session on an item leaves for the next, beside the worktree, so never committed:
+// every brief, redo and fix round is a fresh session (cmdDispatch), and this is what it starts from.
 export const handoffPath = (wt: string) => `${wt.replace(/\/+$/, "")}.handoff.md`;
+
+// What the handoff holds, kept short so a fresh session reads it in one go.
+const HANDOFF = "the branch, the head sha, the one command that runs the checks, and what is open";
 
 const localNote = (ticket: string) => isLocal(ticket)
   ? " This item has no tracker ticket, and its key is factory bookkeeping: leave it out of the " +
@@ -188,21 +192,21 @@ export function buildingPrompt(ws: Workspace, agent: Agent, ticket: string, hand
     `the worktree on branch ${branchFor(ticket)}. Read the repo rules in this directory, then reply exactly ` +
     `READY and wait for ${leadName(ws)}'s brief. The brief is the whole specification: there is no plan ` +
     `artifact and nothing else is coming. Do not start before it arrives.` +
-    (handoff ? ` When you open the PR, write the handoff for the fix round to ${handoff}: what was built, ` +
-      `decisions and why, where things are, how to run the checks, what is open.` : "") +
+    (handoff ? ` A redo of work already on the branch says so: then read the handoff at ${handoff} first. ` +
+      `When you open the PR, and after each push, write the handoff there: ${HANDOFF}.` : "") +
     localNote(ticket);
 }
 
-// A fix round starts fresh in the build's worktree and comes back in through the handoff, which the
-// build session wrote when it opened the PR: what it built, never the findings, which come by message.
+// A fix round starts fresh in the build's worktree and comes back in through the handoff. The round's
+// findings are appended to it, by the reviewer or the lead, or come by message.
 export function fixingPrompt(ws: Workspace, agent: Agent, ticket: string, handoff: string): string {
   return `You are ${capitalize(agent.name)}. Your work item is ${ticket}, and this is its FIX ROUND, in a fresh ` +
     `session in the worktree on branch ${branchFor(ticket)}. Read the repo rules in this directory and the ` +
-    `handoff at ${handoff}, which the build session wrote when it opened the PR: what it built, decisions, ` +
-    `where things are and how to run the checks. It can be missing, for an item built before handoffs. The ` +
-    `review findings are not in it: they come by message, from the reviewer or ${leadName(ws)}. Reply exactly ` +
-    `READY and wait for them. Then fix them, run the tests and lint as one command, push, and send the new sha ` +
-    `straight to the reviewer. Later rounds come to this session.` + localNote(ticket);
+    `handoff at ${handoff}: ${HANDOFF}, and this round's findings at its end. It can be missing, for an item ` +
+    `built before handoffs. With the findings there, start on them; with none, reply exactly READY and wait ` +
+    `for them by message, from the reviewer or ${leadName(ws)}. Fix them, run the tests and lint as one ` +
+    `command, push, rewrite the handoff with the new head sha and without the findings, and send the sha ` +
+    `straight to the reviewer. The next round is a fresh session.` + localNote(ticket);
 }
 
 export const reviewerPrompt = (ws: Workspace) =>

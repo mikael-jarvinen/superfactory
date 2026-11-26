@@ -95,11 +95,12 @@ test("the build session is told where to write the handoff, and the fix round wh
   const wt = "/w/repos/web/.claude/worktrees/TEST-1/";
   assert.equal(handoffPath(wt), "/w/repos/web/.claude/worktrees/TEST-1.handoff.md", "beside the worktree, never in it");
   const b = buildingPrompt(w, bea, "TEST-1", handoffPath(wt));
-  assert.match(b, /When you open the PR, write the handoff for the fix round to \/w\/repos\/web\/\.claude\/worktrees\/TEST-1\.handoff\.md/);
+  assert.match(b, /read the handoff at \/w\/repos\/web\/\.claude\/worktrees\/TEST-1\.handoff\.md first\. When you open the PR, and after each push, write the handoff there: the branch, the head sha/);
   assert.doesNotMatch(buildingPrompt(w, bea, "TEST-1"), /handoff/);
   const f = fixingPrompt(w, bea, "TEST-1", handoffPath(wt));
   assert.match(f, /FIX ROUND, in a fresh session/);
   assert.match(f, /the handoff at \/w\/repos\/web\/\.claude\/worktrees\/TEST-1\.handoff\.md/);
-  assert.match(f, /The review findings are not in it: they come by message, from the reviewer or Ada\. Reply exactly READY and wait for them/);
-  assert.doesNotMatch(f, /holds what the build did and the review findings/);
+  assert.match(f, /this round's findings at its end.*With the findings there, start on them; with none, reply exactly READY and wait for them by message, from the reviewer or Ada\./);
+  assert.match(f, /rewrite the handoff with the new head sha and without the findings.*The next round is a fresh session\./);
+  assert.doesNotMatch(f, /Later rounds come to this session/);
 });

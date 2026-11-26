@@ -107,7 +107,7 @@ export interface Rec {
   design?: Design;
   // the designer session this item was last dispatched to, so a second round can keep its context
   session?: string;
-  // the builder session a fix round started fresh in, so later rounds on it keep that session
+  // the builder session the latest fix round started fresh in
   fix_session?: string;
   // The review states this item has ever entered, set as it enters one and never cleared. A PR is
   // kept open from then on (keptOpen). Records older than the field are given it on load (migrated).
