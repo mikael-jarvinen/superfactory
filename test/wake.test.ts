@@ -3,7 +3,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { after, test } from "node:test";
+import { after, test, type TestContext } from "node:test";
 import { defaultLogsDir } from "../src/config.js";
 import { wakeHookLog } from "../src/failures.js";
 import { agentOrDie } from "../src/fleet.js";
@@ -364,6 +364,14 @@ test("a wake waits on the agent's start lock, and fails without starting when it
   }
 });
 
+// The library's calls to claude go to this fake one until the test ends.
+function useClaude(t: TestContext, dir: string) {
+  const was = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = join(dir, "bin", "claude");
+  t.after(() => (was === undefined ? delete process.env.CLAUDE_BIN : (process.env.CLAUDE_BIN = was)));
+}
+// flock(1) is util-linux's; lock.ts's darwin path is covered by the lock tests that need no child.
+const noFlock = process.platform !== "linux" && "holding the lock from another process uses flock(1), on Linux";
 // Holds the agent's start lock from another process, as a second start would, for ms; resolves once
 // it is held.
 function holdStartLock(ws: ReturnType<typeof openWorkspace>, name: string, ms: number, then = "") {
@@ -375,16 +383,14 @@ function holdStartLock(ws: ReturnType<typeof openWorkspace>, name: string, ms: n
   while (!existsSync(held)) if (Date.now() > until) assert.fail("the lock was never held"); else execFileSync("sleep", ["0.02"]);
   return c;
 }
-test("a wake behind another start waits for it, then finds its session live and starts none", () => {
+test("a wake behind another start waits for it, then finds its session live and starts none", { skip: noFlock }, (t) => {
   const { ws: dir, put, starts } = fakeFleet();
   const ws = openWorkspace(dir, {});
   // the other start lists rae live just before it lets go
   writeFileSync(join(dir, "rae-row.json"), JSON.stringify([sess("first", "rae", { state: "idle" })]));
   holdStartLock(ws, "rae", 800, `cp ${join(dir, "rae-row.json")} ${join(dir, "live.json")}`);
   put("live.json", []);
-  const was = process.env.CLAUDE_BIN;
-  process.env.CLAUDE_BIN = join(dir, "bin", "claude");
-  after(() => (was === undefined ? delete process.env.CLAUDE_BIN : (process.env.CLAUDE_BIN = was)));
+  useClaude(t, dir);
   const t0 = Date.now();
   const w = wake(ws, agentOrDie(ws, "rae"));
   assert.ok(Date.now() - t0 >= 600, "waited for the other start");
@@ -392,7 +398,7 @@ test("a wake behind another start waits for it, then finds its session live and 
   assert.equal((w as { s: { id: string } }).s.id, "first");
   assert.deepEqual(starts(), [], "no second session under the name");
 });
-test("a dispatch's start waits on the agent's start lock too", () => {
+test("a dispatch's start waits on the agent's start lock too", { skip: noFlock }, () => {
   const { ws: dir, starts } = fakeFleet();
   webRepo(dir);
   const ws = openWorkspace(dir, {});
@@ -404,8 +410,9 @@ test("a dispatch's start waits on the agent's start lock too", () => {
   assert.equal(starts().length, 1);
 });
 
-test("a started session whose settings cannot be rendered fails the wake, saying why", () => {
+test("a started session whose settings cannot be rendered fails the wake, saying why", (t) => {
   const dir = fakeFleet().ws;
+  useClaude(t, dir);
   const ws = openWorkspace(dir, {});
   const rae = agentOrDie(ws, "rae");
   (ws.config.roles[rae.role] as { settings: string }).settings = join(dir, "gone.json");
