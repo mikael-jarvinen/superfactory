@@ -284,6 +284,11 @@ export function followInbox(ws: Workspace, out: (line: string) => void = writeLi
 // transcript beside the current one is read, so a restarted session keeps its old receipts, and each
 // is read incrementally because one runs to tens of megabytes.
 const MARK = /\[m:([0-9a-f]{6})\]/g;
+// In a tool's output, only what `board --inbox` printed counts: an id that opens a line, alone (a
+// note) or after pageText's prefix, as the command's stdout, BashOutput's <stdout> or a Read of its
+// output file ("     1→") shows it. Anything else that names an id, the watchdog's own
+// "ALERT, [m:id]" line in a log the lead reads, is not a message reaching it.
+const PRINTED = /^(?:\s*\d+→)?(?:<stdout>)?(?:\[from the message page\] )?\[m:([0-9a-f]{6})\]/gm;
 const CHUNK = 4 * 1024 * 1024;
 
 export class Receipts {
@@ -347,7 +352,7 @@ export class Receipts {
     } catch {
       return;
     }
-    const ids = (s: unknown) => [...String(s ?? "").matchAll(MARK)].map((m) => m[1] as string);
+    const ids = (s: unknown, re = MARK) => [...String(s ?? "").matchAll(re)].map((m) => m[1] as string);
     const kind = d.type;
     if (kind === "assistant") {
       for (const id of pending) this.seen.add(id);
@@ -359,17 +364,18 @@ export class Receipts {
       return;
     }
     let text: unknown;
+    let re = MARK;
     if (kind === "user" && typeof d.message?.content === "string") text = d.message.content;
     // a message read by a tool, as `board --inbox --once` run with Bash hands it over: in the
-    // tool_result's content, a string or text blocks
+    // tool_result's content, a string or text blocks, and only as PRINTED
     else if (kind === "user" && Array.isArray(d.message?.content))
-      text = d.message.content
+      (re = PRINTED), (text = d.message.content
         .filter((c: any) => c?.type === "tool_result")
         .map((c: any) => (typeof c.content === "string" ? c.content : Array.isArray(c.content) ? c.content.map((b: any) => b?.text ?? "").join("\n") : ""))
-        .join("\n");
+        .join("\n"));
     else if (kind === "attachment" && d.attachment?.type === "queued_command") text = d.attachment.prompt;
     else return;
-    for (const id of ids(text)) {
+    for (const id of ids(text, re)) {
       this.delivered.add(id);
       if (!this.seen.has(id)) pending.add(id);
     }

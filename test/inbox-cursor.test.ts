@@ -125,3 +125,25 @@ test("a message read through a Bash tool_result is delivered, then seen at the n
   r.read(t);
   assert.deepEqual([r.receipt("abc123"), r.receipt("def456")], ["seen", "seen"]);
 });
+
+// Only what `board --inbox` printed counts in a tool's output, in each shape it reaches the lead:
+// the command's stdout, BashOutput's, a Read of the background command's output file, a note. A
+// log line that names an id, the watchdog's own alert above all, is not the message reaching it.
+test("in a tool_result only board --inbox's own lines count; the watchdog's log line marks nothing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "receipts-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const t = join(dir, "lead.jsonl");
+  const put = (d: unknown) => appendFileSync(t, JSON.stringify(d) + "\n");
+  const result = (content: unknown) => put({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu", content }] } });
+  result("2026-11-26T10:00:00.000Z watchdog: ALERT, [m:aaaaaa] unseen by niilo for 14 min\n" +
+    "2026-11-26T10:05:00.000Z watchdog: niilo has seen [m:bbbbbb] or a later message, episode over");
+  result([{ type: "text", text: 'grep: {"id":"cccccc","text":"[m:cccccc] quoted"}' }]);
+  result("     1→[from the message page] [m:dddddd] from the output file\n     2→[m:eeeeee] a note");
+  result("<stdout>[from the message page] [m:ffffff] via BashOutput\n</stdout>");
+  result("[from the message page] [m:121212] on stdout");
+  put({ type: "assistant", message: { content: [{ type: "text", text: "on it" }] } });
+  const r = new Receipts();
+  r.read(t);
+  assert.deepEqual(["aaaaaa", "bbbbbb", "cccccc"].map((id) => r.receipt(id)), ["sent", "sent", "sent"]);
+  assert.deepEqual(["dddddd", "eeeeee", "ffffff", "121212"].map((id) => r.receipt(id)), ["seen", "seen", "seen", "seen"]);
+});
