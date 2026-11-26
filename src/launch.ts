@@ -186,7 +186,7 @@ const HANDOFF = "the branch, the head sha, the one command that runs the checks,
 // dispatches the fix round, which stops that session. The reviewer's report ends with its Reviewed
 // line, so the findings are stamped with the head they were found at, and a later round can tell
 // them from a round already fixed.
-export const REVIEWED_RE = /^Reviewed \S+#\d+ at ([0-9a-f]{7,40})\s*$/gm;
+const REVIEWED_RE = /^Reviewed \S+#\d+ at ([0-9a-f]{7,40})\s*$/gm;
 const findingsRule = (ws: Workspace, next = false) =>
   `When ${next ? "the next" : "a"} round's findings reach you, do not fix them in this session. Append them to the handoff verbatim ` +
   `under "## Findings", first the last line of the reviewer's report, "Reviewed <owner/repo>#<N> at <sha>". ` +

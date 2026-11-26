@@ -65,7 +65,9 @@ export const WAITING_ON_LEAD: ReadonlySet<string> = new Set(["pr-open", "agent-r
 // An item in review frees its builder and its stack slot, so both can work on something else.
 export const IN_REVIEW: ReadonlySet<string> = new Set(["your-review", "colleague-review"]);
 // Where a dispatch makes sense without argument. Anywhere else is a judgement, so it needs --force.
-export const DISPATCHABLE: ReadonlySet<string | null> = new Set([null, "building", "fixing"]);
+// The states a dispatch on the item's own session redoes: before review, the state stays.
+export const REDO: ReadonlySet<string | null> = new Set(["building", "pr-open"]);
+export const DISPATCHABLE: ReadonlySet<string | null> = new Set([null, ...REDO, "fixing"]);
 // The same for a designer: a new design, or another round on one the human sent back.
 export const DESIGN_DISPATCHABLE: ReadonlySet<string | null> = new Set([null, "designing", "design-review"]);
 

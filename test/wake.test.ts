@@ -599,7 +599,14 @@ test("a building item whose session is off is briefed as a redo; a done item is 
   let r = factory(ws, ["dispatch", "bea", "TEST-56"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /next: SendMessage to bea: the redo: what to change, the branch and its head sha/);
-  for (const a of [["pr-open", "--pr", "acme/web#10", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "b"], ["gate", "--evidence", "c"], ["your-review", "--reviewed", "abc1234abc1234"], ["done", "--evidence", "merged"]])
+  assert.equal(factory(ws, ["state", "TEST-56", "pr-open", "--pr", "acme/web#10", "--head", "abc1234abc1234"]).status, 0);
+  rmSync(join(ws, "live.json"), { force: true });
+  r = factory(ws, ["dispatch", "bea", "TEST-56"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /as a BUILDING session/);
+  assert.match(r.stdout, /next: SendMessage to bea: the redo: what to change, the branch and its head sha/);
+  assert.equal((JSON.parse(readFileSync(join(ws, "state", "TEST-56.json"), "utf8")) as { state: string }).state, "pr-open");
+  for (const a of [["agent-review", "--evidence", "b"], ["gate", "--evidence", "c"], ["your-review", "--reviewed", "abc1234abc1234"], ["done", "--evidence", "merged"]])
     assert.equal(factory(ws, ["state", "TEST-56", ...a]).status, 0, a.join(" "));
   put("live.json", [sess("new2", "bea", { state: "idle", cwd: wt })]);
   r = factory(ws, ["dispatch", "bea", "TEST-56"]);
@@ -872,7 +879,11 @@ repos = ["web", "api"]
   // a session in no local repo's worktree (a hosted builder's path, say): the record's stack, and
   // the --repo it overrides is said, with where the stack came from
   put("live.json", [sess(fixSession(ws, "TEST-40"), "kit", { state: "idle", cwd: "/far/worktrees/TEST-40" })]);
+  // whose handoff cannot be read here, so its findings are taken on --findings-checked only
   r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "web"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /worktree \/far\/worktrees\/TEST-40 is not here, so the handoff's findings cannot be checked.*--findings-checked/);
+  r = factory(ws, ["dispatch", "kit", "TEST-40", "--repo", "web", "--findings-checked"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^--repo web ignored: kit is kept on api, the stack TEST-40's record has$/m);
 
@@ -895,7 +906,7 @@ repos = ["web", "api"]
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^--repo api ignored: bea is kept in web's worktree$/m);
   put("live.json", [sess(fixSession(ws, "TEST-41"), "bea", { state: "idle", cwd: "/far/worktrees/TEST-41" })]);
-  r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "api"]);
+  r = factory(ws, ["dispatch", "bea", "TEST-41", "--repo", "api", "--findings-checked"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^--repo api not checked: bea's session is in no local worktree$/m);
 });

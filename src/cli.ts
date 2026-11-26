@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
@@ -42,7 +41,7 @@ import { cmdStack, STACK_USAGE } from "./stacks/command.js";
 import { cmdTicket, cmdWiki, TICKET_USAGE } from "./tickets/cli.js";
 import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/engine.js";
 import {
-  allRecs, appendEvent, BUSY, OFF, onBoard, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, removePr, removeRec, saveRec, showRec, transition, TRANSITIONS, validKey,
+  allRecs, appendEvent, BUSY, OFF, onBoard, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, REDO, removePr, removeRec, saveRec, showRec, transition, TRANSITIONS, validKey,
 } from "./state.js";
 import { trackerTitle } from "./tracker/title.js";
 import { chars, FactoryError, firstSentence, now, pyDumps, pyRepr, run, sleep, squash, wrap } from "./util.js";
@@ -51,7 +50,7 @@ import { runQueue } from "./watchers/queue.js";
 import { runRound } from "./watchers/round.js";
 import { runReviews } from "./watchers/reviews.js";
 import { openWorkspace, resolveWorkspace, type Workspace } from "./workspace.js";
-import { worktreePath } from "./worktree.js";
+import { git, worktreePath } from "./worktree.js";
 
 const USAGE = `factory: start, stop, dispatch and track a fleet of Claude Code sessions.
 
@@ -67,16 +66,18 @@ usage: factory [--workspace <dir>] <command> [options]
   restart-lead                    stop the lead, then up: a fresh session
   status [--all]                  sessions joined with the state store
   sessions [--all] [--fleet]      raw \`claude agents --json\`, or one line per fleet member
-  dispatch <agent> <KEY> [--repo <repo>] [--prompt-file <f>] [--title T] [--force]
+  dispatch <agent> <KEY> [--repo <repo>] [--prompt-file <f>] [--title T] [--force] [--findings-checked]
                                   fresh building session for one item in a per-item worktree.
-                                  Dispatch from the backlog, off the board, building or fixing; anywhere else needs
+                                  Dispatch from the backlog, off the board, building, pr-open or fixing; anywhere else needs
                                   --force. Every redo and fix round is a fresh session: a live
                                   session on KEY is stopped (refused while it is mid-turn) and a
                                   new one starts in the same worktree from the handoff
                                   (<worktree>.handoff.md). Past pr-open it records fixing, and
                                   is refused until the handoff holds findings at the branch's
-                                  head. An item whose session is off starts a fresh one, never
-                                  its old conversation. --force stops a session mid-turn.
+                                  head; --findings-checked skips that check, which a worktree on a
+                                  host or another machine cannot get. An item whose session is
+                                  off starts a fresh one, never its old conversation. --force
+                                  stops a session mid-turn.
                                   For a designer: a design session in the designers' cwd, no
                                   worktree, from the backlog or off the board (records designing) or design-review
                                   (another round, on the live session, else a fresh one).
@@ -342,9 +343,10 @@ function blockedCardLines(ws: Workspace, ticket: string): string[] {
 }
 
 function cmdDispatch(ws: Workspace, argv: string[]) {
-  const { v, p } = args("dispatch", argv, { repo: { type: "string" }, "prompt-file": { type: "string" }, title: { type: "string" }, force: { type: "boolean" } }, [2, 2]);
+  const { v, p } = args("dispatch", argv, { repo: { type: "string" }, "prompt-file": { type: "string" }, title: { type: "string" }, force: { type: "boolean" }, "findings-checked": { type: "boolean" } }, [2, 2]);
   const [name, ticket] = p as [string, string];
   const force = !!v.force;
+  const checked = !!v["findings-checked"];
   const ag = agentOrDie(ws, name);
   if (!validKey(ws, ticket)) throw new FactoryError(`${pyRepr(ticket)} is ${KEY_HINT}`);
   if (ag.role === "designer") {
@@ -402,7 +404,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
     // refusal stops nothing; the worktree, and anything left in it, stays. The state moves to fixing
     // only once the fresh session is up, so a start that fails leaves the item where it was, and the
     // same dispatch, run again, starts it.
-    const isRedo = cur === "building" || cur === "pr-open";
+    const isRedo = REDO.has(cur);
     if (on === ticket && !force && cur && (isRedo || cur === "fixing" || TRANSITIONS[cur].has("fixing"))) {
       keep();
       if (midTurn(s))
@@ -414,9 +416,11 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
         repo = ws.config.repos[k]!;
         stack = ag.stack ?? k;
       }
-      if (!isRedo && !ag.host && !existsSync(at))
-        console.log(`warning: ${name}'s worktree ${at} is not here, so the handoff's findings went unchecked`);
-      else if (!isRedo && !ag.host) {
+      if (!isRedo && !checked && (ag.host || !existsSync(at)))
+        throw new FactoryError(`${name}'s worktree ${at} is ${ag.host ? `on ${ag.host}` : "not here"}, so the handoff's ` +
+          `findings cannot be checked, and the round would stop ${name}'s session (${s.id}), which may hold the only copy. ` +
+          `Once ${name} has said "findings in handoff", dispatch again with --findings-checked.`);
+      else if (!isRedo && !checked) {
         const ho = handoffPath(at);
         let text = "", head = "";
         try {
@@ -424,11 +428,8 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
         } catch {
           // no handoff yet
         }
-        try {
-          head = execFileSync("git", ["-C", at, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-        } catch {
-          // no checkout to read
-        }
+        const r = git(at, "rev-parse", "HEAD");
+        if (r.status === 0) head = r.stdout.trim();
         if (!head || !findingsAt(text, head))
           throw new FactoryError(`${ho} holds no findings at ${name}'s head ${head ? head.slice(0, 12) : "(unread)"}, so this ` +
             `round's are only in ${name}'s session (${s.id}), which the round would stop. Wait for its "findings in ` +
@@ -441,7 +442,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
       redo = isRedo;
       fixRound = !isRedo;
     } else if (on === ticket && !force && cur !== null) {
-      throw new FactoryError(`${ticket} is ${cur}; a dispatch makes no sense there. Use \`factory state\` first.`);
+      throw notDispatchable(ticket, cur);
     } else if (on === ticket && !force) {
       // An item taken off the board while its session ran goes back on as building, as a fresh
       // dispatch would put it; off the board it can go nowhere else.
@@ -488,9 +489,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (fixOff && rec?.agent && rec.agent !== name)
     throw new FactoryError(`${ticket} is ${cur}, built by ${rec.agent}; its fix round is ${rec.agent}'s. ` +
       `To hand it to ${name}, \`factory state ${ticket} fixing --agent ${name}\` first.`);
-  if (!DISPATCHABLE.has(cur) && !force && !fixRound && !redo && !fixOff)
-    throw new FactoryError(`${ticket} is ${cur}; a dispatch makes no sense there. Use \`factory state\` first, ` +
-      `or --force if you mean it (a verification run on a sent PR, say).`);
+  if (!DISPATCHABLE.has(cur) && !force && !fixRound && !redo && !fixOff) throw notDispatchable(ticket, cur);
   const { appendix, given } = inputs();
   const { wt, how } = t.worktree({ agent: ag, repo, ticket, toolWritten: ws.config.worktree.toolWritten });
   // A hosted builder has no stack, so there is no slot to check.
@@ -521,8 +520,12 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (d?.approved) console.log(`  design approved by ${ws.config.human.name} (${d.approved_at}): slides ${d.slides} canvas ${d.canvas}. The brief carries it.`);
   else if (d) console.log(`  warning: ${ticket} has a design ${ws.config.human.name} has not approved (${d.slides ?? d.canvas ?? "no link"})`);
   if (fixing) console.log(`  fix round: it reads the handoff, ${handoffPath(wt)}, and fixes the findings there at the branch's head; with none, have the reviewer resend them to ${name}`);
-  else console.log(`  next: SendMessage to ${name}: ${redo || cur === "building" || cur === "pr-open" ? "the redo: what to change, the branch and its head sha" : "what to build, the scope"}, and notify_when_idle`);
+  else console.log(`  next: SendMessage to ${name}: ${REDO.has(cur) ? "the redo: what to change, the branch and its head sha" : "what to build, the scope"}, and notify_when_idle`);
 }
+
+const notDispatchable = (ticket: string, cur: string | null) =>
+  new FactoryError(`${ticket} is ${cur}; a dispatch makes no sense there. Use \`factory state\` first, ` +
+    `or --force if you mean it (a verification run on a sent PR, say).`);
 
 // A dispatch titles its record: --title, else the tracker's title when the record has none, so no
 // card shows a bare key. LOCAL- work with no title says how to give it one.
