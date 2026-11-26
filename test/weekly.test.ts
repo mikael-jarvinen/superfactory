@@ -198,6 +198,12 @@ test("on macOS the login is Claude Code's Keychain item, the file when there is 
     throw new Error("Claude Code's Keychain item could not be read (security exited 36)");
   });
   await assert.rejects(none(), /security exited 36/);
+  // and one that could not be read still falls back on the file when there is one
+  const locked = oauthUsage(() => cfg, fake, async () => {
+    throw new Error("Claude Code's Keychain item could not be read (security exited 36)");
+  });
+  await locked();
+  assert.equal(auth.at(-1), "Bearer from-file");
 
   assert.deepEqual(keychainItem({ USER: "someone" }), { service: "Claude Code-credentials", account: "someone" });
   const hash = createHash("sha256").update("/x/cfg").digest("hex").slice(0, 8);
