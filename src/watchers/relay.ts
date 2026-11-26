@@ -1,5 +1,5 @@
-// How a watcher reaches the lead: a note in the lead's notes log, which the inbox monitor in the
-// lead's session prints within a second. No model carries it. While no monitor is armed the note
+// How a watcher reaches the lead: a note in the lead's notes log, which the inbox holder in the
+// lead's session prints within a second. No model carries it. While no holder is armed the note
 // waits for the next one; the lead's Stop hook asks for one to be armed.
 import { leaveNote } from "../board/inbox.js";
 import { tryFailure } from "../failures.js";
