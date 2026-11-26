@@ -139,7 +139,9 @@ export const gitEnv = (over: GitOver = "https"): Record<string, string> => (over
 // One start of an agent at a time: a start, its wait to be listed and its removal of the agent's
 // ended rows run under this lock, so two starts never make two sessions under one name and the
 // removal never takes a start that is not yet live. A caller that checks for a live session first
-// (wake) takes it around the check, and passes locked.
+// (wake) takes it around the check, and passes locked. The lock is per machine, in ws.runDir: a
+// hosted agent woken from the primary and from its host at once takes two locks, and the daemon's
+// start route takes none, so that pair can still race. Known limit; the hook's wakes are local.
 export const startLock = (ws: Workspace, name: string) => join(ws.runDir, `start-${name}.lock`);
 const START_LOCK_WAIT_MS = 150_000;
 

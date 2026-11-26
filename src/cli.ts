@@ -456,6 +456,10 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   // PR is a verification or a re-brief, never told to fix.
   const fixOff = !force && cur !== null && cur !== "building" && cur !== "fixing" && TRANSITIONS[cur].has("fixing");
   const toFixing = fixRound ? cur !== "fixing" : fixOff;
+  // A fix round stays with its author: another agent takes it over only by `factory state` first.
+  if (fixOff && rec?.agent && rec.agent !== name)
+    throw new FactoryError(`${ticket} is ${cur}, built by ${rec.agent}; its fix round is ${rec.agent}'s. ` +
+      `To hand it to ${name}, \`factory state ${ticket} fixing --agent ${name}\` first.`);
   if (!DISPATCHABLE.has(cur) && !force && !fixRound && !fixOff)
     throw new FactoryError(`${ticket} is ${cur}; a dispatch makes no sense there. Use \`factory state\` first, ` +
       `or --force if you mean it (a verification run on a sent PR, say).`);

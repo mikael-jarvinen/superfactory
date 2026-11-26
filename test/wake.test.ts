@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -364,6 +364,46 @@ test("a wake waits on the agent's start lock, and fails without starting when it
   }
 });
 
+// Holds the agent's start lock from another process, as a second start would, for ms; resolves once
+// it is held.
+function holdStartLock(ws: ReturnType<typeof openWorkspace>, name: string, ms: number, then = "") {
+  const held = join(ws.dir, `held-${name}`);
+  mkdirSync(ws.runDir, { recursive: true });
+  const c = spawn("flock", [startLock(ws, name), "sh", "-c", `touch ${held}; sleep ${ms / 1000}; ${then}`], { stdio: "ignore" });
+  after(() => c.kill());
+  const until = Date.now() + 5_000;
+  while (!existsSync(held)) if (Date.now() > until) assert.fail("the lock was never held"); else execFileSync("sleep", ["0.02"]);
+  return c;
+}
+test("a wake behind another start waits for it, then finds its session live and starts none", () => {
+  const { ws: dir, put, starts } = fakeFleet();
+  const ws = openWorkspace(dir, {});
+  // the other start lists rae live just before it lets go
+  writeFileSync(join(dir, "rae-row.json"), JSON.stringify([sess("first", "rae", { state: "idle" })]));
+  holdStartLock(ws, "rae", 800, `cp ${join(dir, "rae-row.json")} ${join(dir, "live.json")}`);
+  put("live.json", []);
+  const was = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = join(dir, "bin", "claude");
+  after(() => (was === undefined ? delete process.env.CLAUDE_BIN : (process.env.CLAUDE_BIN = was)));
+  const t0 = Date.now();
+  const w = wake(ws, agentOrDie(ws, "rae"));
+  assert.ok(Date.now() - t0 >= 600, "waited for the other start");
+  assert.equal(w.is, "live", JSON.stringify(w));
+  assert.equal((w as { s: { id: string } }).s.id, "first");
+  assert.deepEqual(starts(), [], "no second session under the name");
+});
+test("a dispatch's start waits on the agent's start lock too", () => {
+  const { ws: dir, starts } = fakeFleet();
+  webRepo(dir);
+  const ws = openWorkspace(dir, {});
+  holdStartLock(ws, "bea", 800);
+  const t0 = Date.now();
+  const r = factory(dir, ["dispatch", "bea", "TEST-54", "--title", "Wait"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(Date.now() - t0 >= 600, "started only once the lock was let go");
+  assert.equal(starts().length, 1);
+});
+
 test("a started session whose settings cannot be rendered fails the wake, saying why", () => {
   const dir = fakeFleet().ws;
   const ws = openWorkspace(dir, {});
@@ -563,6 +603,21 @@ test("a fix round whose fresh start fails leaves the item in review, and the sam
   assert.match(r.stdout, /as a FIX ROUND session/);
   assert.equal(state(), "fixing");
   assert.equal(starts().length, 3);
+});
+
+test("a bare dispatch never takes another agent's fix round", () => {
+  const { ws, starts } = fakeFleet();
+  webRepo(ws);
+  assert.equal(factory(ws, ["dispatch", "bea", "TEST-55", "--title", "Mine"]).status, 0);
+  rmSync(join(ws, "live.json"));
+  for (const a of [["pr-open", "--pr", "acme/web#9", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "briefed"]])
+    assert.equal(factory(ws, ["state", "TEST-55", ...a]).status, 0);
+  const r = factory(ws, ["dispatch", "cal", "TEST-55"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /TEST-55 is agent-review, built by bea; its fix round is bea's\. To hand it to cal, `factory state TEST-55 fixing --agent cal` first\./);
+  assert.equal(starts().length, 1);
+  const rec = JSON.parse(readFileSync(join(ws, "state", "TEST-55.json"), "utf8")) as { agent: string; state: string };
+  assert.deepEqual([rec.agent, rec.state], ["bea", "agent-review"]);
 });
 
 // Waiting work has no record, so the dispatch that makes one titles it, and no card shows a bare
