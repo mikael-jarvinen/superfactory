@@ -137,7 +137,7 @@ test("the plan's samples: the actual line, its reset, and what 1% cost this week
 
 test("the plan's figure is read with Claude Code's login, which no error and no sample holds", async () => {
   const cfg = tempDir();
-  const TOKEN = "sk-ant-oat01-secret";
+  const TOKEN = "test-token";
   const seen: { url: string; headers: Record<string, string> }[] = [];
   let answer: () => Response = () => Response.json({ seven_day: { utilization: 24, resets_at: "2026-12-02T11:00:00.135500+00:00" } });
   const fake = (async (url: string, init: RequestInit) => {
@@ -193,10 +193,15 @@ test("on macOS the login is Claude Code's Keychain item, the file when there is 
   item = null;
   await read();
   assert.deepEqual(auth, ["Bearer from-keychain", "Bearer from-file"]);
+  // a Keychain that could not be read says why, when there is no file to fall back on
+  const none = oauthUsage(() => tempDir(), fake, async () => {
+    throw new Error("Claude Code's Keychain item could not be read (security exited 36)");
+  });
+  await assert.rejects(none(), /security exited 36/);
 
   assert.deepEqual(keychainItem({ USER: "someone" }), { service: "Claude Code-credentials", account: "someone" });
   const hash = createHash("sha256").update("/x/cfg").digest("hex").slice(0, 8);
-  assert.deepEqual(keychainItem({ USER: "a b", CLAUDE_CONFIG_DIR: "/x/cfg" }, () => "/x/cfg"), { service: `Claude Code-credentials-${hash}`, account: "claude-code-user" });
+  assert.deepEqual(keychainItem({ USER: "a b", CLAUDE_CONFIG_DIR: "/x/cfg" }), { service: `Claude Code-credentials-${hash}`, account: "claude-code-user" });
   assert.equal(keychainItem({ USER: "m", CLAUDE_CONFIG_DIR: "/x/cfg", CLAUDE_SECURESTORAGE_CONFIG_DIR: "" }).service, "Claude Code-credentials");
 });
 
@@ -241,9 +246,7 @@ test("the weekly chart is served and drawn: two lines, the limit, and each week'
   const cfg = tempDir();
   const was = process.env.CLAUDE_CONFIG_DIR;
   process.env.CLAUDE_CONFIG_DIR = cfg;
-  after(() => {
-    process.env.CLAUDE_CONFIG_DIR = was;
-  });
+  after(() => (was === undefined ? delete process.env.CLAUDE_CONFIG_DIR : (process.env.CLAUDE_CONFIG_DIR = was)));
   const proj = join(cfg, "projects", "-p");
   mkdirSync(proj, { recursive: true });
   const now = Date.now();

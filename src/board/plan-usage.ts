@@ -30,9 +30,9 @@ const URL = "https://api.anthropic.com/api/oauth/usage";
 
 // The Keychain item Claude Code keeps its login in on macOS: the service carries a hash of the
 // config dir when one is set apart from the default, and the account is the user's name.
-export function keychainItem(env: NodeJS.ProcessEnv = process.env, configDir: () => string = claudeConfigDir): { service: string; account: string } {
+export function keychainItem(env: NodeJS.ProcessEnv = process.env): { service: string; account: string } {
   const apart = env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
-  const dir = apart !== undefined ? apart : env.CLAUDE_CONFIG_DIR ? configDir() : "";
+  const dir = apart !== undefined ? apart : env.CLAUDE_CONFIG_DIR ?? "";
   const hash = dir ? "-" + createHash("sha256").update(dir.normalize("NFC")).digest("hex").slice(0, 8) : "";
   let user = "";
   try {
@@ -44,13 +44,20 @@ export function keychainItem(env: NodeJS.ProcessEnv = process.env, configDir: ()
 }
 
 // The Keychain item's text, or null when there is none; `security` prints it to its stdout only.
+// Any other failure rejects with a reason that holds its exit code, never its output: a locked
+// keychain (36, 51) when the board runs over ssh or from launchd, or a timeout, most likely an
+// access prompt nobody answered.
 export type Keychain = () => Promise<string | null>;
+const NO_ITEM = 44;
 const macKeychain: Keychain = () =>
-  new Promise((resolve) => {
+  new Promise((resolve, reject) => {
     const { service, account } = keychainItem();
-    execFile("security", ["find-generic-password", "-a", account, "-w", "-s", service], { encoding: "utf8", timeout: 10_000 }, (err, out) =>
-      resolve(err ? null : out.trim() || null),
-    );
+    execFile("security", ["find-generic-password", "-a", account, "-w", "-s", service], { encoding: "utf8", timeout: 10_000 }, (err, out) => {
+      if (!err) return resolve(out.trim() || null);
+      if (err.killed) return reject(new Error("reading Claude Code's Keychain item timed out, perhaps on an access prompt nobody answered"));
+      if (err.code === NO_ITEM) return resolve(null);
+      reject(new Error(`Claude Code's Keychain item could not be read (security exited ${typeof err.code === "number" ? err.code : "abnormally"})`));
+    });
   });
 
 export function oauthUsage(
@@ -61,14 +68,19 @@ export function oauthUsage(
   return async () => {
     let token: unknown, expires: unknown;
     let text: string | null = null;
-    if (keychain) text = await keychain().catch(() => null);
+    let keychainError: string | null = null;
+    if (keychain)
+      text = await keychain().catch((e: unknown) => {
+        keychainError = e instanceof Error ? e.message : "Claude Code's Keychain item could not be read";
+        return null;
+      });
     try {
       text ??= readFileSync(join(configDir(), ".credentials.json"), "utf8");
       const c = JSON.parse(text)?.claudeAiOauth;
       token = c?.accessToken;
       expires = c?.expiresAt;
     } catch {
-      throw new Error("there is no Claude Code login to read here");
+      throw new Error(keychainError ?? "there is no Claude Code login to read here");
     }
     if (typeof token !== "string" || !token) throw new Error("the Claude Code login has no access token");
     if (typeof expires === "number" && expires < Date.now()) throw new Error("the Claude Code login has expired; it is read again after Claude Code refreshes it");
