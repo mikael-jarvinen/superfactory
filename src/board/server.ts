@@ -16,6 +16,8 @@ import { roster } from "../config.js";
 import { capitalize, firstSentence, run, sleep } from "../util.js";
 import { refreshHosts, report, type Report, TranscriptUsage } from "./analytics.js";
 import type { Runner } from "./remote-transcripts.js";
+import { oauthUsage, type PlanFetch, PlanUsage, POLL_EVERY } from "./plan-usage.js";
+import { weekly, type Weekly, WEEKLY_SINCE } from "./weekly.js";
 import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, saveAttachment } from "./inbox.js";
 import { markSeen, readSeen } from "./seen.js";
 import { markHandled, messageId, queueCards, queueTrouble, WAITING_KINDS } from "./queue.js";
@@ -525,6 +527,9 @@ export interface ServeOptions {
   receipts?: Receipts;
   // How the analytics read another host's transcripts; ssh to its hosts.<name>.ssh by default.
   transcripts?: (host: string) => Runner;
+  // How the weekly chart reads the plan's own weekly utilization; the endpoint /usage reads, with
+  // Claude Code's login, by default, and null for none.
+  plan?: PlanFetch | null;
 }
 
 export interface Board {
@@ -545,6 +550,9 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
   const traffic = new GithubTraffic(ws, opts.github);
   const usage = new TranscriptUsage();
   let analytics: { at: number; body: Report & { at: string } } | null = null;
+  let weeklyView: { at: number; body: Weekly } | null = null;
+  const plan = PlanUsage.of(ws);
+  const planFetch = opts.plan === undefined ? oauthUsage() : opts.plan;
   // Other hosts' transcripts are read in the background, once per ANALYTICS_EVERY at most, and a
   // report made while a read runs counts what was read before it; when the read ends, the next
   // request makes a new report.
@@ -553,7 +561,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
   const readHosts = () => {
     if (reading || Date.now() - readAt < ANALYTICS_EVERY || !Object.keys(ws.config.hosts).length) return;
     readAt = Date.now();
-    reading = refreshHosts(ws, usage, opts.transcripts)
+    reading = refreshHosts(ws, usage, opts.transcripts, Date.now() - WEEKLY_SINCE)
       .catch((e: unknown) => {
         // refreshHosts records each host's failure itself; anything here is a bug, so it is logged
         console.error(`analytics: reading other hosts failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
@@ -561,6 +569,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
       .finally(() => {
         reading = null;
         analytics = null;
+        weeklyView = null;
       });
   };
   const readAnalytics = () => {
@@ -569,6 +578,14 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
       analytics = { at: Date.now(), body: { at: clock(), ...report(ws, usage) } };
     }
     return analytics.body;
+  };
+  const readWeekly = () => {
+    if (!weeklyView || Date.now() - weeklyView.at >= ANALYTICS_EVERY) {
+      readHosts();
+      const now = Date.now();
+      weeklyView = { at: now, body: weekly(usage.account(now - WEEKLY_SINCE), plan.samples(now - WEEKLY_SINCE), now, planFetch ? plan.error : null) };
+    }
+    return weeklyView.body;
   };
   const readReviews = () => {
     try {
@@ -590,6 +607,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
     stacks.check(ws).catch(() => {}).finally(() => (checking = false));
   });
   every(REVIEW_EVERY, readReviews);
+  if (planFetch) every(POLL_EVERY, () => void plan.poll(planFetch).then(() => (weeklyView = null)));
 
   // The tracker's answer, its 404 when the path is not one, or a 500 that says what threw.
   const replyTracker = (res: ServerResponse, p: ReturnType<typeof trackerApi>) =>
@@ -666,6 +684,7 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
     }
     if (path === "/api/messages") return json(res, 200, messagesView(ws, sessions, receipts));
     if (path === "/api/analytics") return json(res, 200, readAnalytics());
+    if (path === "/api/weekly") return json(res, 200, readWeekly());
     if (path === "/api/github") {
       traffic.refresh()?.catch(() => {});
       return json(res, 200, { at: clock(), ...githubView(ws, traffic, new URL(req.url ?? "/", "http://board").searchParams) });

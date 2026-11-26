@@ -87,3 +87,33 @@ tr.none td.k b{color:var(--faint)}
   .wk{grid-template-columns:108px minmax(0,1fr) auto;gap:4px 8px}
   .trends{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
+/* the weekly usage chart (weekly.js): the estimate dashed, the plan's own figure solid */
+#weekly{padding-bottom:0}
+#weekly + .wrap{padding-top:0}
+.wchart{position:relative;min-height:120px}
+.wchart svg{display:block;width:100%;height:auto;touch-action:pan-y}
+.wchart .grid{stroke:var(--line-soft);stroke-width:1}
+.wchart .lim{stroke:var(--dim);stroke-width:1.5}
+.wchart .tick{stroke:var(--line)}
+.wchart .reset{stroke:var(--line);stroke-dasharray:2 3}
+.wchart .now{stroke:var(--faint);stroke-width:1}
+.wchart .cross{stroke:var(--faint);stroke-width:1}
+.wchart .ax{font-family:var(--mono);font-size:10.5px;fill:var(--faint)}
+.wchart .ax.key{fill:var(--ink)}
+.wchart .ax.dim{fill:var(--mute)}
+.wchart .val{font-family:var(--mono);font-size:11px;fill:var(--ink)}
+.wchart path.est{fill:none;stroke:var(--s3);stroke-width:2;stroke-dasharray:6 4;stroke-linejoin:round}
+.wchart path.act{fill:none;stroke:var(--s6);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.wchart .dot{stroke:var(--panel);stroke-width:2}
+.wchart .dot.est{fill:var(--s3)}
+.wchart .dot.act{fill:var(--s6)}
+.wchart .hit circle{fill:var(--ink);stroke:var(--panel);stroke-width:2}
+.wchart .hit path{stroke:var(--panel);stroke-width:1.5}
+.wtip{top:8px;min-width:170px;pointer-events:none}
+.sw.dash{width:16px;height:0;border-radius:0;border-top:2px dashed var(--s3)}
+.sw.solid{width:16px;height:2px;border-radius:1px;background:var(--s6)}
+.sw.hitk{border-radius:50%;background:var(--ink)}
+.wtbl{margin-top:12px}
+.wtbl small{display:block;color:var(--faint);font-size:11px}
+.wtbl td.so small{display:inline}
+.wtbl td.so{color:var(--dim)}
