@@ -120,7 +120,7 @@ tr.none td.k b{color:var(--faint)}
 .wtbl tr.grp th{font-size:11px;color:var(--mute);border-bottom:0;padding-bottom:0}
 .wtbl .tk{color:var(--dim)}
 .wtbl td.tk{border-left:0}
-.wtbl tr.grp th.tk,.wtbl th.tk:nth-child(5),.wtbl td.tk:nth-child(5){border-left:1px solid var(--line-soft)}
+.wtbl tr.grp th.tk,.wtbl .tk1{border-left:1px solid var(--line-soft)}
 .sw.limk{width:16px;height:2px;border-radius:0;background:var(--dim)}
 .wtbl td small.tkl{display:none}
 @media (max-width:640px){

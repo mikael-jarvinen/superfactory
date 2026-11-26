@@ -302,8 +302,10 @@ test("the weekly chart is served and drawn: two lines, the limit, and each week'
   assert.equal(doc.querySelectorAll("line.reset").length, 4);
   assert.equal(doc.querySelectorAll("#wtable tbody tr").length, 3, "one row a week");
   assert.deepEqual([...doc.querySelectorAll("#wtable thead tr:last-child th")].map((t) => t.textContent), ["Week", "by Fri", "by Sun", "at reset", "by Fri", "by Sun", "at reset"]);
-  assert.deepEqual([...doc.querySelectorAll("#wtable tr.grp th")].map((t) => t.textContent), ["", "% of limit", "tokens, est."]);
+  assert.deepEqual([...doc.querySelectorAll("#wtable tr.grp th")].map((t) => t.textContent), ["", "% of limit", "tokens"]);
   assert.match(doc.querySelector("#wtable tbody tr")!.textContent!, /100%/, "the hit week spent all of it");
+  assert.ok([...doc.querySelectorAll("#wtable tbody tr, #wtable thead tr:last-child")].every((r) => r.querySelectorAll(".tk1").length === 1 && r.querySelector(".tk1") === r.querySelector(".tk")), "the divider on the first token column of each row");
+  assert.deepEqual(d.token_kinds, ["input", "output", "cache_read", "cache_write"]);
   // the hit week's tokens at its reset, with their split on hover
   const atReset = doc.querySelector("#wtable tbody tr td.tk:last-child")!;
   assert.equal(atReset.textContent, "5.00M");
@@ -320,5 +322,5 @@ test("the weekly chart is served and drawn: two lines, the limit, and each week'
   (svg as unknown as { getBoundingClientRect: () => DOMRect }).getBoundingClientRect = () => ({ left: 0, top: 0, width: 320, height: 220 } as DOMRect);
   doc.getElementById("wchart")!.dispatchEvent(new w.MouseEvent("pointermove", { clientX: 300 }) as Event);
   assert.match(doc.getElementById("wtip")!.textContent!, /estimated.*%.*actual/);
-  assert.match(doc.getElementById("wtip")!.textContent!, /tokens, est\.1\.00Minput0output1\.00Mcache read0cache write0/, "the tokens at that time, by type");
+  assert.match(doc.getElementById("wtip")!.textContent!, /tokens1\.00Minput0output1\.00Mcache read0cache write0/, "the tokens at that time, by type");
 });

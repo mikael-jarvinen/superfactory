@@ -5,8 +5,8 @@
 // tokens are read from it on hover, on its latest point and in the legend's limit, but are no axis of
 // their own, as the limit is cost, not tokens, so tokens do not run in step with the percent. A
 // table says how much was spent by the end of each Friday and Sunday (midnight after them, in the
-// browser's time), and by the reset, in percent and in tokens. The board
-// makes a new report every thirty seconds at most, so the page asks once a minute.
+// browser's time), and by the reset, in percent and in tokens. The board makes a new report every
+// thirty seconds at most, so the page asks once a minute.
 (function(){
   const DAY = 86400000;
   const el = document.getElementById('weekly');
@@ -15,14 +15,15 @@
   const pct = v => v == null ? '–' : (v < 10 ? v.toFixed(1) : Math.round(v)) + '%';
   const usd = v => '$' + (v < 100 ? v.toFixed(1) : Math.round(v).toLocaleString('en-US'));
   const big = n => n < 1e3 ? String(Math.round(n)) : n < 1e6 ? Math.round(n / 1e3) + 'k' : n < 1e9 ? (n / 1e6).toFixed(n < 1e7 ? 2 : 1) + 'M' : (n / 1e9).toFixed(2) + 'B';
-  const KINDS = ['input', 'output', 'cache read', 'cache write'];
+  // the token types, in the order the report lists them (token_kinds)
+  const kinds = d => d.token_kinds.map(k => k.replace('_', ' '));
   // the tokens of the estimate at a time, by type, from its point there (the full week's at a reset)
   const tokensAt = (d, t, full = false) => {
     let row = null;
     for(const p of d.tokens){ if(p[0] > t) break; if(!(full && row && row[0] === p[0])) row = p; }
     return row && row.slice(1);
   };
-  const total = s => s ? s[0] + s[1] + s[2] + s[3] : null;
+  const total = s => s ? s.reduce((a, b) => a + b, 0) : null;
   const toks = n => n == null ? '–' : big(n);
   const day = (t, o) => new Date(t).toLocaleString('en-GB', o);
   const when = t => day(t, {weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'});
@@ -105,7 +106,7 @@
     return `<b>${esc(when(t))}</b><dl>` +
       `<dt><i class="sw dash"></i>estimated</dt><dd>${pct(e)}</dd>` +
       `<dt><i class="sw solid"></i>actual</dt><dd>${pct(a)}</dd>` +
-      (s ? `<dt class="tk">tokens, est.</dt><dd>${toks(total(s))}</dd>` + KINDS.map((k, i) => `<dt class="sub">${k}</dt><dd class="sub">${toks(s[i])}</dd>`).join('') : '') +
+      (s ? `<dt class="tk">tokens</dt><dd>${toks(total(s))}</dd>` + kinds(d).map((k, i) => `<dt class="sub">${k}</dt><dd class="sub">${toks(s[i])}</dd>`).join('') : '') +
       `</dl>`;
   }
 
@@ -153,25 +154,36 @@
         while(m.getDay() !== (wd + 1) % 7) m.setDate(m.getDate() + 1);
         return m.getTime() < e ? m.getTime() : null;
       });
-      // the tokens by then, with their split on hover
-      const tokCell = sp => sp ? `<td class="tk" title="${KINDS.map((k, i) => `${k} ${big(sp[i])}`).join(', ')}">${big(total(sp))}</td>` : `<td class="tk">–</td>`;
-      const tcells = [...ends, e].map(t => t == null || (t > d.now && !(t === e && d.now < e)) ? tokCell(null) : tokCell(tokensAt(d, Math.min(t, d.now), t === e && t <= d.now)));
-      const cells = [...ends, e].map(t => {
-        if(t == null) return `<td>–</td>`;
-        // on a narrow screen the token columns fold into this line
-        const tl = sp => sp ? `<small class="tkl">${big(total(sp))} tok</small>` : '';
-        if(t > d.now) return t === e && d.now < e ? `<td class="so">${pct(valueAt(d.estimate, d.now))} <small>so far</small>${tl(tokensAt(d, d.now))}</td>` : `<td>–</td>`;
-        // the estimate has a point at each local midnight, and at the reset a full week's point
-        // before its 0; the plan's figure at the reset is its last sample before it
-        const e1 = t === e ? (d.estimate.find(p => p[0] === e) ?? [0, valueAt(d.estimate, e - 1)])[1] : valueAt(d.estimate, t);
-        const a = valueAt(d.actual, t === e ? t - 1 : t, GAP);
-        return `<td>${pct(e1)}${a != null ? `<small>${pct(a)} actual</small>` : ''}${tl(tokensAt(d, t, t === e))}</td>`;
-      });
+      // Each column once: its time, or none, and whether it is the current week's so far. The
+      // estimate has a point at each local midnight, and at the reset a full week's point before
+      // its 0; the plan's figure at the reset is its last sample before it.
+      const cols = [...ends, e].map(t =>
+        t == null ? null
+        : t <= d.now ? {t, sofar: false, reset: t === e}
+        : t === e && d.now < e ? {t: d.now, sofar: true, reset: false}
+        : null);
+      const cells = [], tcells = [];
+      for(const c of cols){
+        // the first token column carries the divider from the % ones
+        const tk = tcells.length ? 'tk' : 'tk tk1';
+        if(!c){ cells.push(`<td>–</td>`); tcells.push(`<td class="${tk}">–</td>`); continue; }
+        const sp = tokensAt(d, c.t, c.reset);
+        // on a narrow screen the token columns fold into the % cell, as its last line
+        const tl = sp ? `<small class="tkl">${big(total(sp))} tok</small>` : '';
+        if(c.sofar) cells.push(`<td class="so">${pct(valueAt(d.estimate, c.t))} <small>so far</small>${tl}</td>`);
+        else {
+          const e1 = c.reset ? (d.estimate.find(p => p[0] === e) ?? [0, valueAt(d.estimate, e - 1)])[1] : valueAt(d.estimate, c.t);
+          const a = valueAt(d.actual, c.reset ? c.t - 1 : c.t, GAP);
+          cells.push(`<td>${pct(e1)}${a != null ? `<small>${pct(a)} actual</small>` : ''}${tl}</td>`);
+        }
+        // the tokens by then, with their split on hover
+        tcells.push(sp ? `<td class="${tk}" title="${kinds(d).map((k, i) => `${k} ${big(sp[i])}`).join(', ')}">${big(total(sp))}</td>` : `<td class="${tk}">–</td>`);
+      }
       rows.push(`<tr><td class="k">${esc(day(s, {day: 'numeric', month: 'short'}))} – ${esc(day(e, {day: 'numeric', month: 'short'}))}</td>${cells.join('')}${tcells.join('')}</tr>`);
     }
     return `<div class="tbl wtbl"><table><thead>` +
-      `<tr class="grp"><th class="k"></th><th colspan="3">% of limit</th><th colspan="3" class="tk">tokens, est.</th></tr>` +
-      `<tr><th class="k">Week</th><th>by Fri</th><th>by Sun</th><th>at reset</th><th class="tk">by Fri</th><th class="tk">by Sun</th><th class="tk">at reset</th></tr></thead>` +
+      `<tr class="grp"><th class="k"></th><th colspan="3">% of limit</th><th colspan="3" class="tk">tokens</th></tr>` +
+      `<tr><th class="k">Week</th><th>by Fri</th><th>by Sun</th><th>at reset</th><th class="tk tk1">by Fri</th><th class="tk">by Sun</th><th class="tk">at reset</th></tr></thead>` +
       `<tbody>${rows.join('')}</tbody></table></div>`;
   }
 
@@ -182,7 +194,7 @@
       s.push(`Estimated: the tokens of every Claude Code session on the hosts the board reads, priced by model and token type at API rates, against a weekly limit of ${usd(d.limit)}: the mean of ${d.weeks.length} week${d.weeks.length === 1 ? '' : 's'} the limit was hit${spread}.`);
       if(d.limit_tokens){
         const ts = d.token_spread != null && d.weeks.length > 1 ? `, each within ${Math.round(d.token_spread * 100)}% of it` : '';
-        s.push(`In tokens the limit is about ${big(d.limit_tokens)}, the mean the same weeks spent${ts}: an estimate, and a looser one, since a cache read spends a twentieth of what an input token does.`);
+        s.push(`In tokens the limit is about ${big(d.limit_tokens)}, the mean the same weeks spent${ts}: an estimate, and a looser one, since a cache read spends a small fraction of what an input token does.`);
       }
       s.push(`This week so far: ${big(d.week_tokens)} tokens, ${usd(d.week_cost)}.`);
     } else s.push('No week in the transcripts hit the limit yet, so there is no estimate to draw.');
