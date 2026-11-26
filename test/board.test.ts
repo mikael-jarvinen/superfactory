@@ -13,9 +13,9 @@ import { CLI, GROUPED, tempWorkspace } from "./helpers.js";
 
 const noInboxLock = process.platform !== "darwin" && process.platform !== "linux" && "the inbox lock is built for macOS and Linux only";
 
-// `board --inbox` in dir, with extra args, its stdout and stderr collected.
-function inbox(dir: string, ...extra: string[]) {
-  const mon = spawn(process.execPath, [CLI, "--workspace", dir, "board", "--inbox", ...extra], { env: { ...process.env, SF_NOTIFY: "0" } });
+// `board` in dir with these args, its stdout and stderr collected.
+function board(dir: string, ...args: string[]) {
+  const mon = spawn(process.execPath, [CLI, "--workspace", dir, "board", ...args], { env: { ...process.env, SF_NOTIFY: "0" } });
   const m = { mon, out: "", err: "" };
   mon.stdout.on("data", (b: Buffer) => (m.out += b));
   mon.stderr.on("data", (b: Buffer) => (m.err += b));
@@ -36,24 +36,24 @@ test("the inbox: held detection, the holder, the watchers' notes, and the next h
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
   const ws = openWorkspace(dir);
-  const arm = () => inbox(dir);
+  const arm = () => board(dir, "--inbox");
 
   postMessage(ws, "before any inbox");
-  leaveNote(ws, "[round]\nleft before any monitor");
+  leaveNote(ws, "[round]\nleft before any holder");
   assert.equal(inboxHeld(ws), false);
   const a = arm();
-  await until("the monitor to hold the inbox", () => inboxHeld(ws));
-  await until("the early note", () => a.out.includes("left before any monitor"));
-  assert.match(a.out, /^\[m:[0-9a-f]{6}\] \[round\]\nleft before any monitor\n$/, "a note is news whenever it was left; page history is not");
+  await until("the holder to hold the inbox", () => inboxHeld(ws));
+  await until("the early note", () => a.out.includes("left before any holder"));
+  assert.match(a.out, /^\[m:[0-9a-f]{6}\] \[round\]\nleft before any holder\n$/, "a note is news whenever it was left; page history is not");
 
   postMessage(ws, "hello");
   appendFileSync(ws.messages, pyDumps({ t: "x", text: "the lead's own", ticket: null, kind: "note", link: null }) + "\n");
   await until("the message on stdout", () => a.out.includes("hello"));
   assert.match(a.out, /\[from the message page\] \[m:[0-9a-f]{6}\] hello\n$/, "the lead's rows are not printed");
 
-  // Unarmed, both wait; the next monitor prints each once, from where the last one stopped.
+  // Unarmed, both wait; the next holder prints each once, from where the last one stopped.
   a.mon.kill();
-  await until("the lock to die with the monitor", () => !inboxHeld(ws));
+  await until("the lock to die with the holder", () => !inboxHeld(ws));
   postMessage(ws, "while unarmed");
   leaveNote(ws, "[queue watcher]\nnoted while unarmed");
   // `say` rotates the message log to .1. The new file is found by its inode, not by being shorter.
@@ -66,11 +66,11 @@ test("the inbox: held detection, the holder, the watchers' notes, and the next h
   assert.equal(b.out.split("] while unarmed").length - 1, 1, "the rolled log is read to its end once");
   assert.equal(inboxHeld(ws), true);
   const c = arm();
-  await until("the second monitor to stop", () => c.mon.exitCode !== null);
+  await until("the second holder to stop", () => c.mon.exitCode !== null);
   assert.match(c.out, /already held by another `board --inbox`; this one stops/);
   assert.equal(c.mon.exitCode, 0, "without --once, a second holder stops quietly as before");
   // With --once it is an error, so the lead is not invited to run it again.
-  const d = inbox(dir, "--once");
+  const d = board(dir, "--inbox", "--once");
   await until("the --once that found it held to stop", () => d.mon.exitCode !== null);
   assert.equal(d.mon.exitCode, 3);
   assert.equal(d.out, "", "nothing on stdout that reads as a message");
@@ -83,7 +83,7 @@ test("the inbox --once: holds while waiting, exits on the first message, prints 
   const dir = tempWorkspace();
   after(() => rmSync(dir, { recursive: true, force: true }));
   const ws = openWorkspace(dir);
-  const once = () => inbox(dir, "--once");
+  const once = () => board(dir, "--inbox", "--once");
   const a = once();
   await until("the wait to hold the inbox", () => inboxHeld(ws));
   await new Promise((r) => setTimeout(r, 600));
@@ -98,12 +98,10 @@ test("the inbox --once: holds while waiting, exits on the first message, prints 
   await until("the second wait to exit", () => b.mon.exitCode !== null);
   assert.ok(!b.out.includes("wake up"), `nothing printed twice:\n${b.out}`);
   assert.match(b.out, /after the first wait/);
-  const u = spawn(process.execPath, [CLI, "--workspace", dir, "board", "--once"], { env: { ...process.env, SF_NOTIFY: "0" } });
-  let uerr = "";
-  u.stderr.on("data", (x: Buffer) => (uerr += x));
-  await new Promise((r) => u.on("close", r));
-  assert.notEqual(u.exitCode, 0);
-  assert.match(uerr, /--once goes with --inbox/);
+  const u = board(dir, "--once");
+  await until("the usage error", () => u.mon.exitCode !== null);
+  assert.notEqual(u.mon.exitCode, 0);
+  assert.match(u.err, /--once goes with --inbox/);
 });
 
 test("the server: pages, the snapshot, posting, and only the tail of the log", { skip: noInboxLock }, async () => {

@@ -36,7 +36,7 @@ export const armText = (ws: Workspace) =>
   `The message page inbox is not armed, so ${ws.config.human.name}'s messages and the watchers' notes are waiting for it. ` +
   `Arm it now: run \`${factoryCommand()} --workspace ${shq(ws.dir)} board --inbox --once\` with Bash, run_in_background true. ` +
   `It holds the inbox and exits 0 with what came the moment a message or note arrives, which wakes you: run it again first, then act on what came. ` +
-  `If it exits non-zero, it says why (another holder has the inbox, or the lock is broken): do not run it again, and tell ${ws.config.human.name} if the lock is broken. ` +
+  `If it exits non-zero, it says why (another holder has the inbox, or the lock is broken): do not run it again, and tell ${ws.config.human.name} either way, since a holder you did not start may be one whose output nobody reads. ` +
   `No timeout and no re-arm on a timer. Then carry on with whatever you were doing.`;
 
 const idleText = (work: string[]) =>

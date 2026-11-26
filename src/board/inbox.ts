@@ -360,6 +360,13 @@ export class Receipts {
     }
     let text: unknown;
     if (kind === "user" && typeof d.message?.content === "string") text = d.message.content;
+    // a message read by a tool, as `board --inbox --once` run with Bash hands it over: in the
+    // tool_result's content, a string or text blocks
+    else if (kind === "user" && Array.isArray(d.message?.content))
+      text = d.message.content
+        .filter((c: any) => c?.type === "tool_result")
+        .map((c: any) => (typeof c.content === "string" ? c.content : Array.isArray(c.content) ? c.content.map((b: any) => b?.text ?? "").join("\n") : ""))
+        .join("\n");
     else if (kind === "attachment" && d.attachment?.type === "queued_command") text = d.attachment.prompt;
     else return;
     for (const id of ids(text)) {
