@@ -223,14 +223,27 @@ test("pr-send's gate read waits out what time clears, and stops at once on what 
 });
 
 // Every PR is a draft until its item reaches undrafting(ws), and CodeRabbit skips drafts with a green status. With
-// no review bot required, that is only named.
+// no review bot required, that is only named, and the remark says to ask it by hand, as pr-wait asks only a
+// review_bot whose trigger it knows.
 test("a review bot that skipped the draft is named as having reviewed nothing", () => {
-  const { run } = gateWorkspace();
   const st = `api repos/${REMOTE}/commits/${HEAD}/status`;
-  const r = run(green({ [st]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review skipped: draft pull request" }] } } }),
-    ["pr-ready", "web", String(N)]);
+  const rv = `api repos/${REMOTE}/pulls/${N}/reviews?per_page=100&page=1`;
+  // with a review_bot set, it has reviewed the head, so the PR is sendable and only remarked on
+  const skipped = (context: string, bot?: string) => green({
+    [st]: { stdout: { statuses: [{ context, state: "success", description: "Review skipped: draft pull request" }] } },
+    ...(bot ? { [rv]: { stdout: [{ user: { login: `${bot}[bot]` }, commit_id: HEAD, state: "COMMENTED", body: REVIEW_BODY }] } } : {}),
+  });
+  let r = gateWorkspace().run(skipped("CodeRabbit"), ["pr-ready", "web", String(N)]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /status 'CodeRabbit' is green only because it skipped a draft and reviewed nothing -- run `factory pr-wait`, which asks it once; never post the trigger by hand/);
+  assert.match(r.stdout, /status 'CodeRabbit' is green only because it skipped a draft and reviewed nothing -- ask it for a review by hand; no \[gate\] review_bot is set, so `factory pr-wait` asks no bot/);
+  // a review_bot set, and this is another bot: pr-wait would ask the review_bot, not this one
+  r = gateWorkspace('review_bot = "coderabbitai"\n').run(skipped("OtherBot", "coderabbitai"), ["pr-ready", "web", String(N)]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /status 'OtherBot' is green only because it skipped a draft and reviewed nothing -- ask it for a review by hand; `factory pr-wait` asks only the review_bot, coderabbitai/);
+  // a review_bot pr-wait knows no trigger for: pr-wait asks nobody
+  r = gateWorkspace('review_bot = "sourcery"\n').run(skipped("OtherBot", "sourcery"), ["pr-ready", "web", String(N)]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /status 'OtherBot' is green only because it skipped a draft and reviewed nothing -- ask it for a review by hand; `factory pr-wait` asks no bot, as it knows no trigger for the review_bot, sourcery/);
 });
 
 // The head commit, the PR's comments since it (one reply per read), and posting the trigger.
@@ -1006,7 +1019,7 @@ test("pr-wait-coderabbit asks for the review of the head and waits it out, rate 
   // its reply to an ask while limited
   const limitedReply = (created_at: string) => ({ body: "<details>\n<summary>Action not completed</summary>\n\nReview rate limited.\n</details>", created_at, user: { login: "coderabbitai[bot]" } });
   // its reply to an ask it took: an incremental review with nothing new brings no review object
-  const performed = (created_at: string) => ({ body: "<details>\n<summary>Action performed</summary>\n\nReview finished.\n</details>", created_at, user: { login: "coderabbitai[bot]" } });
+  const performed = (created_at: string, summary = "Action performed") => ({ body: `<details>\n<summary>${summary}</summary>\n\nReview finished.\n</details>`, created_at, user: { login: "coderabbitai[bot]" } });
   const skipped = { [st]: { stdout: { statuses: [{ context: "CodeRabbit", state: "success", description: "Review skipped: draft pull request" }] } } };
   const limited = { [st]: { stdout: { statuses: [] } }, [cr]: checkRuns(check("test"), rabbitRun("Review rate limited")) };
   const wait = (over: Routes, env: NodeJS.ProcessEnv = {}) => run(green(over), ["pr-wait-coderabbit", "web", String(N)], { FACTORY_REVIEW_POLL: "0", ...env });
@@ -1041,6 +1054,13 @@ test("pr-wait-coderabbit asks for the review of the head and waits it out, rate 
   // "@coderabbitai review" is incremental: when it brings nothing within the grace, a full review
   r = wait({ ...skipped, [rv]: [{ stdout: [] }, { stdout: [] }, { stdout: [review] }],
     ...asking([asked("@coderabbitai review", ago(3600)), performed(ago(3590))], [asked("@coderabbitai review", ago(3600)), performed(ago(3590)), asked("@coderabbitai full review", ago(1))]),
+    [FULL]: { stdout: `https://github.com/${REMOTE}/pull/${N}#issuecomment-2\n` } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(posts(r.calls), 0);
+  assert.equal(posts(r.calls, FULL), 1);
+  // its reply in the plural, "Actions performed", answers the ask just as well
+  r = wait({ ...skipped, [rv]: [{ stdout: [] }, { stdout: [] }, { stdout: [review] }],
+    ...asking([asked("@coderabbitai review", ago(3600)), performed(ago(3590), "✅ Actions performed")], [asked("@coderabbitai review", ago(3600)), performed(ago(3590), "✅ Actions performed"), asked("@coderabbitai full review", ago(1))]),
     [FULL]: { stdout: `https://github.com/${REMOTE}/pull/${N}#issuecomment-2\n` } });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(posts(r.calls), 0);
