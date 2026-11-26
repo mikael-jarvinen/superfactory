@@ -182,6 +182,22 @@ export const handoffPath = (wt: string) => `${wt.replace(/\/+$/, "")}.handoff.md
 // What the handoff holds, kept short so a fresh session reads it in one go.
 const HANDOFF = "the branch, the head sha, the one command that runs the checks, and what is open";
 
+// A round's findings reach the handoff only through the session they were sent to, before the lead
+// dispatches the fix round, which stops that session. The reviewer's report ends with its Reviewed
+// line, so the findings are stamped with the head they were found at, and a later round can tell
+// them from a round already fixed.
+export const REVIEWED_RE = /^Reviewed \S+#\d+ at ([0-9a-f]{7,40})\s*$/gm;
+const findingsRule = (ws: Workspace, next = false) =>
+  `When ${next ? "the next" : "a"} round's findings reach you, do not fix them in this session. Append them to the handoff verbatim ` +
+  `under "## Findings", first the last line of the reviewer's report, "Reviewed <owner/repo>#<N> at <sha>". ` +
+  `Then send ${leadName(ws)} exactly "findings in handoff, ready for the fix round" and end your turn with ` +
+  `nothing left running: the fix round is a fresh session.`;
+
+// Whether the handoff holds findings found at this head: the round the next fix session works on.
+export function findingsAt(text: string, head: string): boolean {
+  return [...text.matchAll(REVIEWED_RE)].some((m) => head.startsWith(m[1]!));
+}
+
 const localNote = (ticket: string) => isLocal(ticket)
   ? " This item has no tracker ticket, and its key is factory bookkeeping: leave it out of the " +
     "PR title and the commit message, which are the description alone."
@@ -193,20 +209,22 @@ export function buildingPrompt(ws: Workspace, agent: Agent, ticket: string, hand
     `READY and wait for ${leadName(ws)}'s brief. The brief is the whole specification: there is no plan ` +
     `artifact and nothing else is coming. Do not start before it arrives.` +
     (handoff ? ` A redo of work already on the branch says so: then read the handoff at ${handoff} first. ` +
-      `When you open the PR, and after each push, write the handoff there: ${HANDOFF}.` : "") +
+      `When you open the PR, and after each push, write the handoff there: ${HANDOFF}. ` + findingsRule(ws) : "") +
     localNote(ticket);
 }
 
-// A fix round starts fresh in the build's worktree and comes back in through the handoff. The round's
-// findings are appended to it, by the reviewer or the lead, or come by message.
+// A fix round starts fresh in the build's worktree and comes back in through the handoff, whose
+// findings the session before it appended (findingsRule).
 export function fixingPrompt(ws: Workspace, agent: Agent, ticket: string, handoff: string): string {
   return `You are ${capitalize(agent.name)}. Your work item is ${ticket}, and this is its FIX ROUND, in a fresh ` +
     `session in the worktree on branch ${branchFor(ticket)}. Read the repo rules in this directory and the ` +
-    `handoff at ${handoff}: ${HANDOFF}, and this round's findings at its end. It can be missing, for an item ` +
-    `built before handoffs. With the findings there, start on them; with none, reply exactly READY and wait ` +
-    `for them by message, from the reviewer or ${leadName(ws)}. Fix them, run the tests and lint as one ` +
-    `command, push, rewrite the handoff with the new head sha and without the findings, and send the sha ` +
-    `straight to the reviewer, quoting its last Reviewed line. The next round is a fresh session.` + localNote(ticket);
+    `handoff at ${handoff}: ${HANDOFF}. It can be missing, for an item built before handoffs. Its findings are ` +
+    `this round's only when the sha in their Reviewed line is the branch's head (\`git rev-parse HEAD\`); ` +
+    `older ones are a round already fixed. With this round's findings there, start on them. With none, reply ` +
+    `exactly READY and wait for them by message, and append them to the handoff the same way before you ` +
+    `start. Fix them, run the tests and lint as one command, push, rewrite the handoff with the new head sha ` +
+    `and without the findings, and send the reviewer the new sha with the findings' Reviewed line quoted. ` +
+    findingsRule(ws, true) + localNote(ticket);
 }
 
 export const reviewerPrompt = (ws: Workspace) =>

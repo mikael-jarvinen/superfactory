@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import type { Session } from "../src/fleet.js";
 import { agentOrDie, lead } from "../src/fleet.js";
-import { buildingPrompt, fixingPrompt, handoffPath, leadPrompt } from "../src/launch.js";
+import { buildingPrompt, findingsAt, fixingPrompt, handoffPath, leadPrompt } from "../src/launch.js";
 import { bringUpLead } from "../src/lead-up.js";
 import { clearEnded, freshCommand } from "../src/stopped.js";
 import type { StartRequest, Transport } from "../src/transport.js";
@@ -100,7 +100,17 @@ test("the build session is told where to write the handoff, and the fix round wh
   const f = fixingPrompt(w, bea, "TEST-1", handoffPath(wt));
   assert.match(f, /FIX ROUND, in a fresh session/);
   assert.match(f, /the handoff at \/w\/repos\/web\/\.claude\/worktrees\/TEST-1\.handoff\.md/);
-  assert.match(f, /this round's findings at its end.*With the findings there, start on them; with none, reply exactly READY and wait for them by message, from the reviewer or Ada\./);
-  assert.match(f, /rewrite the handoff with the new head sha and without the findings.*The next round is a fresh session\./);
+  assert.match(f, /this round's only when the sha in their Reviewed line is the branch's head.*With none, reply exactly READY and wait for them by message/);
+  assert.match(f, /rewrite the handoff with the new head sha and without the findings, and send the reviewer the new sha with the findings' Reviewed line quoted/);
+  // findings reaching a session go into the handoff, never into a fix in that session
+  for (const p of [b, f]) {
+    assert.match(p, /do not fix them in this session\. Append them to the handoff verbatim under "## Findings", first the last line of the reviewer's report, "Reviewed <owner\/repo>#<N> at <sha>"/);
+    assert.match(p, /send Ada exactly "findings in handoff, ready for the fix round".*the fix round is a fresh session\./);
+  }
+  assert.match(f, /When the next round's findings reach you/);
+  const head = "0123456789abcdef0123456789abcdef01234567";
+  assert.ok(findingsAt(`x\n## Findings\nReviewed acme/web#5 at 0123456789ab\n- m\n`, head));
+  assert.ok(!findingsAt(`## Findings\nReviewed acme/web#5 at fedcba987654\n`, head), "a round already fixed");
+  assert.ok(!findingsAt(`the head is ${head}`, head), "a head with no findings");
   assert.doesNotMatch(f, /Later rounds come to this session/);
 });
