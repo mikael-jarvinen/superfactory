@@ -197,10 +197,11 @@ test("on macOS the login is Claude Code's Keychain item, the file when there is 
   const unreadable: Keychain = async () => {
     throw new Error("Claude Code's Keychain item could not be read (security exited 36)");
   };
+  // the read with no file to fall back on sends nothing, and the fallback below sends one request
+  const sent = auth.length;
   const none = oauthUsage(() => tempDir(), fake, unreadable);
   await assert.rejects(none(), /security exited 36/);
   // and one that could not be read still falls back on the file when there is one
-  const sent = auth.length;
   await oauthUsage(() => cfg, fake, unreadable)();
   assert.deepEqual(auth.slice(sent), ["Bearer from-file"]);
 
