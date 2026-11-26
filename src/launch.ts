@@ -206,7 +206,7 @@ export function fixingPrompt(ws: Workspace, agent: Agent, ticket: string, handof
     `built before handoffs. With the findings there, start on them; with none, reply exactly READY and wait ` +
     `for them by message, from the reviewer or ${leadName(ws)}. Fix them, run the tests and lint as one ` +
     `command, push, rewrite the handoff with the new head sha and without the findings, and send the sha ` +
-    `straight to the reviewer. The next round is a fresh session.` + localNote(ticket);
+    `straight to the reviewer, quoting its last Reviewed line. The next round is a fresh session.` + localNote(ticket);
 }
 
 export const reviewerPrompt = (ws: Workspace) =>
