@@ -109,24 +109,39 @@ const stepEnd = (tl: Timeline, i: number, now: number): number => {
 
 // ---------------------------------------------------------------- transcripts
 
-interface Call {
+// One API call: its message id, model, and the part of its cache writes kept for an hour, which
+// the weekly estimate (weekly.ts) prices apart from the rest.
+export interface Call {
   at: number;
+  id: string;
+  model: string | null;
   tokens: Tokens;
+  write_1h: number;
+}
+
+// A call the weekly limit refused: when, and the reset it named.
+export interface Hit {
+  at: number;
+  resets: number;
 }
 
 // A transcript's calls, by the file they came from: `host:path` for another host's.
-interface Read {
+export interface Read {
   file: string;
   agent: string | null;
   calls: Call[];
+  hits: Hit[];
 }
 
 interface FileRead {
   offset: number;
   agent: string | null;
-  ids: Map<string, Tokens>;
+  ids: Map<string, Call>;
   calls: Call[];
+  hits: Hit[];
 }
+
+const blank = (): Omit<FileRead, "offset"> => ({ agent: null, ids: new Map(), calls: [], hits: [] });
 
 const CHUNK = 4 * 1024 * 1024;
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
@@ -155,6 +170,9 @@ export interface HostRead {
   files: number;
 }
 
+// The key of a host's listing that holds every projects/ dir there, rather than one cwd's.
+export const ACCOUNT = "*";
+
 export class TranscriptUsage {
   private files = new Map<string, FileRead>();
   private hosts = new Map<string, HostRead & { listing: RemoteRead["listing"]; busy: Promise<void> | null }>();
@@ -173,7 +191,7 @@ export class TranscriptUsage {
     for (const f of names) {
       if (!f.endsWith(".jsonl") || !fresh(join(dir, f), since)) continue;
       const main = this.readOne(join(dir, f));
-      out.push({ file: join(dir, f), agent: main.agent, calls: main.calls });
+      out.push({ file: join(dir, f), agent: main.agent, calls: main.calls, hits: main.hits });
       const sub = join(dir, f.slice(0, -".jsonl".length), "subagents");
       let subs: string[] = [];
       try {
@@ -181,7 +199,10 @@ export class TranscriptUsage {
       } catch {
         // no subagents
       }
-      for (const s of subs.filter((x) => fresh(join(sub, x), since))) out.push({ file: join(sub, s), agent: main.agent, calls: this.readOne(join(sub, s)).calls });
+      for (const s of subs.filter((x) => fresh(join(sub, x), since))) {
+        const one = this.readOne(join(sub, s));
+        out.push({ file: join(sub, s), agent: main.agent, calls: one.calls, hits: one.hits });
+      }
     }
     return out;
   }
@@ -191,9 +212,27 @@ export class TranscriptUsage {
     const out: Read[] = [];
     for (const f of this.hosts.get(host)?.listing[cwd] ?? []) {
       const main = this.state(`${host}:${f.p}`);
-      out.push({ file: `${host}:${f.p}`, agent: main.agent, calls: main.calls });
-      for (const s of f.subs) out.push({ file: `${host}:${s}`, agent: main.agent, calls: this.state(`${host}:${s}`).calls });
+      out.push({ file: `${host}:${f.p}`, agent: main.agent, calls: main.calls, hits: main.hits });
+      for (const s of f.subs) {
+        const one = this.state(`${host}:${s}`);
+        out.push({ file: `${host}:${s}`, agent: main.agent, calls: one.calls, hits: one.hits });
+      }
     }
+    return out;
+  }
+
+  // Every transcript of the account, for the weekly usage (weekly.ts): each projects/ dir here,
+  // whoever's sessions wrote it, and on each host, as of its last read with `all` (refresh).
+  account(since: number): Read[] {
+    const base = join(claudeConfigDir(), "projects");
+    let dirs: string[] = [];
+    try {
+      dirs = readdirSync(base);
+    } catch {
+      // no transcripts here
+    }
+    const out = dirs.flatMap((d) => this.read(join(base, d), since));
+    for (const host of this.hosts.keys()) out.push(...this.readOn(host, ACCOUNT));
     return out;
   }
 
@@ -204,24 +243,25 @@ export class TranscriptUsage {
 
   // Reads what a host's transcripts in these cwds gained since the last read, one read at a time:
   // asked while one is running, it waits for that one. It never rejects; a failure is the host's error.
-  refresh(host: string, cwds: string[], since: number, run: Runner): Promise<void> {
+  // With `all`, it also reads every projects/ dir there last written since then, for account().
+  refresh(host: string, cwds: string[], since: number, run: Runner, all?: number): Promise<void> {
     const h = this.hosts.get(host) ?? { read_at: null, error: null, files: 0, listing: {}, busy: null };
     this.hosts.set(host, h);
     if (h.busy) return h.busy;
     const prefix = `${host}:`;
     const offsets: Record<string, number> = {};
     for (const [k, st] of this.files) if (k.startsWith(prefix)) offsets[k.slice(prefix.length)] = st.offset;
-    h.busy = run(probeFor({ cwds, since, offsets }))
+    h.busy = run(probeFor({ cwds, since, offsets, ...(all === undefined ? {} : { all }) }))
       .then((out) => {
         const r = parseReply(out);
         for (const [p, d] of Object.entries(r.data)) {
           const st = this.state(prefix + p);
-          if (d.reset || d.off < st.offset) Object.assign(st, { offset: 0, agent: null, ids: new Map(), calls: [] });
+          if (d.reset || d.off < st.offset) Object.assign(st, { offset: 0, ...blank() });
           for (const line of d.lines) this.take(Buffer.from(line, "utf8"), st);
           st.offset = d.off;
         }
         Object.assign(h, { listing: r.listing, read_at: Date.now(), error: null });
-        h.files = Object.values(r.listing).reduce((n, fs) => n + fs.reduce((m, f) => m + 1 + f.subs.length, 0), 0);
+        h.files = new Set(Object.values(r.listing).flatMap((fs) => fs.flatMap((f) => [f.p, ...f.subs]))).size;
       })
       .catch((e: unknown) => {
         h.error = e instanceof Error ? e.message : String(e);
@@ -234,7 +274,7 @@ export class TranscriptUsage {
 
   private state(key: string): FileRead {
     let st = this.files.get(key);
-    if (!st) this.files.set(key, (st = { offset: 0, agent: null, ids: new Map(), calls: [] }));
+    if (!st) this.files.set(key, (st = { offset: 0, ...blank() }));
     return st;
   }
 
@@ -243,7 +283,7 @@ export class TranscriptUsage {
     let fd: number | undefined;
     try {
       const size = statSync(path).size;
-      if (size < st.offset) Object.assign(st, { offset: 0, agent: null, ids: new Map(), calls: [] });
+      if (size < st.offset) Object.assign(st, { offset: 0, ...blank() });
       fd = openSync(path, "r");
       let pos = st.offset;
       let carry = Buffer.alloc(0);
@@ -286,14 +326,21 @@ export class TranscriptUsage {
     const at = time(d.timestamp);
     if (d.type !== "assistant" || !u || Number.isNaN(at)) return;
     const id = String(d.message?.id ?? d.requestId ?? d.uuid ?? "");
+    const q = d.quotaLimits;
+    if (q?.rateLimitType === "seven_day" && q.status === "rejected" && num(q.resetsAt) > 0) st.hits.push({ at, resets: num(q.resetsAt) * 1000 });
     const tokens = { input: num(u.input_tokens), output: num(u.output_tokens), cache_read: num(u.cache_read_input_tokens), cache_write: num(u.cache_creation_input_tokens) };
+    const write_1h = num(u.cache_creation?.ephemeral_1h_input_tokens);
+    const model = typeof d.message?.model === "string" ? d.message.model : null;
     const seen = id ? st.ids.get(id) : undefined;
     if (seen) {
-      for (const k of Object.keys(tokens) as (keyof Tokens)[]) seen[k] = Math.max(seen[k], tokens[k]);
+      for (const k of Object.keys(tokens) as (keyof Tokens)[]) seen.tokens[k] = Math.max(seen.tokens[k], tokens[k]);
+      seen.write_1h = Math.max(seen.write_1h, write_1h);
+      seen.model ??= model;
       return;
     }
-    if (id) st.ids.set(id, tokens);
-    st.calls.push({ at, tokens });
+    const c = { at, id, model, tokens, write_1h };
+    if (id) st.ids.set(id, c);
+    st.calls.push(c);
   }
 }
 
@@ -341,13 +388,16 @@ function sources(ws: Workspace, items: string[]): Source[] {
 // `run` is for tests; the board reads over ssh. Resolves when every read has finished or failed.
 // What cannot even be asked (the events log, the config) is logged: report() reads the same
 // records, so it fails with the same error, which /api/analytics answers and the page shows.
-export function refreshHosts(ws: Workspace, usage: TranscriptUsage, run?: (host: string) => Runner): Promise<void> {
+// Every host is read for the weekly usage, which counts every session of the account, back to
+// `account` (weekly.ts's WEEKLY_SINCE before now), and for the fleet's cwds as well when it has items.
+export function refreshHosts(ws: Workspace, usage: TranscriptUsage, run?: (host: string) => Runner, account?: number): Promise<void> {
   const byHost = new Map<string, string[]>();
-  let since: number;
+  let since = 0;
   try {
     const tls = timelines(ws);
-    if (!tls.length) return Promise.resolve();
-    since = Math.min(...tls.map((t) => (t.steps[0] as Step).at));
+    if (!tls.length && account === undefined) return Promise.resolve();
+    if (tls.length) since = Math.min(...tls.map((t) => (t.steps[0] as Step).at));
+    if (account !== undefined) for (const h of Object.keys(ws.config.hosts)) byHost.set(h, []);
     for (const s of sources(ws, tls.map((t) => t.ticket))) if (s.host) byHost.set(s.host, [...(byHost.get(s.host) ?? []), s.dir]);
   } catch (e) {
     const why = `the board could not work out what to read: ${e instanceof Error ? e.message : String(e)}`;
@@ -355,7 +405,7 @@ export function refreshHosts(ws: Workspace, usage: TranscriptUsage, run?: (host:
     return Promise.resolve();
   }
   return Promise.all([...byHost].map(([host, cwds]) =>
-    usage.refresh(host, cwds, since, run ? run(host) : sshRunner(ws.config.hosts[host]?.ssh ?? "")))).then(() => undefined);
+    usage.refresh(host, cwds, since, run ? run(host) : sshRunner(ws.config.hosts[host]?.ssh ?? ""), account))).then(() => undefined);
 }
 
 // ---------------------------------------------------------------- the report
