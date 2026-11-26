@@ -10,7 +10,9 @@
 // hit, where a call came back refused by the seven_day limit, calibrate it: the cost spent from that
 // week's start up to the first refusal is the limit, and their mean is the 100% line. The weekly
 // figure Anthropic publishes for the plans is in hours of model use, not tokens, so the hit weeks are
-// the better measure. The actual line is the plan's own weekly utilization, as /usage shows it, which
+// the better measure. The same points carry the raw tokens too, by type, and the hit weeks give a
+// limit in tokens: an estimate as well, and a looser one, since a week of cheap cache reads spends
+// more tokens on the limit than a week of output. The actual line is the plan's own weekly utilization, as /usage shows it, which
 // the board samples (plan-usage.ts); each sample also says what 1% cost this week, a check on the
 // estimate. What the transcripts do not hold, claude.ai and other machines' sessions, counts in the
 // actual line only.
@@ -50,7 +52,11 @@ export interface HitWeek {
   start: number;
   hit: number;
   cost: number;
+  tokens: number;
 }
+
+// Tokens by type: input, output, cache read, cache write.
+export type TokenSplit = [number, number, number, number];
 
 export interface Weekly {
   now: number;
@@ -61,10 +67,15 @@ export interface Weekly {
   // The 100% line in dollars at API prices, from the hit weeks, and how far they spread from it.
   limit: number | null;
   spread: number | null;
+  // The same limit in tokens, the mean of the hit weeks' tokens, and how far they spread from it.
+  limit_tokens: number | null;
+  token_spread: number | null;
   weeks: HitWeek[];
   // Points [time, percent] of the estimate every quarter hour, each what was spent before its
   // time, up to now. At each reset come two: the full week, then 0.
   estimate: [number, number][];
+  // The estimate's tokens at each of its points, by type: [time, input, output, cache read, cache write].
+  tokens: [number, ...TokenSplit][];
   // The plan's own samples [time, percent].
   actual: [number, number][];
   // The first refusal of each week on the chart.
@@ -95,7 +106,7 @@ export function weekly(reads: Read[], samples: Sample[], now: number, actualErro
   hits.sort((a, b) => a.at - b.at);
 
   const out: Weekly = {
-    now, start: null, end: null, resets: [], limit: null, spread: null, weeks: [], estimate: [], actual: [],
+    now, start: null, end: null, resets: [], limit: null, spread: null, limit_tokens: null, token_spread: null, weeks: [], estimate: [], tokens: [], actual: [],
     hits: [], check: null, actual_error: actualError, week_cost: 0, week_tokens: 0,
   };
   // The reset a sample or a refusal named last, stepped by weeks to the first one after now.
@@ -109,16 +120,28 @@ export function weekly(reads: Read[], samples: Sample[], now: number, actualErro
   // Cumulative cost from a time to another, over the calls sorted by time.
   const prefix: number[] = [0];
   for (const c of calls) prefix.push((prefix[prefix.length - 1] as number) + costOf(c));
-  const at = (t: number) => {
+  // and the tokens, by type
+  const kinds = ["input", "output", "cache_read", "cache_write"] as const;
+  const tprefix: TokenSplit[] = [[0, 0, 0, 0]];
+  for (const c of calls) {
+    const p = tprefix[tprefix.length - 1] as TokenSplit;
+    tprefix.push(kinds.map((k, i) => p[i]! + c.tokens[k]) as TokenSplit);
+  }
+  const index = (t: number) => {
     let lo = 0, hi = calls.length;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
       if ((calls[mid] as Call).at < t) lo = mid + 1;
       else hi = mid;
     }
-    return prefix[lo] as number;
+    return lo;
   };
-  const spent = (from: number, to: number) => at(to) - at(from);
+  const spent = (from: number, to: number) => (prefix[index(to)] as number) - (prefix[index(from)] as number);
+  const tokensIn = (from: number, to: number): TokenSplit => {
+    const a = tprefix[index(from)] as TokenSplit, b = tprefix[index(to)] as TokenSplit;
+    return [b[0] - a[0], b[1] - a[1], b[2] - a[2], b[3] - a[3]];
+  };
+  const sum = (s: TokenSplit) => s[0] + s[1] + s[2] + s[3];
 
   // The hit weeks: the first refusal of each week, within the span the transcripts were read for.
   const first = new Map<number, number>();
@@ -127,20 +150,22 @@ export function weekly(reads: Read[], samples: Sample[], now: number, actualErro
   for (const [resets, hit] of [...first].sort((a, b) => a[0] - b[0])) {
     const wStart = resets - WEEK;
     if (wStart < oldest || hit < wStart) continue;
-    out.weeks.push({ start: wStart, hit, cost: spent(wStart, hit) });
+    out.weeks.push({ start: wStart, hit, cost: spent(wStart, hit), tokens: sum(tokensIn(wStart, hit)) });
   }
   out.weeks = out.weeks.filter((w) => w.cost > 0);
-  const costs = out.weeks.map((w) => w.cost);
-  if (costs.length) {
-    const mean = costs.reduce((a, b) => a + b, 0) / costs.length;
-    out.limit = mean;
-    out.spread = Math.max(...costs.map((c) => Math.abs(c - mean))) / mean;
+  const meanOf = (xs: number[]): [number, number] => {
+    const mean = xs.reduce((a, b) => a + b, 0) / xs.length;
+    return [mean, Math.max(...xs.map((c) => Math.abs(c - mean))) / mean];
+  };
+  if (out.weeks.length) {
+    [out.limit, out.spread] = meanOf(out.weeks.map((w) => w.cost));
+    [out.limit_tokens, out.token_spread] = meanOf(out.weeks.map((w) => w.tokens));
   }
 
   const weekStart = (t: number) => start + Math.floor((t - start) / WEEK) * WEEK;
   const curStart = weekStart(Math.min(now, end - 1));
   out.week_cost = spent(curStart, now + 1);
-  for (const c of calls) if (c.at >= curStart && c.at <= now) out.week_tokens += c.tokens.input + c.tokens.output + c.tokens.cache_read + c.tokens.cache_write;
+  out.week_tokens = sum(tokensIn(curStart, now + 1));
 
   if (out.limit) {
     const limit = out.limit;
@@ -149,8 +174,11 @@ export function weekly(reads: Read[], samples: Sample[], now: number, actualErro
     const times = new Set<number>([start, ...out.resets.filter((r) => r <= stop), stop]);
     for (let t = Math.ceil(start / STEP) * STEP; t <= stop; t += STEP) times.add(t);
     for (const t of [...times].sort((a, b) => a - b)) {
-      if (t > start && (t - start) % WEEK === 0) out.estimate.push([t, pct(t - WEEK, t)]);
-      out.estimate.push([t, pct(weekStart(t), t)]);
+      const from = [...(t > start && (t - start) % WEEK === 0 ? [t - WEEK] : []), weekStart(t)];
+      for (const f of from) {
+        out.estimate.push([t, pct(f, t)]);
+        out.tokens.push([t, ...tokensIn(f, t)]);
+      }
     }
   }
 

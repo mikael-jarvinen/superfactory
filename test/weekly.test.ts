@@ -101,6 +101,14 @@ test("the weekly estimate: the resets from a refusal, the limit from the hit wee
   ]);
   assert.equal(Math.round(w.limit!), 100, "the mean of the hit weeks");
   assert.equal(Math.round(w.spread! * 100), 20, "the furthest week is 20% from it");
+  assert.deepEqual(w.weeks.map((x) => x.tokens), [5e6, 4e6, 6e6], "each hit week's tokens up to its refusal");
+  assert.equal(w.limit_tokens, 5e6, "the limit in tokens, the mean of the same weeks");
+  assert.equal(Math.round(w.token_spread! * 100), 20);
+  // the tokens ride on the estimate's points, by type: input, output, cache read, cache write
+  assert.equal(w.tokens.length, w.estimate.length);
+  assert.deepEqual(w.tokens.map((p) => p[0]), w.estimate.map((p) => p[0]));
+  assert.deepEqual(w.tokens.filter(([x]) => x === R0 + 2 * WEEK), [[R0 + 2 * WEEK, 0, 5e6, 0, 0], [R0 + 2 * WEEK, 0, 0, 0, 0]], "a week's end at its full tokens, then 0");
+  assert.deepEqual(w.tokens.at(-1), [NOW, 0, 2.25e6, 0, 0]);
   const at = (t: number) => w.estimate.filter(([x]) => x === t).map(([, v]) => Math.round(v));
   assert.deepEqual(at(R0 + WEEK + 6 * HOUR), [80]);
   assert.deepEqual(at(R0 + 2 * WEEK), [100, 0], "a week's end at its full figure, and the reset back at 0");
@@ -293,8 +301,18 @@ test("the weekly chart is served and drawn: two lines, the limit, and each week'
   assert.equal(doc.querySelectorAll("line.lim").length, 1, "the 100% line");
   assert.equal(doc.querySelectorAll("line.reset").length, 4);
   assert.equal(doc.querySelectorAll("#wtable tbody tr").length, 3, "one row a week");
-  assert.deepEqual([...doc.querySelectorAll("#wtable th")].map((t) => t.textContent), ["Week", "by Fri", "by Sun", "at reset"]);
+  assert.deepEqual([...doc.querySelectorAll("#wtable thead tr:last-child th")].map((t) => t.textContent), ["Week", "by Fri", "by Sun", "at reset", "by Fri", "by Sun", "at reset"]);
+  assert.deepEqual([...doc.querySelectorAll("#wtable tr.grp th")].map((t) => t.textContent), ["", "% of limit", "tokens, est."]);
   assert.match(doc.querySelector("#wtable tbody tr")!.textContent!, /100%/, "the hit week spent all of it");
+  // the hit week's tokens at its reset, with their split on hover
+  const atReset = doc.querySelector("#wtable tbody tr td.tk:last-child")!;
+  assert.equal(atReset.textContent, "5.00M");
+  assert.equal(atReset.getAttribute("title"), "input 0, output 5.00M, cache read 0, cache write 0");
+  // the limit in tokens on its line, marked an estimate, and the latest point in both units
+  assert.equal(doc.querySelector("#wlegend .lim-t")!.textContent, "100% ≈ 5.00M tokens, est.");
+  assert.equal(doc.querySelector("#wtable tbody tr td:nth-child(4) .tkl")!.textContent, "5.00M tok", "and folded into the % cell, for a narrow screen");
+  assert.ok([...doc.querySelectorAll("text.val")].some((t) => /% · 1\.00M$/.test(t.textContent!)), "the estimate's latest point in % and tokens");
+  assert.match(doc.getElementById("wnote")!.textContent!, /In tokens the limit is about 5\.00M, the mean the same weeks spent: an estimate/);
   assert.match(doc.getElementById("wlegend")!.textContent!, /estimated, from transcripts.*actual/);
   assert.match(doc.getElementById("wnote")!.textContent!, /weekly limit of \$100: the mean of 1 week the limit was hit\./);
   // a pointer over the chart shows both figures at that time
@@ -302,4 +320,5 @@ test("the weekly chart is served and drawn: two lines, the limit, and each week'
   (svg as unknown as { getBoundingClientRect: () => DOMRect }).getBoundingClientRect = () => ({ left: 0, top: 0, width: 320, height: 220 } as DOMRect);
   doc.getElementById("wchart")!.dispatchEvent(new w.MouseEvent("pointermove", { clientX: 300 }) as Event);
   assert.match(doc.getElementById("wtip")!.textContent!, /estimated.*%.*actual/);
+  assert.match(doc.getElementById("wtip")!.textContent!, /tokens, est\.1\.00Minput0output1\.00Mcache read0cache write0/, "the tokens at that time, by type");
 });
