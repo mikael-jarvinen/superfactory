@@ -7,7 +7,7 @@ import { after, test } from "node:test";
 import vm from "node:vm";
 import { JSDOM } from "jsdom";
 import { ACCOUNT, refreshHosts, type Read, TranscriptUsage } from "../src/board/analytics.js";
-import { keychainItem, oauthUsage, PlanUsage, type Sample } from "../src/board/plan-usage.js";
+import { type Keychain, keychainItem, oauthUsage, PlanUsage, type Sample } from "../src/board/plan-usage.js";
 import type { Runner } from "../src/board/remote-transcripts.js";
 import { serve } from "../src/board/server.js";
 import { costOf, WEEK, weekly } from "../src/board/weekly.js";
@@ -194,16 +194,16 @@ test("on macOS the login is Claude Code's Keychain item, the file when there is 
   await read();
   assert.deepEqual(auth, ["Bearer from-keychain", "Bearer from-file"]);
   // a Keychain that could not be read says why, when there is no file to fall back on
-  const none = oauthUsage(() => tempDir(), fake, async () => {
+  const unreadable: Keychain = async () => {
     throw new Error("Claude Code's Keychain item could not be read (security exited 36)");
-  });
+  };
+  // the read with no file to fall back on sends nothing, and the fallback below sends one request
+  const sent = auth.length;
+  const none = oauthUsage(() => tempDir(), fake, unreadable);
   await assert.rejects(none(), /security exited 36/);
   // and one that could not be read still falls back on the file when there is one
-  const locked = oauthUsage(() => cfg, fake, async () => {
-    throw new Error("Claude Code's Keychain item could not be read (security exited 36)");
-  });
-  await locked();
-  assert.equal(auth.at(-1), "Bearer from-file");
+  await oauthUsage(() => cfg, fake, unreadable)();
+  assert.deepEqual(auth.slice(sent), ["Bearer from-file"]);
 
   assert.deepEqual(keychainItem({ USER: "someone" }), { service: "Claude Code-credentials", account: "someone" });
   const hash = createHash("sha256").update("/x/cfg").digest("hex").slice(0, 8);
