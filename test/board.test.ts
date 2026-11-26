@@ -16,9 +16,11 @@ const noInboxLock = process.platform !== "darwin" && process.platform !== "linux
 // `board` in dir with these args, its stdout and stderr collected.
 function board(dir: string, ...args: string[]) {
   const mon = spawn(process.execPath, [CLI, "--workspace", dir, "board", ...args], { env: { ...process.env, SF_NOTIFY: "0" } });
-  const m = { mon, out: "", err: "" };
+  // closed: exited with its stdout and stderr read to the end, which "exit" alone does not promise
+  const m = { mon, out: "", err: "", closed: false };
   mon.stdout.on("data", (b: Buffer) => (m.out += b));
   mon.stderr.on("data", (b: Buffer) => (m.err += b));
+  mon.on("close", () => (m.closed = true));
   after(() => mon.kill());
   return m;
 }
@@ -66,12 +68,12 @@ test("the inbox: held detection, the holder, the watchers' notes, and the next h
   assert.equal(b.out.split("] while unarmed").length - 1, 1, "the rolled log is read to its end once");
   assert.equal(inboxHeld(ws), true);
   const c = arm();
-  await until("the second holder to stop", () => c.mon.exitCode !== null);
+  await until("the second holder to stop", () => c.closed);
   assert.match(c.out, /already held by another `board --inbox`; this one stops/);
   assert.equal(c.mon.exitCode, 0, "without --once, a second holder stops quietly as before");
   // With --once it is an error, so the lead is not invited to run it again.
   const d = board(dir, "--inbox", "--once");
-  await until("the --once that found it held to stop", () => d.mon.exitCode !== null);
+  await until("the --once that found it held to stop", () => d.closed);
   assert.equal(d.mon.exitCode, 3);
   assert.equal(d.out, "", "nothing on stdout that reads as a message");
   assert.match(d.err, /already held by another `board --inbox`; this one stops\. Do not start another/);
@@ -89,17 +91,17 @@ test("the inbox --once: holds while waiting, exits on the first message, prints 
   await new Promise((r) => setTimeout(r, 600));
   assert.equal(a.mon.exitCode, null, "nothing came, so it still waits");
   postMessage(ws, "wake up");
-  await until("the wait to exit", () => a.mon.exitCode !== null);
+  await until("the wait to exit", () => a.closed);
   assert.equal(a.mon.exitCode, 0);
   assert.match(a.out, /\[from the message page\] \[m:[0-9a-f]{6}\] wake up\n$/);
   await until("the lock to go with it", () => !inboxHeld(ws));
   leaveNote(ws, "[round]\nafter the first wait");
   const b = once();
-  await until("the second wait to exit", () => b.mon.exitCode !== null);
+  await until("the second wait to exit", () => b.closed);
   assert.ok(!b.out.includes("wake up"), `nothing printed twice:\n${b.out}`);
   assert.match(b.out, /after the first wait/);
   const u = board(dir, "--once");
-  await until("the usage error", () => u.mon.exitCode !== null);
+  await until("the usage error", () => u.closed);
   assert.notEqual(u.mon.exitCode, 0);
   assert.match(u.err, /--once goes with --inbox/);
 });

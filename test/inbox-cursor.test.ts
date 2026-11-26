@@ -125,3 +125,33 @@ test("a message read through a Bash tool_result is delivered, then seen at the n
   r.read(t);
   assert.deepEqual([r.receipt("abc123"), r.receipt("def456")], ["seen", "seen"]);
 });
+
+// Only what `board --inbox` printed counts in a tool's output, in each shape it reaches the lead:
+// the command's stdout, a Read of the background command's output file, a note. A
+// log line that names an id, the watchdog's own alert above all, is not the message reaching it.
+test("in a tool_result only board --inbox's own lines count; the watchdog's log line marks nothing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "receipts-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const t = join(dir, "lead.jsonl");
+  const put = (d: unknown) => appendFileSync(t, JSON.stringify(d) + "\n");
+  const result = (content: unknown) => put({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu", content }] } });
+  result("2026-11-26T10:00:00.000Z watchdog: ALERT, [m:aaaaaa] unseen by niilo for 14 min\n" +
+    "2026-11-26T10:05:00.000Z watchdog: niilo has seen [m:bbbbbb] or a later message, episode over");
+  result([{ type: "text", text: 'grep: {"id":"cccccc","text":"[m:cccccc] quoted"}' }]);
+  // A Read of a background run's output file, as a lead's transcript on turing held it (CLI
+  // 2.1.318), with --once's lines in place of what it read: the line number, a tab, the line. Earlier
+  // CLIs pad the number to six.
+  put({ type: "user", message: { role: "user", content: [{ tool_use_id: "toolu_0117WjsxFB66fEPEj11nCK7n", type: "tool_result",
+    content: "1\t[from the message page] [m:dddddd] from the output file\n2\t[m:eeeeee] a note\n3\t\n4\t[exited with code 0]\n5\t" }] },
+    toolUseResult: { type: "text", file: { filePath: "/tmp/claude-1000/-home-turing-agents-tech-lead/s/tasks/bajk0um1h.output",
+      content: "[from the message page] [m:dddddd] from the output file\n[m:eeeeee] a note\n\n[exited with code 0]\n", numLines: 5, startLine: 1, totalLines: 5 } } });
+  result("     1\t[from the message page] [m:dadada] padded, as earlier CLIs write it");
+  // the arrow is how a Read is drawn on screen, not what the transcript holds
+  result("     1→[from the message page] [m:ffffff] as drawn");
+  result("[from the message page] [m:121212] on stdout");
+  put({ type: "assistant", message: { content: [{ type: "text", text: "on it" }] } });
+  const r = new Receipts();
+  r.read(t);
+  assert.deepEqual(["dddddd", "eeeeee", "dadada", "121212"].map((id) => r.receipt(id)), ["seen", "seen", "seen", "seen"]);
+  assert.deepEqual(["aaaaaa", "bbbbbb", "cccccc", "ffffff"].map((id) => r.receipt(id)), ["sent", "sent", "sent", "sent"]);
+});
