@@ -139,13 +139,13 @@ test("in a tool_result only board --inbox's own lines count; the watchdog's log 
     "2026-11-26T10:05:00.000Z watchdog: niilo has seen [m:bbbbbb] or a later message, episode over");
   result([{ type: "text", text: 'grep: {"id":"cccccc","text":"[m:cccccc] quoted"}' }]);
   // A Read of a background run's output file, as a lead's transcript on turing held it (CLI
-  // 2.1.318), with --once's lines in place of what it read: the line number, a tab, the line. Earlier
-  // CLIs pad the number to six.
+  // 2.1.318), with --once's lines in place of what it read: the line number, a tab, the line. The
+  // same CLI versions write the number both bare and padded to six, so the pattern takes either.
   put({ type: "user", message: { role: "user", content: [{ tool_use_id: "toolu_0117WjsxFB66fEPEj11nCK7n", type: "tool_result",
     content: "1\t[from the message page] [m:dddddd] from the output file\n2\t[m:eeeeee] a note\n3\t\n4\t[exited with code 0]\n5\t" }] },
     toolUseResult: { type: "text", file: { filePath: "/tmp/claude-1000/-home-turing-agents-tech-lead/s/tasks/bajk0um1h.output",
       content: "[from the message page] [m:dddddd] from the output file\n[m:eeeeee] a note\n\n[exited with code 0]\n", numLines: 5, startLine: 1, totalLines: 5 } } });
-  result("     1\t[from the message page] [m:dadada] padded, as earlier CLIs write it");
+  result("     1\t[from the message page] [m:dadada] padded, the other form");
   // the arrow is how a Read is drawn on screen, not what the transcript holds
   result("     1→[from the message page] [m:ffffff] as drawn");
   result("[from the message page] [m:121212] on stdout");
