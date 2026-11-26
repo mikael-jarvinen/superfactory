@@ -6,8 +6,7 @@
 // `ok <what>` or `MISSING <what> [fix: <step>]`, the shape the stack contract uses.
 //
 // It reads only. Nothing here installs, starts or changes anything; a fix is text for the human.
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
@@ -18,7 +17,7 @@ import { claudeBin, executable } from "./fleet.js";
 import { findPlaywright } from "./gate/demo.js";
 import { ghBin } from "./gate/github.js";
 import { checks as schedulerChecks } from "./scheduler/index.js";
-import { factoryCommand, shq, TEMPLATES_DIR, templateNames } from "./settings.js";
+import { TEMPLATES_DIR, templateNames } from "./settings.js";
 import { stackDoctor } from "./stacks/engine.js";
 import { trackerOf } from "./tracker/read.js";
 import { ask, probe, Unreachable } from "./remote.js";
@@ -348,56 +347,11 @@ export function hostChecks(ws: Workspace): Check[] {
   });
 }
 
-// ---------------------------------------------------------------- resumed briefs
-
-// Whether this machine's claude hands a resumed session its brief. claude keeps the appendix a
-// session started with on a resume and reads no new one (as of Claude Code 2.1.327), so the
-// factory gives a resumed session its current brief through a SessionStart hook (hooks/appendix.ts).
-// This starts a throwaway `claude -p` session with that hook and no appendix, resumes it, and asks
-// for the codeword only the hook's brief holds. Two model turns, so only on `doctor --resume-probe`.
-export function resumeProbe(ws: Workspace, claude: string = claudeBin()): Check {
-  const what = "a resumed session is handed its current brief (SessionStart hook, codeword probe)";
-  const fix = "a resumed agent comes back on the brief it started with: after a brief change, start it fresh (the command `factory wake` names), and tell the lead";
-  const dir = join(ws.runDir, `resume-probe-${process.pid}`);
-  const code = `PROBE-${randomBytes(4).toString("hex").toUpperCase()}`;
-  try {
-    mkdirSync(dir, { recursive: true });
-    const brief = join(dir, "brief.md");
-    writeFileSync(brief, `The codeword is ${code}.\n`);
-    const settings = join(dir, "settings.json");
-    const command = `${factoryCommand()} hook appendix --file ${shq(brief)}`;
-    writeFileSync(settings, JSON.stringify({ hooks: { SessionStart: [{ matcher: "resume", hooks: [{ type: "command", command, timeout: 10 }] }] } }));
-    const turn = (extra: string[], prompt: string) =>
-      run(claude, ["-p", "--settings", settings, "--output-format", "json", ...extra, prompt], { cwd: dir, timeout: 120_000 }, "claude -p");
-    const first = turn([], "Reply with OK and nothing else.");
-    let id: unknown;
-    try {
-      id = (JSON.parse(first.stdout) as { session_id?: unknown }).session_id;
-    } catch {
-      id = undefined;
-    }
-    if (first.status !== 0 || typeof id !== "string")
-      return { status: "missing", what: `${what}: the first turn failed (${(first.stderr || first.stdout).trim().split("\n")[0] || `exit ${first.status}`})`, fix: "check that `claude -p` runs here" };
-    const second = turn(["--resume", id], "If your context gives you a codeword, reply with the codeword alone. Otherwise reply NONE.");
-    let said = "";
-    try {
-      said = String((JSON.parse(second.stdout) as { result?: unknown }).result ?? "");
-    } catch {
-      said = second.stdout;
-    }
-    if (second.status !== 0)
-      return { status: "missing", what: `${what}: the resume failed (${(second.stderr || second.stdout).trim().split("\n")[0] || `exit ${second.status}`})`, fix };
-    return said.includes(code) ? { status: "ok", what } : { status: "missing", what: `${what}: the resumed session answered ${JSON.stringify(said.trim().slice(0, 80))}, not the codeword`, fix };
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
 // ---------------------------------------------------------------- all of it
 
 // Prints as it goes, since the GitHub reads take a moment each. Resolves to the exit code: 1 when
 // anything is missing.
-export async function doctor(ws: Workspace, print: (l: string) => void = console.log, o: { resumeProbe?: boolean } = {}): Promise<number> {
+export async function doctor(ws: Workspace, print: (l: string) => void = console.log): Promise<number> {
   let missing = 0;
   const emit = (checks: Check[]) => {
     for (const c of checks) {
@@ -414,7 +368,6 @@ export async function doctor(ws: Workspace, print: (l: string) => void = console
   emit(hostChecks(ws));
   // Reported, never fixed: installing jobs is `factory schedule install`, which the human runs.
   emit(schedulerChecks(ws));
-  if (o.resumeProbe) emit([resumeProbe(ws)]);
   // A stack whose script cannot run has its line above; its doctor would only repeat it.
   for (const s of Object.values(ws.config.stacks)) {
     if (!s.script || !existsSync(s.script) || !executable(s.script)) continue;
