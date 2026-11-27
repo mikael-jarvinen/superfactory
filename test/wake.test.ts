@@ -10,6 +10,7 @@ import { agentOrDie } from "../src/fleet.js";
 import { settingsFile, startLock } from "../src/launch.js";
 import { tryLock } from "../src/tickets/lock.js";
 import { recipient } from "../src/hooks/wake.js";
+import { queueCards } from "../src/board/queue.js";
 import { ListingTimedOut, Unreachable } from "../src/remote.js";
 import type { StartRequest, Transport } from "../src/transport.js";
 import * as T from "../src/tickets/store.js";
@@ -498,14 +499,14 @@ test("only a hosted agent's settings explain a failed send", () => {
 // The fix session a dispatch recorded on an item.
 const fixSession = (ws: string, key: string) => (JSON.parse(readFileSync(join(ws, "state", `${key}.json`), "utf8")) as { fix_session: string }).fix_session;
 
-// A checkout of web with one commit and the briefs a builder on the app stack reads.
-function webRepo(ws: string) {
+// A checkout of web (or another repo) with one commit and the briefs a builder on the app stack reads.
+function webRepo(ws: string, name = "web") {
   mkdirSync(join(ws, "briefs"), { recursive: true });
   writeFileSync(join(ws, "briefs", "app.md"), "the app stack's brief");
-  const web = join(ws, "repos", "web");
+  const web = join(ws, "repos", name);
   mkdirSync(web, { recursive: true });
   writeFileSync(join(web, "AGENTS.md"), "the repo's brief");
-  const origin = join(ws, "web-origin.git");
+  const origin = join(ws, `${name}-origin.git`);
   execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
   for (const a of [["init", "-q", "-b", "main"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
     ["remote", "add", "origin", origin], ["push", "-q", "origin", "main"]])
@@ -551,6 +552,12 @@ test("every redo and every fix round stops the item's session and starts a fresh
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /TEST-50\.handoff\.md holds no findings at bea's head [0-9a-f]{12}.*only in bea's session \(new3\)/s);
   assert.ok(!calls().includes("stop new3"));
+  // a worktree here is checked whatever --findings-checked says
+  r = factory(ws, ["dispatch", "bea", "TEST-50", "--findings-checked"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stdout, /--findings-checked not needed: bea's worktree is here/);
+  assert.match(r.stderr, /holds no findings at bea's head/);
+  assert.ok(!calls().includes("stop new3"));
   // findings of a round already fixed are no better
   writeFileSync(handoff, "## Findings\nReviewed acme/web#5 at 0123456789abcdef\n");
   assert.notEqual(factory(ws, ["dispatch", "bea", "TEST-50"]).status, 0);
@@ -590,6 +597,98 @@ test("every redo and every fix round stops the item's session and starts a fresh
   assert.equal(starts().length, 6);
 });
 
+test("another builder takes an item over only off its builder's session, and a refusal stops nothing", () => {
+  const { ws, put, calls } = fakeFleet();
+  webRepo(ws);
+  webRepo(ws, "api");
+  const rec = (k: string) => JSON.parse(readFileSync(join(ws, "state", `${k}.json`), "utf8")) as { state: string; agent: string; worktree: string };
+  assert.equal(factory(ws, ["dispatch", "bea", "TEST-56"]).status, 0);
+  const wt = rec("TEST-56").worktree;
+  // bea's session is in the item's worktree: refused, --force or not
+  put("live.json", [sess("b1", "bea", { state: "idle", cwd: wt })]);
+  for (const f of [[], ["--force"]]) {
+    const r = factory(ws, ["dispatch", "cal", "TEST-56", ...f]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /TEST-56 is building, built by bea, whose session \(b1\) is in its worktree\. Its redo is bea's; to hand it to cal, `factory stop bea` first\./);
+  }
+  // bea off: a building item is handed over on --force only
+  rmSync(join(ws, "live.json"), { force: true });
+  let r = factory(ws, ["dispatch", "cal", "TEST-56"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /TEST-56 is building, built by bea; its redo is bea's\. To hand it to cal, dispatch with --force\./);
+  // cal idle on its own item in review: the refusal comes before cal's session is stopped
+  r = factory(ws, ["dispatch", "cal", "TEST-60"]);
+  assert.equal(r.status, 0, r.stderr);
+  const calSession = /cal started \((\w+)\)/.exec(r.stdout)![1]!;
+  for (const a of [["pr-open", "--pr", "acme/api#3", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "b"], ["gate", "--evidence", "c"], ["your-review", "--reviewed", "abc1234abc1234"]])
+    assert.equal(factory(ws, ["state", "TEST-60", ...a]).status, 0, a.join(" "));
+  put("live.json", [sess(calSession, "cal", { state: "idle", cwd: rec("TEST-60").worktree })]);
+  r = factory(ws, ["dispatch", "cal", "TEST-56"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /its redo is bea's/);
+  assert.ok(!calls().includes(`stop ${calSession}`), "a refused handover stops nothing");
+  // --force hands it over; a redo has no findings to check
+  r = factory(ws, ["dispatch", "cal", "TEST-56", "--force", "--findings-checked"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /--findings-checked ignored: no live session's fix round on TEST-56, so nothing to check/);
+  assert.equal(rec("TEST-56").agent, "cal");
+});
+
+test("a fix round stays with its builder, and never moves while the builder's session is in the worktree", () => {
+  const { ws, put, calls } = fakeFleet();
+  webRepo(ws);
+  webRepo(ws, "api");
+  const rec = (k: string) => JSON.parse(readFileSync(join(ws, "state", `${k}.json`), "utf8")) as { state: string; agent: string; worktree: string };
+  assert.equal(factory(ws, ["dispatch", "bea", "TEST-57"]).status, 0);
+  const wt = rec("TEST-57").worktree;
+  for (const a of [["pr-open", "--pr", "acme/web#11", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "b"]])
+    assert.equal(factory(ws, ["state", "TEST-57", ...a]).status, 0, a.join(" "));
+  // bea idle in the worktree: neither the dispatch nor `factory state --agent` moves it
+  put("live.json", [sess("b1", "bea", { state: "idle", cwd: wt })]);
+  const live = /TEST-57 is agent-review, built by bea, whose session \(b1\) is in its worktree\./;
+  for (const f of [[], ["--force"]]) {
+    const r = factory(ws, ["dispatch", "cal", "TEST-57", ...f]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, live);
+    assert.match(r.stderr, /Its fix round is bea's; to hand it to cal, `factory stop bea` first\./);
+  }
+  let r = factory(ws, ["state", "TEST-57", "fixing", "--agent", "cal"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, live);
+  assert.equal(rec("TEST-57").agent, "bea");
+  assert.ok(!calls().some((c) => c.startsWith("stop")), "a refused handover stops nothing");
+  // bea off: the round goes to cal through `factory state` only
+  rmSync(join(ws, "live.json"), { force: true });
+  r = factory(ws, ["dispatch", "cal", "TEST-57"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /TEST-57 is agent-review, built by bea; its fix round is bea's\. To hand it to cal, `factory state TEST-57 fixing --agent cal` first\./);
+  assert.equal(factory(ws, ["state", "TEST-57", "fixing", "--agent", "cal"]).status, 0);
+  // and once fixing, it is cal's: bea takes it back on --force, as the refusal says
+  r = factory(ws, ["dispatch", "bea", "TEST-57"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /TEST-57 is fixing, built by cal; its fix round is cal's\. To hand it to bea, dispatch with --force\./);
+  r = factory(ws, ["dispatch", "cal", "TEST-57"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(rec("TEST-57").agent, "cal");
+  rmSync(join(ws, "live.json"), { force: true });
+  r = factory(ws, ["dispatch", "bea", "TEST-57", "--force"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual([rec("TEST-57").state, rec("TEST-57").agent], ["fixing", "bea"]);
+  // blocked, with bea idle in the worktree: relinking the block to a posted question hands it to
+  // no one else, and --unchecked says when it has nothing to do
+  assert.equal(factory(ws, ["state", "TEST-57", "blocked", "--note", "which export format?"]).status, 0);
+  assert.equal(factory(ws, ["say", "which export format?", "--kind", "decision"]).status, 0);
+  const q = queueCards(openWorkspace(ws)).find((c) => c.questions[0]?.text === "which export format?")!.questions[0]!.id;
+  put("live.json", [sess("b2", "bea", { state: "idle", cwd: wt })]);
+  r = factory(ws, ["state", "TEST-57", "blocked", "--asks", q, "--agent", "cal"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /TEST-57 is blocked, built by bea, whose session \(b2\) is in its worktree\./);
+  assert.equal(rec("TEST-57").agent, "bea");
+  r = factory(ws, ["state", "TEST-57", "blocked", "--asks", q, "--unchecked"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /--unchecked ignored: TEST-57 goes to no other builder here, so no host to check/);
+});
+
 test("a building item whose session is off is briefed as a redo; a done item is never dispatched", () => {
   const { ws, put } = fakeFleet();
   webRepo(ws);
@@ -606,6 +705,11 @@ test("a building item whose session is off is briefed as a redo; a done item is 
   assert.match(r.stdout, /as a BUILDING session/);
   assert.match(r.stdout, /next: SendMessage to bea: the redo: what to change, the branch and its head sha/);
   assert.equal((JSON.parse(readFileSync(join(ws, "state", "TEST-56.json"), "utf8")) as { state: string }).state, "pr-open");
+  // another builder takes the redo over only on --force
+  rmSync(join(ws, "live.json"), { force: true });
+  r = factory(ws, ["dispatch", "cal", "TEST-56"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /TEST-56 is pr-open, built by bea; its redo is bea's\. To hand it to cal, dispatch with --force\./);
   for (const a of [["agent-review", "--evidence", "b"], ["gate", "--evidence", "c"], ["your-review", "--reviewed", "abc1234abc1234"], ["done", "--evidence", "merged"]])
     assert.equal(factory(ws, ["state", "TEST-56", ...a]).status, 0, a.join(" "));
   put("live.json", [sess("new2", "bea", { state: "idle", cwd: wt })]);
@@ -735,14 +839,16 @@ role = "designer"
   // taken off the board with its session left running, it goes back on as building, not fixing,
   // which off the board cannot reach
   assert.equal(factory(ws, ["state", "TEST-30", "off"]).status, 0);
-  r = factory(ws, ["dispatch", "bea", "TEST-30"]);
+  r = factory(ws, ["dispatch", "bea", "TEST-30", "--findings-checked"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /bea is still on TEST-30 .*so it keeps its context/);
+  assert.match(r.stdout, /--findings-checked ignored: no live session's fix round on TEST-30, so nothing to check/);
   assert.equal(rec("TEST-30").state, "building");
   assert.equal((JSON.parse(readFileSync(join(ws, "state", "TEST-30.json"), "utf8")) as { worktree: string }).worktree, wt);
 
-  r = factory(ws, ["dispatch", "dee", "TEST-31"]);
+  r = factory(ws, ["dispatch", "dee", "TEST-31", "--findings-checked"]);
   assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /--findings-checked ignored: no live session's fix round on TEST-31, so nothing to check/);
   assert.deepEqual([rec("TEST-31").state, rec("TEST-31").title], ["designing", "Draw the export"], "and so has the designer's");
 
   r = factory(ws, ["dispatch", "dee", "TEST-31", "--title", "Draw the export, round two"]);

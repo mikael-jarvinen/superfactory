@@ -34,6 +34,13 @@ export const TRANSITIONS: Record<State, ReadonlySet<Target>> = {
 // included.
 export const usesState = (ws: Workspace, s: State): boolean => s !== "colleague-review" || ws.config.gate.colleagueReview;
 const usable = (ws: Workspace, to: Target) => to === OFF || usesState(ws, to);
+// Where an item may go from a state, or from off the board, without --force.
+const allowedFrom = (ws: Workspace, old: State | null): Target[] => [...(old === null ? FROM_OFF : TRANSITIONS[old])].filter((s) => usable(ws, s));
+// blocked -> blocked with --asks links the block to the posted question it waits on, after the fact.
+const relinks = (old: State | null, to: string, asks: string | undefined) => old === "blocked" && to === "blocked" && !!asks;
+// Whether transition() takes the move without --force.
+export const validMove = (ws: Workspace, old: State | null, to: string, asks?: string): boolean =>
+  relinks(old, to, asks) || (allowedFrom(ws, old) as string[]).includes(to);
 // Items left in a state the workspace has turned off: in colleague-review with colleague_review false.
 // The board still shows them, the round names them, and doctor reports them.
 export const stranded = <R extends { state: State | null }>(ws: Workspace, recs: readonly R[]): R[] =>
@@ -274,12 +281,10 @@ export function transition(ws: Workspace, ticket: string, next: string, c: Chang
   const old = rec.state;
   // How the item stood: an old state, off the board, or nothing yet.
   const was = isNew ? null : old ?? OFF;
-  // blocked -> blocked with --asks links the block to the posted question it waits on, after the fact.
-  const relink = old === "blocked" && to === "blocked" && !!c.asks;
-  if (!isNew && !c.force && !relink) {
-    const allowed = [...(old === null ? FROM_OFF : TRANSITIONS[old])].filter((s) => usable(ws, s));
-    if (!allowed.includes(to))
-      die(`${ticket}: ${old ?? OFF} -> ${to} is not a valid transition. From ${old ?? OFF} you can go to: ` +
+  const relink = relinks(old, to, c.asks);
+  if (!isNew && !c.force && !validMove(ws, old, to, c.asks)) {
+    const allowed = allowedFrom(ws, old);
+    die(`${ticket}: ${old ?? OFF} -> ${to} is not a valid transition. From ${old ?? OFF} you can go to: ` +
         `${allowed.sort().join(", ") || "nowhere, it is terminal"}. Use --force if you mean it.`);
   }
   const warnings: string[] = [];
