@@ -662,13 +662,17 @@ test("a fix round stays with its builder, and never moves while the builder's se
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /TEST-57 is agent-review, built by bea; its fix round is bea's\. To hand it to cal, `factory state TEST-57 fixing --agent cal` first\./);
   assert.equal(factory(ws, ["state", "TEST-57", "fixing", "--agent", "cal"]).status, 0);
-  // and once fixing, it is cal's: bea takes it back the same way
+  // and once fixing, it is cal's: bea takes it back on --force, as the refusal says
   r = factory(ws, ["dispatch", "bea", "TEST-57"]);
   assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /TEST-57 is fixing, built by cal; its fix round is cal's\. To hand it to bea, `factory state TEST-57 fixing --agent bea` first\./);
+  assert.match(r.stderr, /TEST-57 is fixing, built by cal; its fix round is cal's\. To hand it to bea, dispatch with --force\./);
   r = factory(ws, ["dispatch", "cal", "TEST-57"]);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(rec("TEST-57").agent, "cal");
+  rmSync(join(ws, "live.json"), { force: true });
+  r = factory(ws, ["dispatch", "bea", "TEST-57", "--force"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual([rec("TEST-57").state, rec("TEST-57").agent], ["fixing", "bea"]);
 });
 
 test("a building item whose session is off is briefed as a redo; a done item is never dispatched", () => {

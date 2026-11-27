@@ -444,7 +444,7 @@ test("a builder with a host: dispatch makes its worktree there and stop looks th
   assert.throws(() => t.checkout({ ...ws.config.repos.api!, key: "gone" }), (e: unknown) => e instanceof Unreachable && /HTTP 422 not a refusal/.test(e.message));
 });
 
-test("an item whose builder's host cannot be reached is handed over on --force, with a warning", async () => {
+test("an item whose builder's host cannot be reached is handed over on --unchecked or a forced dispatch, with a warning", async () => {
   const port = await closedPort();
   const dir = workspace(hostedCal(`http://127.0.0.1:${port}`));
   for (const a of [["building", "--agent", "cal", "--evidence", "a"], ["pr-open", "--pr", "acme/api#9", "--head", "abc1234abc1234"]])
@@ -455,12 +455,31 @@ test("an item whose builder's host cannot be reached is handed over on --force, 
   assert.match(r.stderr, /TEST-9 is pr-open, built by cal; its redo is cal's\. To hand it to bea, dispatch with --force\./);
   r = factory(dir, ["state", "TEST-9", "pr-open", "--agent", "bea", "--pr", "acme/api#9", "--head", "abc1234abc1234"]);
   assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /cal's host far cannot be reached \(ECONNREFUSED\) to see whether its session is in TEST-9's worktree\. To hand TEST-9 to bea anyway, run again with --force\./);
-  assert.equal(loadRec(openWorkspace(dir), "TEST-9")!.agent, "cal");
+  const refused = /cal's host far cannot be reached \(ECONNREFUSED\) to see whether its session is in TEST-9's worktree, so TEST-9 goes to bea unchecked\. To hand TEST-9 to bea anyway, run again with --unchecked\./;
+  assert.match(r.stderr, refused);
+  // --force is no way past the host: it waives the transition checks only
   r = factory(dir, ["state", "TEST-9", "pr-open", "--agent", "bea", "--pr", "acme/api#9", "--head", "abc1234abc1234", "--force"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, refused);
+  // and --unchecked waives no transition check
+  r = factory(dir, ["state", "TEST-9", "fixing", "--agent", "bea", "--unchecked"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /pr-open -> fixing is not a valid transition/);
+  assert.equal(loadRec(openWorkspace(dir), "TEST-9")!.agent, "cal");
+  r = factory(dir, ["state", "TEST-9", "pr-open", "--agent", "bea", "--pr", "acme/api#9", "--head", "abc1234abc1234", "--unchecked"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /warning: cal's host far cannot be reached \(ECONNREFUSED\), so TEST-9 goes to bea unchecked for cal's session in its worktree/);
+  const warned = (to: string) => new RegExp(`warning: cal's host far cannot be reached \\(ECONNREFUSED\\) to see whether its session is in TEST-9's worktree, so TEST-9 goes to ${to} unchecked\\.`);
+  assert.match(r.stdout, warned("bea"));
   assert.equal(loadRec(openWorkspace(dir), "TEST-9")!.agent, "bea");
+});
+
+test("a forced dispatch past a builder's host that cannot be reached warns and hands the redo over", async () => {
+  const port = await closedPort();
+  const dir = workspace(hostedCal(`http://127.0.0.1:${port}`));
+  for (const a of [["building", "--agent", "cal", "--evidence", "a"], ["pr-open", "--pr", "acme/api#9", "--head", "abc1234abc1234"]])
+    assert.equal(factory(dir, ["state", "TEST-9", ...a]).status, 0, a.join(" "));
+  const r = factory(dir, ["dispatch", "bea", "TEST-9", "--force"]);
+  assert.match(r.stdout, /warning: cal's host far cannot be reached \(ECONNREFUSED\) to see whether its session is in TEST-9's worktree, so TEST-9 goes to bea unchecked\./);
 });
 
 test("a hosted builder's fix round refuses on a handoff it cannot read, until --findings-checked", async () => {

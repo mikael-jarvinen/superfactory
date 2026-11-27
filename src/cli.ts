@@ -41,7 +41,7 @@ import { cmdStack, STACK_USAGE } from "./stacks/command.js";
 import { cmdTicket, cmdWiki, TICKET_USAGE } from "./tickets/cli.js";
 import { exportStacks, releaseForReview, slotless, startBoot } from "./stacks/engine.js";
 import {
-  allRecs, appendEvent, BUSY, OFF, onBoard, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, REDO, removePr, removeRec, saveRec, showRec, transition, TRANSITIONS, validKey,
+  allRecs, appendEvent, BUSY, OFF, onBoard, DESIGN_DISPATCHABLE, DISPATCHABLE, IN_REVIEW, KEY_HINT, loadRec, type Rec, REDO, removePr, removeRec, saveRec, showRec, transition, TRANSITIONS, validKey, validMove,
 } from "./state.js";
 import { trackerTitle } from "./tracker/title.js";
 import { chars, FactoryError, firstSentence, now, pyDumps, pyRepr, run, sleep, squash, wrap } from "./util.js";
@@ -77,9 +77,10 @@ usage: factory [--workspace <dir>] <command> [options]
                                   head. A worktree on a host or another machine cannot be read:
                                   --findings-checked passes it there; a worktree here is checked
                                   whatever it says. Another builder's building or pr-open item
-                                  needs --force, and its fix round \`factory state KEY fixing
-                                  --agent <agent>\` first; neither while that builder's session is
-                                  in the item's worktree. An item whose session is off starts a
+                                  needs --force, and so does its fixing one. Its fix round before
+                                  fixing needs \`factory state KEY fixing --agent <agent>\` first.
+                                  None of them while that builder's session is in the item's
+                                  worktree. An item whose session is off starts a
                                   fresh one, never its old conversation. --force stops a session
                                   mid-turn.
                                   For a designer: a design session in the designers' cwd, no
@@ -104,7 +105,7 @@ usage: factory [--workspace <dir>] <command> [options]
   state <KEY> --remove-pr owner/repo#N [--note N]
                                   take a PR off the item, e.g. after a split. No transition.
   state <KEY> <new-state> [--agent A] [--stack S] [--evidence E] [--note N] [--title T]
-        [--pr owner/repo#N] [--head SHA] [--reviewed SHA] [--jira STATUS] [--force]
+        [--pr owner/repo#N] [--head SHA] [--reviewed SHA] [--jira STATUS] [--force] [--unchecked]
         [--canvas URL] [--slides URL] [--approved "<the human's words>"] [--asks QUEUE-ID]
                                   transition. design-review needs the canvas and slides links;
                                   design-review -> off is the approval and needs --approved.
@@ -114,7 +115,8 @@ usage: factory [--workspace <dir>] <command> [options]
                                   shows one card; it works on an item already blocked too.
                                   --agent moving an item off its builder is refused while that
                                   builder's session is in the item's worktree, and past a host
-                                  that cannot be reached only with --force.
+                                  that cannot be reached only with --unchecked, which waives no
+                                  other check.
   state <KEY> off [--approved "<words>"] [--note N] [--title T]
                                   take it off the board and keep the record (an approved design,
                                   the stack, the title) until a dispatch brings it back. A new
@@ -275,7 +277,7 @@ function cmdIdleWork(ws: Workspace, argv: string[]) {
 function cmdState(ws: Workspace, argv: string[]) {
   const s = { type: "string" } as const;
   const { v, p } = args("state", argv, {
-    list: { type: "boolean" }, all: { type: "boolean" }, off: { type: "boolean" }, force: { type: "boolean" },
+    list: { type: "boolean" }, all: { type: "boolean" }, off: { type: "boolean" }, force: { type: "boolean" }, unchecked: { type: "boolean" },
     agent: s, stack: s, evidence: s, note: s, title: s, pr: s, head: s, reviewed: s, jira: s, canvas: s, slides: s, approved: s,
     "remove-pr": s, asks: s,
   }, [0, 2]);
@@ -323,18 +325,14 @@ function cmdState(ws: Workspace, argv: string[]) {
     if (!waitingCards(ws).some((c) => c.questions.some((q) => q.id === asks)))
       throw new FactoryError(`state: --asks ${asks} is not a posted question waiting in the queue; see factory queue`);
   }
-  // --agent moving an item off its builder: never while the builder's session is in the worktree
+  // --agent moving an item off its builder: never while the builder's session is in the worktree,
+  // and past a host that cannot say only on --unchecked, which waives nothing else. A move
+  // transition() will refuse is left to it, so it probes no host.
   const to = str(v.agent);
   const was = to ? loadRec(ws, ticket) : null;
-  if (to && was?.agent && was.agent !== to) {
-    const b = builderIn(ws, was.agent, ticket);
-    if (b instanceof Unreachable) {
-      if (!v.force)
-        throw new FactoryError(`${was.agent}'s host ${b.host} cannot be reached (${b.why}) to see whether its session is in ` +
-          `${ticket}'s worktree. To hand ${ticket} to ${to} anyway, run again with --force.`);
-      console.log(unchecked(b, was.agent, ticket, to));
-    } else if (b) throw builderThere(was, b, to);
-  }
+  if (to && was?.agent && was.agent !== to && (v.force || validMove(ws, was.state, next)))
+    guardHandover(ws, was, to, !!v.unchecked, (u) =>
+      new FactoryError(`${unreachable(u, was, to)} To hand ${ticket} to ${to} anyway, run again with --unchecked.`));
   transition(ws, ticket, next, {
     agent: str(v.agent), evidence: str(v.evidence), pr: str(v.pr), head: str(v.head), reviewed: str(v.reviewed),
     jira: str(v.jira), stack: str(v.stack), note: str(v.note), force: !!v.force, title: str(v.title),
@@ -367,9 +365,11 @@ function blockedCardLines(ws: Workspace, ticket: string): string[] {
 // is checked before any session is stopped, so a refusal stops nothing.
 const HANDOVER: { kind: string; applies: (s: Rec["state"]) => boolean; howTo: (ticket: string, to: string) => string }[] = [
   { kind: "redo", applies: (s) => REDO.has(s), howTo: () => "dispatch with --force" },
+  // a fixing item is already in its round, so --force hands the round over
+  { kind: "fix round", applies: (s) => s === "fixing", howTo: () => "dispatch with --force" },
   {
     kind: "fix round",
-    applies: (s) => s !== null && (s === "fixing" || TRANSITIONS[s].has("fixing")),
+    applies: (s) => s !== null && TRANSITIONS[s].has("fixing"),
     howTo: (ticket, to) => `\`factory state ${ticket} fixing --agent ${to}\` first`,
   },
 ];
@@ -379,10 +379,20 @@ function handedOver(ws: Workspace, ticket: string, name: string, force: boolean)
   if (!rec || !by || by === name) return;
   const h = HANDOVER.find((x) => x.applies(rec.state));
   if (!h) return;
-  const b = builderIn(ws, by, ticket);
-  if (b && !(b instanceof Unreachable)) throw builderThere(rec, b, name, `Its ${h.kind} is ${by}'s; to`);
-  if (!force) throw new FactoryError(`${ticket} is ${rec.state}, built by ${by}; its ${h.kind} is ${by}'s. To hand it to ${name}, ${h.howTo(ticket, name)}.`);
-  if (b) console.log(unchecked(b, by, ticket, name));
+  const refusal = () => new FactoryError(`${ticket} is ${rec.state}, built by ${by}; its ${h.kind} is ${by}'s. To hand it to ${name}, ${h.howTo(ticket, name)}.`);
+  guardHandover(ws, rec, name, force, refusal, `Its ${h.kind} is ${by}'s; to`);
+  if (!force) throw refusal();
+}
+
+// A handover off the record's builder: refused while the builder's session is in the item's
+// worktree. Past a host that cannot be reached to say, `refusal` refuses unless `override`, and
+// with it a warning prints.
+function guardHandover(ws: Workspace, rec: Rec, to: string, override: boolean, refusal: (u: Unreachable) => FactoryError, lead = "To"): void {
+  const b = builderIn(ws, rec.agent!, rec.ticket);
+  if (!b) return;
+  if (!(b instanceof Unreachable)) throw builderThere(rec, b, to, lead);
+  if (!override) throw refusal(b);
+  console.log(`warning: ${unreachable(b, rec, to)}`);
 }
 
 // The builder's session in an item's worktree; null when it has none there, or the Unreachable
@@ -402,8 +412,9 @@ function builderIn(ws: Workspace, by: string, ticket: string): Session | null | 
 const builderThere = (rec: Rec, s: Session, to: string, lead = "To") =>
   new FactoryError(`${rec.ticket} is ${rec.state}, built by ${rec.agent}, whose session (${s.id}) is in its worktree. ` +
     `${lead} hand it to ${to}, \`factory stop ${rec.agent}\` first.`);
-const unchecked = (u: Unreachable, by: string, ticket: string, to: string) =>
-  `warning: ${by}'s host ${u.host} cannot be reached (${u.why}), so ${ticket} goes to ${to} unchecked for ${by}'s session in its worktree`;
+const unreachable = (u: Unreachable, rec: Rec, to: string) =>
+  `${rec.agent}'s host ${u.host} cannot be reached (${u.why}) to see whether its session is in ${rec.ticket}'s worktree, ` +
+  `so ${rec.ticket} goes to ${to} unchecked.`;
 
 function cmdDispatch(ws: Workspace, argv: string[]) {
   const { v, p } = args("dispatch", argv, { repo: { type: "string" }, "prompt-file": { type: "string" }, title: { type: "string" }, force: { type: "boolean" }, "findings-checked": { type: "boolean" } }, [2, 2]);
@@ -416,8 +427,8 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   if (!validKey(ws, ticket)) throw new FactoryError(`${pyRepr(ticket)} is ${KEY_HINT}`);
   if (ag.role === "designer") {
     if (str(v.repo)) throw new FactoryError(`a designer reads every repo and works in none, so it takes no --repo`);
-    ignored();
     dispatchDesigner(ws, ag, ticket, force, str(v["prompt-file"]));
+    ignored();
     titled(ws, ticket, str(v.title));
     return;
   }
