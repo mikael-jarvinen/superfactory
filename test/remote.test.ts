@@ -444,6 +444,25 @@ test("a builder with a host: dispatch makes its worktree there and stop looks th
   assert.throws(() => t.checkout({ ...ws.config.repos.api!, key: "gone" }), (e: unknown) => e instanceof Unreachable && /HTTP 422 not a refusal/.test(e.message));
 });
 
+test("an item whose builder's host cannot be reached is handed over on --force, with a warning", async () => {
+  const port = await closedPort();
+  const dir = workspace(hostedCal(`http://127.0.0.1:${port}`));
+  for (const a of [["building", "--agent", "cal", "--evidence", "a"], ["pr-open", "--pr", "acme/api#9", "--head", "abc1234abc1234"]])
+    assert.equal(factory(dir, ["state", "TEST-9", ...a]).status, 0, a.join(" "));
+  // a dispatch without --force refuses on the record alone
+  let r = factory(dir, ["dispatch", "bea", "TEST-9"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /TEST-9 is pr-open, built by cal; its redo is cal's\. To hand it to bea, dispatch with --force\./);
+  r = factory(dir, ["state", "TEST-9", "pr-open", "--agent", "bea", "--pr", "acme/api#9", "--head", "abc1234abc1234"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /cal's host far cannot be reached \(ECONNREFUSED\) to see whether its session is in TEST-9's worktree\. To hand TEST-9 to bea anyway, run again with --force\./);
+  assert.equal(loadRec(openWorkspace(dir), "TEST-9")!.agent, "cal");
+  r = factory(dir, ["state", "TEST-9", "pr-open", "--agent", "bea", "--pr", "acme/api#9", "--head", "abc1234abc1234", "--force"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /warning: cal's host far cannot be reached \(ECONNREFUSED\), so TEST-9 goes to bea unchecked for cal's session in its worktree/);
+  assert.equal(loadRec(openWorkspace(dir), "TEST-9")!.agent, "bea");
+});
+
 test("a hosted builder's fix round refuses on a handoff it cannot read, until --findings-checked", async () => {
   const dir = workspace(hostedCal("http://placeholder:1"));
   const d = await fakeDaemon(dir, sha(join(dir, "daemon.toml"), join(dir, "workspace.toml")));

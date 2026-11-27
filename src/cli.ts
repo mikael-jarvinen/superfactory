@@ -112,6 +112,9 @@ usage: factory [--workspace <dir>] <command> [options]
                                   doing waits in the backlog, not on the board. blocked --asks names
                                   the decision posted for it without --ticket, so the human's queue
                                   shows one card; it works on an item already blocked too.
+                                  --agent moving an item off its builder is refused while that
+                                  builder's session is in the item's worktree, and past a host
+                                  that cannot be reached only with --force.
   state <KEY> off [--approved "<words>"] [--note N] [--title T]
                                   take it off the board and keep the record (an approved design,
                                   the stack, the title) until a dispatch brings it back. A new
@@ -320,6 +323,18 @@ function cmdState(ws: Workspace, argv: string[]) {
     if (!waitingCards(ws).some((c) => c.questions.some((q) => q.id === asks)))
       throw new FactoryError(`state: --asks ${asks} is not a posted question waiting in the queue; see factory queue`);
   }
+  // --agent moving an item off its builder: never while the builder's session is in the worktree
+  const to = str(v.agent);
+  const was = to ? loadRec(ws, ticket) : null;
+  if (to && was?.agent && was.agent !== to) {
+    const b = builderIn(ws, was.agent, ticket);
+    if (b instanceof Unreachable) {
+      if (!v.force)
+        throw new FactoryError(`${was.agent}'s host ${b.host} cannot be reached (${b.why}) to see whether its session is in ` +
+          `${ticket}'s worktree. To hand ${ticket} to ${to} anyway, run again with --force.`);
+      console.log(unchecked(b, was.agent, ticket, to));
+    } else if (b) throw builderThere(was, b, to);
+  }
   transition(ws, ticket, next, {
     agent: str(v.agent), evidence: str(v.evidence), pr: str(v.pr), head: str(v.head), reviewed: str(v.reviewed),
     jira: str(v.jira), stack: str(v.stack), note: str(v.note), force: !!v.force, title: str(v.title),
@@ -350,37 +365,58 @@ function blockedCardLines(ws: Workspace, ticket: string): string[] {
 // and a fix round once `factory state` gives it the item (a forced run on a sent PR is no round).
 // Neither goes to it while the builder's session is in the item's worktree, --force or not. This
 // is checked before any session is stopped, so a refusal stops nothing.
-const HANDOVER: [string, (s: Rec["state"]) => boolean, (ticket: string, to: string) => string][] = [
-  ["redo", (s) => REDO.has(s), () => "dispatch with --force"],
-  ["fix round", (s) => s !== null && s !== "fixing" && TRANSITIONS[s].has("fixing"), (ticket, to) => `\`factory state ${ticket} fixing --agent ${to}\` first`],
+const HANDOVER: { kind: string; applies: (s: Rec["state"]) => boolean; howTo: (ticket: string, to: string) => string }[] = [
+  { kind: "redo", applies: (s) => REDO.has(s), howTo: () => "dispatch with --force" },
+  {
+    kind: "fix round",
+    applies: (s) => s !== null && (s === "fixing" || TRANSITIONS[s].has("fixing")),
+    howTo: (ticket, to) => `\`factory state ${ticket} fixing --agent ${to}\` first`,
+  },
 ];
 function handedOver(ws: Workspace, ticket: string, name: string, force: boolean): void {
   const rec = loadRec(ws, ticket);
   const by = rec?.agent;
   if (!rec || !by || by === name) return;
-  const kind = HANDOVER.find(([, is]) => is(rec.state));
-  if (!kind) return;
-  const builder = ws.config.agents.find((a) => a.name === by);
-  if (builder) {
-    const bt = transportFor(ws, builder);
-    const bs = findSession(bt, by);
-    if (bt.alive(bs) && basename((bs.cwd ?? "").replace(/\/+$/, "")) === ticket)
-      throw new FactoryError(`${ticket} is ${rec.state}, built by ${by}, whose session (${bs.id}) is in its worktree. ` +
-        `Its ${kind[0]} is ${by}'s; to hand it to ${name}, \`factory stop ${by}\` first.`);
-  }
-  if (!force)
-    throw new FactoryError(`${ticket} is ${rec.state}, built by ${by}; its ${kind[0]} is ${by}'s. To hand it to ${name}, ${kind[2](ticket, name)}.`);
+  const h = HANDOVER.find((x) => x.applies(rec.state));
+  if (!h) return;
+  const b = builderIn(ws, by, ticket);
+  if (b && !(b instanceof Unreachable)) throw builderThere(rec, b, name, `Its ${h.kind} is ${by}'s; to`);
+  if (!force) throw new FactoryError(`${ticket} is ${rec.state}, built by ${by}; its ${h.kind} is ${by}'s. To hand it to ${name}, ${h.howTo(ticket, name)}.`);
+  if (b) console.log(unchecked(b, by, ticket, name));
 }
+
+// The builder's session in an item's worktree; null when it has none there, or the Unreachable
+// that kept its host from saying.
+function builderIn(ws: Workspace, by: string, ticket: string): Session | null | Unreachable {
+  const builder = ws.config.agents.find((a) => a.name === by);
+  if (!builder) return null;
+  try {
+    const t = transportFor(ws, builder);
+    const s = findSession(t, by);
+    return t.alive(s) && basename((s.cwd ?? "").replace(/\/+$/, "")) === ticket ? s : null;
+  } catch (e) {
+    if (e instanceof Unreachable) return e;
+    throw e;
+  }
+}
+const builderThere = (rec: Rec, s: Session, to: string, lead = "To") =>
+  new FactoryError(`${rec.ticket} is ${rec.state}, built by ${rec.agent}, whose session (${s.id}) is in its worktree. ` +
+    `${lead} hand it to ${to}, \`factory stop ${rec.agent}\` first.`);
+const unchecked = (u: Unreachable, by: string, ticket: string, to: string) =>
+  `warning: ${by}'s host ${u.host} cannot be reached (${u.why}), so ${ticket} goes to ${to} unchecked for ${by}'s session in its worktree`;
 
 function cmdDispatch(ws: Workspace, argv: string[]) {
   const { v, p } = args("dispatch", argv, { repo: { type: "string" }, "prompt-file": { type: "string" }, title: { type: "string" }, force: { type: "boolean" }, "findings-checked": { type: "boolean" } }, [2, 2]);
   const [name, ticket] = p as [string, string];
   const force = !!v.force;
   const checked = !!v["findings-checked"];
+  // only a live session's fix round has findings to lose
+  const ignored = () => checked && console.log(`--findings-checked ignored: no live session's fix round on ${ticket}, so nothing to check`);
   const ag = agentOrDie(ws, name);
   if (!validKey(ws, ticket)) throw new FactoryError(`${pyRepr(ticket)} is ${KEY_HINT}`);
   if (ag.role === "designer") {
     if (str(v.repo)) throw new FactoryError(`a designer reads every repo and works in none, so it takes no --repo`);
+    ignored();
     dispatchDesigner(ws, ag, ticket, force, str(v["prompt-file"]));
     titled(ws, ticket, str(v.title));
     return;
@@ -482,6 +518,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
       keep();
       transition(ws, ticket, "building", { agent: name, stack: keptStack, worktree: s.cwd, evidence: `back on the board on the live session ${s.id}, context kept` });
       console.log(`${name} is still on ${ticket} (${s.id}), so it keeps its context.`);
+      ignored();
       const noSlot = ag.host ? null : slotless(ws, keptStack, ticket, s.cwd ?? "");
       if (noSlot) console.log(`  warning: ${noSlot}\n  Put that in the brief.`);
       console.log(`  next: SendMessage the brief to ${name}; no new session was started`);
@@ -519,8 +556,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
   const fixOff = !force && cur !== null && cur !== "building" && cur !== "fixing" && TRANSITIONS[cur].has("fixing");
   const toFixing = fixRound ? cur !== "fixing" : fixOff;
   if (!DISPATCHABLE.has(cur) && !force && !fixRound && !redo && !fixOff) throw notDispatchable(ticket, cur);
-  // only a live session's fix round has findings to lose
-  if (checked && !fixRound) console.log(`--findings-checked ignored: no live session's fix round on ${ticket}, so nothing to check`);
+  if (!fixRound) ignored();
   const { appendix, given } = inputs();
   const { wt, how } = t.worktree({ agent: ag, repo, ticket, toolWritten: ws.config.worktree.toolWritten });
   // A hosted builder has no stack, so there is no slot to check.

@@ -633,6 +633,44 @@ test("another builder takes an item over only off its builder's session, and a r
   assert.equal(rec("TEST-56").agent, "cal");
 });
 
+test("a fix round stays with its builder, and never moves while the builder's session is in the worktree", () => {
+  const { ws, put, calls } = fakeFleet();
+  webRepo(ws);
+  webRepo(ws, "api");
+  const rec = (k: string) => JSON.parse(readFileSync(join(ws, "state", `${k}.json`), "utf8")) as { state: string; agent: string; worktree: string };
+  assert.equal(factory(ws, ["dispatch", "bea", "TEST-57"]).status, 0);
+  const wt = rec("TEST-57").worktree;
+  for (const a of [["pr-open", "--pr", "acme/web#11", "--head", "abc1234abc1234"], ["agent-review", "--evidence", "b"]])
+    assert.equal(factory(ws, ["state", "TEST-57", ...a]).status, 0, a.join(" "));
+  // bea idle in the worktree: neither the dispatch nor `factory state --agent` moves it
+  put("live.json", [sess("b1", "bea", { state: "idle", cwd: wt })]);
+  const live = /TEST-57 is agent-review, built by bea, whose session \(b1\) is in its worktree\./;
+  for (const f of [[], ["--force"]]) {
+    const r = factory(ws, ["dispatch", "cal", "TEST-57", ...f]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, live);
+    assert.match(r.stderr, /Its fix round is bea's; to hand it to cal, `factory stop bea` first\./);
+  }
+  let r = factory(ws, ["state", "TEST-57", "fixing", "--agent", "cal"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, live);
+  assert.equal(rec("TEST-57").agent, "bea");
+  assert.ok(!calls().some((c) => c.startsWith("stop")), "a refused handover stops nothing");
+  // bea off: the round goes to cal through `factory state` only
+  rmSync(join(ws, "live.json"), { force: true });
+  r = factory(ws, ["dispatch", "cal", "TEST-57"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /TEST-57 is agent-review, built by bea; its fix round is bea's\. To hand it to cal, `factory state TEST-57 fixing --agent cal` first\./);
+  assert.equal(factory(ws, ["state", "TEST-57", "fixing", "--agent", "cal"]).status, 0);
+  // and once fixing, it is cal's: bea takes it back the same way
+  r = factory(ws, ["dispatch", "bea", "TEST-57"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /TEST-57 is fixing, built by cal; its fix round is cal's\. To hand it to bea, `factory state TEST-57 fixing --agent bea` first\./);
+  r = factory(ws, ["dispatch", "cal", "TEST-57"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(rec("TEST-57").agent, "cal");
+});
+
 test("a building item whose session is off is briefed as a redo; a done item is never dispatched", () => {
   const { ws, put } = fakeFleet();
   webRepo(ws);
@@ -783,14 +821,16 @@ role = "designer"
   // taken off the board with its session left running, it goes back on as building, not fixing,
   // which off the board cannot reach
   assert.equal(factory(ws, ["state", "TEST-30", "off"]).status, 0);
-  r = factory(ws, ["dispatch", "bea", "TEST-30"]);
+  r = factory(ws, ["dispatch", "bea", "TEST-30", "--findings-checked"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /bea is still on TEST-30 .*so it keeps its context/);
+  assert.match(r.stdout, /--findings-checked ignored: no live session's fix round on TEST-30, so nothing to check/);
   assert.equal(rec("TEST-30").state, "building");
   assert.equal((JSON.parse(readFileSync(join(ws, "state", "TEST-30.json"), "utf8")) as { worktree: string }).worktree, wt);
 
-  r = factory(ws, ["dispatch", "dee", "TEST-31"]);
+  r = factory(ws, ["dispatch", "dee", "TEST-31", "--findings-checked"]);
   assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /--findings-checked ignored: no live session's fix round on TEST-31, so nothing to check/);
   assert.deepEqual([rec("TEST-31").state, rec("TEST-31").title], ["designing", "Draw the export"], "and so has the designer's");
 
   r = factory(ws, ["dispatch", "dee", "TEST-31", "--title", "Draw the export, round two"]);
