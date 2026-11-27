@@ -10,6 +10,7 @@ import { agentOrDie } from "../src/fleet.js";
 import { settingsFile, startLock } from "../src/launch.js";
 import { tryLock } from "../src/tickets/lock.js";
 import { recipient } from "../src/hooks/wake.js";
+import { queueCards } from "../src/board/queue.js";
 import { ListingTimedOut, Unreachable } from "../src/remote.js";
 import type { StartRequest, Transport } from "../src/transport.js";
 import * as T from "../src/tickets/store.js";
@@ -673,6 +674,19 @@ test("a fix round stays with its builder, and never moves while the builder's se
   r = factory(ws, ["dispatch", "bea", "TEST-57", "--force"]);
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual([rec("TEST-57").state, rec("TEST-57").agent], ["fixing", "bea"]);
+  // blocked, with bea idle in the worktree: relinking the block to a posted question hands it to
+  // no one else, and --unchecked says when it has nothing to do
+  assert.equal(factory(ws, ["state", "TEST-57", "blocked", "--note", "which export format?"]).status, 0);
+  assert.equal(factory(ws, ["say", "which export format?", "--kind", "decision"]).status, 0);
+  const q = queueCards(openWorkspace(ws)).find((c) => c.questions[0]?.text === "which export format?")!.questions[0]!.id;
+  put("live.json", [sess("b2", "bea", { state: "idle", cwd: wt })]);
+  r = factory(ws, ["state", "TEST-57", "blocked", "--asks", q, "--agent", "cal"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /TEST-57 is blocked, built by bea, whose session \(b2\) is in its worktree\./);
+  assert.equal(rec("TEST-57").agent, "bea");
+  r = factory(ws, ["state", "TEST-57", "blocked", "--asks", q, "--unchecked"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /--unchecked ignored: TEST-57 goes to no other builder here, so no host to check/);
 });
 
 test("a building item whose session is off is briefed as a redo; a done item is never dispatched", () => {

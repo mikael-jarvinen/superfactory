@@ -455,7 +455,7 @@ test("an item whose builder's host cannot be reached is handed over on --uncheck
   assert.match(r.stderr, /TEST-9 is pr-open, built by cal; its redo is cal's\. To hand it to bea, dispatch with --force\./);
   r = factory(dir, ["state", "TEST-9", "pr-open", "--agent", "bea", "--pr", "acme/api#9", "--head", "abc1234abc1234"]);
   assert.notEqual(r.status, 0);
-  const refused = /cal's host far cannot be reached \(ECONNREFUSED\) to see whether its session is in TEST-9's worktree, so TEST-9 goes to bea unchecked\. To hand TEST-9 to bea anyway, run again with --unchecked\./;
+  const refused = /cal's host far cannot be reached \(ECONNREFUSED\) to see whether its session is in TEST-9's worktree\. To hand TEST-9 to bea anyway, run again with --unchecked\./;
   assert.match(r.stderr, refused);
   // --force is no way past the host: it waives the transition checks only
   r = factory(dir, ["state", "TEST-9", "pr-open", "--agent", "bea", "--pr", "acme/api#9", "--head", "abc1234abc1234", "--force"]);

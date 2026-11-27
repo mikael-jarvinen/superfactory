@@ -80,7 +80,8 @@ usage: factory [--workspace <dir>] <command> [options]
                                   needs --force, and so does its fixing one. Its fix round before
                                   fixing needs \`factory state KEY fixing --agent <agent>\` first.
                                   None of them while that builder's session is in the item's
-                                  worktree. An item whose session is off starts a
+                                  worktree. Past a builder's host that cannot be reached to say,
+                                  --force hands the item over with a warning. An item whose session is off starts a
                                   fresh one, never its old conversation. --force stops a session
                                   mid-turn.
                                   For a designer: a design session in the designers' cwd, no
@@ -330,9 +331,11 @@ function cmdState(ws: Workspace, argv: string[]) {
   // transition() will refuse is left to it, so it probes no host.
   const to = str(v.agent);
   const was = to ? loadRec(ws, ticket) : null;
-  if (to && was?.agent && was.agent !== to && (v.force || validMove(ws, was.state, next)))
-    guardHandover(ws, was, to, !!v.unchecked, (u) =>
-      new FactoryError(`${unreachable(u, was, to)} To hand ${ticket} to ${to} anyway, run again with --unchecked.`));
+  const handover = !!to && !!was?.agent && was.agent !== to;
+  if (handover && (v.force || validMove(ws, was!.state, next, asks)))
+    guardHandover(ws, was!, to!, !!v.unchecked, (u) =>
+      new FactoryError(`${unreachable(u, was!)}. To hand ${ticket} to ${to} anyway, run again with --unchecked.`));
+  else if (v.unchecked) console.log(`--unchecked ignored: ${ticket} goes to no other builder here, so no host to check`);
   transition(ws, ticket, next, {
     agent: str(v.agent), evidence: str(v.evidence), pr: str(v.pr), head: str(v.head), reviewed: str(v.reviewed),
     jira: str(v.jira), stack: str(v.stack), note: str(v.note), force: !!v.force, title: str(v.title),
@@ -392,7 +395,7 @@ function guardHandover(ws: Workspace, rec: Rec, to: string, override: boolean, r
   if (!b) return;
   if (!(b instanceof Unreachable)) throw builderThere(rec, b, to, lead);
   if (!override) throw refusal(b);
-  console.log(`warning: ${unreachable(b, rec, to)}`);
+  console.log(`warning: ${unreachable(b, rec)}, so ${rec.ticket} goes to ${to} unchecked.`);
 }
 
 // The builder's session in an item's worktree; null when it has none there, or the Unreachable
@@ -412,9 +415,8 @@ function builderIn(ws: Workspace, by: string, ticket: string): Session | null | 
 const builderThere = (rec: Rec, s: Session, to: string, lead = "To") =>
   new FactoryError(`${rec.ticket} is ${rec.state}, built by ${rec.agent}, whose session (${s.id}) is in its worktree. ` +
     `${lead} hand it to ${to}, \`factory stop ${rec.agent}\` first.`);
-const unreachable = (u: Unreachable, rec: Rec, to: string) =>
-  `${rec.agent}'s host ${u.host} cannot be reached (${u.why}) to see whether its session is in ${rec.ticket}'s worktree, ` +
-  `so ${rec.ticket} goes to ${to} unchecked.`;
+const unreachable = (u: Unreachable, rec: Rec) =>
+  `${rec.agent}'s host ${u.host} cannot be reached (${u.why}) to see whether its session is in ${rec.ticket}'s worktree`;
 
 function cmdDispatch(ws: Workspace, argv: string[]) {
   const { v, p } = args("dispatch", argv, { repo: { type: "string" }, "prompt-file": { type: "string" }, title: { type: "string" }, force: { type: "boolean" }, "findings-checked": { type: "boolean" } }, [2, 2]);
