@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { attachmentsDir, inboxHeld, leaveNote, MAX_CHARS, pageText, postMessage } from "../src/board/inbox.js";
+import { attachmentsDir, inboxHeld, leaveNote, MAX_CHARS, pageText, postMessage, readCursor } from "../src/board/inbox.js";
 import { serve } from "../src/board/server.js";
 import { transition } from "../src/state.js";
 import { readTail } from "../src/messages.js";
@@ -52,6 +52,9 @@ test("the inbox: held detection, the holder, the watchers' notes, and the next h
   appendFileSync(ws.messages, pyDumps({ t: "x", text: "the lead's own", ticket: null, kind: "note", link: null }) + "\n");
   await until("the message on stdout", () => a.out.includes("hello"));
   assert.match(a.out, /\[from the message page\] \[m:[0-9a-f]{6}\] hello\n$/, "the lead's rows are not printed");
+  // A holder prints a line before its cursor moves past it, so a kill in between repeats the line
+  // by design. The kill below waits for the cursor, or the next holder may print hello again.
+  await until("the cursor past both rows", () => readCursor(ws)?.offset === statSync(ws.messages).size);
 
   // Unarmed, both wait; the next holder prints each once, from where the last one stopped.
   a.mon.kill();
