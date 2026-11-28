@@ -29,7 +29,7 @@ import { parseArgs } from "node:util";
 import { AcpError, AcpPeer, PROTOCOL_VERSION } from "./acp.js";
 import { agyBin, agySettingsFile, type AgyState, enqueue, FIRST_PROMPT, inbox, inboxDir, scopeUnit, sessionCgroup, sessionDir, transcriptFile, validId, writeJson } from "./agy-store.js";
 import { permissionOutcome, readOnly } from "./read-only.js";
-import { cgroupProcs, killAllAsync, killTreeAsync, ownCgroup, startStamp } from "../stacks/process.js";
+import { cgroupProcs, currentBoot, killAllAsync, killTreeAsync, ownCgroup, startStamp } from "../stacks/process.js";
 
 export interface SupervisorSpec {
   id: string;
@@ -193,7 +193,7 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
   const cgroup = sessionCgroup(spec.id, cg) ? cg : null;
   const st: AgyState = {
     id: spec.id, name: spec.name, kind: "background", backend: "antigravity", state: "starting", status: "busy", cwd: spec.cwd,
-    pid: process.pid, stamp: startStamp(process.pid), cgroup, agentPid: null, sessionId: null, model: spec.model ?? null, transcript: null,
+    pid: process.pid, stamp: startStamp(process.pid), boot: currentBoot(), cgroup, agentPid: null, sessionId: null, model: spec.model ?? null, transcript: null,
     startedAt: Date.now(), updatedAt: iso(),
   };
   const save = (patch: Partial<AgyState> = {}) => {

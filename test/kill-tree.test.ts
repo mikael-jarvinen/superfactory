@@ -49,7 +49,7 @@ test("stopDetached kills it too", { skip: process.platform !== "linux" }, async 
   try {
     const pidFile = join(dir, "server.pid");
     writeFileSync(pidFile, String(leader));
-    assert.equal(stopDetached(pidFile), `stopped ${leader} and its children`);
+    assert.equal(stopDetached(pidFile, 1000), `stopped ${leader} and its children`);
     assert.equal(living(grandchild), false, "the reparented grandchild outlived stopDetached");
   } finally {
     cleanup(dir, [leader, grandchild]);

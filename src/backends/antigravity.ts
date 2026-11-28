@@ -105,14 +105,14 @@ export function startSupervisor(cwd: string, args: string[], env: NodeJS.Process
 }
 
 // Why the supervisor's pid no longer names its process group, or null when it still does: it is
-// the supervisor, alive or a zombie, or no process at all. A pid is not given out again while a
-// group of that number has a member left, so with no process at that pid, whatever is in its group
-// is the session's: within one boot only. Where there is a boot id (Linux), a stamp from another
-// boot is never taken to name it; elsewhere the stamp match is all there is.
+// the supervisor, or no process at all. A pid is not given out again while a group of that number
+// has a member left, so with no process at that pid the group is the session's, but only within
+// the boot the supervisor started in.
 function notOurGroup(st: AgyState): string | null {
   if (typeof st.stamp !== "string") return "has no start recorded";
   const boot = currentBoot();
-  if (boot && !st.stamp.startsWith(`${boot}:`)) return "is from another boot";
+  if (!boot) return "cannot be told from another boot's on this platform";
+  if (st.boot !== boot && !st.stamp.startsWith(`${boot}:`)) return "is from another boot";
   try {
     const now = startStamp(st.pid);
     return now === null || now === st.stamp ? null : "is another process's now";

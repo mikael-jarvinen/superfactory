@@ -534,37 +534,7 @@ test("stop kills a tool in a session of its own by the scope, when supervisor an
   assert.deepEqual(inScope(st), []);
 }));
 
-test("with no scope, a stale state from another boot never has its supervisor's pid's group killed", { skip: process.platform !== "linux" }, async () => {
-  // a group whose leader has exited, with a member left: what a stale pid can name after a reboot
-  const sh = spawnSync("sh", ["-c", "setsid sh -c 'sleep 30 >/dev/null 2>&1 & echo $$ $!'"], { encoding: "utf8" });
-  const [pgid, member] = sh.stdout.trim().split(/\s+/).map(Number) as [number, number];
-  try {
-    await until("the leader to exit", () => gone(pgid));
-    assert.equal(procStat(member)?.pgid, pgid);
-    const id = "agy-0123456789ab";
-    mkdirSync(sessionDir(id), { recursive: true });
-    const stale = { id, name: "stale", kind: "background", backend: "antigravity", state: "done", status: "idle", cwd: root, pid: pgid, stamp: "another-boot:1", cgroup: null, agentPid: null, sessionId: null, model: null, transcript: null, startedAt: 0, updatedAt: "" };
-    writeFileSync(join(sessionDir(id), "state.json"), JSON.stringify(stale));
-    const said: string[] = [];
-    const write = process.stderr.write;
-    process.stderr.write = ((x: string) => (said.push(String(x)), true)) as typeof process.stderr.write;
-    try {
-      stopSession(id, true);
-    } finally {
-      process.stderr.write = write;
-    }
-    assert.equal(gone(member), false, "an unrelated group was killed");
-    assert.match(said.join(""), /stale: no scope recorded, and the supervisor's pid \d+ is from another boot, so its process group is not killed/);
-  } finally {
-    try {
-      process.kill(member, "SIGKILL");
-    } catch {
-      // gone
-    }
-  }
-});
-
-// what stopSession says on stderr about stale state
+// what stopSession says on stderr
 function stopSaying(id: string): string {
   const said: string[] = [];
   const write = process.stderr.write;
@@ -577,41 +547,88 @@ function stopSaying(id: string): string {
   return said.join("");
 }
 
-test("with no scope and no boot id (off Linux), the stamp match alone decides the supervisor's group", { skip: process.platform !== "linux" }, async () => {
+function staleState(id: string, name: string, pid: number, stamp: string, boot?: string): void {
+  mkdirSync(sessionDir(id), { recursive: true });
+  const st = { id, name, kind: "background", backend: "antigravity", state: "done", status: "idle", cwd: root, pid, stamp, ...(boot ? { boot } : {}), cgroup: null, agentPid: null, sessionId: null, model: null, transcript: null, startedAt: 0, updatedAt: "" };
+  writeFileSync(join(sessionDir(id), "state.json"), JSON.stringify(st));
+}
+
+// a group whose leader has exited, with a member left: what a stale pid can name after a reboot
+async function leaderless(): Promise<[number, number]> {
+  const sh = spawnSync("sh", ["-c", "setsid sh -c 'sleep 30 >/dev/null 2>&1 & echo $$ $!'"], { encoding: "utf8" });
+  const pair = sh.stdout.trim().split(/\s+/).map(Number) as [number, number];
+  await until("the leader to exit", () => gone(pair[0]));
+  return pair;
+}
+
+const kill9 = (pids: number[]) => {
+  for (const p of pids)
+    try {
+      process.kill(p, "SIGKILL");
+    } catch {
+      // gone
+    }
+};
+
+async function withBoot(boot: string, f: () => Promise<void>): Promise<void> {
   const before = process.env.SF_BOOT_ID;
-  process.env.SF_BOOT_ID = "";
-  // a group whose leader has exited, and one whose leader is still up, each with a member left
-  const left = spawnSync("sh", ["-c", "setsid sh -c 'sleep 30 >/dev/null 2>&1 & echo $$ $!'"], { encoding: "utf8" });
-  const [gonePid, orphan] = left.stdout.trim().split(/\s+/).map(Number) as [number, number];
+  process.env.SF_BOOT_ID = boot;
+  try {
+    await f();
+  } finally {
+    if (before === undefined) delete process.env.SF_BOOT_ID;
+    else process.env.SF_BOOT_ID = before;
+  }
+}
+
+test("with no scope, a stale state from another boot never has its supervisor's pid's group killed", { skip: process.platform !== "linux" }, async () => {
+  const [pgid, member] = await leaderless();
+  try {
+    assert.equal(procStat(member)?.pgid, pgid);
+    staleState("agy-0123456789ab", "stale", pgid, "another-boot:1");
+    assert.match(stopSaying("agy-0123456789ab"), /stale: no scope recorded, and the supervisor's pid \d+ is from another boot, so its process group is not killed/);
+    assert.equal(gone(member), false, "an unrelated group was killed");
+    // off Linux the boot is recorded beside the stamp, which holds none
+    await withBoot("boot-b", async () => {
+      staleState("agy-0123456789ae", "stale-mac", pgid, "Sat Nov 28 10:00:00 2026", "boot-a");
+      assert.match(stopSaying("agy-0123456789ae"), /stale-mac: no scope recorded, and the supervisor's pid \d+ is from another boot/);
+    });
+    assert.equal(gone(member), false, "an unrelated group was killed");
+  } finally {
+    kill9([member]);
+  }
+});
+
+test("with no scope and no boot id, the supervisor's group is never killed", { skip: process.platform !== "linux" }, () => withBoot("", async () => {
+  const [pgid, member] = await leaderless();
+  try {
+    staleState("agy-0123456789af", "bootless", pgid, "Sat Nov 28 10:00:00 2026");
+    assert.match(stopSaying("agy-0123456789af"), /bootless: no scope recorded, and the supervisor's pid \d+ cannot be told from another boot's on this platform/);
+    assert.equal(gone(member), false, "an unrelated group was killed");
+  } finally {
+    kill9([member]);
+  }
+}));
+
+test("with no scope, in the boot the supervisor recorded, the stamp match decides its group", { skip: process.platform !== "linux" }, () => withBoot("boot-b", async () => {
+  const [gonePid, orphan] = await leaderless();
   const up = spawnSync("sh", ["-c", "setsid sh -c 'sleep 30 >/dev/null 2>&1 & echo $$ $!; wait' >\"$1\" 2>/dev/null &", "sh", join(root, "up.pids")]);
   assert.equal(up.status, 0);
   await until("the second group", () => existsSync(join(root, "up.pids")) && readFileSync(join(root, "up.pids"), "utf8").trim().split(/\s+/).length === 2);
   const [upPid, member] = readFileSync(join(root, "up.pids"), "utf8").trim().split(/\s+/).map(Number) as [number, number];
-  const state = (id: string, name: string, pid: number) => {
-    mkdirSync(sessionDir(id), { recursive: true });
-    const st = { id, name, kind: "background", backend: "antigravity", state: "done", status: "idle", cwd: root, pid, stamp: "Sat Nov 28 10:00:00 2026", cgroup: null, agentPid: null, sessionId: null, model: null, transcript: null, startedAt: 0, updatedAt: "" };
-    writeFileSync(join(sessionDir(id), "state.json"), JSON.stringify(st));
-  };
   try {
-    await until("the first leader to exit", () => gone(gonePid));
-    state("agy-0123456789ac", "orphaned", gonePid);
+    // macOS's shape: the boot beside a stamp that holds none
+    staleState("agy-0123456789ac", "orphaned", gonePid, "Sat Nov 28 10:00:00 2026", "boot-b");
     assert.equal(stopSaying("agy-0123456789ac"), "", "nothing to say when the group is the session's");
     await until("the left tool killed", () => gone(orphan));
-    state("agy-0123456789ad", "reused", upPid);
+    staleState("agy-0123456789ad", "reused", upPid, "Sat Nov 28 10:00:00 2026", "boot-b");
     assert.match(stopSaying("agy-0123456789ad"), /reused: no scope recorded, and the supervisor's pid \d+ is another process's now, so its process group is not killed/);
     assert.equal(gone(member), false, "an unrelated group was killed");
     assert.equal(gone(upPid), false, "an unrelated process was killed");
   } finally {
-    if (before === undefined) delete process.env.SF_BOOT_ID;
-    else process.env.SF_BOOT_ID = before;
-    for (const p of [orphan, upPid, member])
-      try {
-        process.kill(p, "SIGKILL");
-      } catch {
-        // gone
-      }
+    kill9([orphan, upPid, member]);
   }
-});
+}));
 
 test("a stop that removes a session tells each undelivered message, with its sender, and keeps it in the transcript", async () => {
   const id = start("undelivered", "hi");
@@ -620,15 +637,7 @@ test("a stop that removes a session tells each undelivered message, with its sen
   antigravityBackend.deliver!(rowOf(id), "slow", "ada");
   await until("the slow turn", () => readState(id)?.state === "working");
   antigravityBackend.deliver!(rowOf(id), "the second message\nof two lines", "grace");
-  const said: string[] = [];
-  const write = process.stderr.write;
-  process.stderr.write = ((s: string) => (said.push(String(s)), true)) as typeof process.stderr.write;
-  try {
-    stopSession(id, true);
-  } finally {
-    process.stderr.write = write;
-  }
-  const out = said.join("");
+  const out = stopSaying(id);
   assert.match(out, /^undelivered: a message from grace \(\S+\) never reached the session, and the stop drops it from the inbox:\n  the second message\n  of two lines\n$/);
   const u = readFileSync(st.transcript!, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.type === "undelivered");
   assert.equal(u.length, 1);

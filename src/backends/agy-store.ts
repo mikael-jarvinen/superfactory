@@ -60,6 +60,8 @@ export interface AgyState {
   // the supervisor's pid and its start stamp (stacks/process.ts), which tell it from a later process given the pid
   pid: number;
   stamp: string | null;
+  // the boot it started in (currentBoot)
+  boot?: string | null;
   // the cgroup of the supervisor's systemd scope (scopeUnit), which holds agy and every process it
   // starts; null when the supervisor runs in no such scope
   cgroup?: string | null;

@@ -1,5 +1,5 @@
-import { spawn, spawnSync } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { get as httpGet, type IncomingMessage } from "node:http";
 import { get as httpsGet } from "node:https";
 import { connect } from "node:net";
@@ -15,8 +15,8 @@ export interface Proc {
   pid: number;
   ppid: number;
   pgid: number;
-  age: number;
-  // exited and not yet reaped: ps's state Z
+  // tells it from a later process given the pid: the clock tick it started at on Linux, else ps's lstart
+  start: string;
   zombie: boolean;
 }
 
@@ -26,13 +26,28 @@ function seconds(etime: string): number {
   return Number(days) * 86400 + clock.split(":").reduce((s, p) => s * 60 + Number(p), 0);
 }
 
-// Every process but the ps that lists them, which is the caller's child and in its group, so it
-// would otherwise be counted in the caller's own tree at every poll.
+const psEnv = () => ({ ...process.env, TZ: "UTC0", LC_ALL: "C" });
+
+// Every process but the caller's own ps. Linux reads /proc, so a poll starts no process.
 function processes(): Proc[] {
-  const r = spawnSync("ps", ["-A", "-o", "pid=,ppid=,pgid=,etime=,stat="], { encoding: "utf8", maxBuffer: 64 << 20 });
-  if (r.error || r.status !== 0) die(`ps failed: ${r.error?.message ?? r.stderr.trim()}`);
-  return r.stdout.split("\n").map((l) => l.trim().split(/\s+/)).filter((f) => f.length === 5 && Number(f[0]) !== r.pid)
-    .map(([pid, ppid, pgid, etime, stat]) => ({ pid: Number(pid), ppid: Number(ppid), pgid: Number(pgid), age: seconds(etime as string), zombie: (stat as string).startsWith("Z") }));
+  if (process.platform === "linux") {
+    const out: Proc[] = [];
+    for (const d of readdirSync("/proc")) {
+      if (!/^\d+$/.test(d)) continue;
+      let st: ProcStat | null;
+      try {
+        st = procStat(Number(d));
+      } catch {
+        continue;
+      }
+      if (st) out.push({ pid: Number(d), ppid: st.ppid, pgid: st.pgid, start: st.ticks, zombie: st.state === "Z" });
+    }
+    return out;
+  }
+  const r = run("ps", ["-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="], { env: psEnv() });
+  if (r.status !== 0) die(`ps failed: ${r.stderr.trim()}`);
+  return r.stdout.split("\n").map((l) => l.trim().split(/\s+/)).filter((f) => f.length >= 9 && Number(f[0]) !== r.pid)
+    .map(([pid, ppid, pgid, stat, ...lstart]) => ({ pid: Number(pid), ppid: Number(ppid), pgid: Number(pgid), start: lstart.join(" "), zombie: (stat as string).startsWith("Z") }));
 }
 
 export function alive(pid: number): boolean {
@@ -56,10 +71,10 @@ export function pidFromFile(file: string): number | null {
   }
   const pid = Number.parseInt(text.trim(), 10);
   if (!Number.isInteger(pid) || pid <= 1) return null;
-  const p = processes().find((x) => x.pid === pid);
-  if (!p) return null;
+  const r = run("ps", ["-o", "etime=", "-p", String(pid)]);
+  if (r.status !== 0 || !r.stdout.trim()) return null;
   // etime counts whole seconds, so allow the rounding
-  return Date.now() - p.age * 1000 <= statSync(file).mtimeMs + 2000 ? pid : null;
+  return Date.now() - seconds(r.stdout.trim()) * 1000 <= statSync(file).mtimeMs + 2000 ? pid : null;
 }
 
 export interface ProcStat {
@@ -104,7 +119,6 @@ export function signalAll(pids: Iterable<number>, sig: NodeJS.Signals): void {
 // What tells a process apart from a later one given the same pid: on Linux the boot and the clock
 // tick it started at, elsewhere ps's start time. Neither moves when the wall clock is stepped. null
 // when there is no such process; a lookup that fails otherwise throws.
-let bootId: string | undefined;
 export function startStamp(pid: number): string | null {
   if (process.platform === "linux") {
     const st = procStat(pid);
@@ -112,7 +126,7 @@ export function startStamp(pid: number): string | null {
     return `${currentBoot()}:${st.ticks}`;
   }
   // lstart is printed in local time and the locale's words: pin both, or a TZ change restamps it
-  const r = run("ps", ["-o", "lstart=", "-p", String(pid)], { env: { ...process.env, TZ: "UTC0", LC_ALL: "C" } });
+  const r = run("ps", ["-o", "lstart=", "-p", String(pid)], { env: psEnv() });
   if (r.status !== 0) {
     if (!r.stdout.trim() && !r.stderr.trim()) return null; // no such process
     die(`ps failed: ${r.stderr.trim()}`);
@@ -149,34 +163,32 @@ function treeOf(pid: number, table: Proc[]): number[] {
   return [...tree];
 }
 
-// The steps of a kill, written once: TERM to every process list() names, then KILL to what is still
-// living after the grace. It yields each wait in ms, and killAll (sleep) or killAllAsync (await)
-// runs them. One ps per poll: list() is read again from it, and what it names is added to every
-// process seen so far, so a process started meanwhile is caught and one that drops out of the list
-// (a descendant reparented when its parent exits, out of the tree but not dead) still gets KILL. A
-// seen pid is dropped once ps lists it no more, as a zombie, or as a later start (the pid given out
-// again). Returns the pids still living after the KILL.
+// TERM to every process list() names, then KILL to what is still living after the grace; the
+// waits are yielded, for killAll (sleep) or killAllAsync (await). Each poll adds what list() names
+// to the pids seen so far, so a descendant reparented out of the tree still gets the KILL. A seen
+// pid is dropped once it is gone, a zombie, or another process (a different start). A pid list()
+// names that the table missed (a cgroup's, forked after the table was read) is signalled too.
+// Returns the pids still living after the KILL.
 function* killing(list: (table: Proc[]) => number[], graceMs: number): Generator<number, number[], void> {
-  const seen = new Map<number, number>(); // pid → when it started, ms
+  const seen = new Map<number, string>();
   const left = () => {
-    const now = Date.now();
     const table = processes();
     const byPid = new Map(table.map((p) => [p.pid, p]));
-    for (const pid of list(table)) {
+    const named = list(table);
+    for (const pid of named) {
       const p = byPid.get(pid);
-      if (p && !seen.has(pid)) seen.set(pid, now - p.age * 1000);
+      if (p && !p.zombie && !seen.has(pid)) seen.set(pid, p.start);
     }
-    for (const [pid, started] of seen) {
+    for (const [pid, start] of seen) {
       const p = byPid.get(pid);
-      // etime counts whole seconds, so allow the rounding
-      if (!p || p.zombie || now - p.age * 1000 > started + 2000) seen.delete(pid);
+      if (!p || p.zombie || p.start !== start) seen.delete(pid);
     }
-    return [...seen.keys()];
+    return [...new Set([...seen.keys(), ...named.filter((pid) => !byPid.has(pid) && living(pid))])];
   };
   signalAll(left(), "SIGTERM");
-  for (const end = Date.now() + graceMs; Date.now() < end; yield 100) if (!left().length) return [];
+  for (const end = performance.now() + graceMs; performance.now() < end; yield 100) if (!left().length) return [];
   signalAll(left(), "SIGKILL");
-  for (const end = Date.now() + 1000; Date.now() < end; yield 100) if (!left().length) return [];
+  for (const end = performance.now() + 1000; performance.now() < end; yield 100) if (!left().length) return [];
   return left();
 }
 
@@ -233,22 +245,25 @@ export function cgroupProcs(path: string): number[] {
   }
 }
 
-// This boot's id on Linux (a start stamp's first part), null elsewhere.
-// SF_BOOT_ID stands in for it in tests, empty for a platform with none.
+// This boot's id: Linux's boot_id, macOS's kern.bootsessionuuid, null elsewhere. SF_BOOT_ID
+// stands in for it in tests, empty for a platform with none.
+let bootId: string | null | undefined;
 export function currentBoot(): string | null {
   if (process.env.SF_BOOT_ID !== undefined) return process.env.SF_BOOT_ID || null;
-  if (process.platform !== "linux") return null;
-  bootId ??= readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  if (bootId !== undefined) return bootId;
+  if (process.platform === "linux") bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  else if (process.platform === "darwin") bootId = run("sysctl", ["-n", "kern.bootsessionuuid"]).stdout.trim() || null;
+  else bootId = null;
   return bootId;
 }
 
-export function stopDetached(pidFile: string): string {
+export function stopDetached(pidFile: string, graceMs = 10_000): string {
   const pid = pidFromFile(pidFile);
   if (pid === null) {
     rmSync(pidFile, { force: true });
     return "nothing was running";
   }
-  const ok = killTree(pid);
+  const ok = killTree(pid, graceMs);
   rmSync(pidFile, { force: true });
   if (!ok) die(`pid ${pid} or one of its children survived SIGKILL`);
   return `stopped ${pid} and its children`;
