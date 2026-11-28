@@ -14,6 +14,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { backend } from "../backends/index.js";
 import { inboxHeld } from "../board/inbox.js";
 import { lead } from "../fleet.js";
 import { idleWorkFor } from "../idle.js";
@@ -78,8 +79,8 @@ const MCP_WORDS: [string, string][] = [
   ["atlassian", "checking Jira"], ["slack", "checking Slack"], ["playwright", "using the browser"], ["chrome", "using the browser"],
 ];
 
-function wordsForTool(ws: Workspace, name: string, input: Record<string, unknown>): string {
-  if (name === "SendMessage") {
+function wordsForTool(ws: Workspace, messageTool: string, name: string, input: Record<string, unknown>): string {
+  if (name === messageTool) {
     const to = String(input.to ?? "").replace(/\s*\[.*$/, "").trim();
     return to && to !== "main" ? `messaging ${capitalize(to)}` : "messaging";
   }
@@ -111,7 +112,9 @@ function status(argv: string[], input: string, workspace: string | undefined): H
   const d = JSON.parse(input) as Event;
   const ev = d.hook_event_name ?? "";
   const ws = openWorkspace(resolveWorkspace({ flag: workspace }));
-  const words = ev === "PreToolUse" ? wordsForTool(ws, d.tool_name ?? "", d.tool_input ?? {}) : EVENT_WORDS[ev];
+  // A name not in [[agents]] runs under claude, as an agent with no backend does.
+  const messageTool = backend(ws.config.agents.find((a) => a.name === agent)?.backend ?? "claude").messageTool;
+  const words = ev === "PreToolUse" ? wordsForTool(ws, messageTool, d.tool_name ?? "", d.tool_input ?? {}) : EVENT_WORDS[ev];
   if (!words) return { code: 0 };
   mkdirSync(ws.runDir, { recursive: true });
   const file = statusFile(ws, agent);

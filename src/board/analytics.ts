@@ -29,9 +29,10 @@
 // it fails, that host's agents are left out, and the report says why (hosts).
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { type Agent, BACKENDS } from "../config.js";
 import { roleOf } from "../launch.js";
 import { allRecs, BUSY, eachEvent, OFF, STATES } from "../state.js";
-import { claudeBackend } from "../backends/claude.js";
+import { backend, backendFor } from "../backends/index.js";
 import { realpathLoose } from "../util.js";
 import type { Workspace } from "../workspace.js";
 import { worktreePath } from "../worktree.js";
@@ -154,9 +155,6 @@ const fresh = (path: string, since: number) => {
   }
 };
 
-// Claude's projects/ directory for a cwd, where claudeBackend's transcriptAt looks.
-export const projectDirFor = (cwd: string) => claudeBackend.projectDir(cwd);
-
 // Every transcript is read incrementally, as one runs to tens of megabytes, and only its assistant
 // calls and its session name are kept. An API call's usage is repeated on every content block it
 // returned, so a call is counted once by its message id, with the largest of each count seen for it:
@@ -224,14 +222,16 @@ export class TranscriptUsage {
   // Every transcript of the account, for the weekly usage (weekly.ts): each projects/ dir here,
   // whoever's sessions wrote it, and on each host, as of its last read with `all` (refresh).
   account(since: number): Read[] {
-    const base = claudeBackend.transcriptsDir();
-    let dirs: string[] = [];
-    try {
-      dirs = readdirSync(base);
-    } catch {
-      // no transcripts here
+    const out: Read[] = [];
+    for (const base of new Set(BACKENDS.map((n) => backend(n).transcriptsDir()))) {
+      let dirs: string[] = [];
+      try {
+        dirs = readdirSync(base);
+      } catch {
+        // no transcripts here
+      }
+      out.push(...dirs.flatMap((d) => this.read(join(base, d), since)));
     }
-    const out = dirs.flatMap((d) => this.read(join(base, d), since));
     for (const host of this.hosts.keys()) out.push(...this.readOn(host, ACCOUNT));
     return out;
   }
@@ -360,26 +360,27 @@ interface Source {
 
 function sources(ws: Workspace, items: string[]): Source[] {
   const out = new Map<string, Source>();
-  const add = (host: string | null, cwd: string, item: string | null) => {
+  const add = (a: Agent, host: string | null, cwd: string, item: string | null) => {
     const put = (key: string, dir: string) => {
       const had = out.get(key);
       if (!had || (had.item === null && item !== null)) out.set(key, { host, dir, item });
     };
     if (host) return put(`${host}:${cwd}`, cwd);
-    for (const p of new Set([cwd, realpathLoose(cwd)])) put(projectDirFor(p), projectDirFor(p));
+    const dir = (p: string) => backendFor(a).projectDir(p);
+    for (const p of new Set([cwd, realpathLoose(cwd)])) put(dir(p), dir(p));
   };
   for (const a of ws.config.agents) {
     if (a.role === "builder") {
       for (const key of a.repos) {
         const repo = ws.config.repos[key];
         if (!repo || !repo.path) continue;
-        for (const it of items) add(repo.host ?? null, worktreePath(repo.path, it), it);
-        add(repo.host ?? null, repo.path, null);
+        for (const it of items) add(a, repo.host ?? null, worktreePath(repo.path, it), it);
+        add(a, repo.host ?? null, repo.path, null);
       }
       continue;
     }
     const cwd = roleOf(ws, a).cwd;
-    if (cwd) add(a.host ?? null, cwd, null);
+    if (cwd) add(a, a.host ?? null, cwd, null);
   }
   return [...out.values()].filter((s) => s.host || existsSync(s.dir)).sort((a, b) => Number(a.item === null) - Number(b.item === null));
 }

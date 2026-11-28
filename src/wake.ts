@@ -17,7 +17,8 @@ import { assistantPrompt, launch, leadPrompt, reviewerPrompt, roleAppendix, role
 import { tryLock } from "./tickets/lock.js";
 import { freshCommand } from "./stopped.js";
 import { ask, CHILD_SLACK_MS, Unreachable } from "./remote.js";
-import { LISTING_TIMEOUT_MS, type Transport, transportFor } from "./transport.js";
+import { LISTING_TIMEOUT_MS } from "./backends/claude.js";
+import { type Transport, transportFor } from "./transport.js";
 import { FactoryError, sleep } from "./util.js";
 import type { Workspace } from "./workspace.js";
 

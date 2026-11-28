@@ -11,6 +11,9 @@ import { renderSettings } from "../settings.js";
 import { die, MAX_OUTPUT, run } from "../util.js";
 import type { AgentBackend, LaunchSpec } from "./backend.js";
 
+// The tool a Claude session sends messages with.
+export const MESSAGE_TOOL = "SendMessage";
+
 // Claude's projects/ directory for a cwd: the cwd with every character but a letter or digit made "-".
 const projectDir = (cwd: string) => join(claudeConfigDir(), "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
 
@@ -158,8 +161,8 @@ export const claudeBackend: AgentBackend = {
   },
   alive: sessionAlive,
   midTurn,
-  messageTool: "SendMessage",
-  installSettings: renderSettings,
+  messageTool: MESSAGE_TOOL,
+  installSettings: (ws, s) => renderSettings(ws, s, MESSAGE_TOOL),
   transcriptsDir: () => join(claudeConfigDir(), "projects"),
   projectDir,
   transcriptAt,

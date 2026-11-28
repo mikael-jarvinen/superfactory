@@ -1,20 +1,21 @@
-// Where an agent's sessions live. Every session operation goes through the agent's transport; the
-// local one runs claude on this machine, through claudeBackend (backends/claude.ts), and an agent
-// with a host goes through that host's daemon (remote.ts).
+// Where an agent's sessions live. Every session operation goes through the agent's transport; a
+// local one runs the agent's backend (backends/) on this machine, and an agent with a host goes
+// through that host's daemon (remote.ts).
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Agent, Repo } from "./config.js";
+import type { Agent, BackendName, Repo } from "./config.js";
 import type { Session } from "./fleet.js";
 import type { Phase } from "./launch.js";
-import { claudeBackend, instant } from "./backends/claude.js";
+import { instant } from "./backends/claude.js";
+import { backend } from "./backends/index.js";
 import { remote, Unreachable } from "./remote.js";
 import type { Workspace } from "./workspace.js";
 import { die } from "./util.js";
 import { branchPushed, ensureWorktree, git, worktreeDirty, worktreePath } from "./worktree.js";
 
 // What starting a session needs.
-// The transport writes the appendix and settings files on the machine that runs claude,
+// The transport writes the appendix and settings files on the machine that runs the session,
 // so args() is called there, with the appendix file's path.
 export interface StartRequest {
   agent: Agent;
@@ -59,7 +60,7 @@ export interface Transport {
   // For the board, which must not block on a listing. Resolves to Unreachable rather than throwing it.
   sessionsAsync(): Promise<Session[] | Unreachable>;
   alive(s: Session | null | undefined): s is Session;
-  // The launch id claude printed, or "?".
+  // The launch id the backend's CLI printed, or "?".
   start(req: StartRequest): string;
   stop(name: string, id: string, remove: boolean): void;
   // The worktree for the item, made or reused (worktree.ts's ensureWorktree); throws when it cannot.
@@ -72,20 +73,25 @@ export interface Transport {
 
 const isDir = (p: string) => existsSync(p) && statSync(p).isDirectory();
 
-export { daemonAlive, daemonSocketDir, LISTING_TIMEOUT_MS, midTurn, pidExists, sessionAlive, STARTING_MS, transcriptAt } from "./backends/claude.js";
-export { claudeConfigDir } from "./claude-bin.js";
+// This machine's sessions of one backend. Each call resolves the backend when it runs, not when
+// this module loads, so an import cycle through the backend never finds it undefined. Claude's
+// keeps `where` "local"; any other backend's listing is its own, under "local:<name>".
+const locals = new Map<BackendName, Transport>();
+export function localFor(name: BackendName): Transport {
+  let t = locals.get(name);
+  if (!t) locals.set(name, (t = localTransport(name)));
+  return t;
+}
 
-// This machine's sessions, run by Claude Code. Each call reaches claudeBackend when it runs, not when
-// this module loads, so an import cycle through the backend never finds it undefined.
-export const local: Transport = {
-  where: "local",
-  sessions: (includeDone = false) => claudeBackend.sessions(includeDone),
-  sessionsAsync: () => claudeBackend.sessionsAsync(),
-  alive: (s): s is Session => claudeBackend.alive(s),
+const localTransport = (name: BackendName): Transport => ({
+  where: name === "claude" ? "local" : `local:${name}`,
+  sessions: (includeDone = false) => backend(name).sessions(includeDone),
+  sessionsAsync: () => backend(name).sessionsAsync(),
+  alive: (s): s is Session => backend(name).alive(s),
   start(req) {
-    return claudeBackend.start(req, req.appendix ? appendixFile(req.runDir, req.agent.name, req.appendix) : null);
+    return backend(name).start(req, req.appendix ? appendixFile(req.runDir, req.agent.name, req.appendix) : null);
   },
-  stop: (_name, id, remove) => claudeBackend.stop(id, remove),
+  stop: (_name, id, remove) => backend(name).stop(id, remove),
   worktree(q) {
     return ensureWorktree(q.repo.path, q.ticket, q.repo.base, q.repo.gitOver);
   },
@@ -107,7 +113,11 @@ export const local: Transport = {
     if (top.status !== 0) return { top: null, origin: "" };
     return { top: top.stdout.trim(), origin: git(repo.path, "remote", "get-url", "origin").stdout.trim() };
   },
-};
+});
+
+// Claude's sessions on this machine, and the transport for this machine's worktrees and checkouts,
+// which no backend changes.
+export const local: Transport = localFor("claude");
 
 // The file a start passes as --append-system-prompt-file, in the workspace's logs/run/, which a
 // reboot keeps as it does not keep /tmp. It is named by its content, so a brief launched again
@@ -127,7 +137,7 @@ export function appendixFile(runDir: string, name: string, text: string): string
 const remotes = new WeakMap<Workspace, Map<string, Transport>>();
 
 export function transportFor(ws: Workspace, agent: Agent): Transport {
-  return agent.host ? hostTransport(ws, agent.host, `agent ${agent.name}`) : local;
+  return agent.host ? hostTransport(ws, agent.host, `agent ${agent.name}`) : localFor(agent.backend);
 }
 
 // The transport to the machine a repo's checkout is on.
