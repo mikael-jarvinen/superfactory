@@ -59,9 +59,8 @@ export function alive(pid: number): boolean {
   }
 }
 
-// The pid a pid file names, while that process is still the one the file was written for. A pid is
-// reused once its process is gone, and a process that started after the file was written is
-// someone else's: killing it would take down whatever the machine gave the number to next.
+// The pid a pid file names, while it is still the process the file was written for: one started
+// after the file is someone else's, given the reused number.
 export function pidFromFile(file: string): number | null {
   let text: string;
   try {
@@ -79,16 +78,13 @@ export function pidFromFile(file: string): number | null {
 
 export interface ProcStat {
   comm: string;
-  // R, S, D, Z (zombie: exited, not yet reaped) and so on
   state: string;
   ppid: number;
   pgid: number;
-  // the clock tick it started at
   ticks: string;
 }
 
-// /proc/<pid>/stat, Linux only. null when there is no such process; a read that fails otherwise
-// throws.
+// /proc/<pid>/stat, Linux only: null for no such process; any other failed read throws.
 export function procStat(pid: number): ProcStat | null {
   let stat: string;
   try {
@@ -105,7 +101,6 @@ export function procStat(pid: number): ProcStat | null {
   return { comm: stat.slice(stat.indexOf("(") + 1, stat.lastIndexOf(")")), state: f[0] ?? "", ppid: Number(f[1]), pgid: Number(f[2]), ticks };
 }
 
-// Each pid that is still there gets sig.
 export function signalAll(pids: Iterable<number>, sig: NodeJS.Signals): void {
   for (const p of pids) {
     try {
@@ -116,9 +111,8 @@ export function signalAll(pids: Iterable<number>, sig: NodeJS.Signals): void {
   }
 }
 
-// What tells a process apart from a later one given the same pid: on Linux the boot and the clock
-// tick it started at, elsewhere ps's start time. Neither moves when the wall clock is stepped. null
-// when there is no such process; a lookup that fails otherwise throws.
+// What tells a process from a later one given its pid: on Linux the boot and start tick, elsewhere
+// ps's start time. Neither moves when the wall clock is stepped.
 export function startStamp(pid: number): string | null {
   if (process.platform === "linux") {
     const st = procStat(pid);
@@ -134,8 +128,7 @@ export function startStamp(pid: number): string | null {
   return r.stdout.trim() || null;
 }
 
-// Alive and not a zombie: an exited process its parent has not reaped yet still answers
-// kill(pid, 0), and no signal can end it further, so it is not counted alive.
+// Alive and not a zombie, which still answers kill(pid, 0) but no signal can end further.
 export function living(pid: number): boolean {
   if (!alive(pid)) return false;
   try {
@@ -145,9 +138,8 @@ export function living(pid: number): boolean {
   }
 }
 
-// The process, its descendants, and anything left in its process group, in one ps table: a child
-// whose parent died first is reparented and only the group still ties it to the tree. Never the
-// caller or its parent.
+// The process, its descendants, and anything left in its process group, as a reparented child is
+// tied to the tree only by its group. Never the caller or its parent.
 function treeOf(pid: number, table: Proc[]): number[] {
   const tree = new Set([pid]);
   for (let grew = true; grew;) {
@@ -163,12 +155,9 @@ function treeOf(pid: number, table: Proc[]): number[] {
   return [...tree];
 }
 
-// TERM to every process list() names, then KILL to what is still living after the grace; the
-// waits are yielded, for killAll (sleep) or killAllAsync (await). Each poll adds what list() names
-// to the pids seen so far, so a descendant reparented out of the tree still gets the KILL. A seen
-// pid is dropped once it is gone, a zombie, or another process (a different start). A pid list()
-// names that the table missed (a cgroup's, forked after the table was read) is signalled too.
-// Returns the pids still living after the KILL.
+// TERM to what list() names, then KILL after the grace; waits are yielded to killAll or killAllAsync.
+// Pids seen are kept across polls, so a descendant reparented out of the tree still gets the KILL,
+// until gone, a zombie or a different start. A pid the table missed (forked after it) is signalled too.
 function* killing(list: (table: Proc[]) => number[], graceMs: number): Generator<number, number[], void> {
   const seen = new Map<number, string>();
   const left = () => {
@@ -210,7 +199,6 @@ export async function killAllAsync(list: (table: Proc[]) => number[], graceMs: n
   }
 }
 
-// The tree of pid (treeOf), TERM first, KILL what is left. True when nothing of it is left living.
 export function killTree(pid: number, graceMs = 10_000): boolean {
   return killAll((table) => treeOf(pid, table), graceMs).length === 0;
 }
@@ -219,9 +207,8 @@ export async function killTreeAsync(pid: number, graceMs: number): Promise<numbe
   return killAllAsync((table) => treeOf(pid, table), graceMs);
 }
 
-// The cgroup v2 hierarchy and the path this process is in ("0::<path>" in /proc/self/cgroup), or
-// null without one. SF_CGROUP_ROOT and SF_CGROUP_SELF stand in for them in tests, which may open no
-// real scope (test/helpers.ts): a fake systemd-run sets them and writes the pids it puts in.
+// The cgroup v2 path this process is in, or null. SF_CGROUP_ROOT and SF_CGROUP_SELF stand in for
+// the hierarchy and the path in tests, which may open no real scope (test/helpers.ts).
 const cgroupRoot = () => process.env.SF_CGROUP_ROOT || "/sys/fs/cgroup";
 export function ownCgroup(): string | null {
   if (process.env.SF_CGROUP_SELF) return process.env.SF_CGROUP_SELF;
@@ -234,8 +221,7 @@ export function ownCgroup(): string | null {
   }
 }
 
-// The pids in a cgroup v2 path but the caller, [] when there is no such cgroup (its unit has ended
-// and been collected). Every process started in it stays in it, whatever its parent or session.
+// The pids in a cgroup v2 path but the caller; [] once its unit has ended and been collected.
 export function cgroupProcs(path: string): number[] {
   try {
     return readFileSync(`${cgroupRoot()}${path}/cgroup.procs`, "utf8").split("\n").filter(Boolean).map(Number).filter((p) => p > 0 && p !== process.pid);
@@ -293,7 +279,6 @@ export function startDetached(cmd: string[], o: { pidFile: string; log: string; 
   return pid;
 }
 
-// The last lines of a log, for an error that says a process it belongs to died; "" when unread.
 export function logTail(file: string, lines = 15): string {
   try {
     return readFileSync(file, "utf8").trimEnd().split("\n").slice(-lines).join("\n");

@@ -1,7 +1,5 @@
-// The client end of the Agent Client Protocol (https://agentclientprotocol.com), version 1: JSON-RPC
-// 2.0, one message per line, over the agent process's stdin and stdout. The agent sends requests
-// too (session/request_permission); each goes to the handler for its method, and a method with no
-// handler is answered "method not found".
+// The client end of the Agent Client Protocol (https://agentclientprotocol.com), version 1:
+// JSON-RPC 2.0, one message per line, over the agent's stdin and stdout.
 import type { Readable, Writable } from "node:stream";
 
 export const PROTOCOL_VERSION = 1;
@@ -53,7 +51,6 @@ export class AcpPeer {
     if (!this.closed) this.send({ jsonrpc: "2.0", method, params });
   }
 
-  // Every request still waiting fails with why.
   close(why: Error): void {
     if (this.closed) return;
     this.closed = why;

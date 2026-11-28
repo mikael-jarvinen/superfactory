@@ -1,16 +1,11 @@
-// On Linux, every claude call the fleet makes runs in a scope of its own under agents.slice: the
-// transport's (listings, start, stop, rm) and a watcher's `claude -p`. doctor's
-// `claude auth status` stays bare. A call that finds no supervisor may start it, a listing or a
-// one-shot run included, and a process stays in its parent's cgroup:
-// unscoped, the supervisor, every session and every build under it would share the caller's unit
-// (the scheduler's), which systemd-oomd kills whole. avoid is honoured only for the memory pressure
-// rule on user@.service; oomd ignores it for swap and for /user.slice, whose cgroups root owns.
-// There is no fallback to a bare exec: a call systemd-run cannot scope fails. The bus strings were
-// seen with no user bus, in --scope mode: "Failed to connect to bus: …" from systemd 249,
-// "Failed to connect to user scope bus via local transport: …" from 259. A claude that systemd-run
-// cannot find ("Failed to find executable …", exit 1 on both) is no scope failure: it is that
-// call's own. The factory daemon in the agents repo does the same for its calls. An Antigravity
-// supervisor gets a scope too (detachedScoped), for the same reason.
+// On Linux, every claude call the fleet makes (but doctor's `claude auth status`) runs in a scope
+// of its own under agents.slice. Any call may start the supervisor, which stays in its parent's
+// cgroup: unscoped, it and every session and build under it would share the caller's unit (the
+// scheduler's), which systemd-oomd kills whole. avoid is honoured only for the memory pressure
+// rule on user@.service, not for swap or /user.slice. There is no fallback to a bare exec.
+// The bus strings were seen with no user bus, in --scope mode: "Failed to connect to bus: …" from
+// systemd 249, "Failed to connect to user scope bus via local transport: …" from 259. A claude
+// systemd-run cannot find ("Failed to find executable …", exit 1) is that call's own failure.
 import { claudeBin } from "./claude-bin.js";
 import { procStat } from "./stacks/process.js";
 import { die, type RunResult } from "./util.js";
@@ -20,11 +15,9 @@ import { die, type RunResult } from "./util.js";
 export const SCOPE = ["--user", "--scope", "--collect", "--slice=agents.slice", "--quiet", "-p", "ManagedOOMPreference=avoid", "--"];
 const SCOPE_FAILED = /^(Failed to (start transient scope unit|connect to .*bus|create bus connection)|Unknown assignment)/;
 
-// A scheduler job run's calls leave its cgroup for their scopes, so the leftovers reaper finds
-// them by name instead: the scheduler sets FACTORY_JOB to the job's label, and each call's scope is
-// factory-job-<label>-<the run's process group>-<pid>-<n>.scope. The reaper reads the scopes of an
-// ended run's group by this prefix. FACTORY_JOB never reaches claude (claudeEnv), so a session or a
-// supervisor a run starts does not name its own calls after the run.
+// A job run's calls leave its cgroup for their scopes, so the leftovers reaper finds them by name:
+// factory-job-<label>-<the run's process group>-<pid>-<n>.scope. FACTORY_JOB never reaches claude
+// (claudeEnv), so a session or supervisor a run starts does not name its own calls after the run.
 export const JOB_ENV = "FACTORY_JOB";
 export const jobUnitPrefix = (label: string, pgid: number) => `factory-job-${label.replace(/[^A-Za-z0-9_.:-]/g, "_")}-${pgid}-`;
 let jobCalls = 0;
@@ -40,12 +33,9 @@ export function claudeScoped(argv: string[], platform: NodeJS.Platform = process
   return platform === "linux" ? ["systemd-run", [...jobUnit(env), ...SCOPE, claudeBin(), ...argv]] : [claudeBin(), argv];
 }
 
-// The command and arguments that run a process that outlives its caller, an Antigravity
-// supervisor, in a scope of its own where there is systemd. Its scope never takes a job run's name:
-// the leftovers reaper would kill it when the run that started it ends. In --scope mode systemd-run
-// execs the command in place, so the pid spawned is the process's own. It runs with claudeEnv's
-// environment, so FACTORY_JOB does not reach it. unit names the scope (without ".scope"), so the
-// process and whoever stops it can find every process started in it.
+// Runs a process that outlives its caller (an Antigravity supervisor) in a scope of its own. It
+// never takes a job run's name, or the reaper would kill it when that run ends. In --scope mode
+// systemd-run execs in place, so the pid spawned is the process's own.
 export function detachedScoped(bin: string, argv: string[], platform: NodeJS.Platform = process.platform, unit?: string): [string, string[]] {
   return platform === "linux" ? ["systemd-run", [...(unit ? [`--unit=${unit}`] : []), ...SCOPE, bin, ...argv]] : [bin, argv];
 }
@@ -57,10 +47,7 @@ export function claudeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
 }
 
 // Dies when systemd-run, not claude, is what failed. In --scope mode systemd-run fails before it
-// execs claude, so its error is the first line of stderr; a bus error further down is claude's own
-// (a hook's, say), and stays that call's failure. Stderr alone cannot tell the two apart when the
-// first line is a bus error claude printed itself, or a warning of systemd-run's comes before its
-// error: either is then logged under the other's message, and the call fails all the same.
+// execs claude, so its error is stderr's first line; a bus error further down is claude's own.
 export function scopeCheck(argv: string[], r: RunResult, platform: NodeJS.Platform = process.platform): RunResult {
   if (platform !== "linux") return r;
   const said = r.stderr.trim().split("\n")[0] ?? "";

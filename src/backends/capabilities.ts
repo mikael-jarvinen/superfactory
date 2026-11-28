@@ -1,6 +1,5 @@
-// What each backend can and cannot do, as plain data with no imports, so config.ts can check an
-// agent against its backend without loading the backends (which import config.ts in turn). Each
-// backend in backends/ spreads its own entry, so these are AgentBackend's too.
+// What each backend can do, as plain data, so config.ts can check an agent without loading the
+// backends, which import config.ts in turn.
 import type { BackendName } from "../config.js";
 
 export interface BackendCapabilities {
@@ -14,7 +13,6 @@ export interface BackendCapabilities {
 
 export const CAPABILITIES: Record<BackendName, BackendCapabilities> = {
   claude: { listing: "`claude agents`", onHosts: true, roleModel: true },
-  // Which models agy takes is asked of the agy that runs, at start (agy-supervisor.ts pickValue),
-  // never of a list kept here, which would go stale with the next agy.
+  // agy's models are asked of the agy that runs (pickValue); a list here would go stale.
   antigravity: { listing: "the antigravity sessions", onHosts: true, roleModel: false },
 };

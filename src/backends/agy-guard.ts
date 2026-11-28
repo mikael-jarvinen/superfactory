@@ -1,8 +1,6 @@
-// The rules a Claude agent runs under, applied to agy's tool calls: the deny rules and the safety
-// PreToolUse hooks of the agent's rendered settings file (settings.ts renderSettings), run on each
-// agy call put in the shape Claude gives the hook. Two adapters use it: the supervisor's ACP
-// permission handler, for every call that asks, and agy's own PreToolUse hook (`factory hook agy`,
-// installed globally by ensureAgyHook), for the reads inside the workspace that never ask.
+// A Claude agent's deny rules and safety hooks, from its rendered settings, applied to agy's tool
+// calls. The supervisor's permission handler uses it for every call that asks, and agy's own
+// PreToolUse hook (`factory hook agy`) for the reads inside the workspace, which never ask.
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -174,9 +172,8 @@ export function check(rules: Rules, call: ClaudeCall, cwd: string, projectDir: s
 const WRITES = new Set(["edit", "delete", "move"]);
 const art = (k: string) => `${/^[aeiou]/.test(k) ? "an" : "a"} ${k}`;
 
-// Why the supervisor denies a call agy asks about, or null to allow it. An edit must name the file
-// it writes and a command its command line, or nothing can be checked; every other kind but the
-// read-only ones (fetch, other, none) is denied, as the rules have nothing for them.
+// Why the supervisor denies a call agy asks about, or null. An edit must name its file and a
+// command its command line, or nothing can be checked; any other kind not read-only has no rules.
 export function ruling(rules: Rules, kind: unknown, input: { name: string; args: Record<string, unknown> } | undefined, cwd: string): string | null {
   const call = input ? claudeCall(input.name, input.args) : null;
   const k = String(kind ?? "no kind");
@@ -186,7 +183,6 @@ export function ruling(rules: Rules, kind: unknown, input: { name: string; args:
   return call ? check(rules, call, cwd, cwd) : null;
 }
 
-// What the supervisor puts in agy's environment, for the hook to find the session's rules.
 export const RULES_ENV = "SF_AGY_RULES";
 export const PROJECT_ENV = "SF_AGY_PROJECT";
 
@@ -223,8 +219,7 @@ const hookEntry = () => ({
   PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `[ -z "$${RULES_ENV}" ] || exec ${factoryCommand()} hook agy`, timeout: 30 }] }],
 });
 
-// Writes the entry, naming the factory that launches, when it is not already that; the file's other
-// hooks are kept. Throws when the file is there and is not a JSON object, rather than overwrite it.
+// Throws rather than overwrite a hooks file that is not a JSON object.
 export function ensureAgyHook(): string {
   const file = agyHooksFile();
   let cur: Record<string, unknown> = {};
@@ -242,9 +237,8 @@ export function ensureAgyHook(): string {
   return file;
 }
 
-// Why agy would not run agyHook, or null when an entry for it is in place. Any factory's entry
-// will do: each reads the rules from the file RULES_ENV names, so two factories on one machine
-// need not agree on whose it is.
+// Why agy would not run agyHook, or null. Any factory's entry will do: each reads the rules from
+// the file RULES_ENV names, so two factories on one machine need not agree on whose it is.
 export function agyHookMissing(): string | null {
   const file = agyHooksFile();
   try {
