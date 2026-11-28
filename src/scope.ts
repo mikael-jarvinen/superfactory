@@ -9,7 +9,8 @@
 // seen with no user bus, in --scope mode: "Failed to connect to bus: …" from systemd 249,
 // "Failed to connect to user scope bus via local transport: …" from 259. A claude that systemd-run
 // cannot find ("Failed to find executable …", exit 1 on both) is no scope failure: it is that
-// call's own. The factory daemon in the agents repo does the same for its calls.
+// call's own. The factory daemon in the agents repo does the same for its calls. An Antigravity
+// supervisor gets a scope too (detachedScoped), for the same reason.
 import { claudeBin } from "./claude-bin.js";
 import { procStat } from "./stacks/process.js";
 import { die, type RunResult } from "./util.js";
@@ -37,6 +38,16 @@ function jobUnit(env: NodeJS.ProcessEnv): string[] {
 // The command and arguments that run `claude argv`, in a scope where there is systemd.
 export function claudeScoped(argv: string[], platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): [string, string[]] {
   return platform === "linux" ? ["systemd-run", [...jobUnit(env), ...SCOPE, claudeBin(), ...argv]] : [claudeBin(), argv];
+}
+
+// The command and arguments that run a process that outlives its caller, an Antigravity
+// supervisor, in a scope of its own where there is systemd. Its scope never takes a job run's name:
+// the leftovers reaper would kill it when the run that started it ends. In --scope mode systemd-run
+// execs the command in place, so the pid spawned is the process's own. It runs with claudeEnv's
+// environment, so FACTORY_JOB does not reach it. unit names the scope (without ".scope"), so the
+// process and whoever stops it can find every process started in it.
+export function detachedScoped(bin: string, argv: string[], platform: NodeJS.Platform = process.platform, unit?: string): [string, string[]] {
+  return platform === "linux" ? ["systemd-run", [...(unit ? [`--unit=${unit}`] : []), ...SCOPE, bin, ...argv]] : [bin, argv];
 }
 
 // The environment a claude call runs with: env, without FACTORY_JOB.

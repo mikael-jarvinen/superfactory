@@ -40,7 +40,12 @@ src/
                   runs the agent's backend on this machine, one listing per backend
   backends/       which CLI runs an agent's sessions: backend.ts (the AgentBackend interface),
                   claude.ts (`claude --bg` and `claude agents --json`, with any undocumented
-                  daemon internals behind one function), index.ts (backendFor, by `backend`)
+                  daemon internals behind one function), antigravity.ts (Google Antigravity's
+                  `agy acp`, each session held by a detached supervisor, agy-supervisor.ts, that
+                  speaks ACP to it; agy-store.ts is where sessions and transcripts live, acp.ts
+                  the JSON-RPC peer, read-only.ts the tool kinds a session is allowed),
+                  capabilities.ts (what each backend can do, as data config.ts checks
+                  an agent against), index.ts (backendFor, by `backend`)
   claude-bin.ts   which claude binary to run
   remote.ts       the transport for an agent with a host: each session operation is a request
                   to the factory daemon there, and a host that cannot be asked is unknown
@@ -48,6 +53,7 @@ src/
                   handshake
   settings.ts     render each role's Claude Code settings at launch into logs/run/
   worktree.ts     worktree per work item, push over https, dirty and pushed checks
+  agent-name.ts   the agent a transcript names, read by the board's analytics and the wake hook
   messages.ts     say, messages, rotation
   notify.ts       desktop notification on macOS, nothing elsewhere
   board/          server.ts, inbox.ts, static/ (the page's HTML, CSS and JS as real files)

@@ -2,13 +2,14 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { parse, TomlError } from "smol-toml";
+import { CAPABILITIES } from "./backends/capabilities.js";
 import { capitalize, FactoryError } from "./util.js";
 
 export const ROLES = ["lead", "builder", "reviewer", "assistant", "designer"] as const;
 export type RoleName = (typeof ROLES)[number];
 
 // The CLIs an agent's sessions can run under; an agent with no `backend` runs under claude.
-export const BACKENDS = ["claude"] as const;
+export const BACKENDS = ["claude", "antigravity"] as const;
 export type BackendName = (typeof BACKENDS)[number];
 
 export const STATES = [
@@ -529,6 +530,10 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const group = r.str("group");
     if (group !== undefined && !group.trim()) r.bad("group", "must not be empty");
     if (group !== undefined && role === "lead") r.bad("group", "the lead has its own place on the board");
+    // A host's daemon starts and lists claude sessions only.
+    // undefined for a backend that is not one, already reported
+    const caps = CAPABILITIES[backend] as (typeof CAPABILITIES)[BackendName] | undefined;
+    if (host && caps && !caps.onHosts) r.bad("host", `${name} runs under ${backend}, which runs on this machine only, so it takes no host`);
     if (host && !hosts[host]) r.bad("host", `no host ${show(host)}; hosts: ${Object.keys(hosts).join(", ") || "none"}`);
     const workRepos = stack ? (stacks[stack]?.repos ?? []) : (agentRepos ?? []);
     // A builder runs where its worktrees are, and they are under its repos' checkouts.

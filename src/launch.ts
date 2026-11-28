@@ -14,15 +14,17 @@ import { capitalize, die } from "./util.js";
 
 export type Phase = "build" | undefined;
 
-// The agent's own cwd, model, effort, permission_mode and autocompact win over its role's.
+// The agent's own cwd, model, effort, permission_mode and autocompact win over its role's. A role's
+// model and effort name Claude's, so an agent whose backend takes other models never inherits them.
 export function roleOf(ws: Workspace, agent: Agent): Role {
   const role = ws.config.roles[agent.role];
   if (!role) return die(`roles.${agent.role} is not configured`);
+  const inherit = backendFor(agent).roleModel;
   return {
     ...role,
     cwd: agent.cwd ?? role.cwd,
-    model: agent.model ?? role.model,
-    effort: agent.effort ?? role.effort,
+    model: agent.model ?? (inherit ? role.model : undefined),
+    effort: agent.effort ?? (inherit ? role.effort : undefined),
     permissionMode: agent.permissionMode ?? role.permissionMode,
     autocompact: agent.autocompact ?? role.autocompact,
   };
@@ -59,10 +61,13 @@ function withoutRun(dirs: string[], run: string[]): string[] {
   return dirs;
 }
 
-// Rendered at every launch from the role's template and config, into logs/run/, by the agent's backend.
+// Rendered at every launch from the role's template and config, into logs/run/, by the agent's
+// backend. launchSpec asks only a backend that takes a settings file.
 export function settingsFile(ws: Workspace, agent: Agent): string {
   const role = roleOf(ws, agent);
-  return backendFor(agent).installSettings(ws, {
+  const b = backendFor(agent);
+  if (!b.installSettings) return die(`${agent.name} runs under ${b.name}, which takes no settings file`);
+  return b.installSettings(ws, {
     name: agent.name, role: agent.role, template: role.settings, cwd: role.cwd, extraHooks: role.extraHooks, permissionMode: role.permissionMode,
     env: sessionEnv(ws, agent), ...(agent.host ? { host: agent.host } : {}),
   });
@@ -104,7 +109,7 @@ export function launchSpec(ws: Workspace, agent: Agent, prompt: string, appendix
   const role = roleOf(ws, agent);
   return {
     name: agent.name, role: agent.role, prompt, appendixPath,
-    settings: settingsFile(ws, agent),
+    settings: backendFor(agent).installSettings ? settingsFile(ws, agent) : null,
     addDirs: addDirs(ws, agent),
     ...(agent.remoteControl ? { remoteControl: agent.name } : {}),
     // A builder's browser is for its build; a designer's is how it renders frames and today's screens.
@@ -156,7 +161,7 @@ export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string,
   if (!s) {
     const there = agent.host ? ` on host ${t.where}` : "";
     const also = agent.host ? ` there, and \`factory doctor\` for whether ${t.where} answers` : "";
-    die(`${agent.name} did not appear in \`claude agents\`${there} within ${Math.round(waitS)}s (launch id ${sid}). Check \`claude logs ${sid}\`${also}.`);
+    die(`${agent.name} did not appear in ${backendFor(agent).listing}${there} within ${Math.round(waitS)}s (launch id ${sid}). Check ${backendFor(agent).logsHint(sid)}${also}.`);
   }
   // The agent's ended rows go once a start is up (stopped.ts); a caller with a deadline (the hook's
   // wake) has no time for the listing and the removals, and leaves them to the next start.

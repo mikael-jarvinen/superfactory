@@ -7,6 +7,7 @@ import { claudeConfigDir } from "../claude-bin.js";
 import type { Session } from "../fleet.js";
 import { ListingTimedOut } from "../remote.js";
 import { claudeEnv, claudeScoped, scopeCheck } from "../scope.js";
+import { CAPABILITIES } from "./capabilities.js";
 import { renderSettings } from "../settings.js";
 import { die, MAX_OUTPUT, run } from "../util.js";
 import type { AgentBackend, LaunchSpec } from "./backend.js";
@@ -104,6 +105,7 @@ const scoped = (argv: string[], timeout?: number) => scopeCheck(argv, run(...cla
 // ORDER MATTERS. `--add-dir` is variadic and eats every following bare word, including the prompt,
 // so it comes before the single-valued flags and the prompt always follows one of those.
 function launchArgs(spec: LaunchSpec): string[] {
+  if (spec.settings === null) die("a claude session needs its settings file");
   const settings = ["--settings", spec.settings];
   const args = ["--bg"];
   if (spec.role !== "builder") args.push(...settings);
@@ -121,8 +123,9 @@ function launchArgs(spec: LaunchSpec): string[] {
   return args;
 }
 
-export const claudeBackend: AgentBackend = {
+export const claudeBackend = {
   name: "claude",
+  ...CAPABILITIES.claude,
   launchArgs,
   start(req, appendixPath) {
     const argv = req.args(appendixPath);
@@ -135,6 +138,7 @@ export const claudeBackend: AgentBackend = {
     scoped(["stop", id]);
     if (remove) scoped(["rm", id]);
   },
+  logsHint: (id) => `\`claude logs ${id}\``,
   sessions(includeDone = false) {
     const r = scoped(["agents", "--json", ...(includeDone ? ["--all"] : [])], LISTING_TIMEOUT_MS);
     if (r.status === 124) throw new ListingTimedOut(`\`claude agents --json\` did not answer in ${LISTING_TIMEOUT_MS / 1000} s`);
@@ -167,4 +171,4 @@ export const claudeBackend: AgentBackend = {
   projectDir,
   transcriptAt,
   planUsage: () => oauthUsage(),
-};
+} satisfies AgentBackend;

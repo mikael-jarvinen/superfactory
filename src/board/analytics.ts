@@ -29,6 +29,7 @@
 // it fails, that host's agents are left out, and the report says why (hosts).
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { agentNameOf } from "../agent-name.js";
 import { type Agent, BACKENDS } from "../config.js";
 import { roleOf } from "../launch.js";
 import { allRecs, BUSY, eachEvent, OFF, STATES } from "../state.js";
@@ -310,16 +311,18 @@ export class TranscriptUsage {
   }
 
   private take(line: Buffer, st: FileRead): void {
-    const named = st.agent === null && line.includes('"agent-name"');
-    if (!named && !(line.includes('"usage"') && line.includes('"assistant"'))) return;
+    if (st.agent === null) {
+      const n = agentNameOf(line);
+      if (n !== undefined) {
+        st.agent = n;
+        return;
+      }
+    }
+    if (!(line.includes('"usage"') && line.includes('"assistant"'))) return;
     let d: Record<string, any>;
     try {
       d = JSON.parse(line.toString("utf8"));
     } catch {
-      return;
-    }
-    if (d.type === "agent-name" && typeof d.agentName === "string") {
-      st.agent ??= d.agentName;
       return;
     }
     const u = d.message?.usage;

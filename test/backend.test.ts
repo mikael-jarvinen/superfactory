@@ -37,7 +37,7 @@ test("an unknown backend fails at config load, naming the agent's field and the 
   after(() => rmSync(ws, { recursive: true, force: true }));
   assert.throws(
     () => loadConfig(join(ws, "factory.toml"), {}),
-    (e: unknown) => e instanceof ConfigError && e.problems.some((p) => /^agents\[0\]\.backend: must be one of claude, got "gemini"/.test(p)),
+    (e: unknown) => e instanceof ConfigError && e.problems.some((p) => /^agents\[0\]\.backend: must be one of claude, antigravity, got "gemini"/.test(p)),
   );
   const ws2 = tempWorkspace(TOML.replace('name = "ada"\nrole = "lead"\n', 'name = "ada"\nrole = "lead"\nbackend = 3\n'));
   after(() => rmSync(ws2, { recursive: true, force: true }));
