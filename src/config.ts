@@ -8,7 +8,7 @@ export const ROLES = ["lead", "builder", "reviewer", "assistant", "designer"] as
 export type RoleName = (typeof ROLES)[number];
 
 // The CLIs an agent's sessions can run under; an agent with no `backend` runs under claude.
-export const BACKENDS = ["claude"] as const;
+export const BACKENDS = ["claude", "antigravity"] as const;
 export type BackendName = (typeof BACKENDS)[number];
 
 export const STATES = [
@@ -529,6 +529,8 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const group = r.str("group");
     if (group !== undefined && !group.trim()) r.bad("group", "must not be empty");
     if (group !== undefined && role === "lead") r.bad("group", "the lead has its own place on the board");
+    // A host's daemon starts and lists claude sessions only.
+    if (host && backend !== "claude") r.bad("host", `${name} runs under ${backend}, which runs on this machine only, so it takes no host`);
     if (host && !hosts[host]) r.bad("host", `no host ${show(host)}; hosts: ${Object.keys(hosts).join(", ") || "none"}`);
     const workRepos = stack ? (stacks[stack]?.repos ?? []) : (agentRepos ?? []);
     // A builder runs where its worktrees are, and they are under its repos' checkouts.

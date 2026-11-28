@@ -5,13 +5,20 @@
 // its own error: failOpen lets it through and says so. From a host (--from-host) it wakes only
 // agents on that host, and after a send to any other fails as not reachable it says to have the
 // lead wake it. The lead being off is a known gap: nobody else can wake it.
+//
+// A recipient whose backend has no such tool, an Antigravity agent, is never reached by the send
+// itself: the hook puts the message in its session as the next prompt (AgentBackend.deliver) and
+// denies the tool call, saying it was delivered.
 import { appendFileSync, mkdirSync } from "node:fs";
 import { parseArgs } from "node:util";
 import type { HookResult } from "../settings.js";
 import { sleep } from "../util.js";
 import { defaultLogsDir } from "../config.js";
 import { iso, wakeHookLog } from "../failures.js";
+import { backendFor } from "../backends/index.js";
 import { lead } from "../fleet.js";
+import { roleOf } from "../launch.js";
+import type { Workspace } from "../workspace.js";
 import { local } from "../transport.js";
 import { WAKE_SETTLE_S, wake } from "../wake.js";
 import { openWorkspace, resolveWorkspace } from "../workspace.js";
@@ -28,6 +35,18 @@ export const recipient = (to: unknown): string | null => {
 };
 
 type HookEvent = "PreToolUse" | "PostToolUse" | "PostToolUseFailure";
+
+// The tool call denied, with why: a delivery, or a recipient that cannot be reached.
+const deny = (reason: string): HookResult => ({
+  code: 0,
+  stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } }),
+});
+
+// The sender as the recipient is told it: the agent whose role cwd the sending session is in.
+function senderName(ws: Workspace, cwd: unknown): string {
+  const hit = typeof cwd === "string" ? ws.config.agents.find((a) => a.role !== "builder" && roleOf(ws, a).cwd === cwd) : undefined;
+  return hit ? hit.name : `a factory session in ${String(cwd ?? "?")}`;
+}
 
 // The hook's own error: the send goes, or after it the failure is left unexplained, and the error is
 // logged and told to the sender under the event it answers. A workspace whose config does not load
@@ -60,12 +79,16 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   const fromHost = typeof v["from-host"] === "string" ? v["from-host"] : undefined;
   let to: string | null = null;
   let failedSend = false;
+  let text: string | null = null;
+  let senderCwd: unknown;
   let event: HookEvent = "PreToolUse";
   let sender = `session ? in ?${fromHost ? ` on ${fromHost}` : ""}`;
   try {
-    const ev = JSON.parse(input) as { hook_event_name?: unknown; session_id?: unknown; cwd?: unknown; tool_input?: { to?: unknown }; tool_response?: { success?: unknown; message?: unknown }; error?: unknown };
+    const ev = JSON.parse(input) as { hook_event_name?: unknown; session_id?: unknown; cwd?: unknown; tool_input?: { to?: unknown; message?: unknown }; tool_response?: { success?: unknown; message?: unknown }; error?: unknown };
     sender = `session ${String(ev.session_id ?? "?")} in ${String(ev.cwd ?? "?")}${fromHost ? ` on ${fromHost}` : ""}`;
     to = recipient(ev.tool_input?.to);
+    text = typeof ev.tool_input?.message === "string" ? ev.tool_input.message : null;
+    senderCwd = ev.cwd;
     // Explained is only a send that failed as not reachable: a result with success false and that
     // message (PostToolUse, as recorded), or a tool error saying it (PostToolUseFailure, not seen,
     // assumed to say the same). Any other failure, a name two sessions share say, passes as it is.
@@ -104,6 +127,18 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
     w = wake(ws, agent, { waitS, deadline, ...(fromHost ? { t: local } : {}) });
   } catch (e) {
     return failOpen("PreToolUse", ws.logsDir, sender, to, e);
+  }
+  const b = backendFor(agent);
+  if (b.deliver && !failedSend) {
+    if (w.is === "unknown") return deny(`${to}'s session could not be listed (${w.why}), so the message was not delivered. Try again shortly.`);
+    if (w.is === "failed") return deny(`${to} is off and did not start: ${w.why.replace(/\.$/, "")}. The message was not delivered.`);
+    if (!text) return deny(`the message to ${to} has no text, so nothing was delivered.`);
+    try {
+      b.deliver(w.s, `Message from ${senderName(ws, senderCwd)}:\n\n${text}`);
+    } catch (e) {
+      return deny(`the message to ${to} was not delivered: ${(e as Error).message}`);
+    }
+    return deny(`Delivered: ${to} runs on ${b.name}, which SendMessage does not reach, so the message went into its session as its next prompt${w.is === "started" ? ", after a fresh start" : ""}. Do not send it again. Its answers are in its transcript, not a reply.`);
   }
   switch (w.is) {
     case "live":

@@ -156,7 +156,8 @@ export function launch(ws: Workspace, agent: Agent, cwd: string, prompt: string,
   if (!s) {
     const there = agent.host ? ` on host ${t.where}` : "";
     const also = agent.host ? ` there, and \`factory doctor\` for whether ${t.where} answers` : "";
-    die(`${agent.name} did not appear in \`claude agents\`${there} within ${Math.round(waitS)}s (launch id ${sid}). Check \`claude logs ${sid}\`${also}.`);
+    const listing = agent.backend === "claude" ? "`claude agents`" : `the ${agent.backend} sessions`;
+    die(`${agent.name} did not appear in ${listing}${there} within ${Math.round(waitS)}s (launch id ${sid}). Check ${backendFor(agent).logsHint(sid)}${also}.`);
   }
   // The agent's ended rows go once a start is up (stopped.ts); a caller with a deadline (the hook's
   // wake) has no time for the listing and the removals, and leaves them to the next start.

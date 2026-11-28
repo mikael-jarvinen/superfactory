@@ -79,7 +79,7 @@ const MCP_WORDS: [string, string][] = [
   ["atlassian", "checking Jira"], ["slack", "checking Slack"], ["playwright", "using the browser"], ["chrome", "using the browser"],
 ];
 
-function wordsForTool(ws: Workspace, messageTool: string, name: string, input: Record<string, unknown>): string {
+function wordsForTool(ws: Workspace, messageTool: string | null, name: string, input: Record<string, unknown>): string {
   if (name === messageTool) {
     const to = String(input.to ?? "").replace(/\s*\[.*$/, "").trim();
     return to && to !== "main" ? `messaging ${capitalize(to)}` : "messaging";

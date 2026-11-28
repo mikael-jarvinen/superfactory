@@ -135,6 +135,7 @@ export const claudeBackend: AgentBackend = {
     scoped(["stop", id]);
     if (remove) scoped(["rm", id]);
   },
+  logsHint: (id) => `\`claude logs ${id}\``,
   sessions(includeDone = false) {
     const r = scoped(["agents", "--json", ...(includeDone ? ["--all"] : [])], LISTING_TIMEOUT_MS);
     if (r.status === 124) throw new ListingTimedOut(`\`claude agents --json\` did not answer in ${LISTING_TIMEOUT_MS / 1000} s`);

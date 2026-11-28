@@ -2,6 +2,12 @@
 // runs there: how a session starts and stops, how it is listed and told alive or mid-turn, how a
 // message reaches it, what settings and hooks it is given, where its transcripts are, and how the
 // plan's usage is read. An agent names its backend with `backend` in [[agents]] (config.ts).
+//
+// Two kinds of CLI sit behind it. One keeps its own sessions: Claude's daemon runs each `claude
+// --bg` worker and lists them (claude.ts). The other is a process that lives only as long as
+// whoever holds its stdio, as `agy acp` does; its backend runs a supervisor of its own for each
+// session, detached so it outlives the `factory` command, and lists the supervisors
+// (antigravity.ts). Every method below is written for both.
 import type { RoleName } from "../config.js";
 import type { PlanFetch } from "../board/plan-usage.js";
 import type { Session } from "../fleet.js";
@@ -33,22 +39,31 @@ export interface AgentBackend {
 
   // Launch: the arguments of a background start, run by start() on the machine that runs the session.
   launchArgs(spec: LaunchSpec): string[];
-  // Runs a start on this machine, with the brief's file the transport wrote, and returns the launch
-  // id the CLI printed, or "?".
+  // Runs a start on this machine, with the brief's file the transport wrote, and returns the id the
+  // session is listed under, or "?" when the CLI printed none. It returns once the session is
+  // started and held by something that outlives the caller: the CLI's daemon, or the backend's
+  // supervisor.
   start(req: StartRequest, appendixPath: string | null): string;
   stop(id: string, remove: boolean): void;
+  // Where to look when a start does not come up, for the error that says so.
+  logsHint(id: string): string;
 
-  // Listing and liveness. sessions() throws ListingTimedOut (remote.ts) on a listing that hangs;
-  // sessionsAsync() resolves to an empty list on any failure.
+  // Listing and liveness, from wherever the backend keeps its sessions: the CLI's registry, or its
+  // supervisors' state files. sessions() throws ListingTimedOut (remote.ts) on a listing that
+  // hangs; sessionsAsync() resolves to an empty list on any failure. alive() takes a row of this
+  // backend's own listing, and probes the process behind it.
   sessions(includeDone?: boolean): Session[];
   sessionsAsync(): Promise<Session[]>;
   alive(s: Session | null | undefined): s is Session;
   // Busy: a session in a turn, which a stop cuts short. Any other live session is idle.
   midTurn(s: Session): boolean;
 
-  // Message delivery. The tool a session sends messages with; the wake hook in its settings runs
-  // before that tool and starts a recipient that is off.
-  readonly messageTool: string;
+  // Message delivery. messageTool is the tool a session sends messages with; the wake hook in its
+  // settings runs before that tool and starts a recipient that is off. null for a session that has
+  // no such tool. deliver, on a backend whose sessions cannot be reached by that tool, puts a
+  // message into a live session as its next prompt; the wake hook calls it for a send to one.
+  readonly messageTool: string | null;
+  deliver?(s: Session, text: string): void;
 
   // Settings and hooks: writes the session's settings file, hooks included, and returns its path.
   installSettings(ws: Workspace, s: SessionSettings): string;
