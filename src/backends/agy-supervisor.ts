@@ -14,7 +14,8 @@
 //   - writes the transcript (agy-store.ts's transcriptFile) and every ACP message (acp.jsonl);
 //   - ends the session on SIGTERM, and marks it failed when agy exits on its own, when agy runs a
 //     tool that is not read-only without asking, when the mode cannot be held, when the setup
-//     fails, or when the supervisor itself crashes (killing agy first).
+//     fails, or when the supervisor itself crashes, killing agy and its tools first;
+//   - leaves any message that never went to agy in the inbox, named in state.json's undelivered.
 //
 // Usage: node agy-supervisor.js --id <id> [--add-dir <dir>]... [--model <m>] [--effort <e>]
 //          [--appendix <file>] [--mcp-config <file>] [--load <session id>] --name <name> --prompt <text>
@@ -24,7 +25,7 @@ import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync, watch } f
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { AcpError, AcpPeer, PROTOCOL_VERSION } from "./acp.js";
-import { agyBin, agySettingsFile, type AgyState, inboxDir, sessionDir, transcriptFile, validId, writeJson } from "./agy-store.js";
+import { agyBin, agySettingsFile, type AgyState, enqueue, inboxDir, sessionDir, transcriptFile, validId, writeJson } from "./agy-store.js";
 import { permissionOutcome, readOnly } from "./read-only.js";
 import { killTree, startStamp } from "../stacks/process.js";
 
@@ -74,9 +75,6 @@ const unsafeNow = (): string | null => {
   const u = unsafeSettings(readSettings());
   return u && `${agySettingsFile()} lets tools run without asking: ${u}. An Antigravity session runs only with every tool call put to its supervisor.`;
 };
-
-// Set by supervise once agy runs: what a crash of the supervisor does before it exits.
-let onCrash: ((why: string) => void) | null = null;
 
 // What in agy's own settings would let a tool run without a permission request reaching the
 // supervisor, or null for none. A request that never comes is one the handler cannot deny.
@@ -136,10 +134,19 @@ const iso = () => new Date().toISOString();
 // A call that is not read-only trips it when it ends, completed or failed, without ever having been
 // put to the supervisor, or completes after it was denied; and so does an allowed read-only call
 // whose kind is later changed to one that is not. Fails closed: a call with no kind is not read-only.
+// Its kind only ever gets stricter (stricterKind), so a call once seen as not read-only stays so.
 export interface CallSeen {
   kind: unknown;
   asked: boolean;
   allowed: boolean;
+}
+
+// The kind a call is held to, from the one seen before and one it now gives (undefined when it gives
+// none): the stricter of the two, so a kind seen as not read-only, announced or asked, is kept.
+export function stricterKind(before: unknown, now: unknown, seenBefore: boolean): unknown {
+  if (!seenBefore) return now;
+  if (now === undefined || !readOnly(before)) return before;
+  return now;
 }
 
 export function tripped(c: CallSeen, status: unknown, kindChanged: boolean): string | null {
@@ -189,16 +196,58 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
   const finish = (patch: Partial<AgyState>, code: number) => {
     if (ended) return;
     ended = true;
-    save({ status: "off", ...patch });
+    save({ status: "off", ...patch, ...undelivered() });
     log(`ended: ${patch.state}${patch.error ? `: ${patch.error}` : ""}`);
-    if (child && child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
-      const k = setTimeout(() => child?.kill("SIGKILL"), 5000);
-      k.unref();
-    }
+    // agy and every tool it runs, SIGKILL for whatever outlives the grace; this waits for that
+    // before the supervisor goes on to exit, since a tool left behind would be reparented and out of
+    // reach of a later stop.
+    const pid = child?.pid;
+    if (pid !== undefined && child!.exitCode === null && child!.signalCode === null && !killTree(pid, 5000))
+      log(`agy ${pid} or one of its tools survived SIGKILL`);
     resolveEnd(code);
   };
   const fail = (why: string) => finish({ state: "failed", error: why }, 1);
+
+  // The messages a session ends with that never went to agy: each stays in the inbox, the first
+  // prompt is put there too, and state.json names them (undelivered), so none is lost unsaid.
+  const queue: string[] = [];
+  const inboxNames = (): string[] => {
+    try {
+      return readdirSync(inboxDir(spec.id)).filter((n) => n.endsWith(".json")).sort();
+    } catch {
+      return [];
+    }
+  };
+  // Written with the session's end, in the same save, so a reader that sees it ended sees these.
+  function undelivered(): { undelivered?: string[] } {
+    try {
+      for (const text of queue.splice(0)) enqueue(spec.id, text);
+      const left = inboxNames();
+      if (!left.length) return {};
+      log(`${left.length} message(s) not delivered, left in the inbox: ${left.join(", ")}`);
+      return { undelivered: left };
+    } catch (e) {
+      log(`the undelivered messages could not be recorded: ${(e as Error).message}`);
+      return {};
+    }
+  }
+
+  // A crash kills agy and its tools and says so, so no agy outlives a supervisor with no record.
+  // Registered here, where the session it cleans up is in scope, as SIGTERM's handler is below.
+  process.on("uncaughtException", (e) => {
+    console.error(`agy-supervisor: ${e.stack ?? e.message}`);
+    try {
+      const pid = child?.pid;
+      if (pid !== undefined && child?.exitCode === null && child.signalCode === null) killTree(pid, 1000);
+      if (!ended) {
+        ended = true;
+        save({ state: "failed", status: "off", error: `the supervisor crashed: ${e.message}`, ...undelivered() });
+      }
+    } catch (ce) {
+      console.error(`agy-supervisor: and the crash could not be cleaned up: ${(ce as Error).message}`);
+    }
+    process.exit(1);
+  });
 
   const unsafe = unsafeNow();
   if (unsafe) {
@@ -216,15 +265,6 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
     else fail(`agy exited on its own (${sig ?? `code ${code}`})`);
   });
   save({ agentPid: child.pid ?? null, agentStamp: child.pid === undefined ? null : startStamp(child.pid) });
-  // A crash kills agy and its tools and says so, so no agy outlives a supervisor with no record.
-  onCrash = (why) => {
-    const pid = child?.pid;
-    if (pid !== undefined && child?.exitCode === null && child.signalCode === null) killTree(pid, 1000);
-    if (!ended) {
-      ended = true;
-      save({ state: "failed", status: "off", error: `the supervisor crashed: ${why}` });
-    }
-  };
 
   const acpLog = join(dir, "acp.jsonl");
   const peer = new AcpPeer(child.stdin!, child.stdout!, (d, line) => appendFileSync(acpLog, `{"at":"${iso()}","dir":"${d}","m":${line}}\n`));
@@ -242,13 +282,15 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
     said = "";
   };
 
-  // Tool calls by id: the kind the agent gave last, whether it was put to the supervisor, and
-  // whether the supervisor allowed it.
+  // Tool calls by id: the strictest kind the agent gave it, whether it was put to the supervisor,
+  // and whether the supervisor allowed it.
   const calls = new Map<string, CallSeen>();
   peer.handle("session/request_permission", (p: any) => {
     const tc = p?.toolCall ?? {};
     const id = String(tc.toolCallId ?? "");
-    const kind = tc.kind ?? calls.get(id)?.kind;
+    const prev = calls.get(id);
+    // asked as read-only, a call announced as not read-only is still held to its announced kind
+    const kind = stricterKind(prev?.kind, tc.kind, prev !== undefined);
     const outcome = permissionOutcome(kind, p?.options);
     const allowed = outcome.outcome === "selected" && readOnly(kind);
     calls.set(id, { kind, asked: true, allowed });
@@ -262,14 +304,14 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
       throw new Error(`${m} is not offered by this client`);
     });
 
-  // A tool call's update: its kind, if it gives one, replaces the last, and the tripwire (tripped)
+  // A tool call's update: its kind, if it gives one, is held to the stricter (stricterKind), and the tripwire (tripped)
   // ends the session over a call that ran without the supervisor's leave. agy reports a call
   // in_progress before it asks and again after a denial, so only an end counts as having run.
   const seen = (id: string, kind: unknown, status: unknown) => {
     const prev = calls.get(id);
-    const c: CallSeen = { kind: kind ?? prev?.kind, asked: prev?.asked ?? false, allowed: prev?.allowed ?? false };
+    const c: CallSeen = { kind: stricterKind(prev?.kind, kind, prev !== undefined), asked: prev?.asked ?? false, allowed: prev?.allowed ?? false };
     calls.set(id, c);
-    const why = tripped(c, status, kind !== undefined && prev !== undefined && kind !== prev.kind);
+    const why = tripped(c, status, prev !== undefined && c.kind !== prev.kind);
     if (why) fail(`agy's tool call ${id} (${String(c.kind ?? "no kind")}) is not read-only and ${why}; the session cannot be kept read-only`);
   };
 
@@ -331,38 +373,43 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
   });
 
   let busy = false;
-  const queue: string[] = [];
-  const takeInbox = (): string | null => {
-    if (queue.length) return queue.shift()!;
-    let names: string[] = [];
-    try {
-      names = readdirSync(inboxDir(spec.id)).filter((n) => n.endsWith(".json")).sort();
-    } catch {
-      return null;
-    }
-    for (const n of names) {
+  // The next message and its inbox file, which is removed only once its user line is written, so
+  // a crash before then leaves it in the inbox.
+  const takeInbox = (): { text: string; file?: string } | null => {
+    if (queue.length) return { text: queue.shift()! };
+    for (const n of inboxNames()) {
       const f = join(inboxDir(spec.id), n);
       try {
         const m = JSON.parse(readFileSync(f, "utf8")) as { text?: unknown };
-        rmSync(f, { force: true });
-        if (typeof m.text === "string" && m.text) return m.text;
+        if (typeof m.text === "string" && m.text) return { text: m.text, file: f };
       } catch {
-        rmSync(f, { force: true });
+        // a file that is not a message is no message
       }
+      rmSync(f, { force: true });
     }
     return null;
   };
   const pump = async (): Promise<void> => {
     if (busy || ended || stopping) return;
-    const text = takeInbox();
-    if (text === null) return;
-    const unsafe = unsafeNow();
-    if (unsafe) return fail(unsafe);
+    if (!queue.length && !inboxNames().length) return;
+    // Both checks come before a message leaves the inbox, so a session they end keeps it there.
     busy = true;
     await holding;
-    if (ended) return;
+    if (ended || stopping) {
+      busy = false;
+      return;
+    }
+    const unsafe = unsafeNow();
+    if (unsafe) return fail(unsafe);
+    const next = takeInbox();
+    if (next === null) {
+      busy = false;
+      return;
+    }
+    const { text } = next;
     save({ state: "working", status: "busy" });
     line({ type: "user", message: { role: "user", content: [{ type: "text", text }] } });
+    if (next.file) rmSync(next.file, { force: true });
     try {
       const r = await peer.request<{ stopReason?: string; usage?: unknown }>("session/prompt", { sessionId: st.sessionId, prompt: [{ type: "text", text }] });
       flushSaid();
@@ -405,18 +452,21 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
       st.sessionId = setup.sessionId;
     }
     const opts: ConfigOption[] = Array.isArray(setup?.configOptions) ? setup.configOptions : [];
+    // The agy that runs is the only list of its models: factory.toml's model is checked here.
+    const offered = (what: string, want: string, on: string[]) =>
+      `${spec.name}'s ${what} ${JSON.stringify(want)} is not one this agy offers; it offers ${on.join(", ")}. Set ${what} in factory.toml to one of them`;
     const set = async (what: "model" | "effort", want: string, category: string, ids: RegExp) => {
       const o = optionFor(opts, category, ids);
       if (o) {
         const value = pickValue(o, want);
-        if (!value) throw new Error(`no ${what} ${want}: agy offers ${flat(o).map((x) => x.value).join(", ")}`);
+        if (!value) throw new Error(offered(what, want, flat(o).map((x) => (x.name && x.name !== x.value ? `${x.value} (${x.name})` : x.value))));
         await peer.request("session/set_config_option", { sessionId: st.sessionId, configId: o.id, value });
         return value;
       }
       const models = setup?.models?.availableModels;
       if (what === "model" && Array.isArray(models)) {
         const hit = models.find((m: any) => [m.modelId, m.name].some((x) => typeof x === "string" && x.toLowerCase() === want.toLowerCase()));
-        if (!hit) throw new Error(`no model ${want}: agy offers ${models.map((m: any) => m.modelId).join(", ")}`);
+        if (!hit) throw new Error(offered(what, want, models.map((m: any) => String(m.modelId))));
         await peer.request("session/set_model", { sessionId: st.sessionId, modelId: hit.modelId });
         return hit.modelId as string;
       }
@@ -462,14 +512,5 @@ if (process.argv[1] && /agy-supervisor\.js$/.test(process.argv[1])) {
     console.error(`agy-supervisor: ${(e as Error).message}`);
     process.exit(2);
   }
-  process.on("uncaughtException", (e) => {
-    console.error(`agy-supervisor: ${e.stack ?? e.message}`);
-    try {
-      onCrash?.(e.message);
-    } catch (ce) {
-      console.error(`agy-supervisor: and the crash could not be cleaned up: ${(ce as Error).message}`);
-    }
-    process.exit(1);
-  });
   void supervise(spec).then((code) => setTimeout(() => process.exit(code), 200));
 }

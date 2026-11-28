@@ -534,9 +534,6 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     // undefined for a backend that is not one, already reported
     const caps = CAPABILITIES[backend] as (typeof CAPABILITIES)[BackendName] | undefined;
     if (host && caps && !caps.onHosts) r.bad("host", `${name} runs under ${backend}, which runs on this machine only, so it takes no host`);
-    const model = r.str("model");
-    const notRun = model === undefined || !caps ? null : caps.modelProblem(model);
-    if (notRun) r.bad("model", `${name} runs under ${backend}: ${notRun}`);
     if (host && !hosts[host]) r.bad("host", `no host ${show(host)}; hosts: ${Object.keys(hosts).join(", ") || "none"}`);
     const workRepos = stack ? (stacks[stack]?.repos ?? []) : (agentRepos ?? []);
     // A builder runs where its worktrees are, and they are under its repos' checkouts.
@@ -565,7 +562,7 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
       backend,
       remoteControl: r.bool("remote_control") ?? false,
       cwd,
-      model,
+      model: r.str("model"),
       effort: r.str("effort"),
       permissionMode: r.str("permission_mode"),
       autocompact: r.str("autocompact"),

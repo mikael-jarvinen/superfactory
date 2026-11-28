@@ -10,14 +10,16 @@
 // itself: the hook puts the message in its session as the next prompt (AgentBackend.deliver) and
 // denies the tool call, saying it was delivered. Only a session on the primary can do that, as the
 // recipient's inbox is there: a send to one from a host is refused at once, as it is unsupported.
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { HookResult } from "../settings.js";
 import { sleep } from "../util.js";
 import { defaultLogsDir } from "../config.js";
 import { iso, wakeHookLog } from "../failures.js";
+import { firstAgentName } from "../agent-name.js";
 import { backend, backendFor } from "../backends/index.js";
+import { CAPABILITIES } from "../backends/capabilities.js";
 import { lead } from "../fleet.js";
 import { local } from "../transport.js";
 import { WAKE_SETTLE_S, wake } from "../wake.js";
@@ -42,30 +44,13 @@ const deny = (reason: string): HookResult => ({
   stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } }),
 });
 
-// The name the sending session runs under, from its own transcript: the last agent-name line
-// Claude wrote for it. undefined when the transcript cannot be read or names none.
+// The name the sending session runs under, from the head of its own transcript: the first
+// agent-name line (agent-name.ts). undefined when the transcript cannot be read or names none.
 export function sessionName(transcript: unknown, sessionId: unknown, cwd: unknown): string | undefined {
   const file = typeof transcript === "string" && transcript
     ? transcript
     : typeof sessionId === "string" && /^[\w-]+$/.test(sessionId) && typeof cwd === "string" ? join(backend("claude").projectDir(cwd), `${sessionId}.jsonl`) : undefined;
-  if (!file) return undefined;
-  let text: string;
-  try {
-    text = readFileSync(file, "utf8");
-  } catch {
-    return undefined;
-  }
-  let name: string | undefined;
-  for (const l of text.split("\n")) {
-    if (!l.includes('"agent-name"')) continue;
-    try {
-      const d = JSON.parse(l) as { type?: unknown; agentName?: unknown; sessionId?: unknown };
-      if (d.type === "agent-name" && typeof d.agentName === "string" && d.agentName && (d.sessionId === undefined || d.sessionId === sessionId)) name = d.agentName;
-    } catch {
-      // a line that is not JSON names no one
-    }
-  }
-  return name;
+  return file ? firstAgentName(file, sessionId) : undefined;
 }
 
 // The sender as the recipient is told it: the name the sending session itself runs under, which is
@@ -139,8 +124,8 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   const agent = ws.config.agents.find((a) => a.name === to);
   if (!agent) return { code: 0 };
   const b = backendFor(agent);
-  // A recipient reached only through its inbox on the primary, which a host's session cannot write.
-  if (fromHost && b.deliver) {
+  // A recipient whose backend runs on the primary only: its inbox is there, and a host's session cannot write it.
+  if (fromHost && !CAPABILITIES[agent.backend].onHosts) {
     if (failedSend) return { code: 0 };
     return { code: 2, stderr: `${to} runs under ${b.name}, and an ${b.name} agent can only be messaged from a session on the primary, the machine that runs it, not from ${fromHost}. This is not supported in this phase; waking it or sending again will not change that.\n` };
   }

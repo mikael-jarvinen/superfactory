@@ -6,8 +6,9 @@ import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { antigravityBackend, listSessions, sessionAlive, startSupervisor, stopSession } from "../src/backends/antigravity.js";
 import { allStates, readState, sessionDir } from "../src/backends/agy-store.js";
-import { mcpServers, modeOf, pickValue, tripped, unsafeSettings } from "../src/backends/agy-supervisor.js";
+import { mcpServers, modeOf, pickValue, stricterKind, tripped, unsafeSettings } from "../src/backends/agy-supervisor.js";
 import { backendFor } from "../src/backends/index.js";
+import { NAME_HEAD_BYTES } from "../src/agent-name.js";
 import { permissionOutcome, READ_ONLY_KINDS, readOnly } from "../src/backends/read-only.js";
 import { ConfigError, loadConfig } from "../src/config.js";
 import { hook, senderName } from "../src/hooks/wake.js";
@@ -129,7 +130,7 @@ test("Claude's MCP config becomes ACP stdio servers; a model or effort is picked
   assert.equal(pickValue(o, "max"), null);
 });
 
-test("an antigravity agent never takes its role's Claude model or effort, and one naming a model agy has not is refused", () => {
+test("an antigravity agent never takes its role's Claude model or effort, and its own model is not checked at load", () => {
   const agy = (extra: string) => TOML.replace('name = "rae"\nrole = "reviewer"\n', `name = "rae"\nrole = "reviewer"\nbackend = "antigravity"\n${extra}`);
   const ws = tempWorkspace(agy(""));
   after(() => rmSync(ws, { recursive: true, force: true }));
@@ -145,9 +146,15 @@ test("an antigravity agent never takes its role's Claude model or effort, and on
   const w2 = openWorkspace(own, {});
   const spec2 = launchSpec(w2, w2.config.agents.find((a) => a.name === "rae")!, "hi", null, undefined);
   assert.deepEqual([spec2.model, spec2.effort], ["Gemini 4 Neon", "xhigh"]);
-  const bad = tempWorkspace(agy('model = "opus"\n'));
-  after(() => rmSync(bad, { recursive: true, force: true }));
-  assert.throws(() => loadConfig(join(bad, "factory.toml"), {}), (e: unknown) => e instanceof ConfigError && e.problems.some((p) => /rae runs under antigravity: "opus" is not an agy model; agy offers gemini-4-neon, /.test(p)));
+  // Only the agy that runs knows its models, so a name no list here has loads, and start checks it.
+  const fresh = tempWorkspace(agy('model = "gemini-9-ultra"\n'));
+  after(() => rmSync(fresh, { recursive: true, force: true }));
+  assert.equal(loadConfig(join(fresh, "factory.toml"), {}).agents.find((a) => a.name === "rae")!.model, "gemini-9-ultra");
+});
+
+test("a model the running agy does not offer fails the start, naming the agent and agy's models", () => {
+  assert.throws(() => start("nomodel", "hi", ["--model", "opus"]),
+    /nomodel's model "opus" is not one this agy offers; it offers gemini-flash \(Gemini Flash\), gemini-pro \(Gemini Pro\)\. Set model in factory\.toml/);
 });
 
 test("backend = \"antigravity\" loads, and takes no host", () => {
@@ -174,10 +181,10 @@ test("a session outlives its start, sets its model and effort, goes idle after i
   assert.equal(antigravityBackend.midTurn(row), false, "idle between prompts");
   assert.equal(row.name, "vera");
   assert.equal(st.model, "gemini-pro");
-  const sets = requests().filter((r) => r.method === "session/set_config_option").map((r) => [r.params.configId, r.params.value]);
+  const sets = requests().filter((r) => r.method === "session/set_config_option" && r.params.sessionId === st.sessionId).map((r) => [r.params.configId, r.params.value]);
   assert.deepEqual(sets, [["model", "gemini-pro"], ["thinking", "extra"]]);
   // the brief went in as a system-prompt addition, and the prompt as it is
-  const created = requests().find((r) => r.method === "session/new");
+  const created = requests().find((r) => r.method === "session/new" && r.params.cwd === cwdFor("vera"));
   assert.equal(created.params._meta.antigravity.systemPrompt.append, "You are Vera.\n");
   assert.equal(created.params.cwd, cwdFor("vera"));
   assert.ok(st.transcript!.startsWith(antigravityBackend.projectDir(cwdFor("vera"))));
@@ -273,6 +280,11 @@ test("agy settings are read again before each prompt", async () => {
     await until("the session to fail", () => readState(id)?.state === "failed");
     assert.match(readState(id)!.error!, /lets tools run without asking: agentMode is "accept-edits"/);
     assert.equal(transcript(id).filter((l) => l.type === "turn-end").length, 1, "the prompt did not go");
+    // delivered by the hook, so never lost: still in the inbox, and named in the state
+    const left = readdirSync(join(sessionDir(id), "inbox")).filter((n) => n.endsWith(".json"));
+    assert.equal(left.length, 1);
+    assert.match(JSON.parse(readFileSync(join(sessionDir(id), "inbox", left[0]!), "utf8")).text, /hello/);
+    assert.deepEqual(readState(id)!.undelivered, left);
   } finally {
     rmSync(process.env.SF_AGY_SETTINGS!, { force: true });
   }
@@ -288,6 +300,12 @@ test("the tripwire: a call never asked trips it whether it completes or fails; a
   assert.equal(tripped({ kind: "read", asked: false, allowed: false }, "completed", false), null);
   assert.match(tripped({ kind: undefined, asked: false, allowed: false }, "failed", false)!, /without asking/);
   assert.match(tripped({ kind: "edit", asked: true, allowed: true }, "in_progress", true)!, /changed its kind to edit after it was allowed/);
+  // a kind only gets stricter: once not read-only, a call stays so, whatever it later says
+  assert.equal(stricterKind(undefined, "read", false), "read");
+  assert.equal(stricterKind("read", "edit", true), "edit");
+  assert.equal(stricterKind("edit", "read", true), "edit");
+  assert.equal(stricterKind("read", undefined, true), "read");
+  assert.equal(stricterKind(undefined, "read", true), undefined, "a call seen with no kind is not read-only, and stays so");
   assert.deepEqual(modeOf(undefined, { currentModeId: "plan", availableModes: [{ id: "default" }] }), { current: "plan", offersDefault: true, via: "modes" });
   assert.equal(modeOf([], undefined), undefined);
 });
@@ -304,6 +322,36 @@ test("an unasked command that fails, and a read whose kind turns to edit, each e
   antigravityBackend.deliver!(rowOf(m), "morph");
   await until("the session to fail", () => readState(m)?.state === "failed");
   assert.match(readState(m)!.error!, /\(edit\) is not read-only and changed its kind to edit after it was allowed as read-only/);
+});
+
+test("a call's kind is held to the stricter: denied as an edit it cannot pass as a read, nor be asked as one", async () => {
+  const u = start("unmorph", "hi");
+  await until("idle", () => readState(u)?.state === "done");
+  antigravityBackend.deliver!(rowOf(u), "unmorph");
+  await until("the session to fail", () => readState(u)?.state === "failed");
+  assert.match(readState(u)!.error!, /\(edit\) is not read-only and ran after it was denied/);
+
+  const a = start("askasread", "hi");
+  await until("idle", () => readState(a)?.state === "done");
+  antigravityBackend.deliver!(rowOf(a), "ask-as-read");
+  await until("the turn", () => transcript(a).some((l) => l.type === "permission"));
+  const p = transcript(a).find((l) => l.type === "permission");
+  assert.equal(p.kind, "edit");
+  assert.equal(p.allowed, false);
+  await until("idle", () => readState(a)?.state === "done");
+});
+
+test("a tripwire kills agy's tools too, SIGKILL for one that outlives SIGTERM, before the supervisor exits", async () => {
+  const id = start("stubborn", "hi");
+  await until("idle", () => readState(id)?.state === "done");
+  const st = readState(id)!;
+  antigravityBackend.deliver!(rowOf(id), "stubborn");
+  await until("the session to fail", () => readState(id)?.state === "failed", 20_000);
+  const toolPid = requests().map((r) => r.tool).filter((x) => typeof x === "number").pop() as number;
+  assert.ok(toolPid, "the fake started its tool");
+  await until("the supervisor to exit", () => gone(st.pid), 20_000);
+  assert.equal(gone(toolPid), true, "the tool outlived the supervisor");
+  assert.equal(gone(st.agentPid!), true);
 });
 
 test("a tool that is not read-only and runs without asking ends the session as failed", async () => {
@@ -355,6 +403,7 @@ test("a supervisor that crashes kills its agy and records the session failed", a
     antigravityBackend.deliver!(rowOf(id), "hello");
     await until("the session to fail", () => readState(id)?.state === "failed");
     assert.match(readState(id)!.error!, /^the supervisor crashed: EISDIR/);
+    assert.equal(readState(id)!.undelivered?.length, 1, "the message it crashed on is still in the inbox");
     await until("agy and the supervisor to be gone", () => gone(st.agentPid!) && gone(st.pid));
   });
 });
@@ -420,6 +469,13 @@ test("a sender with no transcript naming it is unknown, never a guess", () => {
   const t = join(root, "s8.jsonl");
   writeFileSync(t, JSON.stringify({ type: "agent-name", agentName: "otto", sessionId: "other" }) + "\n" + JSON.stringify({ type: "agent-name", agentName: "otto2" }) + "\n");
   assert.equal(senderName({ session_id: "s8", transcript_path: t }), "otto2");
+  // the first name is the one, as the board's analytics take it, and only the head is read
+  const two = join(root, "s7.jsonl");
+  writeFileSync(two, [{ type: "agent-name", agentName: "first" }, { type: "user" }, { type: "agent-name", agentName: "second" }].map((l) => JSON.stringify(l)).join("\n") + "\n");
+  assert.equal(senderName({ session_id: "s7", transcript_path: two }), "first");
+  const deep = join(root, "s6.jsonl");
+  writeFileSync(deep, JSON.stringify({ type: "user", pad: "x".repeat(NAME_HEAD_BYTES) }) + "\n" + JSON.stringify({ type: "agent-name", agentName: "late" }) + "\n");
+  assert.equal(senderName({ session_id: "s6", transcript_path: deep }), "unknown (session s6)");
 });
 
 test("a send from a host session to an Antigravity agent is refused at once, as unsupported", () => {

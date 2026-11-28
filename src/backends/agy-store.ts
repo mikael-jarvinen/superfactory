@@ -64,6 +64,8 @@ export interface AgyState {
   startedAt: number;
   updatedAt: string;
   error?: string;
+  // the inbox files a session ended with, which never went to agy and are still in its inbox
+  undelivered?: string[];
 }
 
 // Written beside and renamed, so a reader never sees half of one.

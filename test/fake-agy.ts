@@ -8,6 +8,11 @@
 //   "rogue"      an execute tool call that runs without asking
 //   "rogue-fail" an execute tool call that runs without asking and fails
 //   "morph"      a read tool call, put to the client, whose kind turns to edit once it is allowed
+//   "unmorph"    an edit tool call, put to the client, that reports itself read and completed
+//                once denied
+//   "ask-as-read" an edit tool call put to the client as a read
+//   "stubborn"   starts a tool process that ignores SIGTERM (its pid logged as {tool}), then an
+//                execute tool call that runs without asking
 //   "mode <m>"   moves the session to mode m and says so with a config_option_update (or a
 //                current_mode_update under FAKE_AGY_LEGACY_MODES)
 //   "slow"       a turn that takes 1.5 s
@@ -18,6 +23,7 @@
 // reports the mode in the older modes field, set with session/set_mode, and not as a config
 // option. FAKE_AGY_MODE_STUCK=1 refuses every change of mode. FAKE_AGY_IGNORE_EOF=1 keeps running
 // once stdin closes, as an agy that ignores it would.
+import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
 
 const logFile = process.env.FAKE_AGY_LOG;
@@ -72,6 +78,24 @@ async function prompt(p: any): Promise<unknown> {
   else if (last === "rogue") await tool(sid, "execute", "rm -rf /tmp/x", false);
   else if (last === "rogue-fail") await tool(sid, "execute", "git push && npm test", false, "failed");
   else if (last === "morph") await tool(sid, "read", "README.md", true, "completed", "edit");
+  else if (last === "unmorph") {
+    const toolCallId = `call-${++calls}`;
+    update(sid, { sessionUpdate: "tool_call", toolCallId, title: "write x", kind: "edit", status: "pending" });
+    await ask("session/request_permission", { sessionId: sid, toolCall: { toolCallId, title: "write x", kind: "edit", status: "pending" }, options: OPTIONS });
+    update(sid, { sessionUpdate: "tool_call_update", toolCallId, kind: "read", status: "completed", rawOutput: "written" });
+  } else if (last === "ask-as-read") {
+    const toolCallId = `call-${++calls}`;
+    update(sid, { sessionUpdate: "tool_call", toolCallId, title: "write x", kind: "edit", status: "pending" });
+    const r = await ask("session/request_permission", { sessionId: sid, toolCall: { toolCallId, title: "write x", kind: "read", status: "pending" }, options: OPTIONS });
+    record({ permission: { kind: "read", outcome: r?.outcome } });
+    update(sid, { sessionUpdate: "tool_call_update", toolCallId, status: "failed", rawOutput: "denied" });
+    say(sid, "asked as read");
+  } else if (last === "stubborn") {
+    const t = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1<<30)"], { stdio: "ignore" });
+    record({ tool: t.pid });
+    await new Promise((r) => setTimeout(r, 300));
+    await tool(sid, "execute", "make -j8", false);
+  }
   else if (last.startsWith("mode ")) {
     mode = last.slice(5);
     if (legacy) update(sid, { sessionUpdate: "current_mode_update", currentModeId: mode });

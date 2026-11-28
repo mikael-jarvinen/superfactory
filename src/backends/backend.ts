@@ -36,7 +36,7 @@ export interface LaunchSpec {
 }
 
 // Its capabilities (capabilities.ts): what its listing is called, whether it runs on a host,
-// whether a role's model applies to it, and which models it takes.
+// and whether a role's model applies to it.
 export interface AgentBackend extends BackendCapabilities {
   readonly name: string;
 
