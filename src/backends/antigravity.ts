@@ -19,7 +19,7 @@ export const START_WAIT_MS = 60_000;
 
 // The supervisor's arguments. Settings, remote control, autocompact and permission mode have no
 // ACP counterpart: an agy session takes no Claude settings, its tools are put to the supervisor
-// (read-only.ts) whatever the mode, and ACP sessions do not show in Antigravity's remote control.
+// (read-only.ts) whatever the mode, and `agy acp` takes no remote-control flag.
 function launchArgs(spec: LaunchSpec): string[] {
   const args = ["--name", spec.name];
   for (const d of spec.addDirs) args.push("--add-dir", d);
