@@ -70,6 +70,7 @@ add_dirs = ["web", "api"]                 # checkouts the session may read, as r
 name = "lee"                              # lower case; also the session name
 role = "lead"                             # exactly one lead
 remote_control = true                     # reachable from Remote Control under its name
+# backend = "claude"                      # the CLI that runs its sessions; claude when not given
 
 [[agents]]
 name = "bea"

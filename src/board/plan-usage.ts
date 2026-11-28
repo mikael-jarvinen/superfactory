@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
-import { claudeConfigDir } from "../transport.js";
+import { claudeConfigDir } from "../claude-bin.js";
 import type { Workspace } from "../workspace.js";
 
 export interface Sample {

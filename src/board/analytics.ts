@@ -31,7 +31,7 @@ import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, s
 import { join } from "node:path";
 import { roleOf } from "../launch.js";
 import { allRecs, BUSY, eachEvent, OFF, STATES } from "../state.js";
-import { claudeConfigDir } from "../transport.js";
+import { claudeBackend } from "../backends/claude.js";
 import { realpathLoose } from "../util.js";
 import type { Workspace } from "../workspace.js";
 import { worktreePath } from "../worktree.js";
@@ -154,8 +154,8 @@ const fresh = (path: string, since: number) => {
   }
 };
 
-// Claude's projects/ directory name for a cwd, as transport.ts's transcriptAt builds it.
-export const projectDirFor = (cwd: string) => join(claudeConfigDir(), "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
+// Claude's projects/ directory for a cwd, where claudeBackend's transcriptAt looks.
+export const projectDirFor = (cwd: string) => claudeBackend.projectDir(cwd);
 
 // Every transcript is read incrementally, as one runs to tens of megabytes, and only its assistant
 // calls and its session name are kept. An API call's usage is repeated on every content block it
@@ -224,7 +224,7 @@ export class TranscriptUsage {
   // Every transcript of the account, for the weekly usage (weekly.ts): each projects/ dir here,
   // whoever's sessions wrote it, and on each host, as of its last read with `all` (refresh).
   account(since: number): Read[] {
-    const base = join(claudeConfigDir(), "projects");
+    const base = claudeBackend.transcriptsDir();
     let dirs: string[] = [];
     try {
       dirs = readdirSync(base);

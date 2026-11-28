@@ -1,9 +1,10 @@
 import { readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
+import type { LaunchSpec } from "./backends/backend.js";
+import { backendFor } from "./backends/index.js";
 import type { Agent, GitOver, Role } from "./config.js";
 import { lead, pollForName, type Session } from "./fleet.js";
 import { Unreachable } from "./remote.js";
-import { renderSettings } from "./settings.js";
 import { branchFor, isLocal } from "./state.js";
 import { clearEnded } from "./stopped.js";
 import { withLock } from "./tickets/lock.js";
@@ -58,10 +59,10 @@ function withoutRun(dirs: string[], run: string[]): string[] {
   return dirs;
 }
 
-// Rendered at every launch from the role's template and config, into logs/run/.
+// Rendered at every launch from the role's template and config, into logs/run/, by the agent's backend.
 export function settingsFile(ws: Workspace, agent: Agent): string {
   const role = roleOf(ws, agent);
-  return renderSettings(ws, {
+  return backendFor(agent).installSettings(ws, {
     name: agent.name, role: agent.role, template: role.settings, cwd: role.cwd, extraHooks: role.extraHooks, permissionMode: role.permissionMode,
     env: sessionEnv(ws, agent), ...(agent.host ? { host: agent.host } : {}),
   });
@@ -98,32 +99,22 @@ export const roleAppendix = (ws: Workspace, agent: Agent): string | null => buil
 const addDirs = (ws: Workspace, agent: Agent) =>
   (agent.addDirs ?? roleOf(ws, agent).addDirs).map((k) => ws.config.repos[k]!.path);
 
-// ORDER MATTERS. `--add-dir` is variadic and eats every following bare word, including the prompt,
-// so it comes before the single-valued flags and the prompt always follows one of those.
-export function commonFlags(ws: Workspace, agent: Agent, phase: Phase): string[] {
+// What a background start of the agent needs, for its backend to turn into arguments.
+export function launchSpec(ws: Workspace, agent: Agent, prompt: string, appendixPath: string | null, phase: Phase): LaunchSpec {
   const role = roleOf(ws, agent);
-  const settings = ["--settings", settingsFile(ws, agent)];
-  const flags: string[] = [];
-  if (agent.role !== "builder") flags.push(...settings);
-  for (const d of addDirs(ws, agent)) flags.push("--add-dir", d);
-  if (agent.remoteControl) flags.push("--remote-control", agent.name);
-  if (agent.role === "builder") flags.push(...settings);
-  // A builder's browser is for its build; a designer's is how it renders frames and today's screens.
-  if (role.mcpConfig && (agent.role !== "builder" || phase === "build")) flags.push("--mcp-config", role.mcpConfig);
-  flags.push("--name", agent.name);
-  if (role.model) flags.push("--model", role.model);
-  if (role.effort) flags.push("--effort", role.effort);
-  if (role.autocompact) flags.push("--autocompact", role.autocompact);
-  if (role.permissionMode) flags.push("--permission-mode", role.permissionMode);
-  return flags;
+  return {
+    name: agent.name, role: agent.role, prompt, appendixPath,
+    settings: settingsFile(ws, agent),
+    addDirs: addDirs(ws, agent),
+    ...(agent.remoteControl ? { remoteControl: agent.name } : {}),
+    // A builder's browser is for its build; a designer's is how it renders frames and today's screens.
+    ...(role.mcpConfig && (agent.role !== "builder" || phase === "build") ? { mcpConfig: role.mcpConfig } : {}),
+    model: role.model, effort: role.effort, autocompact: role.autocompact, permissionMode: role.permissionMode,
+  };
 }
 
-export function launchArgs(ws: Workspace, agent: Agent, prompt: string, appendixPath: string | null, phase: Phase): string[] {
-  const args = ["--bg", ...commonFlags(ws, agent, phase)];
-  if (appendixPath) args.push("--append-system-prompt-file", appendixPath);
-  args.push(prompt);
-  return args;
-}
+export const launchArgs = (ws: Workspace, agent: Agent, prompt: string, appendixPath: string | null, phase: Phase): string[] =>
+  backendFor(agent).launchArgs(launchSpec(ws, agent, prompt, appendixPath, phase));
 
 // GitHub over https with gh's credential helper, whatever the remote says, set through the
 // environment so the clone's own config is untouched.

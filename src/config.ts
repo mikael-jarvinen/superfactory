@@ -7,6 +7,10 @@ import { capitalize, FactoryError } from "./util.js";
 export const ROLES = ["lead", "builder", "reviewer", "assistant", "designer"] as const;
 export type RoleName = (typeof ROLES)[number];
 
+// The CLIs an agent's sessions can run under; an agent with no `backend` runs under claude.
+export const BACKENDS = ["claude"] as const;
+export type BackendName = (typeof BACKENDS)[number];
+
 export const STATES = [
   "designing", "design-review", "building", "pr-open", "agent-review",
   "fixing", "gate", "your-review", "colleague-review", "done", "blocked",
@@ -65,6 +69,8 @@ export interface Role {
 export interface Agent {
   name: string;
   role: RoleName;
+  // The CLI that runs the agent's sessions (backends/).
+  backend: BackendName;
   stack?: string;
   repos: string[];
   appendix: string[];
@@ -493,6 +499,9 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const known = !!roleV && (ROLES as readonly string[]).includes(roleV);
     if (roleV && !known) r.bad("role", `must be one of ${ROLES.join(", ")}, got ${show(roleV)}`);
     const role = roleV as RoleName;
+    const backendV = r.str("backend");
+    if (backendV !== undefined && !(BACKENDS as readonly string[]).includes(backendV)) r.bad("backend", `must be one of ${BACKENDS.join(", ")}, got ${show(backendV)}`);
+    const backend = (backendV ?? "claude") as BackendName;
     const stack = r.str("stack");
     const agentRepos = repoKeys(r, "repos", r.strs("repos"));
     if (stack && !stacks[stack]) r.bad("stack", `no stack ${show(stack)}; stacks: ${Object.keys(stacks).join(", ") || "none"}`);
@@ -545,6 +554,7 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
       repos: workRepos,
       appendix: resolved,
       addDirs,
+      backend,
       remoteControl: r.bool("remote_control") ?? false,
       cwd,
       model: r.str("model"),

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { allowClosePath } from "./allow-close.js";
+import { claudeBackend } from "./backends/claude.js";
 import { isSettingsPath } from "./config.js";
 import { lead } from "./fleet.js";
 import { POLICIES, type Policy, TMP_ROOTS } from "./hooks/guard.js";
@@ -208,9 +209,9 @@ export function renderSettings(ws: Workspace, s: SessionSettings): string {
   // Every role sends messages, and a message to a session that is off is lost, so every role wakes
   // its recipient first.
   const wakeArgs = ["--workspace", ws.dir, "hook", "wake", ...(s.host ? ["--from-host", s.host] : [])];
-  add("PreToolUse", "SendMessage", wakeArgs, WAKE_HOOK_TIMEOUT_S);
+  add("PreToolUse", claudeBackend.messageTool, wakeArgs, WAKE_HOOK_TIMEOUT_S);
   // a failed send from a host, to an agent it cannot wake, is explained
-  if (s.host) for (const ev of ["PostToolUse", "PostToolUseFailure"]) add(ev, "SendMessage", wakeArgs, 10);
+  if (s.host) for (const ev of ["PostToolUse", "PostToolUseFailure"]) add(ev, claudeBackend.messageTool, wakeArgs, 10);
   for (const h of names) {
     if (h === "wake" || h === "appendix") continue;
     if (h === "guard") {
