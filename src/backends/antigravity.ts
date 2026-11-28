@@ -104,18 +104,20 @@ export function startSupervisor(cwd: string, args: string[], env: NodeJS.Process
   die(`the Antigravity session did not start within ${Math.round(waitMs / 1000)} s (log: ${log})${tail()}`);
 }
 
-// Whether the supervisor's pid still names its process group: it is the supervisor, alive or a
-// zombie, or no process at all. A pid is not given out again while a group of that number has a
-// member left, so with no process at that pid, whatever is in its group is the session's: within
-// one boot only, so a stamp from another boot (or none) is never taken to name it.
-function groupOurs(st: AgyState): boolean {
+// Why the supervisor's pid no longer names its process group, or null when it still does: it is
+// the supervisor, alive or a zombie, or no process at all. A pid is not given out again while a
+// group of that number has a member left, so with no process at that pid, whatever is in its group
+// is the session's: within one boot only. Where there is a boot id (Linux), a stamp from another
+// boot is never taken to name it; elsewhere the stamp match is all there is.
+function notOurGroup(st: AgyState): string | null {
+  if (typeof st.stamp !== "string") return "has no start recorded";
   const boot = currentBoot();
-  if (!boot || typeof st.stamp !== "string" || !st.stamp.startsWith(`${boot}:`)) return false;
+  if (boot && !st.stamp.startsWith(`${boot}:`)) return "is from another boot";
   try {
     const now = startStamp(st.pid);
-    return now === null || now === st.stamp;
+    return now === null || now === st.stamp ? null : "is another process's now";
   } catch {
-    return false;
+    return "has a start that cannot be read";
   }
 }
 
@@ -124,7 +126,7 @@ function groupOurs(st: AgyState): boolean {
 // whose supervisor crashed, is otherwise left running with nothing that records it once the
 // directory goes. What is left is the session's scope's cgroup (sf-<id>.scope, a name no other
 // process gets), the supervisor itself included if it is still up; without a scope, the supervisor's
-// process group, and that only within the boot it was recorded in.
+// process group, and that only while its pid still names it (notOurGroup).
 export function stopSession(id: string, remove: boolean): void {
   if (!validId(id)) die(`not an Antigravity session id: ${id}`);
   const st = readState(id);
@@ -140,9 +142,11 @@ export function stopSession(id: string, remove: boolean): void {
     const who = st.name ?? id;
     let left: number[] = [];
     if (sessionCgroup(id, st.cgroup)) left = killAll(() => cgroupProcs(st.cgroup!), 2000);
-    else if (typeof st.pid === "number" && st.pid > 1 && groupOurs(st)) left = killTree(st.pid, 2000) ? [] : [st.pid];
-    else if (typeof st.pid === "number" && st.pid > 1)
-      process.stderr.write(`${who}: no scope recorded, and the supervisor's pid ${st.pid} is from another boot or another process now, so its process group is not killed\n`);
+    else if (typeof st.pid === "number" && st.pid > 1) {
+      const why = notOurGroup(st);
+      if (why === null) left = killTree(st.pid, 2000) ? [] : [st.pid];
+      else process.stderr.write(`${who}: no scope recorded, and the supervisor's pid ${st.pid} ${why}, so its process group is not killed\n`);
+    }
     if (up(st.agentPid, st.agentStamp) && !killTree(st.agentPid, 2000)) left.push(st.agentPid);
     if (left.length) process.stderr.write(`${who}: still running after SIGKILL: ${left.join(", ")}\n`);
     const after = readState(id);

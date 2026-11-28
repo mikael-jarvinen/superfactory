@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { get as httpGet, type IncomingMessage } from "node:http";
 import { get as httpsGet } from "node:https";
@@ -11,11 +11,13 @@ import { die, run, sleep } from "../util.js";
 // dies with that call's process group when the session stops, so it runs as the leader of a
 // session of its own, with a pid file to find it by.
 
-interface Proc {
+export interface Proc {
   pid: number;
   ppid: number;
   pgid: number;
   age: number;
+  // exited and not yet reaped: ps's state Z
+  zombie: boolean;
 }
 
 // ps's etime: [[dd-]hh:]mm:ss
@@ -24,11 +26,13 @@ function seconds(etime: string): number {
   return Number(days) * 86400 + clock.split(":").reduce((s, p) => s * 60 + Number(p), 0);
 }
 
+// Every process but the ps that lists them, which is the caller's child and in its group, so it
+// would otherwise be counted in the caller's own tree at every poll.
 function processes(): Proc[] {
-  const r = run("ps", ["-A", "-o", "pid=,ppid=,pgid=,etime="]);
-  if (r.status !== 0) die(`ps failed: ${r.stderr.trim()}`);
-  return r.stdout.split("\n").map((l) => l.trim().split(/\s+/)).filter((f) => f.length === 4)
-    .map(([pid, ppid, pgid, etime]) => ({ pid: Number(pid), ppid: Number(ppid), pgid: Number(pgid), age: seconds(etime as string) }));
+  const r = spawnSync("ps", ["-A", "-o", "pid=,ppid=,pgid=,etime=,stat="], { encoding: "utf8", maxBuffer: 64 << 20 });
+  if (r.error || r.status !== 0) die(`ps failed: ${r.error?.message ?? r.stderr.trim()}`);
+  return r.stdout.split("\n").map((l) => l.trim().split(/\s+/)).filter((f) => f.length === 5 && Number(f[0]) !== r.pid)
+    .map(([pid, ppid, pgid, etime, stat]) => ({ pid: Number(pid), ppid: Number(ppid), pgid: Number(pgid), age: seconds(etime as string), zombie: (stat as string).startsWith("Z") }));
 }
 
 export function alive(pid: number): boolean {
@@ -127,10 +131,10 @@ export function living(pid: number): boolean {
   }
 }
 
-// The process, its descendants, and anything left in its process group: a child whose parent died
-// first is reparented and only the group still ties it to the tree. Never the caller or its parent.
-function treeOf(pid: number): number[] {
-  const table = processes();
+// The process, its descendants, and anything left in its process group, in one ps table: a child
+// whose parent died first is reparented and only the group still ties it to the tree. Never the
+// caller or its parent.
+function treeOf(pid: number, table: Proc[]): number[] {
   const tree = new Set([pid]);
   for (let grew = true; grew;) {
     grew = false;
@@ -145,35 +149,62 @@ function treeOf(pid: number): number[] {
   return [...tree];
 }
 
-// TERM to every process list() names, then KILL to what is still living after the grace; list() is
-// read again at each step, so a process started meanwhile is caught. Returns the pids still living
-// after the KILL, zombies aside. This one blocks, so it is for a caller that is not the parent of
-// what it kills; a parent uses killAllAsync, which lets Node reap its children.
-export function killAll(list: () => number[], graceMs: number): number[] {
-  const left = () => list().filter(living);
+// The steps of a kill, written once: TERM to every process list() names, then KILL to what is still
+// living after the grace. It yields each wait in ms, and killAll (sleep) or killAllAsync (await)
+// runs them. One ps per poll: list() is read again from it, and what it names is added to every
+// process seen so far, so a process started meanwhile is caught and one that drops out of the list
+// (a descendant reparented when its parent exits, out of the tree but not dead) still gets KILL. A
+// seen pid is dropped once ps lists it no more, as a zombie, or as a later start (the pid given out
+// again). Returns the pids still living after the KILL.
+function* killing(list: (table: Proc[]) => number[], graceMs: number): Generator<number, number[], void> {
+  const seen = new Map<number, number>(); // pid → when it started, ms
+  const left = () => {
+    const now = Date.now();
+    const table = processes();
+    const byPid = new Map(table.map((p) => [p.pid, p]));
+    for (const pid of list(table)) {
+      const p = byPid.get(pid);
+      if (p && !seen.has(pid)) seen.set(pid, now - p.age * 1000);
+    }
+    for (const [pid, started] of seen) {
+      const p = byPid.get(pid);
+      // etime counts whole seconds, so allow the rounding
+      if (!p || p.zombie || now - p.age * 1000 > started + 2000) seen.delete(pid);
+    }
+    return [...seen.keys()];
+  };
   signalAll(left(), "SIGTERM");
-  for (const end = Date.now() + graceMs; Date.now() < end; sleep(100)) if (!left().length) return [];
+  for (const end = Date.now() + graceMs; Date.now() < end; yield 100) if (!left().length) return [];
   signalAll(left(), "SIGKILL");
-  for (const end = Date.now() + 1000; Date.now() < end; sleep(100)) if (!left().length) return [];
+  for (const end = Date.now() + 1000; Date.now() < end; yield 100) if (!left().length) return [];
   return left();
 }
 
-export async function killAllAsync(list: () => number[], graceMs: number): Promise<number[]> {
-  const left = () => list().filter(living);
-  signalAll(left(), "SIGTERM");
-  for (const end = Date.now() + graceMs; Date.now() < end; await delay(100)) if (!left().length) return [];
-  signalAll(left(), "SIGKILL");
-  for (const end = Date.now() + 1000; Date.now() < end; await delay(100)) if (!left().length) return [];
-  return left();
+// killing, with a wait that blocks: for a caller that is not the parent of what it kills. A parent
+// uses killAllAsync, which lets Node reap its children.
+export function killAll(list: (table: Proc[]) => number[], graceMs: number): number[] {
+  const g = killing(list, graceMs);
+  for (let r = g.next(); ; r = g.next()) {
+    if (r.done) return r.value;
+    sleep(r.value);
+  }
+}
+
+export async function killAllAsync(list: (table: Proc[]) => number[], graceMs: number): Promise<number[]> {
+  const g = killing(list, graceMs);
+  for (let r = g.next(); ; r = g.next()) {
+    if (r.done) return r.value;
+    await delay(r.value);
+  }
 }
 
 // The tree of pid (treeOf), TERM first, KILL what is left. True when nothing of it is left living.
 export function killTree(pid: number, graceMs = 10_000): boolean {
-  return killAll(() => treeOf(pid), graceMs).length === 0;
+  return killAll((table) => treeOf(pid, table), graceMs).length === 0;
 }
 
 export async function killTreeAsync(pid: number, graceMs: number): Promise<number[]> {
-  return killAllAsync(() => treeOf(pid), graceMs);
+  return killAllAsync((table) => treeOf(pid, table), graceMs);
 }
 
 // The cgroup v2 hierarchy and the path this process is in ("0::<path>" in /proc/self/cgroup), or
@@ -203,7 +234,9 @@ export function cgroupProcs(path: string): number[] {
 }
 
 // This boot's id on Linux (a start stamp's first part), null elsewhere.
+// SF_BOOT_ID stands in for it in tests, empty for a platform with none.
 export function currentBoot(): string | null {
+  if (process.env.SF_BOOT_ID !== undefined) return process.env.SF_BOOT_ID || null;
   if (process.platform !== "linux") return null;
   bootId ??= readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
   return bootId;
