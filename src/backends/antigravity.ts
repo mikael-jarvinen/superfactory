@@ -2,7 +2,7 @@
 // (agy-supervisor.ts) that start() runs detached, so the session outlives the `factory` command.
 // The listing is the supervisors' state files (agy-store.ts); a row is live while its supervisor
 // is. A message reaches a session as its next prompt, through its inbox (deliver).
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Session } from "../fleet.js";
@@ -10,7 +10,7 @@ import { claudeEnv, detachedScoped } from "../scope.js";
 import { logTail, alive as pidAlive, killTree, procStat, spawnDetached, startStamp } from "../stacks/process.js";
 import { die, sleep } from "../util.js";
 import type { AgentBackend, LaunchSpec } from "./backend.js";
-import { allStates, type AgyState, enqueue, newId, projectDir, readState, sessionDir, transcriptsDir, validId, writeJson } from "./agy-store.js";
+import { allStates, type AgyState, enqueue, inbox, newId, projectDir, readState, sessionDir, transcriptsDir, validId, writeJson } from "./agy-store.js";
 import { CAPABILITIES } from "./capabilities.js";
 
 const SUPERVISOR = join(dirname(fileURLToPath(import.meta.url)), "agy-supervisor.js");
@@ -112,9 +112,22 @@ export function startSupervisor(cwd: string, args: string[], env: NodeJS.Process
   die(`the Antigravity session did not start within ${Math.round(waitMs / 1000)} s (log: ${log})${tail()}`);
 }
 
+// Whether the supervisor's pid still names its process group: it is the supervisor, alive or a
+// zombie, or no process at all. A pid is not given out again while a group of that number has a
+// member left, so with no process at that pid, whatever is in its group is the session's.
+function groupOurs(st: AgyState): boolean {
+  try {
+    const now = startStamp(st.pid);
+    return now === null || (typeof st.stamp === "string" && now === st.stamp);
+  } catch {
+    return false;
+  }
+}
+
 // SIGTERM to the supervisor, which ends the session; whatever is left after the wait is killed. The
-// agy it recorded is killed whether or not the supervisor is up: one whose supervisor crashed is
-// otherwise left running with nothing that records it once the directory goes.
+// supervisor's process group and the agy it recorded are killed whether or not the supervisor is
+// up: a tool agy left when it exited, or an agy whose supervisor crashed, is otherwise left running
+// with nothing that records it once the directory goes.
 export function stopSession(id: string, remove: boolean): void {
   if (!validId(id)) die(`not an Antigravity session id: ${id}`);
   const st = readState(id);
@@ -126,21 +139,43 @@ export function stopSession(id: string, remove: boolean): void {
         // gone already
       }
       for (const end = Date.now() + 15_000; Date.now() < end && supervisorUp(st); sleep(200));
-      if (supervisorUp(st)) killTree(st.pid, 2000);
     }
+    if (typeof st.pid === "number" && st.pid > 1 && groupOurs(st)) killTree(st.pid, 2000);
     if (up(st.agentPid, st.agentStamp)) killTree(st.agentPid, 2000);
     const after = readState(id);
     if (after && after.state !== "stopped" && after.state !== "failed")
       writeJson(join(sessionDir(id), "state.json"), { ...after, state: "stopped", status: "off", updatedAt: new Date().toISOString() });
   }
   // the transcript is under projects/ and stays
-  if (remove) rmSync(sessionDir(id), { recursive: true, force: true });
+  if (remove) {
+    dropUndelivered(id);
+    rmSync(sessionDir(id), { recursive: true, force: true });
+  }
+}
+
+// The messages that never reached the session, before its inbox goes with its directory: each is
+// told on stderr, with its sender, and kept in the transcript as an undelivered line. stderr, as a
+// stop can run inside the wake hook, whose stdout is its answer.
+function dropUndelivered(id: string): void {
+  const left = inbox(id);
+  if (!left.length) return;
+  const st = readState(id);
+  const who = st?.name ?? id;
+  for (const m of left) {
+    process.stderr.write(`${who}: a message from ${m.from ?? "an unknown sender"}${m.at ? ` (${m.at})` : ""} never reached the session, and the stop drops it from the inbox:\n${m.text.replace(/^/gm, "  ")}\n`);
+    if (st?.transcript)
+      try {
+        appendFileSync(st.transcript, JSON.stringify({ type: "undelivered", from: m.from, queuedAt: m.at, text: m.text, timestamp: new Date().toISOString(), sessionId: st.sessionId, cwd: st.cwd }) + "\n");
+      } catch (e) {
+        process.stderr.write(`${who}: and it could not be kept in the transcript ${st.transcript}: ${(e as Error).message}\n`);
+      }
+  }
 }
 
 // A message for a live session, sent as its next prompt once the one in flight has ended.
-export function deliver(s: Session, text: string): void {
+export function deliver(s: Session, text: string, from?: string): void {
   if (!validId(s.id) || !sessionAlive(s)) die(`${s.name ?? s.id ?? "the session"} is not running, so the message cannot reach it`);
-  enqueue(s.id, text);
+  enqueue(s.id, text, from);
 }
 
 export const antigravityBackend: AgentBackend = {

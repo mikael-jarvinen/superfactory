@@ -64,9 +64,10 @@ export interface AgentBackend extends BackendCapabilities {
   // Message delivery. messageTool is the tool a session sends messages with; the wake hook in its
   // settings runs before that tool and starts a recipient that is off. null for a session that has
   // no such tool. deliver, on a backend whose sessions cannot be reached by that tool, puts a
-  // message into a live session as its next prompt; the wake hook calls it for a send to one.
+  // message into a live session as its next prompt, with who sent it; the wake hook calls it for a
+  // send to one.
   readonly messageTool: string | null;
-  deliver?(s: Session, text: string): void;
+  deliver?(s: Session, text: string, from?: string): void;
 
   // Settings and hooks: writes the session's settings file, hooks included, and returns its path.
   // Left out by a backend whose sessions take no settings file.

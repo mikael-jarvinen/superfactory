@@ -305,7 +305,11 @@ test("the tripwire: a call never asked trips it whether it completes or fails; a
   assert.equal(stricterKind("read", "edit", true), "edit");
   assert.equal(stricterKind("edit", "read", true), "edit");
   assert.equal(stricterKind("read", undefined, true), "read");
-  assert.equal(stricterKind(undefined, "read", true), undefined, "a call seen with no kind is not read-only, and stays so");
+  // a call announced with no kind takes the first kind it gives, then only gets stricter
+  assert.equal(stricterKind(undefined, "read", true), "read");
+  assert.equal(stricterKind(undefined, undefined, true), undefined);
+  assert.equal(stricterKind(stricterKind(undefined, "read", true), "edit", true), "edit");
+  assert.equal(stricterKind(stricterKind(undefined, "edit", true), "read", true), "edit");
   assert.deepEqual(modeOf(undefined, { currentModeId: "plan", availableModes: [{ id: "default" }] }), { current: "plan", offersDefault: true, via: "modes" });
   assert.equal(modeOf([], undefined), undefined);
 });
@@ -352,6 +356,100 @@ test("a tripwire kills agy's tools too, SIGKILL for one that outlives SIGTERM, b
   await until("the supervisor to exit", () => gone(st.pid), 20_000);
   assert.equal(gone(toolPid), true, "the tool outlived the supervisor");
   assert.equal(gone(st.agentPid!), true);
+});
+
+// The pids whose process group is pgid, zombies aside.
+const inGroup = (pgid: number): number[] =>
+  readdirSync("/proc").filter((d) => /^\d+$/.test(d)).map(Number).filter((pid) => {
+    try {
+      const s = procStat(pid);
+      return s?.pgid === pgid && s.state !== "Z";
+    } catch {
+      return false;
+    }
+  });
+const lastTool = () => requests().map((r) => r.tool).filter((x) => typeof x === "number").pop() as number;
+
+test("a call announced with no kind takes the kind it gives later: a read so given passes, asked or not", async () => {
+  const id = start("kindless", "hi");
+  await until("idle", () => readState(id)?.state === "done");
+  antigravityBackend.deliver!(rowOf(id), "kindless");
+  await until("the turn", () => transcript(id).filter((l) => l.type === "turn-end").length === 2);
+  antigravityBackend.deliver!(rowOf(id), "kindless-ask");
+  await until("the turn", () => transcript(id).filter((l) => l.type === "turn-end").length === 3);
+  assert.equal(readState(id)!.state, "done", readState(id)!.error);
+  const p = transcript(id).find((l) => l.type === "permission");
+  assert.equal(p.kind, "read");
+  assert.equal(p.allowed, true);
+});
+
+test("agy that exits on its own takes its tools with it: nothing is left in the supervisor's group", async () => {
+  const id = start("exitwithtool", "hi");
+  await until("idle", () => readState(id)?.state === "done");
+  const st = readState(id)!;
+  antigravityBackend.deliver!(rowOf(id), "exit-with-tool");
+  await until("the session to fail", () => readState(id)?.state === "failed", 20_000);
+  assert.match(readState(id)!.error!, /agy exited on its own \(code 3\)/);
+  const toolPid = lastTool();
+  assert.ok(toolPid, "the fake started its tool");
+  await until("the supervisor to exit", () => gone(st.pid), 20_000);
+  assert.equal(gone(toolPid), true, "the tool outlived agy and the supervisor");
+  assert.deepEqual(inGroup(st.pid), []);
+});
+
+test("stop with a tool running kills it, SIGKILL as it ignores SIGTERM: nothing is left in the supervisor's group", async () => {
+  const id = start("stopwithtool", "hi");
+  await until("idle", () => readState(id)?.state === "done");
+  const st = readState(id)!;
+  antigravityBackend.deliver!(rowOf(id), "spawn-tool");
+  await until("the turn", () => transcript(id).filter((l) => l.type === "turn-end").length === 2);
+  const toolPid = lastTool();
+  assert.equal(gone(toolPid), false, "the tool runs after the turn");
+  stopSession(id, false);
+  assert.equal(readState(id)!.state, "stopped");
+  assert.equal(gone(toolPid), true, "the tool outlived the stop");
+  assert.equal(gone(st.pid), true);
+  assert.deepEqual(inGroup(st.pid), []);
+});
+
+test("stop kills what is left in the group of a supervisor that is gone, agy and its tool both dead", async () => {
+  const id = start("orphantool", "hi");
+  await until("idle", () => readState(id)?.state === "done");
+  const st = readState(id)!;
+  antigravityBackend.deliver!(rowOf(id), "spawn-tool");
+  await until("the turn", () => transcript(id).filter((l) => l.type === "turn-end").length === 2);
+  const toolPid = lastTool();
+  process.kill(st.pid, "SIGKILL");
+  process.kill(st.agentPid!, "SIGKILL");
+  await until("supervisor and agy gone", () => gone(st.pid) && gone(st.agentPid!));
+  assert.equal(gone(toolPid), false, "the tool is left, reparented");
+  stopSession(id, true);
+  assert.equal(gone(toolPid), true, "the tool was killed by its group");
+  assert.deepEqual(inGroup(st.pid), []);
+});
+
+test("a stop that removes a session tells each undelivered message, with its sender, and keeps it in the transcript", async () => {
+  const id = start("undelivered", "hi");
+  await until("idle", () => readState(id)?.state === "done");
+  const st = readState(id)!;
+  antigravityBackend.deliver!(rowOf(id), "slow", "ada");
+  await until("the slow turn", () => readState(id)?.state === "working");
+  antigravityBackend.deliver!(rowOf(id), "the second message\nof two lines", "grace");
+  const said: string[] = [];
+  const write = process.stderr.write;
+  process.stderr.write = ((s: string) => (said.push(String(s)), true)) as typeof process.stderr.write;
+  try {
+    stopSession(id, true);
+  } finally {
+    process.stderr.write = write;
+  }
+  const out = said.join("");
+  assert.match(out, /^undelivered: a message from grace \(\S+\) never reached the session, and the stop drops it from the inbox:\n  the second message\n  of two lines\n$/);
+  const u = readFileSync(st.transcript!, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.type === "undelivered");
+  assert.equal(u.length, 1);
+  assert.equal(u[0].from, "grace");
+  assert.equal(u[0].text, "the second message\nof two lines");
+  assert.equal(existsSync(sessionDir(id)), false);
 });
 
 test("a tool that is not read-only and runs without asking ends the session as failed", async () => {

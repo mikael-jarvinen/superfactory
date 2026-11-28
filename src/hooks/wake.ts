@@ -19,7 +19,6 @@ import { defaultLogsDir } from "../config.js";
 import { iso, wakeHookLog } from "../failures.js";
 import { firstAgentName } from "../agent-name.js";
 import { backend, backendFor } from "../backends/index.js";
-import { CAPABILITIES } from "../backends/capabilities.js";
 import { lead } from "../fleet.js";
 import { local } from "../transport.js";
 import { WAKE_SETTLE_S, wake } from "../wake.js";
@@ -125,7 +124,7 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   if (!agent) return { code: 0 };
   const b = backendFor(agent);
   // A recipient whose backend runs on the primary only: its inbox is there, and a host's session cannot write it.
-  if (fromHost && !CAPABILITIES[agent.backend].onHosts) {
+  if (fromHost && !b.onHosts) {
     if (failedSend) return { code: 0 };
     return { code: 2, stderr: `${to} runs under ${b.name}, and an ${b.name} agent can only be messaged from a session on the primary, the machine that runs it, not from ${fromHost}. This is not supported in this phase; waking it or sending again will not change that.\n` };
   }
@@ -150,7 +149,8 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
     if (w.is === "failed") return deny(`${to} is off and did not start: ${w.why.replace(/\.$/, "")}. The message was not delivered.`);
     if (!text) return deny(`the message to ${to} has no text, so nothing was delivered.`);
     try {
-      b.deliver(w.s, `Message from ${senderName(from)}:\n\n${text}`);
+      const who = senderName(from);
+      b.deliver(w.s, `Message from ${who}:\n\n${text}`, who);
     } catch (e) {
       return deny(`the message to ${to} was not delivered: ${(e as Error).message}`);
     }

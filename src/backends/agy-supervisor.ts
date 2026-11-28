@@ -25,7 +25,7 @@ import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync, watch } f
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { AcpError, AcpPeer, PROTOCOL_VERSION } from "./acp.js";
-import { agyBin, agySettingsFile, type AgyState, enqueue, inboxDir, sessionDir, transcriptFile, validId, writeJson } from "./agy-store.js";
+import { agyBin, agySettingsFile, type AgyState, enqueue, FIRST_PROMPT, inboxDir, sessionDir, transcriptFile, validId, writeJson } from "./agy-store.js";
 import { permissionOutcome, readOnly } from "./read-only.js";
 import { killTree, startStamp } from "../stacks/process.js";
 
@@ -134,7 +134,11 @@ const iso = () => new Date().toISOString();
 // A call that is not read-only trips it when it ends, completed or failed, without ever having been
 // put to the supervisor, or completes after it was denied; and so does an allowed read-only call
 // whose kind is later changed to one that is not. Fails closed: a call with no kind is not read-only.
-// Its kind only ever gets stricter (stricterKind), so a call once seen as not read-only stays so.
+// A call announced with no kind takes the first kind it gives later, asked or in an update; from
+// then on its kind only gets stricter (stricterKind), so a call once seen as not read-only stays so.
+// agy 1.5.19, seen live: every tool_call it announces carries its kind (a read as "read", an edit as
+// "edit"), and its permission requests and updates repeat that same kind, so the adoption is for an
+// agy that does otherwise. A call that ends while it still has no kind is not read-only.
 export interface CallSeen {
   kind: unknown;
   asked: boolean;
@@ -142,9 +146,10 @@ export interface CallSeen {
 }
 
 // The kind a call is held to, from the one seen before and one it now gives (undefined when it gives
-// none): the stricter of the two, so a kind seen as not read-only, announced or asked, is kept.
+// none): the first kind a kind-less call gives, then the stricter of the two, so a kind seen as not
+// read-only, announced or asked, is kept.
 export function stricterKind(before: unknown, now: unknown, seenBefore: boolean): unknown {
-  if (!seenBefore) return now;
+  if (!seenBefore || before === undefined) return now;
   if (now === undefined || !readOnly(before)) return before;
   return now;
 }
@@ -189,6 +194,9 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
   save();
 
   let child: ChildProcess | null = null;
+  // Everything in the supervisor's process group but the supervisor: agy, which is spawned in it,
+  // and every tool agy runs, reparented or not. The supervisor leads the group (spawnDetached).
+  const killGroup = (graceMs: number) => killTree(process.pid, graceMs);
   let stopping = false;
   let ended = false;
   let resolveEnd: (code: number) => void = () => {};
@@ -198,12 +206,10 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
     ended = true;
     save({ status: "off", ...patch, ...undelivered() });
     log(`ended: ${patch.state}${patch.error ? `: ${patch.error}` : ""}`);
-    // agy and every tool it runs, SIGKILL for whatever outlives the grace; this waits for that
-    // before the supervisor goes on to exit, since a tool left behind would be reparented and out of
-    // reach of a later stop.
-    const pid = child?.pid;
-    if (pid !== undefined && child!.exitCode === null && child!.signalCode === null && !killTree(pid, 5000))
-      log(`agy ${pid} or one of its tools survived SIGKILL`);
+    // agy and every tool it runs, alive or not: a tool agy left behind when it exited is still in
+    // the group. SIGKILL for whatever outlives the grace; this waits for that before the supervisor
+    // exits.
+    if (!killGroup(5000)) log("agy or one of its tools survived SIGKILL");
     resolveEnd(code);
   };
   const fail = (why: string) => finish({ state: "failed", error: why }, 1);
@@ -221,7 +227,7 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
   // Written with the session's end, in the same save, so a reader that sees it ended sees these.
   function undelivered(): { undelivered?: string[] } {
     try {
-      for (const text of queue.splice(0)) enqueue(spec.id, text);
+      for (const text of queue.splice(0)) enqueue(spec.id, text, FIRST_PROMPT);
       const left = inboxNames();
       if (!left.length) return {};
       log(`${left.length} message(s) not delivered, left in the inbox: ${left.join(", ")}`);
@@ -237,8 +243,7 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
   process.on("uncaughtException", (e) => {
     console.error(`agy-supervisor: ${e.stack ?? e.message}`);
     try {
-      const pid = child?.pid;
-      if (pid !== undefined && child?.exitCode === null && child.signalCode === null) killTree(pid, 1000);
+      killGroup(1000);
       if (!ended) {
         ended = true;
         save({ state: "failed", status: "off", error: `the supervisor crashed: ${e.message}`, ...undelivered() });
@@ -361,15 +366,13 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
     }
   });
 
+  // A stop: the turn in flight is cancelled, and finish ends the session, its group with it.
   process.on("SIGTERM", () => {
-    if (ended) return;
+    if (ended || stopping) return;
     stopping = true;
     log("SIGTERM: ending the session");
     if (st.sessionId && busy) peer.notify("session/cancel", { sessionId: st.sessionId });
-    setTimeout(() => {
-      if (child && child.exitCode === null) child.kill("SIGTERM");
-    }, busy ? 2000 : 0).unref();
-    setTimeout(() => child?.kill("SIGKILL"), 10_000).unref();
+    setTimeout(() => finish({ state: "stopped" }, 0), busy ? 2000 : 0).unref();
   });
 
   let busy = false;
@@ -470,7 +473,7 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
         await peer.request("session/set_model", { sessionId: st.sessionId, modelId: hit.modelId });
         return hit.modelId as string;
       }
-      throw new Error(`agy offers no ${what} setting, so ${what} ${want} cannot be set`);
+      throw new Error(`${spec.name}'s ${what} ${JSON.stringify(want)} cannot be set: this agy offers no ${what} setting. Take ${what} out of ${spec.name}'s entry in factory.toml`);
     };
     // agy's modes other than "default" approve edits or commands without asking, or ("plan") are
     // not the mode it was asked for. A session that reports no mode is held through its updates.

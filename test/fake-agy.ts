@@ -13,6 +13,12 @@
 //   "ask-as-read" an edit tool call put to the client as a read
 //   "stubborn"   starts a tool process that ignores SIGTERM (its pid logged as {tool}), then an
 //                execute tool call that runs without asking
+//   "spawn-tool" starts a tool process that ignores SIGTERM (its pid logged as {tool}) and leaves
+//                it running after the turn
+//   "exit-with-tool" starts that tool, then exits, as an agy that dies would, leaving the tool
+//   "kindless"   a read tool call announced with no kind, which gives its kind "read" in an update
+//                and runs without asking
+//   "kindless-ask" a tool call announced with no kind, put to the client as a read; runs if allowed
 //   "mode <m>"   moves the session to mode m and says so with a config_option_update (or a
 //                current_mode_update under FAKE_AGY_LEGACY_MODES)
 //   "slow"       a turn that takes 1.5 s
@@ -95,6 +101,27 @@ async function prompt(p: any): Promise<unknown> {
     record({ tool: t.pid });
     await new Promise((r) => setTimeout(r, 300));
     await tool(sid, "execute", "make -j8", false);
+  }
+  else if (last === "spawn-tool" || last === "exit-with-tool") {
+    const t = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1<<30)"], { stdio: "ignore" });
+    record({ tool: t.pid });
+    await new Promise((r) => setTimeout(r, 300));
+    if (last === "exit-with-tool") process.exit(3);
+    say(sid, "tool running");
+  } else if (last === "kindless") {
+    const toolCallId = `call-${++calls}`;
+    update(sid, { sessionUpdate: "tool_call", toolCallId, title: "File README.md", status: "in_progress" });
+    update(sid, { sessionUpdate: "tool_call_update", toolCallId, kind: "read", status: "in_progress" });
+    update(sid, { sessionUpdate: "tool_call_update", toolCallId, status: "completed", rawOutput: "done" });
+    say(sid, "kindless ok");
+  } else if (last === "kindless-ask") {
+    const toolCallId = `call-${++calls}`;
+    update(sid, { sessionUpdate: "tool_call", toolCallId, title: "File README.md", status: "pending" });
+    const r = await ask("session/request_permission", { sessionId: sid, toolCall: { toolCallId, title: "File README.md", kind: "read", status: "pending" }, options: OPTIONS });
+    const ok = r?.outcome?.outcome === "selected" && String(r.outcome.optionId).startsWith("allow");
+    record({ permission: { kind: "read", outcome: r?.outcome } });
+    update(sid, { sessionUpdate: "tool_call_update", toolCallId, status: ok ? "completed" : "failed", rawOutput: ok ? "done" : "denied" });
+    say(sid, ok ? "kindless-ask ok" : "kindless-ask denied");
   }
   else if (last.startsWith("mode ")) {
     mode = last.slice(5);

@@ -94,13 +94,43 @@ export function allStates(): AgyState[] {
   return ids.map(readState).filter((s): s is AgyState => s !== null);
 }
 
-// A message for a session, put in its inbox for its supervisor to send as the next prompt. Names
-// sort by time, then by order within this process, so one sender's messages go in the order sent.
+// A message for a session, put in its inbox for its supervisor to send as the next prompt, with who
+// sent it. Names sort by time, then by order within this process, so one sender's messages go in
+// the order sent.
 let sent = 0;
-export function enqueue(id: string, text: string): string {
+export function enqueue(id: string, text: string, from?: string): string {
   const dir = inboxDir(id);
   mkdirSync(dir, { recursive: true });
   const name = `${Date.now().toString().padStart(15, "0")}-${(sent++).toString().padStart(6, "0")}-${randomBytes(4).toString("hex")}.json`;
-  writeJson(join(dir, name), { text, at: new Date().toISOString() });
+  writeJson(join(dir, name), { text, at: new Date().toISOString(), ...(from === undefined ? {} : { from }) });
   return name;
+}
+
+// The sender a session's first prompt is put back in its inbox under, when it never went to agy.
+export const FIRST_PROMPT = "the start (its first prompt)";
+
+export interface InboxMessage {
+  file: string;
+  text: string;
+  at: string | null;
+  from: string | null;
+}
+
+// The messages in a session's inbox, oldest first; a file that is not a message is left out.
+export function inbox(id: string): InboxMessage[] {
+  let names: string[];
+  try {
+    names = readdirSync(inboxDir(id)).filter((n) => n.endsWith(".json")).sort();
+  } catch {
+    return [];
+  }
+  return names.flatMap((n) => {
+    try {
+      const m = JSON.parse(readFileSync(join(inboxDir(id), n), "utf8")) as { text?: unknown; at?: unknown; from?: unknown };
+      if (typeof m.text !== "string" || !m.text) return [];
+      return [{ file: n, text: m.text, at: typeof m.at === "string" ? m.at : null, from: typeof m.from === "string" ? m.from : null }];
+    } catch {
+      return [];
+    }
+  });
 }
