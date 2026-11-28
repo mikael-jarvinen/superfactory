@@ -44,9 +44,10 @@ export function claudeScoped(argv: string[], platform: NodeJS.Platform = process
 // supervisor, in a scope of its own where there is systemd. Its scope never takes a job run's name:
 // the leftovers reaper would kill it when the run that started it ends. In --scope mode systemd-run
 // execs the command in place, so the pid spawned is the process's own. It runs with claudeEnv's
-// environment, so FACTORY_JOB does not reach it.
-export function detachedScoped(bin: string, argv: string[], platform: NodeJS.Platform = process.platform): [string, string[]] {
-  return platform === "linux" ? ["systemd-run", [...SCOPE, bin, ...argv]] : [bin, argv];
+// environment, so FACTORY_JOB does not reach it. unit names the scope (without ".scope"), so the
+// process and whoever stops it can find every process started in it.
+export function detachedScoped(bin: string, argv: string[], platform: NodeJS.Platform = process.platform, unit?: string): [string, string[]] {
+  return platform === "linux" ? ["systemd-run", [...(unit ? [`--unit=${unit}`] : []), ...SCOPE, bin, ...argv]] : [bin, argv];
 }
 
 // The environment a claude call runs with: env, without FACTORY_JOB.

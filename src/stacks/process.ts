@@ -105,8 +105,7 @@ export function startStamp(pid: number): string | null {
   if (process.platform === "linux") {
     const st = procStat(pid);
     if (!st) return null;
-    bootId ??= readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-    return `${bootId}:${st.ticks}`;
+    return `${currentBoot()}:${st.ticks}`;
   }
   // lstart is printed in local time and the locale's words: pin both, or a TZ change restamps it
   const r = run("ps", ["-o", "lstart=", "-p", String(pid)], { env: { ...process.env, TZ: "UTC0", LC_ALL: "C" } });
@@ -117,9 +116,20 @@ export function startStamp(pid: number): string | null {
   return r.stdout.trim() || null;
 }
 
+// Alive and not a zombie: an exited process its parent has not reaped yet still answers
+// kill(pid, 0), and no signal can end it further, so it is not counted alive.
+export function living(pid: number): boolean {
+  if (!alive(pid)) return false;
+  try {
+    return procStat(pid)?.state !== "Z";
+  } catch {
+    return true;
+  }
+}
+
 // The process, its descendants, and anything left in its process group: a child whose parent died
-// first is reparented and only the group still ties it to the tree. TERM first, KILL what is left.
-export function killTree(pid: number, graceMs = 10_000): boolean {
+// first is reparented and only the group still ties it to the tree. Never the caller or its parent.
+function treeOf(pid: number): number[] {
   const table = processes();
   const tree = new Set([pid]);
   for (let grew = true; grew;) {
@@ -132,12 +142,71 @@ export function killTree(pid: number, graceMs = 10_000): boolean {
   }
   tree.delete(process.pid);
   tree.delete(process.ppid);
-  const gone = () => ![...tree].some(alive);
-  signalAll(tree, "SIGTERM");
-  for (const end = Date.now() + graceMs; Date.now() < end; sleep(100)) if (gone()) return true;
-  signalAll(tree, "SIGKILL");
-  sleep(200);
-  return gone();
+  return [...tree];
+}
+
+// TERM to every process list() names, then KILL to what is still living after the grace; list() is
+// read again at each step, so a process started meanwhile is caught. Returns the pids still living
+// after the KILL, zombies aside. This one blocks, so it is for a caller that is not the parent of
+// what it kills; a parent uses killAllAsync, which lets Node reap its children.
+export function killAll(list: () => number[], graceMs: number): number[] {
+  const left = () => list().filter(living);
+  signalAll(left(), "SIGTERM");
+  for (const end = Date.now() + graceMs; Date.now() < end; sleep(100)) if (!left().length) return [];
+  signalAll(left(), "SIGKILL");
+  for (const end = Date.now() + 1000; Date.now() < end; sleep(100)) if (!left().length) return [];
+  return left();
+}
+
+export async function killAllAsync(list: () => number[], graceMs: number): Promise<number[]> {
+  const left = () => list().filter(living);
+  signalAll(left(), "SIGTERM");
+  for (const end = Date.now() + graceMs; Date.now() < end; await delay(100)) if (!left().length) return [];
+  signalAll(left(), "SIGKILL");
+  for (const end = Date.now() + 1000; Date.now() < end; await delay(100)) if (!left().length) return [];
+  return left();
+}
+
+// The tree of pid (treeOf), TERM first, KILL what is left. True when nothing of it is left living.
+export function killTree(pid: number, graceMs = 10_000): boolean {
+  return killAll(() => treeOf(pid), graceMs).length === 0;
+}
+
+export async function killTreeAsync(pid: number, graceMs: number): Promise<number[]> {
+  return killAllAsync(() => treeOf(pid), graceMs);
+}
+
+// The cgroup v2 hierarchy and the path this process is in ("0::<path>" in /proc/self/cgroup), or
+// null without one. SF_CGROUP_ROOT and SF_CGROUP_SELF stand in for them in tests, which may open no
+// real scope (test/helpers.ts): a fake systemd-run sets them and writes the pids it puts in.
+const cgroupRoot = () => process.env.SF_CGROUP_ROOT || "/sys/fs/cgroup";
+export function ownCgroup(): string | null {
+  if (process.env.SF_CGROUP_SELF) return process.env.SF_CGROUP_SELF;
+  if (process.platform !== "linux") return null;
+  try {
+    const line = readFileSync("/proc/self/cgroup", "utf8").split("\n").find((l) => l.startsWith("0::"));
+    return line ? line.slice(3).trim() || null : null;
+  } catch {
+    return null;
+  }
+}
+
+// The pids in a cgroup v2 path but the caller, [] when there is no such cgroup (its unit has ended
+// and been collected). Every process started in it stays in it, whatever its parent or session.
+export function cgroupProcs(path: string): number[] {
+  try {
+    return readFileSync(`${cgroupRoot()}${path}/cgroup.procs`, "utf8").split("\n").filter(Boolean).map(Number).filter((p) => p > 0 && p !== process.pid);
+  } catch (e) {
+    if (["ENOENT", "ENODEV", "ENOTDIR"].includes((e as NodeJS.ErrnoException).code ?? "")) return [];
+    throw e;
+  }
+}
+
+// This boot's id on Linux (a start stamp's first part), null elsewhere.
+export function currentBoot(): string | null {
+  if (process.platform !== "linux") return null;
+  bootId ??= readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  return bootId;
 }
 
 export function stopDetached(pidFile: string): string {

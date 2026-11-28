@@ -14,20 +14,22 @@
 //   - writes the transcript (agy-store.ts's transcriptFile) and every ACP message (acp.jsonl);
 //   - ends the session on SIGTERM, and marks it failed when agy exits on its own, when agy runs a
 //     tool that is not read-only without asking, when the mode cannot be held, when the setup
-//     fails, or when the supervisor itself crashes, killing agy and its tools first;
+//     fails, or when the supervisor itself crashes, killing first every process in its systemd
+//     scope but itself: agy and every tool agy started, one left behind or in a session of its own
+//     included;
 //   - leaves any message that never went to agy in the inbox, named in state.json's undelivered.
 //
 // Usage: node agy-supervisor.js --id <id> [--add-dir <dir>]... [--model <m>] [--effort <e>]
 //          [--appendix <file>] [--mcp-config <file>] [--load <session id>] --name <name> --prompt <text>
 // It runs in the session's cwd.
 import { spawn, type ChildProcess } from "node:child_process";
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync, watch } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, watch } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { AcpError, AcpPeer, PROTOCOL_VERSION } from "./acp.js";
-import { agyBin, agySettingsFile, type AgyState, enqueue, FIRST_PROMPT, inboxDir, sessionDir, transcriptFile, validId, writeJson } from "./agy-store.js";
+import { agyBin, agySettingsFile, type AgyState, enqueue, FIRST_PROMPT, inbox, inboxDir, scopeUnit, sessionCgroup, sessionDir, transcriptFile, validId, writeJson } from "./agy-store.js";
 import { permissionOutcome, readOnly } from "./read-only.js";
-import { killTree, startStamp } from "../stacks/process.js";
+import { cgroupProcs, killAllAsync, killTreeAsync, ownCgroup, startStamp } from "../stacks/process.js";
 
 export interface SupervisorSpec {
   id: string;
@@ -134,8 +136,10 @@ const iso = () => new Date().toISOString();
 // A call that is not read-only trips it when it ends, completed or failed, without ever having been
 // put to the supervisor, or completes after it was denied; and so does an allowed read-only call
 // whose kind is later changed to one that is not. Fails closed: a call with no kind is not read-only.
-// A call announced with no kind takes the first kind it gives later, asked or in an update; from
-// then on its kind only gets stricter (stricterKind), so a call once seen as not read-only stays so.
+// A call announced with no kind takes the first kind it gives later, asked or in an update, as long
+// as it has not yet been put to the supervisor: a call asked with no kind was denied as not
+// read-only, and keeps no kind, so a "read" it reports after that cannot pass it off. From then on
+// its kind only gets stricter (stricterKind), so a call once seen as not read-only stays so.
 // agy 1.5.19, seen live: every tool_call it announces carries its kind (a read as "read", an edit as
 // "edit"), and its permission requests and updates repeat that same kind, so the adoption is for an
 // agy that does otherwise. A call that ends while it still has no kind is not read-only.
@@ -145,12 +149,13 @@ export interface CallSeen {
   allowed: boolean;
 }
 
-// The kind a call is held to, from the one seen before and one it now gives (undefined when it gives
-// none): the first kind a kind-less call gives, then the stricter of the two, so a kind seen as not
-// read-only, announced or asked, is kept.
-export function stricterKind(before: unknown, now: unknown, seenBefore: boolean): unknown {
-  if (!seenBefore || before === undefined) return now;
-  if (now === undefined || !readOnly(before)) return before;
+// The kind a call is held to, from what was seen of it before (undefined for a new call) and the
+// kind it now gives (undefined when it gives none): the first kind a kind-less call gives before it
+// is asked, then the stricter of the two, so a kind seen as not read-only, announced or asked, is
+// kept, and so is the want of a kind of a call asked without one.
+export function stricterKind(prev: CallSeen | undefined, now: unknown): unknown {
+  if (!prev || (prev.kind === undefined && !prev.asked)) return now;
+  if (now === undefined || !readOnly(prev.kind)) return prev.kind;
   return now;
 }
 
@@ -181,9 +186,14 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
   const dir = sessionDir(spec.id);
   mkdirSync(inboxDir(spec.id), { recursive: true });
   writeJson(join(dir, "spec.json"), spec);
+  // The session's systemd scope (antigravity.ts startSupervisor names it): every process agy starts
+  // stays in its cgroup, whatever its parent, process group or session, so the cgroup is what an end
+  // kills. Without it, the supervisor's process group is the fallback.
+  const cg = ownCgroup();
+  const cgroup = sessionCgroup(spec.id, cg) ? cg : null;
   const st: AgyState = {
     id: spec.id, name: spec.name, kind: "background", backend: "antigravity", state: "starting", status: "busy", cwd: spec.cwd,
-    pid: process.pid, stamp: startStamp(process.pid), agentPid: null, sessionId: null, model: spec.model ?? null, transcript: null,
+    pid: process.pid, stamp: startStamp(process.pid), cgroup, agentPid: null, sessionId: null, model: spec.model ?? null, transcript: null,
     startedAt: Date.now(), updatedAt: iso(),
   };
   const save = (patch: Partial<AgyState> = {}) => {
@@ -192,11 +202,21 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
   };
   const log = (s: string) => console.log(`${iso()} ${s}`);
   save();
+  if (!cgroup) log(`not in the scope ${scopeUnit(spec.id)}.scope (cgroup ${cg ?? "none"}): an end kills the supervisor's process group, and a tool that leaves it is out of reach`);
 
   let child: ChildProcess | null = null;
-  // Everything in the supervisor's process group but the supervisor: agy, which is spawned in it,
-  // and every tool agy runs, reparented or not. The supervisor leads the group (spawnDetached).
-  const killGroup = (graceMs: number) => killTree(process.pid, graceMs);
+  // Resolved once agy has exited and Node has reaped it, or at once when it never started.
+  let agyExited: Promise<void> = Promise.resolve();
+  // Everything in the session but the supervisor: agy and every process it starts, alive or left
+  // behind, in a session of its own or not: all of the scope's cgroup, or without a scope, the
+  // supervisor's process group, which it leads (spawnDetached). TERM, then KILL after the grace.
+  // Async, so Node reaps agy while it waits: a reaped agy is no zombie to wait on. Returns the
+  // pids still living after the KILL.
+  const killSession = async (graceMs: number): Promise<number[]> => {
+    const left = cgroup ? await killAllAsync(() => cgroupProcs(cgroup), graceMs) : await killTreeAsync(process.pid, graceMs);
+    await Promise.race([agyExited, new Promise((r) => setTimeout(r, 1000))]);
+    return left;
+  };
   let stopping = false;
   let ended = false;
   let resolveEnd: (code: number) => void = () => {};
@@ -206,29 +226,29 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
     ended = true;
     save({ status: "off", ...patch, ...undelivered() });
     log(`ended: ${patch.state}${patch.error ? `: ${patch.error}` : ""}`);
-    // agy and every tool it runs, alive or not: a tool agy left behind when it exited is still in
-    // the group. SIGKILL for whatever outlives the grace; this waits for that before the supervisor
-    // exits.
-    if (!killGroup(5000)) log("agy or one of its tools survived SIGKILL");
-    resolveEnd(code);
+    // agy and every process it started, alive or left behind, before the supervisor exits.
+    void killSession(5000).then(
+      (left) => {
+        if (left.length) log(`still running after SIGKILL: ${left.join(", ")}`);
+        resolveEnd(code);
+      },
+      (e) => {
+        log(`the session's processes could not all be killed: ${(e as Error).message}`);
+        resolveEnd(code);
+      },
+    );
   };
   const fail = (why: string) => finish({ state: "failed", error: why }, 1);
 
-  // The messages a session ends with that never went to agy: each stays in the inbox, the first
-  // prompt is put there too, and state.json names them (undelivered), so none is lost unsaid.
-  const queue: string[] = [];
-  const inboxNames = (): string[] => {
-    try {
-      return readdirSync(inboxDir(spec.id)).filter((n) => n.endsWith(".json")).sort();
-    } catch {
-      return [];
-    }
-  };
+  // The messages a session ends with that never went to agy: each stays in the inbox, one not yet
+  // there (the first prompt) is put there under its sender, and state.json names them
+  // (undelivered), so none is lost unsaid.
+  const queue: { text: string; from: string }[] = [];
   // Written with the session's end, in the same save, so a reader that sees it ended sees these.
   function undelivered(): { undelivered?: string[] } {
     try {
-      for (const text of queue.splice(0)) enqueue(spec.id, text, FIRST_PROMPT);
-      const left = inboxNames();
+      for (const m of queue.splice(0)) enqueue(spec.id, m.text, m.from);
+      const left = inbox(spec.id).map((m) => m.file);
       if (!left.length) return {};
       log(`${left.length} message(s) not delivered, left in the inbox: ${left.join(", ")}`);
       return { undelivered: left };
@@ -238,20 +258,26 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
     }
   }
 
+  let crashing = false;
   // A crash kills agy and its tools and says so, so no agy outlives a supervisor with no record.
   // Registered here, where the session it cleans up is in scope, as SIGTERM's handler is below.
   process.on("uncaughtException", (e) => {
     console.error(`agy-supervisor: ${e.stack ?? e.message}`);
     try {
-      killGroup(1000);
       if (!ended) {
         ended = true;
         save({ state: "failed", status: "off", error: `the supervisor crashed: ${e.message}`, ...undelivered() });
       }
     } catch (ce) {
-      console.error(`agy-supervisor: and the crash could not be cleaned up: ${(ce as Error).message}`);
+      console.error(`agy-supervisor: and the crash could not be recorded: ${(ce as Error).message}`);
     }
-    process.exit(1);
+    // a second crash while this runs exits at once; stopSession then kills what is left by the scope
+    if (crashing) process.exit(1);
+    crashing = true;
+    void killSession(1000).catch(() => []).then((left) => {
+      if (left.length) console.error(`agy-supervisor: still running after SIGKILL: ${left.join(", ")}`);
+      process.exit(1);
+    });
   });
 
   const unsafe = unsafeNow();
@@ -265,6 +291,7 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
   child = spawn(agyBin(), args, { cwd: spec.cwd, stdio: ["pipe", "pipe", "pipe"], env: process.env });
   child.on("error", (e) => fail(`agy could not start: ${e.message}`));
   child.stderr?.on("data", (d) => process.stdout.write(`agy: ${d}`));
+  agyExited = new Promise((r) => child!.once("exit", () => r()));
   child.on("exit", (code, sig) => {
     if (stopping) finish({ state: "stopped" }, 0);
     else fail(`agy exited on its own (${sig ?? `code ${code}`})`);
@@ -295,7 +322,7 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
     const id = String(tc.toolCallId ?? "");
     const prev = calls.get(id);
     // asked as read-only, a call announced as not read-only is still held to its announced kind
-    const kind = stricterKind(prev?.kind, tc.kind, prev !== undefined);
+    const kind = stricterKind(prev, tc.kind);
     const outcome = permissionOutcome(kind, p?.options);
     const allowed = outcome.outcome === "selected" && readOnly(kind);
     calls.set(id, { kind, asked: true, allowed });
@@ -314,7 +341,7 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
   // in_progress before it asks and again after a denial, so only an end counts as having run.
   const seen = (id: string, kind: unknown, status: unknown) => {
     const prev = calls.get(id);
-    const c: CallSeen = { kind: stricterKind(prev?.kind, kind, prev !== undefined), asked: prev?.asked ?? false, allowed: prev?.allowed ?? false };
+    const c: CallSeen = { kind: stricterKind(prev, kind), asked: prev?.asked ?? false, allowed: prev?.allowed ?? false };
     calls.set(id, c);
     const why = tripped(c, status, prev !== undefined && c.kind !== prev.kind);
     if (why) fail(`agy's tool call ${id} (${String(c.kind ?? "no kind")}) is not read-only and ${why}; the session cannot be kept read-only`);
@@ -379,22 +406,13 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
   // The next message and its inbox file, which is removed only once its user line is written, so
   // a crash before then leaves it in the inbox.
   const takeInbox = (): { text: string; file?: string } | null => {
-    if (queue.length) return { text: queue.shift()! };
-    for (const n of inboxNames()) {
-      const f = join(inboxDir(spec.id), n);
-      try {
-        const m = JSON.parse(readFileSync(f, "utf8")) as { text?: unknown };
-        if (typeof m.text === "string" && m.text) return { text: m.text, file: f };
-      } catch {
-        // a file that is not a message is no message
-      }
-      rmSync(f, { force: true });
-    }
-    return null;
+    if (queue.length) return { text: queue.shift()!.text };
+    const m = inbox(spec.id)[0];
+    return m ? { text: m.text, file: join(inboxDir(spec.id), m.file) } : null;
   };
   const pump = async (): Promise<void> => {
     if (busy || ended || stopping) return;
-    if (!queue.length && !inboxNames().length) return;
+    if (!queue.length && !inbox(spec.id).length) return;
     // Both checks come before a message leaves the inbox, so a session they end keeps it there.
     busy = true;
     await holding;
@@ -490,7 +508,7 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
     appendFileSync(transcript, JSON.stringify({ type: "agent-name", agentName: spec.name, sessionId: st.sessionId }) + "\n");
     save({ transcript, model: st.model });
     log(`session ${st.sessionId}${spec.load ? " (loaded)" : ""}, transcript ${transcript}`);
-    queue.push(brief && !viaSystem ? `${brief.trimEnd()}\n\n---\n\n${spec.prompt}` : spec.prompt);
+    queue.push({ text: brief && !viaSystem ? `${brief.trimEnd()}\n\n---\n\n${spec.prompt}` : spec.prompt, from: FIRST_PROMPT });
   } catch (e) {
     const m = e instanceof AcpError && e.code === -32000 ? `${e.message}: agy is not logged in (agy acp --login)` : (e as Error).message;
     fail(`setup failed: ${m}`);

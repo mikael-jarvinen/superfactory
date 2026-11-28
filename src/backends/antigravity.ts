@@ -7,10 +7,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Session } from "../fleet.js";
 import { claudeEnv, detachedScoped } from "../scope.js";
-import { logTail, alive as pidAlive, killTree, procStat, spawnDetached, startStamp } from "../stacks/process.js";
+import { cgroupProcs, currentBoot, killAll, killTree, living, logTail, spawnDetached, startStamp } from "../stacks/process.js";
 import { die, sleep } from "../util.js";
 import type { AgentBackend, LaunchSpec } from "./backend.js";
-import { allStates, type AgyState, enqueue, inbox, newId, projectDir, readState, sessionDir, transcriptsDir, validId, writeJson } from "./agy-store.js";
+import { allStates, type AgyState, enqueue, inbox, newId, projectDir, readState, scopeUnit, sessionCgroup, sessionDir, transcriptsDir, validId, writeJson } from "./agy-store.js";
 import { CAPABILITIES } from "./capabilities.js";
 
 const SUPERVISOR = join(dirname(fileURLToPath(import.meta.url)), "agy-supervisor.js");
@@ -33,20 +33,11 @@ function launchArgs(spec: LaunchSpec): string[] {
   return args;
 }
 
-// An exited process its parent has not reaped yet still answers kill(pid, 0); /proc says it is a
-// zombie. The `factory` command that started a supervisor is its parent until it exits.
-function zombie(pid: number): boolean {
-  try {
-    return procStat(pid)?.state === "Z";
-  } catch {
-    return false;
-  }
-}
-
-// The process a pid and stamp were recorded for: alive, not a zombie, and with the stamp it had at
-// its start, as pids are reused.
+// The process a pid and stamp were recorded for: alive, not a zombie (living: the `factory` command
+// that started a supervisor is its parent until it exits), and with the stamp it had at its start,
+// as pids are reused.
 function up(pid: unknown, stamp: unknown): pid is number {
-  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || !pidAlive(pid) || zombie(pid)) return false;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || !living(pid)) return false;
   if (typeof stamp !== "string") return true;
   try {
     return startStamp(pid) === stamp;
@@ -93,9 +84,10 @@ export function startSupervisor(cwd: string, args: string[], env: NodeJS.Process
   const dir = sessionDir(id);
   mkdirSync(dir, { recursive: true });
   const log = join(dir, "supervisor.log");
-  // In a scope of its own (scope.ts): unscoped it would stay in its caller's cgroup, a scheduler
-  // job's say, and die with it.
-  const [bin, argv] = detachedScoped(process.execPath, [SUPERVISOR, "--id", id, ...args]);
+  // In a scope of its own (scope.ts), named for the session: unscoped it would stay in its caller's
+  // cgroup, a scheduler job's say, and die with it; and the scope is what ends the session's every
+  // process, agy's tools included, at its end or its stop.
+  const [bin, argv] = detachedScoped(process.execPath, [SUPERVISOR, "--id", id, ...args], process.platform, scopeUnit(id));
   const pid = spawnDetached([bin, ...argv], { log, cwd, env: claudeEnv(env), what: "the Antigravity supervisor" });
   const tail = () => {
     const t = logTail(log);
@@ -114,20 +106,25 @@ export function startSupervisor(cwd: string, args: string[], env: NodeJS.Process
 
 // Whether the supervisor's pid still names its process group: it is the supervisor, alive or a
 // zombie, or no process at all. A pid is not given out again while a group of that number has a
-// member left, so with no process at that pid, whatever is in its group is the session's.
+// member left, so with no process at that pid, whatever is in its group is the session's: within
+// one boot only, so a stamp from another boot (or none) is never taken to name it.
 function groupOurs(st: AgyState): boolean {
+  const boot = currentBoot();
+  if (!boot || typeof st.stamp !== "string" || !st.stamp.startsWith(`${boot}:`)) return false;
   try {
     const now = startStamp(st.pid);
-    return now === null || (typeof st.stamp === "string" && now === st.stamp);
+    return now === null || now === st.stamp;
   } catch {
     return false;
   }
 }
 
-// SIGTERM to the supervisor, which ends the session; whatever is left after the wait is killed. The
-// supervisor's process group and the agy it recorded are killed whether or not the supervisor is
-// up: a tool agy left when it exited, or an agy whose supervisor crashed, is otherwise left running
-// with nothing that records it once the directory goes.
+// SIGTERM to the supervisor, which ends the session and kills its every process before it exits;
+// then whatever is left is killed whether or not the supervisor is up, as a tool agy left, or an agy
+// whose supervisor crashed, is otherwise left running with nothing that records it once the
+// directory goes. What is left is the session's scope's cgroup (sf-<id>.scope, a name no other
+// process gets), the supervisor itself included if it is still up; without a scope, the supervisor's
+// process group, and that only within the boot it was recorded in.
 export function stopSession(id: string, remove: boolean): void {
   if (!validId(id)) die(`not an Antigravity session id: ${id}`);
   const st = readState(id);
@@ -140,8 +137,14 @@ export function stopSession(id: string, remove: boolean): void {
       }
       for (const end = Date.now() + 15_000; Date.now() < end && supervisorUp(st); sleep(200));
     }
-    if (typeof st.pid === "number" && st.pid > 1 && groupOurs(st)) killTree(st.pid, 2000);
-    if (up(st.agentPid, st.agentStamp)) killTree(st.agentPid, 2000);
+    const who = st.name ?? id;
+    let left: number[] = [];
+    if (sessionCgroup(id, st.cgroup)) left = killAll(() => cgroupProcs(st.cgroup!), 2000);
+    else if (typeof st.pid === "number" && st.pid > 1 && groupOurs(st)) left = killTree(st.pid, 2000) ? [] : [st.pid];
+    else if (typeof st.pid === "number" && st.pid > 1)
+      process.stderr.write(`${who}: no scope recorded, and the supervisor's pid ${st.pid} is from another boot or another process now, so its process group is not killed\n`);
+    if (up(st.agentPid, st.agentStamp) && !killTree(st.agentPid, 2000)) left.push(st.agentPid);
+    if (left.length) process.stderr.write(`${who}: still running after SIGKILL: ${left.join(", ")}\n`);
     const after = readState(id);
     if (after && after.state !== "stopped" && after.state !== "failed")
       writeJson(join(sessionDir(id), "state.json"), { ...after, state: "stopped", status: "off", updatedAt: new Date().toISOString() });

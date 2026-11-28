@@ -38,6 +38,12 @@ export const projectDir = (cwd: string) => join(transcriptsDir(), cwd.replace(/[
 export const transcriptFile = (cwd: string, sessionId: string) => join(projectDir(cwd), `${sessionId}.jsonl`);
 
 export const validId = (id: unknown): id is string => typeof id === "string" && /^agy-[0-9a-f]{12}$/.test(id);
+// The systemd scope a session's supervisor runs in, without ".scope": unique to the session, so the
+// name never comes to mean another process, after a reboot included.
+export const scopeUnit = (id: string) => `sf-${id}`;
+// Whether a cgroup path is that scope's, so a state file names no other cgroup to kill.
+export const sessionCgroup = (id: string, path: unknown): path is string =>
+  typeof path === "string" && validId(id) && /^(\/[A-Za-z0-9_.@:-]+)+$/.test(path) && !path.split("/").includes("..") && path.endsWith(`/${scopeUnit(id)}.scope`);
 export const newId = () => `agy-${randomBytes(6).toString("hex")}`;
 
 // A session's row. state is "starting" until its first prompt goes, then "working" while a prompt
@@ -54,6 +60,9 @@ export interface AgyState {
   // the supervisor's pid and its start stamp (stacks/process.ts), which tell it from a later process given the pid
   pid: number;
   stamp: string | null;
+  // the cgroup of the supervisor's systemd scope (scopeUnit), which holds agy and every process it
+  // starts; null when the supervisor runs in no such scope
+  cgroup?: string | null;
   // agy's pid and its start stamp
   agentPid: number | null;
   agentStamp?: string | null;

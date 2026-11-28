@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { after, test } from "node:test";
 import { antigravityBackend, listSessions, sessionAlive, startSupervisor, stopSession } from "../src/backends/antigravity.js";
 import { allStates, readState, sessionDir } from "../src/backends/agy-store.js";
@@ -27,6 +28,32 @@ const fake = join(root, "agy");
 writeFileSync(fake, `#!/bin/sh\nexec "${process.execPath}" "${fileURLToPath(new URL("./fake-agy.js", import.meta.url))}" "$@"\n`);
 chmodSync(fake, 0o755);
 process.env.SF_AGY_BIN = fake;
+// No test opens a real scope (helpers.ts). This systemd-run stands in for one that makes the
+// session's scope: it puts itself (the supervisor, once it execs) in a cgroup of the --unit name
+// under SF_CGROUP_ROOT, and fake-agy.ts adds itself and its tools, as the kernel would. withScope
+// puts it first on PATH.
+process.env.SF_CGROUP_ROOT = join(root, "cgroup");
+const scopeBin = join(root, "scope-bin");
+mkdirSync(scopeBin);
+writeFileSync(join(scopeBin, "systemd-run"), `#!/bin/sh
+unit=
+while [ "$1" != "--" ]; do [ $# -gt 0 ] || exit 2; case "$1" in --unit=*) unit="\${1#--unit=}";; esac; shift; done
+shift
+[ -n "$unit" ] || exit 3
+SF_CGROUP_SELF="/agents.slice/$unit.scope"; export SF_CGROUP_SELF
+mkdir -p "$SF_CGROUP_ROOT$SF_CGROUP_SELF" && echo $$ >> "$SF_CGROUP_ROOT$SF_CGROUP_SELF/cgroup.procs"
+exec "$@"
+`);
+chmodSync(join(scopeBin, "systemd-run"), 0o755);
+const withScope = async (f: () => Promise<void>) => {
+  const path = process.env.PATH;
+  process.env.PATH = `${scopeBin}:${path}`;
+  try {
+    await f();
+  } finally {
+    process.env.PATH = path;
+  }
+};
 
 const requests = (): any[] => (existsSync(agyLog) ? readFileSync(agyLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
 const cwdFor = (name: string) => {
@@ -301,15 +328,18 @@ test("the tripwire: a call never asked trips it whether it completes or fails; a
   assert.match(tripped({ kind: undefined, asked: false, allowed: false }, "failed", false)!, /without asking/);
   assert.match(tripped({ kind: "edit", asked: true, allowed: true }, "in_progress", true)!, /changed its kind to edit after it was allowed/);
   // a kind only gets stricter: once not read-only, a call stays so, whatever it later says
-  assert.equal(stricterKind(undefined, "read", false), "read");
-  assert.equal(stricterKind("read", "edit", true), "edit");
-  assert.equal(stricterKind("edit", "read", true), "edit");
-  assert.equal(stricterKind("read", undefined, true), "read");
-  // a call announced with no kind takes the first kind it gives, then only gets stricter
-  assert.equal(stricterKind(undefined, "read", true), "read");
-  assert.equal(stricterKind(undefined, undefined, true), undefined);
-  assert.equal(stricterKind(stricterKind(undefined, "read", true), "edit", true), "edit");
-  assert.equal(stricterKind(stricterKind(undefined, "edit", true), "read", true), "edit");
+  const seen = (kind: unknown, asked = false) => ({ kind, asked, allowed: false });
+  assert.equal(stricterKind(undefined, "read"), "read");
+  assert.equal(stricterKind(seen("read"), "edit"), "edit");
+  assert.equal(stricterKind(seen("edit"), "read"), "edit");
+  assert.equal(stricterKind(seen("read"), undefined), "read");
+  // a call announced with no kind takes the first kind it gives before it is asked, then only gets stricter
+  assert.equal(stricterKind(seen(undefined), "read"), "read");
+  assert.equal(stricterKind(seen(undefined), undefined), undefined);
+  assert.equal(stricterKind(seen(stricterKind(seen(undefined), "read")), "edit"), "edit");
+  assert.equal(stricterKind(seen(stricterKind(seen(undefined), "edit")), "read"), "edit");
+  // asked with no kind, it was denied as not read-only, and a kind it gives later is not taken
+  assert.equal(stricterKind(seen(undefined, true), "read"), undefined);
   assert.deepEqual(modeOf(undefined, { currentModeId: "plan", availableModes: [{ id: "default" }] }), { current: "plan", offersDefault: true, via: "modes" });
   assert.equal(modeOf([], undefined), undefined);
 });
@@ -426,6 +456,112 @@ test("stop kills what is left in the group of a supervisor that is gone, agy and
   stopSession(id, true);
   assert.equal(gone(toolPid), true, "the tool was killed by its group");
   assert.deepEqual(inGroup(st.pid), []);
+});
+
+test("a call asked with no kind is denied, and a read it reports after that and completes trips the session", async () => {
+  const id = start("kindlessdenied", "hi");
+  await until("idle", () => readState(id)?.state === "done");
+  antigravityBackend.deliver!(rowOf(id), "kindless-denied");
+  await until("the session to fail", () => readState(id)?.state === "failed");
+  assert.match(readState(id)!.error!, /\(no kind\) is not read-only and ran after it was denied/);
+  const p = transcript(id).find((l) => l.type === "permission");
+  assert.equal(p.allowed, false);
+});
+
+test("a plain stop of an idle session takes well under 5 s, and the supervisor logs no survivor", async () => {
+  const id = start("quickstop", "hi");
+  await until("idle", () => readState(id)?.state === "done");
+  const st = readState(id)!;
+  const t0 = Date.now();
+  stopSession(id, false);
+  const took = Date.now() - t0;
+  assert.ok(took < 2500, `the stop took ${took} ms`);
+  assert.equal(readState(id)!.state, "stopped");
+  assert.equal(gone(st.pid), true);
+  assert.equal(gone(st.agentPid!), true);
+  const log = readFileSync(join(sessionDir(id), "supervisor.log"), "utf8");
+  assert.doesNotMatch(log, /still running after SIGKILL|survived/);
+});
+
+// The living pids in a session's scope.
+const inScope = (st: { cgroup?: string | null }): number[] =>
+  readFileSync(`${process.env.SF_CGROUP_ROOT}${st.cgroup}/cgroup.procs`, "utf8").split("\n").filter(Boolean).map(Number).filter((p) => !gone(p));
+
+test("the supervisor runs in a scope named for its session, holding agy; one that runs in none says so", async () => {
+  await withScope(async () => {
+    const id = start("scoped", "hi");
+    await until("idle", () => readState(id)?.state === "done");
+    const st = readState(id)!;
+    assert.equal(st.cgroup, `/agents.slice/sf-${id}.scope`);
+    assert.deepEqual(inScope(st).sort(), [st.pid, st.agentPid!].sort());
+    stopSession(id, true);
+    assert.deepEqual(inScope(st), []);
+  });
+  const id = start("unscoped", "hi");
+  await until("idle", () => readState(id)?.state === "done");
+  assert.equal(readState(id)!.cgroup, null);
+  assert.match(readFileSync(join(sessionDir(id), "supervisor.log"), "utf8"), /not in the scope sf-agy-[0-9a-f]{12}\.scope \(cgroup .*\): an end kills the supervisor's process group/);
+  stopSession(id, true);
+});
+
+test("agy that exits on its own takes a tool in a session of its own with it: nothing is left in the scope", () => withScope(async () => {
+  const id = start("exitsetsid", "hi");
+  await until("idle", () => readState(id)?.state === "done");
+  const st = readState(id)!;
+  antigravityBackend.deliver!(rowOf(id), "exit-with-setsid-tool");
+  await until("the session to fail", () => readState(id)?.state === "failed", 20_000);
+  const toolPid = lastTool();
+  assert.ok(toolPid, "the fake started its tool");
+  assert.notEqual(procStat(toolPid)?.pgid ?? 0, st.pid, "the tool is in a group of its own");
+  await until("the supervisor to exit", () => gone(st.pid), 20_000);
+  assert.equal(gone(toolPid), true, "the tool outlived agy and the supervisor");
+  assert.deepEqual(inScope(st), []);
+}));
+
+test("stop kills a tool in a session of its own by the scope, when supervisor and agy are both gone", () => withScope(async () => {
+  const id = start("orphansetsid", "hi");
+  await until("idle", () => readState(id)?.state === "done");
+  const st = readState(id)!;
+  antigravityBackend.deliver!(rowOf(id), "spawn-setsid-tool");
+  await until("the turn", () => transcript(id).filter((l) => l.type === "turn-end").length === 2);
+  const toolPid = lastTool();
+  process.kill(st.pid, "SIGKILL");
+  process.kill(st.agentPid!, "SIGKILL");
+  await until("supervisor and agy gone", () => gone(st.pid) && gone(st.agentPid!));
+  assert.equal(gone(toolPid), false, "the tool is left");
+  stopSession(id, true);
+  assert.equal(gone(toolPid), true, "the tool was killed by the scope");
+  assert.deepEqual(inScope(st), []);
+}));
+
+test("with no scope, a stale state from another boot never has its supervisor's pid's group killed", { skip: process.platform !== "linux" }, async () => {
+  // a group whose leader has exited, with a member left: what a stale pid can name after a reboot
+  const sh = spawnSync("sh", ["-c", "setsid sh -c 'sleep 30 >/dev/null 2>&1 & echo $$ $!'"], { encoding: "utf8" });
+  const [pgid, member] = sh.stdout.trim().split(/\s+/).map(Number) as [number, number];
+  try {
+    await until("the leader to exit", () => gone(pgid));
+    assert.equal(procStat(member)?.pgid, pgid);
+    const id = "agy-0123456789ab";
+    mkdirSync(sessionDir(id), { recursive: true });
+    const stale = { id, name: "stale", kind: "background", backend: "antigravity", state: "done", status: "idle", cwd: root, pid: pgid, stamp: "another-boot:1", cgroup: null, agentPid: null, sessionId: null, model: null, transcript: null, startedAt: 0, updatedAt: "" };
+    writeFileSync(join(sessionDir(id), "state.json"), JSON.stringify(stale));
+    const said: string[] = [];
+    const write = process.stderr.write;
+    process.stderr.write = ((x: string) => (said.push(String(x)), true)) as typeof process.stderr.write;
+    try {
+      stopSession(id, true);
+    } finally {
+      process.stderr.write = write;
+    }
+    assert.equal(gone(member), false, "an unrelated group was killed");
+    assert.match(said.join(""), /stale: no scope recorded, and the supervisor's pid \d+ is from another boot or another process now, so its process group is not killed/);
+  } finally {
+    try {
+      process.kill(member, "SIGKILL");
+    } catch {
+      // gone
+    }
+  }
 });
 
 test("a stop that removes a session tells each undelivered message, with its sender, and keeps it in the transcript", async () => {

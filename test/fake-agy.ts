@@ -19,6 +19,10 @@
 //   "kindless"   a read tool call announced with no kind, which gives its kind "read" in an update
 //                and runs without asking
 //   "kindless-ask" a tool call announced with no kind, put to the client as a read; runs if allowed
+//   "kindless-denied" a tool call announced and put to the client with no kind, which then says it
+//                is a read and completes
+//   "spawn-setsid-tool", "exit-with-setsid-tool" as "spawn-tool" and "exit-with-tool", with the tool
+//                in a session of its own (setsid), as a tool runner may start one
 //   "mode <m>"   moves the session to mode m and says so with a config_option_update (or a
 //                current_mode_update under FAKE_AGY_LEGACY_MODES)
 //   "slow"       a turn that takes 1.5 s
@@ -28,12 +32,19 @@
 // system-prompt capability. FAKE_AGY_MODE is the mode a session starts in. FAKE_AGY_LEGACY_MODES=1
 // reports the mode in the older modes field, set with session/set_mode, and not as a config
 // option. FAKE_AGY_MODE_STUCK=1 refuses every change of mode. FAKE_AGY_IGNORE_EOF=1 keeps running
-// once stdin closes, as an agy that ignores it would.
+// once stdin closes, as an agy that ignores it would. Under the scope test's systemd-run
+// (SF_CGROUP_SELF and SF_CGROUP_ROOT set), it writes its own pid and each tool's to the scope's
+// cgroup.procs, as the kernel would put every process it starts in its cgroup.
 import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
 
 const logFile = process.env.FAKE_AGY_LOG;
 const record = (m: unknown) => logFile && appendFileSync(logFile, JSON.stringify(m) + "\n");
+const inCgroup = (pid: number | undefined) => {
+  if (pid && process.env.SF_CGROUP_SELF && process.env.SF_CGROUP_ROOT)
+    appendFileSync(`${process.env.SF_CGROUP_ROOT}${process.env.SF_CGROUP_SELF}/cgroup.procs`, `${pid}\n`);
+};
+inCgroup(process.pid);
 const send = (m: unknown) => process.stdout.write(JSON.stringify(m) + "\n");
 let next = 1;
 const waiting = new Map<string, (r: any) => void>();
@@ -99,14 +110,17 @@ async function prompt(p: any): Promise<unknown> {
   } else if (last === "stubborn") {
     const t = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1<<30)"], { stdio: "ignore" });
     record({ tool: t.pid });
+    inCgroup(t.pid);
     await new Promise((r) => setTimeout(r, 300));
     await tool(sid, "execute", "make -j8", false);
   }
-  else if (last === "spawn-tool" || last === "exit-with-tool") {
-    const t = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1<<30)"], { stdio: "ignore" });
+  else if (["spawn-tool", "exit-with-tool", "spawn-setsid-tool", "exit-with-setsid-tool"].includes(last)) {
+    const t = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1<<30)"], { stdio: "ignore", detached: last.includes("setsid") });
+    t.unref();
     record({ tool: t.pid });
+    inCgroup(t.pid);
     await new Promise((r) => setTimeout(r, 300));
-    if (last === "exit-with-tool") process.exit(3);
+    if (last.startsWith("exit-with")) process.exit(3);
     say(sid, "tool running");
   } else if (last === "kindless") {
     const toolCallId = `call-${++calls}`;
@@ -114,6 +128,12 @@ async function prompt(p: any): Promise<unknown> {
     update(sid, { sessionUpdate: "tool_call_update", toolCallId, kind: "read", status: "in_progress" });
     update(sid, { sessionUpdate: "tool_call_update", toolCallId, status: "completed", rawOutput: "done" });
     say(sid, "kindless ok");
+  } else if (last === "kindless-denied") {
+    const toolCallId = `call-${++calls}`;
+    update(sid, { sessionUpdate: "tool_call", toolCallId, title: "File README.md", status: "pending" });
+    await ask("session/request_permission", { sessionId: sid, toolCall: { toolCallId, title: "File README.md", status: "pending" }, options: OPTIONS });
+    update(sid, { sessionUpdate: "tool_call_update", toolCallId, kind: "read", status: "completed", rawOutput: "done" });
+    say(sid, "kindless-denied ran");
   } else if (last === "kindless-ask") {
     const toolCallId = `call-${++calls}`;
     update(sid, { sessionUpdate: "tool_call", toolCallId, title: "File README.md", status: "pending" });
