@@ -9,9 +9,12 @@
 //   - keeps state.json: "working" while a prompt is in flight, "done" between prompts;
 //   - answers session/request_permission from read-only.ts: a read-only call is allowed once,
 //     every other one is denied;
+//   - holds the session in agy's "default" mode, the one that asks before edits and commands, and
+//     re-reads agy's settings before each prompt;
 //   - writes the transcript (agy-store.ts's transcriptFile) and every ACP message (acp.jsonl);
 //   - ends the session on SIGTERM, and marks it failed when agy exits on its own, when agy runs a
-//     tool that is not read-only without asking, or when the setup fails.
+//     tool that is not read-only without asking, when the mode cannot be held, when the setup
+//     fails, or when the supervisor itself crashes (killing agy first).
 //
 // Usage: node agy-supervisor.js --id <id> [--add-dir <dir>]... [--model <m>] [--effort <e>]
 //          [--appendix <file>] [--mcp-config <file>] [--load <session id>] --name <name> --prompt <text>
@@ -23,7 +26,7 @@ import { parseArgs } from "node:util";
 import { AcpError, AcpPeer, PROTOCOL_VERSION } from "./acp.js";
 import { agyBin, agySettingsFile, type AgyState, inboxDir, sessionDir, transcriptFile, validId, writeJson } from "./agy-store.js";
 import { permissionOutcome, readOnly } from "./read-only.js";
-import { startStamp } from "../stacks/process.js";
+import { killTree, startStamp } from "../stacks/process.js";
 
 export interface SupervisorSpec {
   id: string;
@@ -57,6 +60,23 @@ export function parseSpec(argv: string[], cwd: string): SupervisorSpec {
     ...(v.load ? { load: v.load } : {}),
   };
 }
+
+// agy's settings file, read again before every prompt: null for none.
+function readSettings(): string | null {
+  try {
+    return readFileSync(agySettingsFile(), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+const unsafeNow = (): string | null => {
+  const u = unsafeSettings(readSettings());
+  return u && `${agySettingsFile()} lets tools run without asking: ${u}. An Antigravity session runs only with every tool call put to its supervisor.`;
+};
+
+// Set by supervise once agy runs: what a crash of the supervisor does before it exits.
+let onCrash: ((why: string) => void) | null = null;
 
 // What in agy's own settings would let a tool run without a permission request reaching the
 // supervisor, or null for none. A request that never comes is one the handler cannot deny.
@@ -112,6 +132,39 @@ export const optionFor = (opts: ConfigOption[], category: string, ids: RegExp) =
 
 const iso = () => new Date().toISOString();
 
+// What a tool call's updates say of it: whether the supervisor ends the session over it, and why.
+// A call that is not read-only trips it when it ends, completed or failed, without ever having been
+// put to the supervisor, or completes after it was denied; and so does an allowed read-only call
+// whose kind is later changed to one that is not. Fails closed: a call with no kind is not read-only.
+export interface CallSeen {
+  kind: unknown;
+  asked: boolean;
+  allowed: boolean;
+}
+
+export function tripped(c: CallSeen, status: unknown, kindChanged: boolean): string | null {
+  if (readOnly(c.kind)) return null;
+  if (c.allowed && kindChanged) return `changed its kind to ${String(c.kind)} after it was allowed as read-only`;
+  if (status !== "completed" && status !== "failed") return null;
+  if (!c.asked) return `${status === "completed" ? "ran" : "ran and failed"} without asking`;
+  if (!c.allowed && status === "completed") return "ran after it was denied";
+  return null;
+}
+
+// The only mode the session may be in: agy's "default" asks before edits and commands. "plan",
+// "accept-edits" and "auto" are put back.
+export const HELD_MODE = "default";
+
+// The mode a session reports, from its config options or the older modes field, or undefined.
+export function modeOf(opts: unknown, modes: unknown): { current: unknown; offersDefault: boolean; via: "config"; id: string } | { current: unknown; offersDefault: boolean; via: "modes" } | undefined {
+  const o = Array.isArray(opts) ? optionFor(opts as ConfigOption[], "mode", /^mode$/) : undefined;
+  if (o) return { current: o.currentValue, offersDefault: flat(o).some((x) => x.value === HELD_MODE), via: "config", id: o.id };
+  const m = modes as { currentModeId?: unknown; availableModes?: { id?: unknown }[] } | null | undefined;
+  if (m && typeof m === "object" && "currentModeId" in m)
+    return { current: m.currentModeId, offersDefault: Array.isArray(m.availableModes) && m.availableModes.some((x) => x?.id === HELD_MODE), via: "modes" };
+  return undefined;
+}
+
 export async function supervise(spec: SupervisorSpec): Promise<number> {
   const dir = sessionDir(spec.id);
   mkdirSync(inboxDir(spec.id), { recursive: true });
@@ -147,15 +200,9 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
   };
   const fail = (why: string) => finish({ state: "failed", error: why }, 1);
 
-  let settings: string | null = null;
-  try {
-    settings = readFileSync(agySettingsFile(), "utf8");
-  } catch {
-    settings = null;
-  }
-  const unsafe = unsafeSettings(settings);
+  const unsafe = unsafeNow();
   if (unsafe) {
-    fail(`${agySettingsFile()} lets tools run without asking: ${unsafe}. An Antigravity session runs only with every tool call put to its supervisor.`);
+    fail(unsafe);
     return end;
   }
 
@@ -168,7 +215,16 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
     if (stopping) finish({ state: "stopped" }, 0);
     else fail(`agy exited on its own (${sig ?? `code ${code}`})`);
   });
-  save({ agentPid: child.pid ?? null });
+  save({ agentPid: child.pid ?? null, agentStamp: child.pid === undefined ? null : startStamp(child.pid) });
+  // A crash kills agy and its tools and says so, so no agy outlives a supervisor with no record.
+  onCrash = (why) => {
+    const pid = child?.pid;
+    if (pid !== undefined && child?.exitCode === null && child.signalCode === null) killTree(pid, 1000);
+    if (!ended) {
+      ended = true;
+      save({ state: "failed", status: "off", error: `the supervisor crashed: ${why}` });
+    }
+  };
 
   const acpLog = join(dir, "acp.jsonl");
   const peer = new AcpPeer(child.stdin!, child.stdout!, (d, line) => appendFileSync(acpLog, `{"at":"${iso()}","dir":"${d}","m":${line}}\n`));
@@ -186,15 +242,16 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
     said = "";
   };
 
-  // Tool calls by id: the kind the agent gave, and whether the supervisor allowed it.
-  const calls = new Map<string, { kind: unknown; allowed: boolean }>();
+  // Tool calls by id: the kind the agent gave last, whether it was put to the supervisor, and
+  // whether the supervisor allowed it.
+  const calls = new Map<string, CallSeen>();
   peer.handle("session/request_permission", (p: any) => {
     const tc = p?.toolCall ?? {};
     const id = String(tc.toolCallId ?? "");
     const kind = tc.kind ?? calls.get(id)?.kind;
     const outcome = permissionOutcome(kind, p?.options);
     const allowed = outcome.outcome === "selected" && readOnly(kind);
-    calls.set(id, { kind, allowed });
+    calls.set(id, { kind, asked: true, allowed });
     log(`permission ${allowed ? "allowed" : "denied"}: ${String(kind)} ${JSON.stringify(tc.title ?? "")}`);
     line({ type: "permission", toolCallId: id, kind, title: tc.title ?? null, allowed });
     return { outcome };
@@ -205,6 +262,34 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
       throw new Error(`${m} is not offered by this client`);
     });
 
+  // A tool call's update: its kind, if it gives one, replaces the last, and the tripwire (tripped)
+  // ends the session over a call that ran without the supervisor's leave. agy reports a call
+  // in_progress before it asks and again after a denial, so only an end counts as having run.
+  const seen = (id: string, kind: unknown, status: unknown) => {
+    const prev = calls.get(id);
+    const c: CallSeen = { kind: kind ?? prev?.kind, asked: prev?.asked ?? false, allowed: prev?.allowed ?? false };
+    calls.set(id, c);
+    const why = tripped(c, status, kind !== undefined && prev !== undefined && kind !== prev.kind);
+    if (why) fail(`agy's tool call ${id} (${String(c.kind ?? "no kind")}) is not read-only and ${why}; the session cannot be kept read-only`);
+  };
+
+  // The mode, held at default: a change agy reports is put back, and one that cannot be is the end
+  // of the session. A prompt waits for the mode to be put back before it goes.
+  let modeVia: { via: "config"; id: string } | { via: "modes" } | null = null;
+  let holding: Promise<void> = Promise.resolve();
+  const setDefault = async (): Promise<void> => {
+    if (!modeVia) throw new Error("agy reports no way to set the mode");
+    if (modeVia.via === "config") await peer.request("session/set_config_option", { sessionId: st.sessionId, configId: modeVia.id, value: HELD_MODE });
+    else await peer.request("session/set_mode", { sessionId: st.sessionId, modeId: HELD_MODE });
+  };
+  const hold = (m: ReturnType<typeof modeOf>) => {
+    if (!m || m.current === HELD_MODE || ended) return;
+    if (m.via === "config") modeVia = { via: "config", id: m.id };
+    else modeVia ??= { via: "modes" };
+    log(`agy moved the session to mode ${String(m.current)}; setting it back to ${HELD_MODE}`);
+    holding = holding.then(setDefault).catch((e) => fail(`agy moved the session to mode ${String(m.current)}, and it could not be set back to ${HELD_MODE}: ${(e as Error).message}`));
+  };
+
   peer.on("session/update", (p: any) => {
     const u = p?.update ?? {};
     switch (u.sessionUpdate) {
@@ -214,33 +299,25 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
       case "tool_call": {
         flushSaid();
         const id = String(u.toolCallId ?? "");
-        const prev = calls.get(id);
-        calls.set(id, { kind: u.kind ?? prev?.kind, allowed: prev?.allowed ?? false });
         line({ type: "assistant", message: { id: `${st.sessionId}:${++msgN}`, role: "assistant", model: st.model, content: [{ type: "tool_use", id, name: u.title ?? u.kind ?? "tool", kind: u.kind ?? null, input: u.rawInput ?? null }] } });
-        ranUnasked(id, u.status);
+        seen(id, u.kind, u.status);
         break;
       }
       case "tool_call_update": {
         const id = String(u.toolCallId ?? "");
-        const prev = calls.get(id);
-        if (u.kind !== undefined) calls.set(id, { kind: u.kind, allowed: prev?.allowed ?? false });
-        ranUnasked(id, u.status);
+        seen(id, u.kind, u.status);
         if (u.status === "completed" || u.status === "failed")
           line({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, is_error: u.status === "failed", content: u.rawOutput ?? u.content ?? null }] } });
         break;
       }
+      case "current_mode_update":
+        hold({ current: u.currentModeId, offersDefault: true, via: "modes" });
+        break;
+      case "config_option_update":
+        hold(modeOf(u.configOptions, undefined));
+        break;
     }
   });
-  // A call that is not read-only, that the supervisor did not allow, and that completes anyway was
-  // run without a permission request: the session cannot be kept read-only, so it ends. agy
-  // reports a call in_progress before it asks and again after a denial, which ends it failed, so
-  // only completion counts.
-  const ranUnasked = (id: string, status: unknown) => {
-    if (status !== "completed") return;
-    const c = calls.get(id);
-    if (c && (c.allowed || readOnly(c.kind))) return;
-    fail(`agy ran a tool call that is not read-only (${String(c?.kind ?? "no kind")}, ${id}) without asking; it would have been denied`);
-  };
 
   process.on("SIGTERM", () => {
     if (ended) return;
@@ -279,7 +356,11 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
     if (busy || ended || stopping) return;
     const text = takeInbox();
     if (text === null) return;
+    const unsafe = unsafeNow();
+    if (unsafe) return fail(unsafe);
     busy = true;
+    await holding;
+    if (ended) return;
     save({ state: "working", status: "busy" });
     line({ type: "user", message: { role: "user", content: [{ type: "text", text }] } });
     try {
@@ -341,11 +422,13 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
       }
       throw new Error(`agy offers no ${what} setting, so ${what} ${want} cannot be set`);
     };
-    // agy's modes other than "default" and "plan" approve edits or commands without asking.
-    const mode = optionFor(opts, "mode", /^mode$/);
-    if (mode && !["default", "plan"].includes(String(mode.currentValue))) {
-      if (!flat(mode).some((x) => x.value === "default")) throw new Error(`agy is in mode ${String(mode.currentValue)} and offers no "default" mode`);
-      await peer.request("session/set_config_option", { sessionId: st.sessionId, configId: mode.id, value: "default" });
+    // agy's modes other than "default" approve edits or commands without asking, or ("plan") are
+    // not the mode it was asked for. A session that reports no mode is held through its updates.
+    const mode = modeOf(setup?.configOptions, setup?.modes);
+    if (mode) modeVia = mode.via === "config" ? { via: "config", id: mode.id } : { via: "modes" };
+    if (mode && mode.current !== HELD_MODE) {
+      if (!mode.offersDefault) throw new Error(`agy is in mode ${String(mode.current)} and offers no "${HELD_MODE}" mode`);
+      await setDefault();
     }
     if (spec.model) st.model = await set("model", spec.model, "model", /model/i);
     if (spec.effort) await set("effort", spec.effort, "thought_level", /think|effort|reason/i);
@@ -381,6 +464,11 @@ if (process.argv[1] && /agy-supervisor\.js$/.test(process.argv[1])) {
   }
   process.on("uncaughtException", (e) => {
     console.error(`agy-supervisor: ${e.stack ?? e.message}`);
+    try {
+      onCrash?.(e.message);
+    } catch (ce) {
+      console.error(`agy-supervisor: and the crash could not be cleaned up: ${(ce as Error).message}`);
+    }
     process.exit(1);
   });
   void supervise(spec).then((code) => setTimeout(() => process.exit(code), 200));

@@ -13,6 +13,7 @@ import type { PlanFetch } from "../board/plan-usage.js";
 import type { Session } from "../fleet.js";
 import type { SessionSettings } from "../settings.js";
 import type { StartRequest } from "../transport.js";
+import type { BackendCapabilities } from "./capabilities.js";
 import type { Workspace } from "../workspace.js";
 
 // What a background start needs, in no CLI's terms; the backend turns it into its own arguments.
@@ -22,8 +23,8 @@ export interface LaunchSpec {
   prompt: string;
   // The brief's file, or null for a session with none.
   appendixPath: string | null;
-  // The file installSettings wrote.
-  settings: string;
+  // The file installSettings wrote, or null for a backend that takes no settings file.
+  settings: string | null;
   addDirs: string[];
   // The name the session is shown under in the CLI's own remote control, or undefined for none.
   remoteControl?: string;
@@ -34,7 +35,9 @@ export interface LaunchSpec {
   permissionMode?: string;
 }
 
-export interface AgentBackend {
+// Its capabilities (capabilities.ts): what its listing is called, whether it runs on a host,
+// whether a role's model applies to it, and which models it takes.
+export interface AgentBackend extends BackendCapabilities {
   readonly name: string;
 
   // Launch: the arguments of a background start, run by start() on the machine that runs the session.
@@ -66,7 +69,8 @@ export interface AgentBackend {
   deliver?(s: Session, text: string): void;
 
   // Settings and hooks: writes the session's settings file, hooks included, and returns its path.
-  installSettings(ws: Workspace, s: SessionSettings): string;
+  // Left out by a backend whose sessions take no settings file.
+  installSettings?(ws: Workspace, s: SessionSettings): string;
 
   // Transcripts and usage: the directory that holds every transcript, the one for a cwd's sessions,
   // and when a session last wrote its transcript (undefined when it is not found).

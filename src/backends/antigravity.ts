@@ -2,15 +2,16 @@
 // (agy-supervisor.ts) that start() runs detached, so the session outlives the `factory` command.
 // The listing is the supervisors' state files (agy-store.ts); a row is live while its supervisor
 // is. A message reaches a session as its next prompt, through its inbox (deliver).
-import { spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Session } from "../fleet.js";
-import { alive as pidAlive, killTree, startStamp } from "../stacks/process.js";
+import { claudeEnv, detachedScoped } from "../scope.js";
+import { logTail, alive as pidAlive, killTree, procStat, spawnDetached, startStamp } from "../stacks/process.js";
 import { die, sleep } from "../util.js";
 import type { AgentBackend, LaunchSpec } from "./backend.js";
-import { agyHome, allStates, type AgyState, enqueue, newId, projectDir, readState, sessionDir, transcriptsDir, validId, writeJson } from "./agy-store.js";
+import { allStates, type AgyState, enqueue, newId, projectDir, readState, sessionDir, transcriptsDir, validId, writeJson } from "./agy-store.js";
+import { CAPABILITIES } from "./capabilities.js";
 
 const SUPERVISOR = join(dirname(fileURLToPath(import.meta.url)), "agy-supervisor.js");
 
@@ -18,8 +19,9 @@ const SUPERVISOR = join(dirname(fileURLToPath(import.meta.url)), "agy-supervisor
 export const START_WAIT_MS = 60_000;
 
 // The supervisor's arguments. Settings, remote control, autocompact and permission mode have no
-// ACP counterpart: an agy session takes no Claude settings, its tools are put to the supervisor
-// (read-only.ts) whatever the mode, and `agy acp` takes no remote-control flag.
+// ACP counterpart: an agy session takes no Claude settings (the backend has no installSettings),
+// its tools are put to the supervisor (read-only.ts) whatever the mode, and `agy acp` takes no
+// remote-control flag. The model and effort are the agent's own (launch.ts roleOf).
 function launchArgs(spec: LaunchSpec): string[] {
   const args = ["--name", spec.name];
   for (const d of spec.addDirs) args.push("--add-dir", d);
@@ -35,23 +37,25 @@ function launchArgs(spec: LaunchSpec): string[] {
 // zombie. The `factory` command that started a supervisor is its parent until it exits.
 function zombie(pid: number): boolean {
   try {
-    return /^\d+ \(.*\) Z /s.test(readFileSync(`/proc/${pid}/stat`, "utf8"));
+    return procStat(pid)?.state === "Z";
   } catch {
     return false;
   }
 }
 
-// The supervisor is the process it recorded: alive, and with the stamp it had at its start, as
-// pids are reused.
-function supervisorUp(s: { pid?: unknown; stamp?: unknown }): boolean {
-  if (typeof s.pid !== "number" || !Number.isInteger(s.pid) || s.pid <= 0 || !pidAlive(s.pid) || zombie(s.pid)) return false;
-  if (typeof s.stamp !== "string") return true;
+// The process a pid and stamp were recorded for: alive, not a zombie, and with the stamp it had at
+// its start, as pids are reused.
+function up(pid: unknown, stamp: unknown): pid is number {
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || !pidAlive(pid) || zombie(pid)) return false;
+  if (typeof stamp !== "string") return true;
   try {
-    return startStamp(s.pid) === s.stamp;
+    return startStamp(pid) === stamp;
   } catch {
     return true;
   }
 }
+
+const supervisorUp = (s: { pid?: unknown; stamp?: unknown }): boolean => up(s.pid, s.stamp);
 
 export function sessionAlive(s: Session | null | undefined): s is Session {
   if (!s || s.kind !== "background" || s.backend !== "antigravity") return false;
@@ -88,39 +92,43 @@ export function startSupervisor(cwd: string, args: string[], env: NodeJS.Process
   const id = newId();
   const dir = sessionDir(id);
   mkdirSync(dir, { recursive: true });
-  const fd = openSync(join(dir, "supervisor.log"), "a");
-  try {
-    // detached makes it a session leader (setsid), so the caller's process group does not hold it
-    const child = spawn(process.execPath, [SUPERVISOR, "--id", id, ...args], { cwd, detached: true, stdio: ["ignore", fd, fd], env });
-    child.on("error", () => {});
-    if (child.pid === undefined) die(`cannot start the Antigravity supervisor in ${cwd}`);
-    child.unref();
-  } finally {
-    closeSync(fd);
-  }
-  // Up once the first prompt has gone; a failure says why.
+  const log = join(dir, "supervisor.log");
+  // In a scope of its own (scope.ts): unscoped it would stay in its caller's cgroup, a scheduler
+  // job's say, and die with it.
+  const [bin, argv] = detachedScoped(process.execPath, [SUPERVISOR, "--id", id, ...args]);
+  const pid = spawnDetached([bin, ...argv], { log, cwd, env: claudeEnv(env), what: "the Antigravity supervisor" });
+  const tail = () => {
+    const t = logTail(log);
+    return t ? `; its log ends:\n${t}` : "";
+  };
+  // Up once the first prompt has gone; a failure says why. A supervisor that dies before it says
+  // anything fails the start at once, not after the wait.
   for (const end = Date.now() + waitMs; Date.now() < end; sleep(200)) {
     const st = readState(id);
-    if (st?.state === "failed") die(`the Antigravity session did not start: ${st.error ?? "no reason given"} (log: ${join(dir, "supervisor.log")})`);
+    if (st?.state === "failed") die(`the Antigravity session did not start: ${st.error ?? "no reason given"} (log: ${log})`);
     if (st && st.state !== "starting") return id;
-    if (st && !supervisorUp(st)) die(`the Antigravity supervisor exited before its session started (log: ${join(dir, "supervisor.log")})`);
+    if (st ? !supervisorUp(st) : !up(pid, null)) die(`the Antigravity supervisor exited before its session started (log: ${log})${tail()}`);
   }
-  die(`the Antigravity session did not start within ${Math.round(waitMs / 1000)} s (log: ${join(dir, "supervisor.log")})`);
+  die(`the Antigravity session did not start within ${Math.round(waitMs / 1000)} s (log: ${log})${tail()}`);
 }
 
-// SIGTERM to the supervisor, which ends the session; whatever is left after the wait is killed.
+// SIGTERM to the supervisor, which ends the session; whatever is left after the wait is killed. The
+// agy it recorded is killed whether or not the supervisor is up: one whose supervisor crashed is
+// otherwise left running with nothing that records it once the directory goes.
 export function stopSession(id: string, remove: boolean): void {
   if (!validId(id)) die(`not an Antigravity session id: ${id}`);
   const st = readState(id);
-  if (st && supervisorUp(st)) {
-    try {
-      process.kill(st.pid, "SIGTERM");
-    } catch {
-      // gone already
+  if (st) {
+    if (supervisorUp(st)) {
+      try {
+        process.kill(st.pid, "SIGTERM");
+      } catch {
+        // gone already
+      }
+      for (const end = Date.now() + 15_000; Date.now() < end && supervisorUp(st); sleep(200));
+      if (supervisorUp(st)) killTree(st.pid, 2000);
     }
-    for (const end = Date.now() + 15_000; Date.now() < end && supervisorUp(st); sleep(200));
-    if (supervisorUp(st)) killTree(st.pid, 2000);
-    if (typeof st.agentPid === "number" && pidAlive(st.agentPid) && !zombie(st.agentPid)) killTree(st.agentPid, 2000);
+    if (up(st.agentPid, st.agentStamp)) killTree(st.agentPid, 2000);
     const after = readState(id);
     if (after && after.state !== "stopped" && after.state !== "failed")
       writeJson(join(sessionDir(id), "state.json"), { ...after, state: "stopped", status: "off", updatedAt: new Date().toISOString() });
@@ -137,6 +145,7 @@ export function deliver(s: Session, text: string): void {
 
 export const antigravityBackend: AgentBackend = {
   name: "antigravity",
+  ...CAPABILITIES.antigravity,
   launchArgs,
   start: (req, appendixPath) => startSupervisor(req.cwd, req.args(appendixPath), req.env, req.timeoutMs ? Math.min(req.timeoutMs, START_WAIT_MS) : START_WAIT_MS),
   stop: stopSession,
@@ -147,13 +156,6 @@ export const antigravityBackend: AgentBackend = {
   messageTool: null,
   deliver,
   logsHint: (id) => `the supervisor's log, ${join(sessionDir(id), "supervisor.log")}`,
-  // An agy session takes no Claude settings; the file records what the session was rendered with.
-  installSettings(ws, s) {
-    const path = join(ws.runDir, `agy-settings-${s.name}.json`);
-    mkdirSync(dirname(path), { recursive: true });
-    writeJson(path, { name: s.name, role: s.role, cwd: s.cwd ?? null, home: agyHome() });
-    return path;
-  },
   transcriptsDir,
   projectDir,
   transcriptAt,

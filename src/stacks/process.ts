@@ -152,21 +152,36 @@ export function stopDetached(pidFile: string): string {
   return `stopped ${pid} and its children`;
 }
 
-export function startDetached(cmd: string[], o: { pidFile: string; log: string; cwd?: string }): number {
+// Starts cmd detached, its stdout and stderr appended to log, and returns its pid: a session
+// leader (setsid), so no caller's process group holds it, and unref'd, so the caller can exit.
+export function spawnDetached(cmd: string[], o: { log: string; cwd?: string; env?: NodeJS.ProcessEnv; what?: string }): number {
   const [bin, ...rest] = cmd as [string, ...string[]];
   mkdirSync(dirname(o.log), { recursive: true });
-  mkdirSync(dirname(o.pidFile), { recursive: true });
   const fd = openSync(o.log, "a");
   try {
-    // detached makes the child a session leader (setsid), so no caller's process group holds it
-    const child = spawn(bin, rest, { cwd: o.cwd, detached: true, stdio: ["ignore", fd, fd], env: process.env });
+    const child = spawn(bin, rest, { cwd: o.cwd, detached: true, stdio: ["ignore", fd, fd], env: o.env ?? process.env });
     child.on("error", () => {});
-    if (child.pid === undefined) die(`cannot start ${bin}${o.cwd ? ` in ${o.cwd}` : ""}`);
+    if (child.pid === undefined) die(`cannot start ${o.what ?? bin}${o.cwd ? ` in ${o.cwd}` : ""}`);
     child.unref();
-    writeFileSync(o.pidFile, `${child.pid}\n`);
     return child.pid;
   } finally {
     closeSync(fd);
+  }
+}
+
+export function startDetached(cmd: string[], o: { pidFile: string; log: string; cwd?: string }): number {
+  mkdirSync(dirname(o.pidFile), { recursive: true });
+  const pid = spawnDetached(cmd, { log: o.log, ...(o.cwd ? { cwd: o.cwd } : {}) });
+  writeFileSync(o.pidFile, `${pid}\n`);
+  return pid;
+}
+
+// The last lines of a log, for an error that says a process it belongs to died; "" when unread.
+export function logTail(file: string, lines = 15): string {
+  try {
+    return readFileSync(file, "utf8").trimEnd().split("\n").slice(-lines).join("\n");
+  } catch {
+    return "";
   }
 }
 

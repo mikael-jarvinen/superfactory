@@ -54,8 +54,9 @@ export interface AgyState {
   // the supervisor's pid and its start stamp (stacks/process.ts), which tell it from a later process given the pid
   pid: number;
   stamp: string | null;
-  // agy's pid
+  // agy's pid and its start stamp
   agentPid: number | null;
+  agentStamp?: string | null;
   // the ACP session id, once session/new or session/load has answered
   sessionId: string | null;
   model: string | null;
@@ -63,8 +64,6 @@ export interface AgyState {
   startedAt: number;
   updatedAt: string;
   error?: string;
-  // the remote-control name the session is shown under, when it has one
-  remoteControl?: string | null;
 }
 
 // Written beside and renamed, so a reader never sees half of one.

@@ -8,17 +8,17 @@
 //
 // A recipient whose backend has no such tool, an Antigravity agent, is never reached by the send
 // itself: the hook puts the message in its session as the next prompt (AgentBackend.deliver) and
-// denies the tool call, saying it was delivered.
-import { appendFileSync, mkdirSync } from "node:fs";
+// denies the tool call, saying it was delivered. Only a session on the primary can do that, as the
+// recipient's inbox is there: a send to one from a host is refused at once, as it is unsupported.
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { HookResult } from "../settings.js";
 import { sleep } from "../util.js";
 import { defaultLogsDir } from "../config.js";
 import { iso, wakeHookLog } from "../failures.js";
-import { backendFor } from "../backends/index.js";
+import { backend, backendFor } from "../backends/index.js";
 import { lead } from "../fleet.js";
-import { roleOf } from "../launch.js";
-import type { Workspace } from "../workspace.js";
 import { local } from "../transport.js";
 import { WAKE_SETTLE_S, wake } from "../wake.js";
 import { openWorkspace, resolveWorkspace } from "../workspace.js";
@@ -42,10 +42,36 @@ const deny = (reason: string): HookResult => ({
   stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } }),
 });
 
-// The sender as the recipient is told it: the agent whose role cwd the sending session is in.
-function senderName(ws: Workspace, cwd: unknown): string {
-  const hit = typeof cwd === "string" ? ws.config.agents.find((a) => a.role !== "builder" && roleOf(ws, a).cwd === cwd) : undefined;
-  return hit ? hit.name : `a factory session in ${String(cwd ?? "?")}`;
+// The name the sending session runs under, from its own transcript: the last agent-name line
+// Claude wrote for it. undefined when the transcript cannot be read or names none.
+export function sessionName(transcript: unknown, sessionId: unknown, cwd: unknown): string | undefined {
+  const file = typeof transcript === "string" && transcript
+    ? transcript
+    : typeof sessionId === "string" && /^[\w-]+$/.test(sessionId) && typeof cwd === "string" ? join(backend("claude").projectDir(cwd), `${sessionId}.jsonl`) : undefined;
+  if (!file) return undefined;
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    return undefined;
+  }
+  let name: string | undefined;
+  for (const l of text.split("\n")) {
+    if (!l.includes('"agent-name"')) continue;
+    try {
+      const d = JSON.parse(l) as { type?: unknown; agentName?: unknown; sessionId?: unknown };
+      if (d.type === "agent-name" && typeof d.agentName === "string" && d.agentName && (d.sessionId === undefined || d.sessionId === sessionId)) name = d.agentName;
+    } catch {
+      // a line that is not JSON names no one
+    }
+  }
+  return name;
+}
+
+// The sender as the recipient is told it: the name the sending session itself runs under, which is
+// a fleet agent's for every session the factory starts; never a guess from where it runs.
+export function senderName(ev: { transcript_path?: unknown; session_id?: unknown; cwd?: unknown }): string {
+  return sessionName(ev.transcript_path, ev.session_id, ev.cwd) ?? `unknown (session ${String(ev.session_id ?? "?")})`;
 }
 
 // The hook's own error: the send goes, or after it the failure is left unexplained, and the error is
@@ -80,15 +106,15 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   let to: string | null = null;
   let failedSend = false;
   let text: string | null = null;
-  let senderCwd: unknown;
+  let from: { transcript_path?: unknown; session_id?: unknown; cwd?: unknown } = {};
   let event: HookEvent = "PreToolUse";
   let sender = `session ? in ?${fromHost ? ` on ${fromHost}` : ""}`;
   try {
-    const ev = JSON.parse(input) as { hook_event_name?: unknown; session_id?: unknown; cwd?: unknown; tool_input?: { to?: unknown; message?: unknown }; tool_response?: { success?: unknown; message?: unknown }; error?: unknown };
+    const ev = JSON.parse(input) as { hook_event_name?: unknown; session_id?: unknown; cwd?: unknown; transcript_path?: unknown; tool_input?: { to?: unknown; message?: unknown }; tool_response?: { success?: unknown; message?: unknown }; error?: unknown };
     sender = `session ${String(ev.session_id ?? "?")} in ${String(ev.cwd ?? "?")}${fromHost ? ` on ${fromHost}` : ""}`;
     to = recipient(ev.tool_input?.to);
     text = typeof ev.tool_input?.message === "string" ? ev.tool_input.message : null;
-    senderCwd = ev.cwd;
+    from = { transcript_path: ev.transcript_path, session_id: ev.session_id, cwd: ev.cwd };
     // Explained is only a send that failed as not reachable: a result with success false and that
     // message (PostToolUse, as recorded), or a tool error saying it (PostToolUseFailure, not seen,
     // assumed to say the same). Any other failure, a name two sessions share say, passes as it is.
@@ -112,6 +138,12 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   }
   const agent = ws.config.agents.find((a) => a.name === to);
   if (!agent) return { code: 0 };
+  const b = backendFor(agent);
+  // A recipient reached only through its inbox on the primary, which a host's session cannot write.
+  if (fromHost && b.deliver) {
+    if (failedSend) return { code: 0 };
+    return { code: 2, stderr: `${to} runs under ${b.name}, and an ${b.name} agent can only be messaged from a session on the primary, the machine that runs it, not from ${fromHost}. This is not supported in this phase; waking it or sending again will not change that.\n` };
+  }
   if (failedSend) {
     const ld = lead(ws).name;
     if (agent.host === fromHost || agent.name === ld) return { code: 0 };
@@ -128,13 +160,12 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   } catch (e) {
     return failOpen("PreToolUse", ws.logsDir, sender, to, e);
   }
-  const b = backendFor(agent);
   if (b.deliver && !failedSend) {
     if (w.is === "unknown") return deny(`${to}'s session could not be listed (${w.why}), so the message was not delivered. Try again shortly.`);
     if (w.is === "failed") return deny(`${to} is off and did not start: ${w.why.replace(/\.$/, "")}. The message was not delivered.`);
     if (!text) return deny(`the message to ${to} has no text, so nothing was delivered.`);
     try {
-      b.deliver(w.s, `Message from ${senderName(ws, senderCwd)}:\n\n${text}`);
+      b.deliver(w.s, `Message from ${senderName(from)}:\n\n${text}`);
     } catch (e) {
       return deny(`the message to ${to} was not delivered: ${(e as Error).message}`);
     }

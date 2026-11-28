@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { parse, TomlError } from "smol-toml";
+import { CAPABILITIES } from "./backends/capabilities.js";
 import { capitalize, FactoryError } from "./util.js";
 
 export const ROLES = ["lead", "builder", "reviewer", "assistant", "designer"] as const;
@@ -530,7 +531,12 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     if (group !== undefined && !group.trim()) r.bad("group", "must not be empty");
     if (group !== undefined && role === "lead") r.bad("group", "the lead has its own place on the board");
     // A host's daemon starts and lists claude sessions only.
-    if (host && backend !== "claude") r.bad("host", `${name} runs under ${backend}, which runs on this machine only, so it takes no host`);
+    // undefined for a backend that is not one, already reported
+    const caps = CAPABILITIES[backend] as (typeof CAPABILITIES)[BackendName] | undefined;
+    if (host && caps && !caps.onHosts) r.bad("host", `${name} runs under ${backend}, which runs on this machine only, so it takes no host`);
+    const model = r.str("model");
+    const notRun = model === undefined || !caps ? null : caps.modelProblem(model);
+    if (notRun) r.bad("model", `${name} runs under ${backend}: ${notRun}`);
     if (host && !hosts[host]) r.bad("host", `no host ${show(host)}; hosts: ${Object.keys(hosts).join(", ") || "none"}`);
     const workRepos = stack ? (stacks[stack]?.repos ?? []) : (agentRepos ?? []);
     // A builder runs where its worktrees are, and they are under its repos' checkouts.
@@ -559,7 +565,7 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
       backend,
       remoteControl: r.bool("remote_control") ?? false,
       cwd,
-      model: r.str("model"),
+      model,
       effort: r.str("effort"),
       permissionMode: r.str("permission_mode"),
       autocompact: r.str("autocompact"),
