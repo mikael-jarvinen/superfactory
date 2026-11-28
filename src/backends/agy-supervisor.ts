@@ -1,17 +1,12 @@
-// The supervisor of one Antigravity session. `agy acp` lives only as long as whoever holds its
-// pipes, so AntigravityBackend.start runs this detached, to outlive the `factory` command. It holds
-// the session in agy's "default" mode, allows only the calls the rules allow, and on any end kills
-// every process in its systemd scope, tools that left agy's session included. A message that never
-// reached agy stays in the inbox, named in state.json's undelivered. It runs in the session's cwd.
 import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, rmSync, watch } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { AcpError, AcpPeer, PROTOCOL_VERSION } from "./acp.js";
 import { agyBin, agySettingsFile, type AgyState, enqueue, FIRST_PROMPT, inbox, inboxDir, scopeUnit, sessionCgroup, sessionDir, transcriptFile, validId, writeJson } from "./agy-store.js";
-import { agyHookMissing, loadRules, PROJECT_ENV, type Rules, ruling, RULES_ENV } from "./agy-guard.js";
+import { agyHookMissing, HOOK_LOG_ENV, hookDecisions, loadRules, MCP_ENV, PROJECT_ENV, type Rules, ruling, RULES_ENV } from "./agy-guard.js";
 import { permissionOutcome, readOnly } from "./read-only.js";
-import { cgroupProcs, currentBoot, killAllAsync, killTreeAsync, ownCgroup, startStamp } from "../stacks/process.js";
+import { cgroupProcs, killAllAsync, killTreeAsync, ownCgroup, processStart } from "../stacks/process.js";
 
 export interface SupervisorSpec {
   id: string;
@@ -132,20 +127,22 @@ export function stricterKind(prev: CallSeen | undefined, now: unknown): unknown 
   return now;
 }
 
-// A failed call that agy stopped before it ran: denied by its PreToolUse hook (agy-guard.ts), or
-// dropped beside a call the supervisor denied, which agy reports failed with an empty output.
-export const neverRan = (output: unknown): boolean =>
-  (typeof output === "string" && output.startsWith("tool call denied")) ||
-  (!!output && typeof output === "object" && (output as { output?: unknown }).output === "");
+export const HOOK_DENIED = "tool call denied by pre-tool hook: superfactory: ";
+
+// Whether agy's own report says the call never started: it failed with the text agy gives a call
+// its PreToolUse hook denied, and `factory hook agy` logged a deny for that call's id. agy 1.5.19
+// reports such a call in_progress then failed, never pending.
+export const neverRan = (status: unknown, output: unknown, hookDeny: boolean): boolean =>
+  status === "failed" && hookDeny && typeof output === "string" && output.startsWith(HOOK_DENIED);
 
 // Why the session ends over a call, or null. One that is not read-only trips it by ending without
 // being asked, or completing after a denial; an allowed read-only call, by changing its kind.
 // Fails closed: a call with no kind is not read-only.
-export function tripped(c: CallSeen, status: unknown, kindChanged: boolean, output?: unknown): string | null {
+export function tripped(c: CallSeen, status: unknown, kindChanged: boolean, output?: unknown, hookDeny = false): string | null {
   if (readOnly(c.kind)) return null;
   if (c.allowed && kindChanged) return `changed its kind to ${String(c.kind)} after it was allowed as read-only`;
   if (status !== "completed" && status !== "failed") return null;
-  if (!c.asked && status === "failed" && neverRan(output)) return null;
+  if (!c.asked && neverRan(status, output, hookDeny)) return null;
   if (!c.asked) return `${status === "completed" ? "ran" : "ran and failed"} without asking`;
   if (!c.allowed && status === "completed") return "ran after it was denied";
   return null;
@@ -168,13 +165,14 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
   const dir = sessionDir(spec.id);
   mkdirSync(inboxDir(spec.id), { recursive: true });
   writeJson(join(dir, "spec.json"), spec);
+  const hookLog = join(dir, "hook.jsonl");
   // Every process agy starts stays in the scope's cgroup whatever its parent, group or session, so
   // that is what an end kills; without a scope, the supervisor's process group.
   const cg = ownCgroup();
   const cgroup = sessionCgroup(spec.id, cg) ? cg : null;
   const st: AgyState = {
     id: spec.id, name: spec.name, kind: "background", backend: "antigravity", state: "starting", status: "busy", cwd: spec.cwd,
-    pid: process.pid, stamp: startStamp(process.pid), boot: currentBoot(), cgroup, agentPid: null, sessionId: null, model: spec.model ?? null, transcript: null,
+    pid: process.pid, stamp: processStart(process.pid), cgroup, agentPid: null, sessionId: null, model: spec.model ?? null, transcript: null,
     startedAt: Date.now(), updatedAt: iso(),
   };
   const save = (patch: Partial<AgyState> = {}) => {
@@ -262,7 +260,7 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
   let rules: Rules | null = null;
   if (spec.settings) {
     try {
-      rules = loadRules(spec.settings);
+      rules = loadRules(spec.settings, spec.mcpConfig);
     } catch (e) {
       fail(`the session's settings ${spec.settings} cannot be read: ${(e as Error).message}`);
       return end;
@@ -277,7 +275,7 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
 
   const args = ["acp", "--log-file", join(dir, "agy.log"), ...spec.addDirs.flatMap((d) => ["--add-dir", d])];
   log(`starting ${agyBin()} ${args.join(" ")} in ${spec.cwd}`);
-  const env = rules ? { ...process.env, [RULES_ENV]: rules.file, [PROJECT_ENV]: spec.cwd } : process.env;
+  const env = rules ? { ...process.env, [RULES_ENV]: rules.file, [PROJECT_ENV]: spec.cwd, [HOOK_LOG_ENV]: hookLog, [MCP_ENV]: spec.mcpConfig ?? "" } : process.env;
   child = spawn(agyBin(), args, { cwd: spec.cwd, stdio: ["pipe", "pipe", "pipe"], env });
   child.on("error", (e) => fail(`agy could not start: ${e.message}`));
   child.stderr?.on("data", (d) => process.stdout.write(`agy: ${d}`));
@@ -286,7 +284,7 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
     if (stopping) finish({ state: "stopped" }, 0);
     else fail(`agy exited on its own (${sig ?? `code ${code}`})`);
   });
-  save({ agentPid: child.pid ?? null, agentStamp: child.pid === undefined ? null : startStamp(child.pid) });
+  save({ agentPid: child.pid ?? null, agentStamp: child.pid === undefined ? null : processStart(child.pid) });
 
   const acpLog = join(dir, "acp.jsonl");
   const peer = new AcpPeer(child.stdin!, child.stdout!, (d, line) => appendFileSync(acpLog, `{"at":"${iso()}","dir":"${d}","m":${line}}\n`));
@@ -331,7 +329,8 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
     const prev = calls.get(id);
     const c: CallSeen = { kind: stricterKind(prev, kind), asked: prev?.asked ?? false, allowed: prev?.allowed ?? false, ...(prev?.input ? { input: prev.input } : {}) };
     calls.set(id, c);
-    const why = tripped(c, status, prev !== undefined && c.kind !== prev.kind, output);
+    const hookDeny = status === "failed" && hookDecisions(hookLog).get(id)?.decision === "deny";
+    const why = tripped(c, status, prev !== undefined && c.kind !== prev.kind, output, hookDeny);
     if (why) fail(`agy's tool call ${id} (${String(c.kind ?? "no kind")}) is not read-only and ${why}; the session cannot be kept read-only`);
   };
 

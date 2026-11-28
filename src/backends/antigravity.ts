@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Session } from "../fleet.js";
 import { claudeEnv, detachedScoped } from "../scope.js";
-import { cgroupProcs, currentBoot, killAll, killTree, living, logTail, spawnDetached, startStamp } from "../stacks/process.js";
+import { cgroupProcs, currentBoot, isStartStamp, killAll, killTree, living, logTail, processStart, sameStart, spawnDetached } from "../stacks/process.js";
 import { die, sleep } from "../util.js";
 import type { AgentBackend, LaunchSpec } from "./backend.js";
 import { allStates, type AgyState, enqueue, inbox, newId, projectDir, readState, scopeUnit, sessionCgroup, sessionDir, transcriptsDir, validId, writeJson } from "./agy-store.js";
@@ -36,9 +36,9 @@ function launchArgs(spec: LaunchSpec): string[] {
 // is a supervisor's parent until it exits), and with the same start stamp, as pids are reused.
 function up(pid: unknown, stamp: unknown): pid is number {
   if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || !living(pid)) return false;
-  if (typeof stamp !== "string") return true;
+  if (!isStartStamp(stamp)) return true;
   try {
-    return startStamp(pid) === stamp;
+    return sameStart(stamp, processStart(pid));
   } catch {
     return true;
   }
@@ -104,13 +104,13 @@ export function startSupervisor(cwd: string, args: string[], env: NodeJS.Process
 // not given out again while a group of that number has a member left, so with no process at that
 // pid the group is still the session's, but only within the boot the supervisor started in.
 function notOurGroup(st: AgyState): string | null {
-  if (typeof st.stamp !== "string") return "has no start recorded";
+  if (!isStartStamp(st.stamp)) return "has no start recorded";
   const boot = currentBoot();
   if (!boot) return "cannot be told from another boot's on this platform";
-  if (st.boot !== boot && !st.stamp.startsWith(`${boot}:`)) return "is from another boot";
+  if (st.stamp.boot !== boot) return "is from another boot";
   try {
-    const now = startStamp(st.pid);
-    return now === null || now === st.stamp ? null : "is another process's now";
+    const now = processStart(st.pid);
+    return now === null || sameStart(st.stamp, now) ? null : "is another process's now";
   } catch {
     return "has a start that cannot be read";
   }

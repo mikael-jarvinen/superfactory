@@ -125,7 +125,7 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   const b = backendFor(agent);
   // A recipient whose inbox is on another machine than this host: only the primary reaches every
   // machine's daemon, so a host's session can write only its own machine's inboxes.
-  if (fromHost && b.deliver && (agent.host !== fromHost || !b.onHosts)) {
+  if (fromHost && b.deliver && agent.host !== fromHost) {
     if (failedSend) return { code: 0 };
     return { code: 2, stderr: `${to} runs under ${b.name} on ${agent.host ?? "the primary"}, and an ${b.name} agent can only be messaged from a session on the primary or on its own machine, not from ${fromHost}. Waking it or sending again will not change that; ask the lead to pass the message on.\n` };
   }
@@ -139,9 +139,10 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   const settle = !fromHost && agent.host ? settleS : 0;
   // Everything, the settle included, ends 5 s before the hook would be killed.
   const deadline = t0 + (timeoutS - 5 - settle) * 1000;
+  const t = fromHost ? localFor(agent.backend) : transportFor(ws, agent);
   let w;
   try {
-    w = wake(ws, agent, { waitS, deadline, ...(fromHost ? { t: localFor(agent.backend) } : {}) });
+    w = wake(ws, agent, { waitS, deadline, t });
   } catch (e) {
     return failOpen("PreToolUse", ws.logsDir, sender, to, e);
   }
@@ -151,7 +152,7 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
     if (!text) return deny(`the message to ${to} has no text, so nothing was delivered.`);
     try {
       const who = senderName(from);
-      (fromHost ? localFor(agent.backend) : transportFor(ws, agent)).deliver(to, w.s, `Message from ${who}:\n\n${text}`, who);
+      t.deliver(to, w.s, `Message from ${who}:\n\n${text}`, who);
     } catch (e) {
       return deny(`the message to ${to} was not delivered: ${(e as Error).message}`);
     }

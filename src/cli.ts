@@ -1176,7 +1176,7 @@ function cmdHook(argv: string[], workspace: string | undefined): number {
   const [name, ...rest] = argv;
   // agy's PreToolUse hook (agy-guard.ts), which agy runs, not a Claude session's settings
   const fn = name === "agy" ? agyHook : HOOK_FNS[name as HookName];
-  if (!fn) throw new UsageError(`hook: ${name ? `no hook ${pyRepr(name)}` : "which hook?"}; hooks are ${HOOKS.join(", ")}`);
+  if (!fn) throw new UsageError(`hook: ${name ? `no hook ${pyRepr(name)}` : "which hook?"}; hooks are ${[...HOOKS, "agy"].join(", ")}`);
   let input = "";
   try {
     input = readFileSync(0, "utf8");

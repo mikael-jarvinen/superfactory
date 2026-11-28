@@ -3,9 +3,6 @@
 // cgroup: unscoped, it and every session and build under it would share the caller's unit (the
 // scheduler's), which systemd-oomd kills whole. avoid is honoured only for the memory pressure
 // rule on user@.service, not for swap or /user.slice. There is no fallback to a bare exec.
-// The bus strings were seen with no user bus, in --scope mode: "Failed to connect to bus: …" from
-// systemd 249, "Failed to connect to user scope bus via local transport: …" from 259. A claude
-// systemd-run cannot find ("Failed to find executable …", exit 1) is that call's own failure.
 import { claudeBin } from "./claude-bin.js";
 import { procStat } from "./stacks/process.js";
 import { die, type RunResult } from "./util.js";

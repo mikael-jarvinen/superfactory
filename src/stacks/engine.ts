@@ -12,7 +12,7 @@ import type { Workspace } from "../workspace.js";
 import { die, now, pyDumps, realpathLoose, run, sleep } from "../util.js";
 import { git, HTTPS, registeredWorktrees, worktreePath } from "../worktree.js";
 import { callScript, failed, type Placement } from "./contract.js";
-import { alive, pidFromFile } from "./process.js";
+import { alive, pidFromFile, writePidFile } from "./process.js";
 
 // The program owns the slots. A slot is a number from 0 to stacks.<key>.slots; the registry in
 // state/stacks/<stack>.json says which worktree holds each repo's place in it. Everything a slot
@@ -72,7 +72,7 @@ function withLock<T>(ws: Workspace, stack: string, out: Out, fn: () => T): T {
   let told = false;
   for (const end = Date.now() + 15 * 60_000; ;) {
     try {
-      writeFileSync(p, `${process.pid}\n`, { flag: "wx" });
+      writePidFile(p, process.pid, "wx");
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
@@ -739,13 +739,13 @@ export function startBoot(ws: Workspace): string | null {
 }
 
 // The pid of another boot holding the lock, or null once this one holds it. pidFromFile ignores a
-// pid that the machine has given to a newer process, as it will after a reboot.
+// pid that the machine has given to a newer process since, as it will after a reboot.
 function holdBootLock(ws: Workspace): number | null {
   const p = bootLock(ws);
   mkdirSync(dirname(p), { recursive: true });
   for (;;) {
     try {
-      writeFileSync(p, `${process.pid}\n`, { flag: "wx" });
+      writePidFile(p, process.pid, "wx");
       return null;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;

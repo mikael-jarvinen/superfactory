@@ -28,6 +28,14 @@
 //   "mode <m>"   moves the session to mode m and says so with a config_option_update (or a
 //                current_mode_update under FAKE_AGY_LEGACY_MODES)
 //   "slow"       a turn that takes 1.5 s
+//   "hook-read <p>" agy's read_file {Path: p}, run without asking after agy's hooks
+//   "hook-run <cmd>" agy's run_command {CommandLine: cmd}, run without asking after agy's hooks
+//   "hook-mcp <tool> <json>" agy's mcp_<tool> with those arguments, put to the client after agy's
+//                hooks
+//   "silent-fail" agy's run_command, run without asking, that fails with an empty output
+// A hook-* call runs the PreToolUse hooks of agy's hooks file (SF_AGY_HOOKS) first, as agy 1.5.19
+// does: each command with the event on stdin, and a deny fails the call in_progress, unasked, with
+// "tool call denied by pre-tool hook: <reason>".
 //   anything     answered "echo: <text>"
 // FAKE_AGY_LOG names a file each request it gets is appended to, as JSON lines, after a first
 // {env} line with the supervisor's SF_AGY_RULES and SF_AGY_PROJECT. FAKE_AGY_AUTH=0
@@ -38,8 +46,8 @@
 // once stdin closes, as an agy that ignores it would. Under the scope test's systemd-run
 // (SF_CGROUP_SELF and SF_CGROUP_ROOT set), it writes its own pid and each tool's to the scope's
 // cgroup.procs, as the kernel would put every process it starts in its cgroup.
-import { spawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { appendFileSync, readFileSync } from "node:fs";
 
 const logFile = process.env.FAKE_AGY_LOG;
 const record = (m: unknown) => logFile && appendFileSync(logFile, JSON.stringify(m) + "\n");
@@ -67,9 +75,37 @@ const OPTIONS = [
 ];
 let calls = 0;
 
-async function tool(sessionId: string, kind: string, title: string, asked = true, ends: "completed" | "failed" = "completed", turnsInto?: string, named?: { name: string; rawInput: unknown }): Promise<boolean> {
+// The reason the first hook that denies gives, or null.
+function hooks(toolCallId: string, name: string, args: unknown): string | null {
+  let file: Record<string, any> = {};
+  try {
+    file = JSON.parse(readFileSync(process.env.SF_AGY_HOOKS ?? "", "utf8"));
+  } catch {
+    return null;
+  }
+  const ev = JSON.stringify({ toolCall: { id: toolCallId, name, args }, cwd: process.cwd(), hookEventName: "PreToolUse", stepIdx: calls, conversationId: "fake" });
+  for (const e of Object.values(file))
+    for (const g of e?.enabled === false ? [] : (e?.PreToolUse ?? []))
+      for (const h of g.matcher === "*" ? (g.hooks ?? []) : []) {
+        const r = spawnSync("sh", ["-c", h.command], { input: ev, encoding: "utf8" });
+        record({ hook: { name, status: r.status, stdout: r.stdout } });
+        try {
+          const out = JSON.parse(r.stdout || "{}");
+          if (out.decision === "deny") return String(out.reason);
+        } catch {}
+      }
+  return null;
+}
+
+async function tool(sessionId: string, kind: string, title: string, asked = true, ends: "completed" | "failed" = "completed", turnsInto?: string, named?: { name: string; rawInput: unknown; hooked?: boolean }): Promise<boolean> {
   const toolCallId = `call-${++calls}`;
-  update(sessionId, { sessionUpdate: "tool_call", toolCallId, title, kind, status: "in_progress", ...(named ?? { rawInput: { title } }) });
+  update(sessionId, { sessionUpdate: "tool_call", toolCallId, title, kind, status: "in_progress", ...(named ? { name: named.name, rawInput: named.rawInput } : { rawInput: { title } }) });
+  const denied = named?.hooked ? hooks(toolCallId, named.name, named.rawInput) : null;
+  if (denied !== null) {
+    const out = `tool call denied by pre-tool hook: ${denied}`;
+    update(sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: "failed", rawOutput: out, content: [{ type: "content", content: { type: "text", text: out } }] });
+    return false;
+  }
   if (!asked) {
     update(sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: "in_progress" });
     update(sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: ends, rawOutput: ends === "failed" ? "exit 1" : "done" });
@@ -158,6 +194,20 @@ async function prompt(p: any): Promise<unknown> {
     if (legacy) update(sid, { sessionUpdate: "current_mode_update", currentModeId: mode });
     else update(sid, { sessionUpdate: "config_option_update", configOptions: config() });
     say(sid, `mode ${mode}`);
+  }
+  else if (last.startsWith("hook-read ")) {
+    const Path = last.slice(10);
+    say(sid, (await tool(sid, "read", `File ${Path}`, false, "completed", undefined, { name: "read_file", rawInput: { Path }, hooked: true })) ? "hook-read ok" : "hook-read denied");
+  } else if (last.startsWith("hook-run ")) {
+    const CommandLine = last.slice(9);
+    say(sid, (await tool(sid, "execute", CommandLine, false, "completed", undefined, { name: "run_command", rawInput: { CommandLine }, hooked: true })) ? "hook-run ran" : "hook-run denied");
+  } else if (last.startsWith("hook-mcp ")) {
+    const [, t, json] = /^hook-mcp (\S+) (.*)$/.exec(last) ?? [];
+    say(sid, (await tool(sid, "other", `Run mcp_${t}`, true, "completed", undefined, { name: `mcp_${t}`, rawInput: JSON.parse(json ?? "{}"), hooked: true })) ? "hook-mcp ok" : "hook-mcp denied");
+  } else if (last === "silent-fail") {
+    const toolCallId = `call-${++calls}`;
+    update(sid, { sessionUpdate: "tool_call", toolCallId, title: "false", kind: "execute", status: "in_progress", name: "run_command", rawInput: { CommandLine: "false" } });
+    update(sid, { sessionUpdate: "tool_call_update", toolCallId, status: "failed", rawOutput: { output: "" } });
   }
   else if (last === "slow") await new Promise((r) => setTimeout(r, 1500));
   else say(sid, `echo: ${last}`);

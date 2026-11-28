@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { killTree, living, procStat, spawnDetached, stopDetached } from "../src/stacks/process.js";
+import { killTree, living, procStat, spawnDetached, stopDetached, writePidFile } from "../src/stacks/process.js";
 import { until } from "./helpers.js";
 
 // A leader (its own session and group) whose child starts a grandchild in a group of its own that
@@ -48,7 +48,7 @@ test("stopDetached kills it too", { skip: process.platform !== "linux" }, async 
   const { leader, grandchild } = await stubbornGrandchild(dir);
   try {
     const pidFile = join(dir, "server.pid");
-    writeFileSync(pidFile, String(leader));
+    writePidFile(pidFile, leader);
     assert.equal(stopDetached(pidFile, 1000), `stopped ${leader} and its children`);
     assert.equal(living(grandchild), false, "the reparented grandchild outlived stopDetached");
   } finally {

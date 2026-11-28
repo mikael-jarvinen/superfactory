@@ -53,7 +53,6 @@ export interface AgentBackend extends BackendCapabilities {
   readonly messageTool: string | null;
   deliver?(s: Session, text: string, from?: string): void;
 
-  // Writes the session's settings file, hooks included, and returns its path.
   installSettings?(ws: Workspace, s: SessionSettings): string;
 
   // transcriptAt: when a session last wrote its transcript.

@@ -15,7 +15,7 @@ import { permissionOutcome, READ_ONLY_KINDS, readOnly } from "../src/backends/re
 import { ConfigError, loadConfig } from "../src/config.js";
 import { hook, senderName } from "../src/hooks/wake.js";
 import { launchSpec } from "../src/launch.js";
-import { procStat } from "../src/stacks/process.js";
+import { currentBoot, procStat } from "../src/stacks/process.js";
 import { openWorkspace } from "../src/workspace.js";
 import { TOML, tempWorkspace, until } from "./helpers.js";
 
@@ -552,9 +552,9 @@ function stopSaying(id: string): string {
   return said.join("");
 }
 
-function staleState(id: string, name: string, pid: number, stamp: string, boot?: string): void {
+function staleState(id: string, name: string, pid: number, stamp: unknown): void {
   mkdirSync(sessionDir(id), { recursive: true });
-  const st = { id, name, kind: "background", backend: "antigravity", state: "done", status: "idle", cwd: root, pid, stamp, ...(boot ? { boot } : {}), cgroup: null, agentPid: null, sessionId: null, model: null, transcript: null, startedAt: 0, updatedAt: "" };
+  const st = { id, name, kind: "background", backend: "antigravity", state: "done", status: "idle", cwd: root, pid, stamp, cgroup: null, agentPid: null, sessionId: null, model: null, transcript: null, startedAt: 0, updatedAt: "" };
   writeFileSync(join(sessionDir(id), "state.json"), JSON.stringify(st));
 }
 
@@ -590,14 +590,12 @@ test("with no scope, a stale state from another boot never has its supervisor's 
   const [pgid, member] = await leaderless();
   try {
     assert.equal(procStat(member)?.pgid, pgid);
-    staleState("agy-0123456789ab", "stale", pgid, "another-boot:1");
+    staleState("agy-0123456789ab", "stale", pgid, { boot: "another-boot", start: "1" });
     assert.match(stopSaying("agy-0123456789ab"), /stale: no scope recorded, and the supervisor's pid \d+ is from another boot, so its process group is not killed/);
     assert.equal(gone(member), false, "an unrelated group was killed");
-    // off Linux the boot is recorded beside the stamp, which holds none
-    await withBoot("boot-b", async () => {
-      staleState("agy-0123456789ae", "stale-mac", pgid, "Sat Nov 28 10:00:00 2026", "boot-a");
-      assert.match(stopSaying("agy-0123456789ae"), /stale-mac: no scope recorded, and the supervisor's pid \d+ is from another boot/);
-    });
+    // a stamp in the older string form is no start recorded
+    staleState("agy-0123456789ae", "stale-old", pgid, `${currentBoot()}:1`);
+    assert.match(stopSaying("agy-0123456789ae"), /stale-old: no scope recorded, and the supervisor's pid \d+ has no start recorded/);
     assert.equal(gone(member), false, "an unrelated group was killed");
   } finally {
     kill9([member]);
@@ -607,7 +605,7 @@ test("with no scope, a stale state from another boot never has its supervisor's 
 test("with no scope and no boot id, the supervisor's group is never killed", { skip: process.platform !== "linux" }, () => withBoot("", async () => {
   const [pgid, member] = await leaderless();
   try {
-    staleState("agy-0123456789af", "bootless", pgid, "Sat Nov 28 10:00:00 2026");
+    staleState("agy-0123456789af", "bootless", pgid, { boot: null, start: "Sat Nov 28 10:00:00 2026" });
     assert.match(stopSaying("agy-0123456789af"), /bootless: no scope recorded, and the supervisor's pid \d+ cannot be told from another boot's on this platform/);
     assert.equal(gone(member), false, "an unrelated group was killed");
   } finally {
@@ -622,11 +620,10 @@ test("with no scope, in the boot the supervisor recorded, the stamp match decide
   await until("the second group", () => existsSync(join(root, "up.pids")) && readFileSync(join(root, "up.pids"), "utf8").trim().split(/\s+/).length === 2);
   const [upPid, member] = readFileSync(join(root, "up.pids"), "utf8").trim().split(/\s+/).map(Number) as [number, number];
   try {
-    // macOS's shape: the boot beside a stamp that holds none
-    staleState("agy-0123456789ac", "orphaned", gonePid, "Sat Nov 28 10:00:00 2026", "boot-b");
+    staleState("agy-0123456789ac", "orphaned", gonePid, { boot: "boot-b", start: "Sat Nov 28 10:00:00 2026" });
     assert.equal(stopSaying("agy-0123456789ac"), "", "nothing to say when the group is the session's");
     await until("the left tool killed", () => gone(orphan));
-    staleState("agy-0123456789ad", "reused", upPid, "Sat Nov 28 10:00:00 2026", "boot-b");
+    staleState("agy-0123456789ad", "reused", upPid, { boot: "boot-b", start: "1" });
     assert.match(stopSaying("agy-0123456789ad"), /reused: no scope recorded, and the supervisor's pid \d+ is another process's now, so its process group is not killed/);
     assert.equal(gone(member), false, "an unrelated group was killed");
     assert.equal(gone(upPid), false, "an unrelated process was killed");
@@ -877,10 +874,38 @@ test("a session whose rules cannot be read, or whose agy would skip the hook, do
   }
 });
 
-test("a call agy's hook denied never ran, so it is no tripwire", () => {
-  // the denied call, and a sibling agy fails with empty output after it
-  assert.equal(tripped({ kind: "execute", asked: false, allowed: false }, "failed", false, "tool call denied by pre-tool hook: superfactory: no"), null);
-  assert.equal(tripped({ kind: "execute", asked: false, allowed: false }, "failed", false, { output: "" }), null);
-  assert.notEqual(tripped({ kind: "execute", asked: false, allowed: false }, "failed", false, "exit 1"), null);
-  assert.notEqual(tripped({ kind: "execute", asked: false, allowed: false }, "completed", false, "tool call denied by pre-tool hook: x"), null);
+test("a call agy's hook denied never ran only when the hook logged that deny, whatever its output", () => {
+  const c = { kind: "execute", asked: false, allowed: false };
+  const denial = "tool call denied by pre-tool hook: superfactory: no";
+  assert.equal(tripped(c, "failed", false, denial, true), null);
+  // the same text with no deny in the hook's log, or another hook's, or a deny the call outlived
+  assert.match(tripped(c, "failed", false, denial, false)!, /ran and failed without asking/);
+  assert.notEqual(tripped(c, "failed", false, "tool call denied by pre-tool hook: other", true), null);
+  assert.notEqual(tripped(c, "completed", false, denial, true), null);
+  // a failure with an empty output is a failure, not a call that never started
+  assert.match(tripped(c, "failed", false, { output: "" }, false)!, /ran and failed without asking/);
+  assert.notEqual(tripped(c, "failed", false, "exit 1", false), null);
+});
+
+test("agy's hook, as a launch installs it, refuses before the call, logs it, and the supervisor holds to its log", async () => {
+  const settings = builderSettings();
+  const id = start("hooked", "hook-read .env", ["--settings", settings]);
+  await until("the first turn to end", () => readState(id)?.state === "done");
+  const row = () => listSessions().find((s) => s.id === id)!;
+  antigravityBackend.deliver!(row(), "hook-run git push origin main");
+  antigravityBackend.deliver!(row(), "hook-read README.md");
+  antigravityBackend.deliver!(row(), `hook-mcp echo_add_issue_comment {"body":"hi","issue":1,"toolSummary":"x"}`);
+  await until("the messages to be answered", () => transcript(id).filter((l) => l.type === "turn-end").length === 4);
+  const said = transcript(id).filter((l) => l.type === "assistant" && l.message.content[0].type === "text").map((l) => l.message.content[0].text);
+  assert.deepEqual(said, ["hook-read denied", "hook-run denied", "hook-read ok", "hook-mcp denied"]);
+  const log = readFileSync(join(sessionDir(id), "hook.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(log.map((d) => [d.name, d.decision]), [["read_file", "deny"], ["run_command", "deny"], ["read_file", "pass"], ["mcp_echo_add_issue_comment", "deny"]]);
+  assert.match(log[0].reason, /^guard\[builder\]: refused\. \.env holds secrets/);
+  assert.match(log[1].reason, /pushing to a protected branch \(main\)/);
+  assert.match(log[3].reason, /not a tool of an MCP server this role is given: it is given none/);
+  assert.equal(transcript(id).filter((l) => l.type === "permission").length, 0, "nothing the hook denied was put to the supervisor");
+  assert.equal(readState(id)!.state, "done", "a call the hook denied is no tripwire");
+  antigravityBackend.deliver!(row(), "silent-fail");
+  await until("the session to fail", () => readState(id)?.state === "failed");
+  assert.match(readState(id)!.error!, /\(execute\) is not read-only and ran and failed without asking/);
 });

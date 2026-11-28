@@ -530,7 +530,6 @@ export function validate(doc: Table, file: string, env: NodeJS.ProcessEnv = proc
     const group = r.str("group");
     if (group !== undefined && !group.trim()) r.bad("group", "must not be empty");
     if (group !== undefined && role === "lead") r.bad("group", "the lead has its own place on the board");
-    // A host's daemon starts and lists claude sessions only.
     // undefined for a backend that is not one, already reported
     const caps = CAPABILITIES[backend] as (typeof CAPABILITIES)[BackendName] | undefined;
     if (host && caps && !caps.onHosts) r.bad("host", `${name} runs under ${backend}, which runs on this machine only, so it takes no host`);

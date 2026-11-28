@@ -59,21 +59,29 @@ export function alive(pid: number): boolean {
   }
 }
 
-// The pid a pid file names, while it is still the process the file was written for: one started
-// after the file is someone else's, given the reused number.
+// The pid a pid file names, while it is still the process the file was written for (writePidFile):
+// its start stamp must be the one recorded, so a reused pid, or a file with no stamp, is no one's.
 export function pidFromFile(file: string): number | null {
-  let text: string;
+  let lines: string[];
   try {
-    text = readFileSync(file, "utf8");
+    lines = readFileSync(file, "utf8").split("\n");
   } catch {
     return null;
   }
-  const pid = Number.parseInt(text.trim(), 10);
+  const pid = Number.parseInt(lines[0] ?? "", 10);
   if (!Number.isInteger(pid) || pid <= 1) return null;
-  const r = run("ps", ["-o", "etime=", "-p", String(pid)]);
-  if (r.status !== 0 || !r.stdout.trim()) return null;
-  // etime counts whole seconds, so allow the rounding
-  return Date.now() - seconds(r.stdout.trim()) * 1000 <= statSync(file).mtimeMs + 2000 ? pid : null;
+  let recorded: unknown;
+  try {
+    recorded = JSON.parse(lines[1] ?? "");
+  } catch {
+    return null;
+  }
+  return sameStart(recorded, processStart(pid)) ? pid : null;
+}
+
+// A pid file: the pid, then its start stamp. With flag "wx", only if there is none.
+export function writePidFile(file: string, pid: number, flag = "w"): void {
+  writeFileSync(file, `${pid}\n${JSON.stringify(processStart(pid))}\n`, { flag });
 }
 
 export interface ProcStat {
@@ -111,13 +119,18 @@ export function signalAll(pids: Iterable<number>, sig: NodeJS.Signals): void {
   }
 }
 
-// What tells a process from a later one given its pid: on Linux the boot and start tick, elsewhere
-// ps's start time. Neither moves when the wall clock is stepped.
-export function startStamp(pid: number): string | null {
+// What tells a process from a later one given its pid: the boot (currentBoot) and, on Linux, the
+// start tick, elsewhere ps's start time. Neither moves when the wall clock is stepped.
+export interface StartStamp {
+  boot: string | null;
+  start: string;
+}
+
+export function processStart(pid: number): StartStamp | null {
+  const boot = currentBoot();
   if (process.platform === "linux") {
     const st = procStat(pid);
-    if (!st) return null;
-    return `${currentBoot()}:${st.ticks}`;
+    return st ? { boot, start: st.ticks } : null;
   }
   // lstart is printed in local time and the locale's words: pin both, or a TZ change restamps it
   const r = run("ps", ["-o", "lstart=", "-p", String(pid)], { env: psEnv() });
@@ -125,7 +138,19 @@ export function startStamp(pid: number): string | null {
     if (!r.stdout.trim() && !r.stderr.trim()) return null; // no such process
     die(`ps failed: ${r.stderr.trim()}`);
   }
-  return r.stdout.trim() || null;
+  return r.stdout.trim() ? { boot, start: r.stdout.trim() } : null;
+}
+
+export const isStartStamp = (v: unknown): v is StartStamp =>
+  !!v && typeof v === "object" && typeof (v as StartStamp).start === "string" && ((v as StartStamp).boot === null || typeof (v as StartStamp).boot === "string");
+
+export const sameStart = (a: unknown, b: StartStamp | null): boolean => isStartStamp(a) && b !== null && a.boot === b.boot && a.start === b.start;
+
+// processStart as one string, as the scheduler's state files keep it.
+export function startStamp(pid: number): string | null {
+  const s = processStart(pid);
+  if (!s) return null;
+  return process.platform === "linux" ? `${s.boot}:${s.start}` : s.start;
 }
 
 // Alive and not a zombie, which still answers kill(pid, 0) but no signal can end further.
@@ -275,7 +300,7 @@ export function spawnDetached(cmd: string[], o: { log: string; cwd?: string; env
 export function startDetached(cmd: string[], o: { pidFile: string; log: string; cwd?: string }): number {
   mkdirSync(dirname(o.pidFile), { recursive: true });
   const pid = spawnDetached(cmd, { log: o.log, ...(o.cwd ? { cwd: o.cwd } : {}) });
-  writeFileSync(o.pidFile, `${pid}\n`);
+  writePidFile(o.pidFile, pid);
   return pid;
 }
 

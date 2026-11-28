@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFile
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import type { StartStamp } from "../stacks/process.js";
 
 export const agyHome = () =>
   process.env.SF_AGY_HOME || join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "superfactory", "antigravity");
@@ -46,12 +47,11 @@ export interface AgyState {
   cwd: string;
   // the supervisor's pid and its start stamp (stacks/process.ts), which tell it from a later process given the pid
   pid: number;
-  stamp: string | null;
-  boot?: string | null;
+  stamp: StartStamp | null;
   // the scope's cgroup (scopeUnit), which holds agy and every process it starts; null for no scope
   cgroup?: string | null;
   agentPid: number | null;
-  agentStamp?: string | null;
+  agentStamp?: StartStamp | null;
   sessionId: string | null;
   model: string | null;
   transcript: string | null;
