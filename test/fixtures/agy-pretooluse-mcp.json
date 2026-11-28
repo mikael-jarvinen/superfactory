@@ -1,0 +1,22 @@
+{
+ "artifactDirectoryPath": "/home/turing/.gemini/antigravity-cli/brain/816f2d77-7bde-490a-bf6c-bca55fd52e92",
+ "conversationId": "816f2d77-7bde-490a-bf6c-bca55fd52e92",
+ "cwd": "/home/turing/work/winston/sf-agy3-live/probe/scratch2/repo",
+ "hookEventName": "PreToolUse",
+ "lastUserInput": "Call the add_issue_comment tool of the MCP server named echo with issue 1 and body hi. One call only; if refused, reply REFUSED.",
+ "modelName": "gemini-4-neon-high",
+ "stepIdx": 17,
+ "toolCall": {
+  "args": {
+   "body": "hi",
+   "issue": 1,
+   "toolSummary": "Add issue comment"
+  },
+  "id": "call_2749845466821000364",
+  "name": "mcp_echo_add_issue_comment"
+ },
+ "transcriptPath": "/home/turing/.gemini/antigravity-cli/brain/816f2d77-7bde-490a-bf6c-bca55fd52e92/.system_generated/logs/transcript_full.jsonl",
+ "workspacePaths": [
+  "/home/turing/work/winston/sf-agy3-live/probe/scratch2/repo"
+ ]
+}

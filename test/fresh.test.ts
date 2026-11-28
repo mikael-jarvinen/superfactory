@@ -37,6 +37,7 @@ function fake(sessions: Session[]) {
       assert.equal(remove, true);
       stopped.push(id);
     },
+    deliver: () => assert.fail("not used"),
     worktree: () => assert.fail("not used"),
     worktreeLeft: () => assert.fail("not used"),
     removeWorktree: () => assert.fail("not used"),

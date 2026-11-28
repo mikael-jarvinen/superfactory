@@ -46,6 +46,8 @@ mkdirSync(join(fakeClaude, "sockets", "d1"), { recursive: true });
 writeFileSync(join(fakeClaude, "sockets", "d1", "control.sock"), "");
 process.env.CLAUDE_CONFIG_DIR = join(fakeClaude, "config");
 process.env.SF_CC_DAEMON_DIR = join(fakeClaude, "sockets");
+// agy's global hooks file, which an antigravity launch writes (backends/agy-guard.ts)
+process.env.SF_AGY_HOOKS = join(fakeClaude, "agy-hooks.json");
 process.on("exit", () => rmSync(fakeClaude, { recursive: true, force: true }));
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

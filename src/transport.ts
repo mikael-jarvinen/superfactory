@@ -63,6 +63,9 @@ export interface Transport {
   // The launch id the backend's CLI printed, or "?".
   start(req: StartRequest): string;
   stop(name: string, id: string, remove: boolean): void;
+  // Puts a message into a live session of a backend that has deliver (AgentBackend.deliver), on
+  // the machine the session runs on.
+  deliver(name: string, s: Session, text: string, from: string): void;
   // The worktree for the item, made or reused (worktree.ts's ensureWorktree); throws when it cannot.
   worktree(q: WorktreeRequest): { wt: string; how: string };
   worktreeLeft(q: WorktreeRequest): WorktreeLeft;
@@ -92,6 +95,11 @@ const localTransport = (name: BackendName): Transport => ({
     return backend(name).start(req, req.appendix ? appendixFile(req.runDir, req.agent.name, req.appendix) : null);
   },
   stop: (_name, id, remove) => backend(name).stop(id, remove),
+  deliver(_name, s, text, from) {
+    const b = backend(name);
+    if (!b.deliver) throw new Error(`${b.name} sessions take no delivered message`);
+    b.deliver(s, text, from);
+  },
   worktree(q) {
     return ensureWorktree(q.repo.path, q.ticket, q.repo.base, q.repo.gitOver);
   },

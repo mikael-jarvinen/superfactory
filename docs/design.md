@@ -43,7 +43,10 @@ src/
                   daemon internals behind one function), antigravity.ts (Google Antigravity's
                   `agy acp`, each session held by a detached supervisor, agy-supervisor.ts, that
                   speaks ACP to it; agy-store.ts is where sessions and transcripts live, acp.ts
-                  the JSON-RPC peer, read-only.ts the tool kinds a session is allowed),
+                  the JSON-RPC peer, agy-guard.ts the role's deny rules and safety hooks
+                  applied to agy's calls, by the supervisor for a call that asks and by agy's
+                  own PreToolUse hook, `factory hook agy`, for every call, read-only.ts the ACP
+                  tool kinds that only read and the answer to a permission request),
                   capabilities.ts (what each backend can do, as data config.ts checks
                   an agent against), index.ts (backendFor, by `backend`)
   claude-bin.ts   which claude binary to run
@@ -64,7 +67,8 @@ src/
   tracker/        jira.ts (driven by config), none.ts
   watchers/       queue.ts, round.ts, relay.ts; prompts come from the workspace
   scheduler/      launchd.ts, rendering jobs from config
-  hooks/          guard.ts, status.ts, no-dialogs.ts, no-side-channels.ts, marked-comments.ts, run as `factory hook <name>`
+  hooks/          guard.ts, status.ts, no-dialogs.ts, no-side-channels.ts, marked-comments.ts, run as `factory hook <name>`;
+                  `factory hook agy` is agy's, in backends/agy-guard.ts
   doctor.ts       checks derived from config, plus each stack's own `doctor` verb
 templates/        role settings, launch prompts, the demo camera and Playwright config
 test/             node:test suites

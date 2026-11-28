@@ -1,29 +1,28 @@
-// Google Antigravity: each session is an `agy acp` process, owned by a supervisor of its own
-// (agy-supervisor.ts) that start() runs detached, so the session outlives the `factory` command.
-// The listing is the supervisors' state files (agy-store.ts); a row is live while its supervisor
-// is. A message reaches a session as its next prompt, through its inbox (deliver).
+// Google Antigravity: each session is an `agy acp` process owned by a detached supervisor
+// (agy-supervisor.ts); a row is live while its supervisor is.
 import { appendFileSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Session } from "../fleet.js";
 import { claudeEnv, detachedScoped } from "../scope.js";
-import { cgroupProcs, currentBoot, killAll, killTree, living, logTail, spawnDetached, startStamp } from "../stacks/process.js";
+import { cgroupProcs, currentBoot, isStartStamp, killAll, killTree, living, logTail, processStart, sameStart, spawnDetached } from "../stacks/process.js";
 import { die, sleep } from "../util.js";
 import type { AgentBackend, LaunchSpec } from "./backend.js";
 import { allStates, type AgyState, enqueue, inbox, newId, projectDir, readState, scopeUnit, sessionCgroup, sessionDir, transcriptsDir, validId, writeJson } from "./agy-store.js";
 import { CAPABILITIES } from "./capabilities.js";
+import { renderSettings } from "../settings.js";
+import { ensureAgyHook } from "./agy-guard.js";
 
 const SUPERVISOR = join(dirname(fileURLToPath(import.meta.url)), "agy-supervisor.js");
 
 // How long a start waits for its supervisor to send the first prompt, or to fail.
 export const START_WAIT_MS = 60_000;
 
-// The supervisor's arguments. Settings, remote control, autocompact and permission mode have no
-// ACP counterpart: an agy session takes no Claude settings (the backend has no installSettings),
-// its tools are put to the supervisor (read-only.ts) whatever the mode, and `agy acp` takes no
-// remote-control flag. The model and effort are the agent's own (launch.ts roleOf).
+// Remote control, autocompact and permission mode have no ACP counterpart: every call is put to
+// the supervisor whatever the mode, and `agy acp` takes no remote-control flag.
 function launchArgs(spec: LaunchSpec): string[] {
   const args = ["--name", spec.name];
+  if (spec.settings) args.push("--settings", spec.settings);
   for (const d of spec.addDirs) args.push("--add-dir", d);
   if (spec.model) args.push("--model", spec.model);
   if (spec.effort) args.push("--effort", spec.effort);
@@ -33,14 +32,13 @@ function launchArgs(spec: LaunchSpec): string[] {
   return args;
 }
 
-// The process a pid and stamp were recorded for: alive, not a zombie (living: the `factory` command
-// that started a supervisor is its parent until it exits), and with the stamp it had at its start,
-// as pids are reused.
+// Whether the process a pid and stamp were recorded for is up: not a zombie (the `factory` command
+// is a supervisor's parent until it exits), and with the same start stamp, as pids are reused.
 function up(pid: unknown, stamp: unknown): pid is number {
   if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || !living(pid)) return false;
-  if (typeof stamp !== "string") return true;
+  if (!isStartStamp(stamp)) return true;
   try {
-    return startStamp(pid) === stamp;
+    return sameStart(stamp, processStart(pid));
   } catch {
     return true;
   }
@@ -84,17 +82,15 @@ export function startSupervisor(cwd: string, args: string[], env: NodeJS.Process
   const dir = sessionDir(id);
   mkdirSync(dir, { recursive: true });
   const log = join(dir, "supervisor.log");
-  // In a scope of its own (scope.ts), named for the session: unscoped it would stay in its caller's
-  // cgroup, a scheduler job's say, and die with it; and the scope is what ends the session's every
-  // process, agy's tools included, at its end or its stop.
+  // A scope of its own: unscoped it would stay in its caller's cgroup, a scheduler job's say, and
+  // die with it; and the scope is what ends every process of the session, agy's tools included.
   const [bin, argv] = detachedScoped(process.execPath, [SUPERVISOR, "--id", id, ...args], process.platform, scopeUnit(id));
   const pid = spawnDetached([bin, ...argv], { log, cwd, env: claudeEnv(env), what: "the Antigravity supervisor" });
   const tail = () => {
     const t = logTail(log);
     return t ? `; its log ends:\n${t}` : "";
   };
-  // Up once the first prompt has gone; a failure says why. A supervisor that dies before it says
-  // anything fails the start at once, not after the wait.
+  // Up once the first prompt has gone; a supervisor that dies silently fails the start at once.
   for (const end = Date.now() + waitMs; Date.now() < end; sleep(200)) {
     const st = readState(id);
     if (st?.state === "failed") die(`the Antigravity session did not start: ${st.error ?? "no reason given"} (log: ${log})`);
@@ -104,29 +100,25 @@ export function startSupervisor(cwd: string, args: string[], env: NodeJS.Process
   die(`the Antigravity session did not start within ${Math.round(waitMs / 1000)} s (log: ${log})${tail()}`);
 }
 
-// Why the supervisor's pid no longer names its process group, or null when it still does: it is
-// the supervisor, alive or a zombie, or no process at all. A pid is not given out again while a
-// group of that number has a member left, so with no process at that pid, whatever is in its group
-// is the session's: within one boot only. Where there is a boot id (Linux), a stamp from another
-// boot is never taken to name it; elsewhere the stamp match is all there is.
+// Why the supervisor's pid no longer names its process group, or null when it still does. A pid is
+// not given out again while a group of that number has a member left, so with no process at that
+// pid the group is still the session's, but only within the boot the supervisor started in.
 function notOurGroup(st: AgyState): string | null {
-  if (typeof st.stamp !== "string") return "has no start recorded";
+  if (!isStartStamp(st.stamp)) return "has no start recorded";
   const boot = currentBoot();
-  if (boot && !st.stamp.startsWith(`${boot}:`)) return "is from another boot";
+  if (!boot) return "cannot be told from another boot's on this platform";
+  if (st.stamp.boot !== boot) return "is from another boot";
   try {
-    const now = startStamp(st.pid);
-    return now === null || now === st.stamp ? null : "is another process's now";
+    const now = processStart(st.pid);
+    return now === null || sameStart(st.stamp, now) ? null : "is another process's now";
   } catch {
     return "has a start that cannot be read";
   }
 }
 
-// SIGTERM to the supervisor, which ends the session and kills its every process before it exits;
-// then whatever is left is killed whether or not the supervisor is up, as a tool agy left, or an agy
-// whose supervisor crashed, is otherwise left running with nothing that records it once the
-// directory goes. What is left is the session's scope's cgroup (sf-<id>.scope, a name no other
-// process gets), the supervisor itself included if it is still up; without a scope, the supervisor's
-// process group, and that only while its pid still names it (notOurGroup).
+// SIGTERM to the supervisor, which ends the session; then whatever is left in its scope (or without
+// one, its process group while notOurGroup allows) is killed anyway, as a tool agy left or an agy
+// whose supervisor crashed would otherwise run on with nothing recording it.
 export function stopSession(id: string, remove: boolean): void {
   if (!validId(id)) die(`not an Antigravity session id: ${id}`);
   const st = readState(id);
@@ -160,8 +152,7 @@ export function stopSession(id: string, remove: boolean): void {
   }
 }
 
-// The messages that never reached the session, before its inbox goes with its directory: each is
-// told on stderr, with its sender, and kept in the transcript as an undelivered line. stderr, as a
+// Tells each message that never reached the session, and keeps it in the transcript. stderr, as a
 // stop can run inside the wake hook, whose stdout is its answer.
 function dropUndelivered(id: string): void {
   const left = inbox(id);
@@ -196,6 +187,11 @@ export const antigravityBackend: AgentBackend = {
   alive: sessionAlive,
   midTurn,
   messageTool: null,
+  // the hook is written here, at every launch, so it names the factory that starts the session
+  installSettings: (ws, s) => {
+    ensureAgyHook();
+    return renderSettings(ws, s, null);
+  },
   deliver,
   logsHint: (id) => `the supervisor's log, ${join(sessionDir(id), "supervisor.log")}`,
   transcriptsDir,

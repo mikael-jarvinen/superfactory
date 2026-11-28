@@ -20,7 +20,7 @@ import { iso, wakeHookLog } from "../failures.js";
 import { firstAgentName } from "../agent-name.js";
 import { backend, backendFor } from "../backends/index.js";
 import { lead } from "../fleet.js";
-import { local } from "../transport.js";
+import { localFor, transportFor } from "../transport.js";
 import { WAKE_SETTLE_S, wake } from "../wake.js";
 import { openWorkspace, resolveWorkspace } from "../workspace.js";
 
@@ -123,10 +123,11 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   const agent = ws.config.agents.find((a) => a.name === to);
   if (!agent) return { code: 0 };
   const b = backendFor(agent);
-  // A recipient whose backend runs on the primary only: its inbox is there, and a host's session cannot write it.
-  if (fromHost && !b.onHosts) {
+  // A recipient whose inbox is on another machine than this host: only the primary reaches every
+  // machine's daemon, so a host's session can write only its own machine's inboxes.
+  if (fromHost && b.deliver && agent.host !== fromHost) {
     if (failedSend) return { code: 0 };
-    return { code: 2, stderr: `${to} runs under ${b.name}, and an ${b.name} agent can only be messaged from a session on the primary, the machine that runs it, not from ${fromHost}. This is not supported in this phase; waking it or sending again will not change that.\n` };
+    return { code: 2, stderr: `${to} runs under ${b.name} on ${agent.host ?? "the primary"}, and an ${b.name} agent can only be messaged from a session on the primary or on its own machine, not from ${fromHost}. Waking it or sending again will not change that; ask the lead to pass the message on.\n` };
   }
   if (failedSend) {
     const ld = lead(ws).name;
@@ -138,9 +139,10 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
   const settle = !fromHost && agent.host ? settleS : 0;
   // Everything, the settle included, ends 5 s before the hook would be killed.
   const deadline = t0 + (timeoutS - 5 - settle) * 1000;
+  const t = fromHost ? localFor(agent.backend) : transportFor(ws, agent);
   let w;
   try {
-    w = wake(ws, agent, { waitS, deadline, ...(fromHost ? { t: local } : {}) });
+    w = wake(ws, agent, { waitS, deadline, t });
   } catch (e) {
     return failOpen("PreToolUse", ws.logsDir, sender, to, e);
   }
@@ -150,7 +152,7 @@ export function hook(argv: string[], input: string, workspace?: string): HookRes
     if (!text) return deny(`the message to ${to} has no text, so nothing was delivered.`);
     try {
       const who = senderName(from);
-      b.deliver(w.s, `Message from ${who}:\n\n${text}`, who);
+      t.deliver(to, w.s, `Message from ${who}:\n\n${text}`, who);
     } catch (e) {
       return deny(`the message to ${to} was not delivered: ${(e as Error).message}`);
     }

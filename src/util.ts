@@ -18,6 +18,7 @@ export interface RunResult {
   stderr: string;
   // the signal that ended it, when one did
   signal?: NodeJS.Signals;
+  pid?: number;
 }
 
 // How much of a command's output is read, on every path that reads one. spawnSync counts stdout
@@ -38,7 +39,7 @@ export function run(cmd: string, args: string[], opts: SpawnSyncOptions = {}, na
   // 127 for a command that could not start, as a shell says; 124 for one killed at its timeout, as
   // timeout(1) says, so a slow or sleeping run is not read as a missing binary.
   if (r.error) return { status: (r.error as NodeJS.ErrnoException).code === "ETIMEDOUT" ? 124 : 127, stdout: "", stderr: String(r.error.message) };
-  return { status: r.status ?? 1, stdout: String(r.stdout ?? ""), stderr: String(r.stderr ?? ""), ...(r.signal ? { signal: r.signal } : {}) };
+  return { status: r.status ?? 1, stdout: String(r.stdout ?? ""), stderr: String(r.stderr ?? ""), pid: r.pid, ...(r.signal ? { signal: r.signal } : {}) };
 }
 
 export function sleep(ms: number): void {

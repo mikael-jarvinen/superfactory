@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { after, test } from "node:test";
 import { antigravityBackend, listSessions, sessionAlive, startSupervisor, stopSession } from "../src/backends/antigravity.js";
 import { allStates, readState, sessionDir } from "../src/backends/agy-store.js";
+import { agyHookMissing, agyHooksFile } from "../src/backends/agy-guard.js";
 import { mcpServers, modeOf, pickValue, stricterKind, tripped, unsafeSettings } from "../src/backends/agy-supervisor.js";
 import { backendFor } from "../src/backends/index.js";
 import { NAME_HEAD_BYTES } from "../src/agent-name.js";
@@ -14,7 +15,7 @@ import { permissionOutcome, READ_ONLY_KINDS, readOnly } from "../src/backends/re
 import { ConfigError, loadConfig } from "../src/config.js";
 import { hook, senderName } from "../src/hooks/wake.js";
 import { launchSpec } from "../src/launch.js";
-import { procStat } from "../src/stacks/process.js";
+import { currentBoot, procStat } from "../src/stacks/process.js";
 import { openWorkspace } from "../src/workspace.js";
 import { TOML, tempWorkspace, until } from "./helpers.js";
 
@@ -124,17 +125,18 @@ test("the read-only list is read, search and think, and nothing else is allowed"
     { optionId: "r", kind: "reject_once" },
     { optionId: "r2", kind: "reject_always" },
   ];
-  for (const k of READ_ONLY_KINDS) assert.deepEqual(permissionOutcome(k, opts), { outcome: "selected", optionId: "a" }, k);
+  for (const k of READ_ONLY_KINDS) assert.equal(readOnly(k), true, k);
+  assert.deepEqual(permissionOutcome(true, opts), { outcome: "selected", optionId: "a" });
+  assert.deepEqual(permissionOutcome(false, opts), { outcome: "selected", optionId: "r" });
   // every other ACP ToolKind, a kind left out, and one not in the protocol
   for (const k of ["edit", "delete", "move", "execute", "fetch", "switch_mode", "other", undefined, null, "READ", "write"]) {
     assert.equal(readOnly(k), false, String(k));
-    assert.deepEqual(permissionOutcome(k, opts), { outcome: "selected", optionId: "r" }, String(k));
   }
-  assert.deepEqual(permissionOutcome("edit", [{ optionId: "r2", kind: "reject_always" }]), { outcome: "selected", optionId: "r2" });
+  assert.deepEqual(permissionOutcome(false, [{ optionId: "r2", kind: "reject_always" }]), { outcome: "selected", optionId: "r2" });
   // never an allow-always, and nothing to pick is cancelled
-  assert.deepEqual(permissionOutcome("read", [{ optionId: "a1", kind: "allow_always" }]), { outcome: "cancelled" });
-  assert.deepEqual(permissionOutcome("edit", [{ optionId: "a", kind: "allow_once" }]), { outcome: "cancelled" });
-  assert.deepEqual(permissionOutcome("read", "junk"), { outcome: "cancelled" });
+  assert.deepEqual(permissionOutcome(true, [{ optionId: "a1", kind: "allow_always" }]), { outcome: "cancelled" });
+  assert.deepEqual(permissionOutcome(false, [{ optionId: "a", kind: "allow_once" }]), { outcome: "cancelled" });
+  assert.deepEqual(permissionOutcome(true, "junk"), { outcome: "cancelled" });
 });
 
 test("agy settings that would run a tool without asking are refused", () => {
@@ -167,7 +169,10 @@ test("an antigravity agent never takes its role's Claude model or effort, and it
   const spec = launchSpec(w, rae, "hi", null, undefined);
   assert.equal(spec.model, undefined);
   assert.equal(spec.effort, undefined);
-  assert.equal(spec.settings, null, "an agy session takes no settings file");
+  // the role's rendered settings, whose rules the supervisor holds agy's calls to, with no wake hook
+  const rendered = JSON.parse(readFileSync(spec.settings!, "utf8"));
+  assert.ok(rendered.permissions?.deny?.length, "the reviewer's deny rules are rendered");
+  assert.ok(!JSON.stringify(rendered.hooks ?? {}).includes(" hook wake"), "no wake hook for a backend with no message tool");
   const own = tempWorkspace(agy('model = "Gemini 4 Neon"\neffort = "xhigh"\n'));
   after(() => rmSync(own, { recursive: true, force: true }));
   const w2 = openWorkspace(own, {});
@@ -184,7 +189,7 @@ test("a model the running agy does not offer fails the start, naming the agent a
     /nomodel's model "opus" is not one this agy offers; it offers gemini-flash \(Gemini Flash\), gemini-pro \(Gemini Pro\)\. Set model in factory\.toml/);
 });
 
-test("backend = \"antigravity\" loads, and takes no host", () => {
+test("backend = \"antigravity\" loads, on this machine or a host", () => {
   const ws = tempWorkspace(TOML.replace('name = "rae"\nrole = "reviewer"\n', 'name = "rae"\nrole = "reviewer"\nbackend = "antigravity"\n'));
   after(() => rmSync(ws, { recursive: true, force: true }));
   const c = loadConfig(join(ws, "factory.toml"), {});
@@ -192,9 +197,9 @@ test("backend = \"antigravity\" loads, and takes no host", () => {
   assert.equal(rae.backend, "antigravity");
   assert.equal(backendFor(rae), antigravityBackend);
   const hosted = tempWorkspace(TOML.replace('name = "rae"\nrole = "reviewer"\n', 'name = "rae"\nrole = "reviewer"\nbackend = "antigravity"\nhost = "far"\ncwd = "/far/rae"\n') +
-    '\n[hosts.far]\nssh = "far"\nurl = "http://far:1"\ntoken_file = "t"\n');
+    '\n[hosts.far]\nssh = "far"\nurl = "http://far:1"\ntoken_file = "t"\nhash_files = ["daemon.toml", "workspace.toml"]\n');
   after(() => rmSync(hosted, { recursive: true, force: true }));
-  assert.throws(() => loadConfig(join(hosted, "factory.toml"), {}), (e: unknown) => e instanceof ConfigError && e.problems.some((p) => /rae runs under antigravity, which runs on this machine only/.test(p)));
+  assert.equal(loadConfig(join(hosted, "factory.toml"), {}).agents.find((a) => a.name === "rae")!.host, "far");
 });
 
 test("a session outlives its start, sets its model and effort, goes idle after its turn, and its transcript is under projects/", async () => {
@@ -534,37 +539,7 @@ test("stop kills a tool in a session of its own by the scope, when supervisor an
   assert.deepEqual(inScope(st), []);
 }));
 
-test("with no scope, a stale state from another boot never has its supervisor's pid's group killed", { skip: process.platform !== "linux" }, async () => {
-  // a group whose leader has exited, with a member left: what a stale pid can name after a reboot
-  const sh = spawnSync("sh", ["-c", "setsid sh -c 'sleep 30 >/dev/null 2>&1 & echo $$ $!'"], { encoding: "utf8" });
-  const [pgid, member] = sh.stdout.trim().split(/\s+/).map(Number) as [number, number];
-  try {
-    await until("the leader to exit", () => gone(pgid));
-    assert.equal(procStat(member)?.pgid, pgid);
-    const id = "agy-0123456789ab";
-    mkdirSync(sessionDir(id), { recursive: true });
-    const stale = { id, name: "stale", kind: "background", backend: "antigravity", state: "done", status: "idle", cwd: root, pid: pgid, stamp: "another-boot:1", cgroup: null, agentPid: null, sessionId: null, model: null, transcript: null, startedAt: 0, updatedAt: "" };
-    writeFileSync(join(sessionDir(id), "state.json"), JSON.stringify(stale));
-    const said: string[] = [];
-    const write = process.stderr.write;
-    process.stderr.write = ((x: string) => (said.push(String(x)), true)) as typeof process.stderr.write;
-    try {
-      stopSession(id, true);
-    } finally {
-      process.stderr.write = write;
-    }
-    assert.equal(gone(member), false, "an unrelated group was killed");
-    assert.match(said.join(""), /stale: no scope recorded, and the supervisor's pid \d+ is from another boot, so its process group is not killed/);
-  } finally {
-    try {
-      process.kill(member, "SIGKILL");
-    } catch {
-      // gone
-    }
-  }
-});
-
-// what stopSession says on stderr about stale state
+// what stopSession says on stderr
 function stopSaying(id: string): string {
   const said: string[] = [];
   const write = process.stderr.write;
@@ -577,41 +552,85 @@ function stopSaying(id: string): string {
   return said.join("");
 }
 
-test("with no scope and no boot id (off Linux), the stamp match alone decides the supervisor's group", { skip: process.platform !== "linux" }, async () => {
+function staleState(id: string, name: string, pid: number, stamp: unknown): void {
+  mkdirSync(sessionDir(id), { recursive: true });
+  const st = { id, name, kind: "background", backend: "antigravity", state: "done", status: "idle", cwd: root, pid, stamp, cgroup: null, agentPid: null, sessionId: null, model: null, transcript: null, startedAt: 0, updatedAt: "" };
+  writeFileSync(join(sessionDir(id), "state.json"), JSON.stringify(st));
+}
+
+// a group whose leader has exited, with a member left: what a stale pid can name after a reboot
+async function leaderless(): Promise<[number, number]> {
+  const sh = spawnSync("sh", ["-c", "setsid sh -c 'sleep 30 >/dev/null 2>&1 & echo $$ $!'"], { encoding: "utf8" });
+  const pair = sh.stdout.trim().split(/\s+/).map(Number) as [number, number];
+  await until("the leader to exit", () => gone(pair[0]));
+  return pair;
+}
+
+const kill9 = (pids: number[]) => {
+  for (const p of pids)
+    try {
+      process.kill(p, "SIGKILL");
+    } catch {
+      // gone
+    }
+};
+
+async function withBoot(boot: string, f: () => Promise<void>): Promise<void> {
   const before = process.env.SF_BOOT_ID;
-  process.env.SF_BOOT_ID = "";
-  // a group whose leader has exited, and one whose leader is still up, each with a member left
-  const left = spawnSync("sh", ["-c", "setsid sh -c 'sleep 30 >/dev/null 2>&1 & echo $$ $!'"], { encoding: "utf8" });
-  const [gonePid, orphan] = left.stdout.trim().split(/\s+/).map(Number) as [number, number];
+  process.env.SF_BOOT_ID = boot;
+  try {
+    await f();
+  } finally {
+    if (before === undefined) delete process.env.SF_BOOT_ID;
+    else process.env.SF_BOOT_ID = before;
+  }
+}
+
+test("with no scope, a stale state from another boot never has its supervisor's pid's group killed", { skip: process.platform !== "linux" }, async () => {
+  const [pgid, member] = await leaderless();
+  try {
+    assert.equal(procStat(member)?.pgid, pgid);
+    staleState("agy-0123456789ab", "stale", pgid, { boot: "another-boot", start: "1" });
+    assert.match(stopSaying("agy-0123456789ab"), /stale: no scope recorded, and the supervisor's pid \d+ is from another boot, so its process group is not killed/);
+    assert.equal(gone(member), false, "an unrelated group was killed");
+    // a stamp in the older string form is no start recorded
+    staleState("agy-0123456789ae", "stale-old", pgid, `${currentBoot()}:1`);
+    assert.match(stopSaying("agy-0123456789ae"), /stale-old: no scope recorded, and the supervisor's pid \d+ has no start recorded/);
+    assert.equal(gone(member), false, "an unrelated group was killed");
+  } finally {
+    kill9([member]);
+  }
+});
+
+test("with no scope and no boot id, the supervisor's group is never killed", { skip: process.platform !== "linux" }, () => withBoot("", async () => {
+  const [pgid, member] = await leaderless();
+  try {
+    staleState("agy-0123456789af", "bootless", pgid, { boot: null, start: "Sat Nov 28 10:00:00 2026" });
+    assert.match(stopSaying("agy-0123456789af"), /bootless: no scope recorded, and the supervisor's pid \d+ cannot be told from another boot's on this platform/);
+    assert.equal(gone(member), false, "an unrelated group was killed");
+  } finally {
+    kill9([member]);
+  }
+}));
+
+test("with no scope, in the boot the supervisor recorded, the stamp match decides its group", { skip: process.platform !== "linux" }, () => withBoot("boot-b", async () => {
+  const [gonePid, orphan] = await leaderless();
   const up = spawnSync("sh", ["-c", "setsid sh -c 'sleep 30 >/dev/null 2>&1 & echo $$ $!; wait' >\"$1\" 2>/dev/null &", "sh", join(root, "up.pids")]);
   assert.equal(up.status, 0);
   await until("the second group", () => existsSync(join(root, "up.pids")) && readFileSync(join(root, "up.pids"), "utf8").trim().split(/\s+/).length === 2);
   const [upPid, member] = readFileSync(join(root, "up.pids"), "utf8").trim().split(/\s+/).map(Number) as [number, number];
-  const state = (id: string, name: string, pid: number) => {
-    mkdirSync(sessionDir(id), { recursive: true });
-    const st = { id, name, kind: "background", backend: "antigravity", state: "done", status: "idle", cwd: root, pid, stamp: "Sat Nov 28 10:00:00 2026", cgroup: null, agentPid: null, sessionId: null, model: null, transcript: null, startedAt: 0, updatedAt: "" };
-    writeFileSync(join(sessionDir(id), "state.json"), JSON.stringify(st));
-  };
   try {
-    await until("the first leader to exit", () => gone(gonePid));
-    state("agy-0123456789ac", "orphaned", gonePid);
+    staleState("agy-0123456789ac", "orphaned", gonePid, { boot: "boot-b", start: "Sat Nov 28 10:00:00 2026" });
     assert.equal(stopSaying("agy-0123456789ac"), "", "nothing to say when the group is the session's");
     await until("the left tool killed", () => gone(orphan));
-    state("agy-0123456789ad", "reused", upPid);
+    staleState("agy-0123456789ad", "reused", upPid, { boot: "boot-b", start: "1" });
     assert.match(stopSaying("agy-0123456789ad"), /reused: no scope recorded, and the supervisor's pid \d+ is another process's now, so its process group is not killed/);
     assert.equal(gone(member), false, "an unrelated group was killed");
     assert.equal(gone(upPid), false, "an unrelated process was killed");
   } finally {
-    if (before === undefined) delete process.env.SF_BOOT_ID;
-    else process.env.SF_BOOT_ID = before;
-    for (const p of [orphan, upPid, member])
-      try {
-        process.kill(p, "SIGKILL");
-      } catch {
-        // gone
-      }
+    kill9([orphan, upPid, member]);
   }
-});
+}));
 
 test("a stop that removes a session tells each undelivered message, with its sender, and keeps it in the transcript", async () => {
   const id = start("undelivered", "hi");
@@ -620,15 +639,7 @@ test("a stop that removes a session tells each undelivered message, with its sen
   antigravityBackend.deliver!(rowOf(id), "slow", "ada");
   await until("the slow turn", () => readState(id)?.state === "working");
   antigravityBackend.deliver!(rowOf(id), "the second message\nof two lines", "grace");
-  const said: string[] = [];
-  const write = process.stderr.write;
-  process.stderr.write = ((s: string) => (said.push(String(s)), true)) as typeof process.stderr.write;
-  try {
-    stopSession(id, true);
-  } finally {
-    process.stderr.write = write;
-  }
-  const out = said.join("");
+  const out = stopSaying(id);
   assert.match(out, /^undelivered: a message from grace \(\S+\) never reached the session, and the stop drops it from the inbox:\n  the second message\n  of two lines\n$/);
   const u = readFileSync(st.transcript!, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.type === "undelivered");
   assert.equal(u.length, 1);
@@ -747,6 +758,40 @@ backend = "antigravity"
   void ws;
 });
 
+test("a session on a host wakes an Antigravity agent of that host there, and delivers to it there", async () => {
+  const dir = tempWorkspace(TOML.replace("[tracker]", `[roles.assistant]
+cwd = "assistants"
+permission_mode = "auto"
+settings = "readonly"
+
+[[agents]]
+name = "vesta"
+role = "assistant"
+backend = "antigravity"
+host = "far"
+cwd = "%CWD%"
+
+[tracker]`).replace("%CWD%", cwdFor("vesta")) + '\n[hosts.far]\nssh = "far"\nurl = "http://127.0.0.1:1"\ntoken_file = "t"\nhash_files = ["daemon.toml", "workspace.toml"]\n');
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const ws = openWorkspace(dir, {});
+  mkdirSync(join(dir, "assistants"), { recursive: true });
+  // the sender is named by its own transcript, not by where it runs: ada and another session share the lead's cwd
+  const own = join(root, "s1h.jsonl");
+  writeFileSync(own, [JSON.stringify({ type: "agent-name", agentName: "ada", sessionId: "s1h" }), JSON.stringify({ type: "user" })].join("\n") + "\n");
+  const input = JSON.stringify({ hook_event_name: "PreToolUse", session_id: "s1h", transcript_path: own, cwd: join(dir, "lead"), tool_name: "SendMessage", tool_input: { to: "vesta", message: "read notes.md" } });
+  const r = hook(["--wait-seconds", "20", "--from-host", "far"], input, dir);
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout!).hookSpecificOutput;
+  assert.equal(out.permissionDecision, "deny");
+  assert.match(out.permissionDecisionReason, /^Delivered: vesta runs on antigravity.*after a fresh start/);
+  const s = listSessions().find((x) => x.name === "vesta" && sessionAlive(x))!;
+  await until("the message to be answered", () => transcript(s.id!).some((l) => l.type === "assistant" && l.message.content[0].text === "read ok"));
+  const asked = transcript(s.id!).filter((l) => l.type === "user" && l.message.content[0].type === "text").map((l) => l.message.content[0].text);
+  assert.equal(asked.length, 2);
+  assert.equal(asked[1], "Message from ada:\n\nread notes.md");
+  void ws;
+});
+
 test("a sender with no transcript naming it is unknown, never a guess", () => {
   assert.equal(senderName({ session_id: "s9", cwd: join(root, "nowhere") }), "unknown (session s9)");
   const t = join(root, "s8.jsonl");
@@ -761,7 +806,7 @@ test("a sender with no transcript naming it is unknown, never a guess", () => {
   assert.equal(senderName({ session_id: "s6", transcript_path: deep }), "unknown (session s6)");
 });
 
-test("a send from a host session to an Antigravity agent is refused at once, as unsupported", () => {
+test("a send from a host session to an Antigravity agent on another machine is refused at once", () => {
   const dir = tempWorkspace(TOML.replace("[tracker]", `[roles.assistant]
 cwd = "assistants"
 permission_mode = "auto"
@@ -778,11 +823,89 @@ backend = "antigravity"
   const input = JSON.stringify({ hook_event_name: "PreToolUse", session_id: "s2", cwd: "/far/lead", tool_name: "SendMessage", tool_input: { to: "vega", message: "hi" } });
   const r = hook(["--from-host", "far"], input, dir);
   assert.equal(r.code, 2);
-  assert.match(r.stderr!, /vega runs under antigravity, and an antigravity agent can only be messaged from a session on the primary.*not from far.*not supported/s);
+  assert.match(r.stderr!, /vega runs under antigravity on the primary, and an antigravity agent can only be messaged from a session on the primary or on its own machine, not from far\. .*ask the lead/s);
   assert.doesNotMatch(r.stderr!, /factory wake|Tell .* that vega is off/);
   assert.ok(Date.now() - t0 < 5000);
   assert.equal(listSessions().some((x) => x.name === "vega" && sessionAlive(x) && x.startedAt as number >= t0), false, "nothing was started");
   // and the failed-send explanation stays out of it
   const post = JSON.stringify({ hook_event_name: "PostToolUse", session_id: "s2", cwd: "/far/lead", tool_name: "SendMessage", tool_input: { to: "vega", message: "hi" }, tool_response: { success: false, message: "No agent named vega is reachable" } });
   assert.deepEqual(hook(["--from-host", "far"], post, dir), { code: 0 });
+});
+
+// A builder's rendered settings, as an antigravity launch writes them, and the hook entry in place.
+function builderSettings(): string {
+  const ws = tempWorkspace(TOML.replace('name = "bea"\nrole = "builder"\n', 'name = "bea"\nrole = "builder"\nbackend = "antigravity"\n'));
+  after(() => rmSync(ws, { recursive: true, force: true }));
+  const w = openWorkspace(ws, {});
+  const spec = launchSpec(w, w.config.agents.find((a) => a.name === "bea")!, "hi", null, undefined);
+  assert.equal(agyHookMissing(), null, "the launch wrote agy's hook entry");
+  return spec.settings!;
+}
+
+test("with the role's settings, agy's edits and commands are held to its rules, as a Claude agent's are", async () => {
+  const settings = builderSettings();
+  const id = start("ruled", "write notes.txt", ["--settings", settings]);
+  const row = () => listSessions().find((s) => s.id === id)!;
+  await until("the first turn to end", () => readState(id)?.state === "done");
+  antigravityBackend.deliver!(row(), "run git status && ls");
+  antigravityBackend.deliver!(row(), "run git push origin main");
+  await until("the messages to be answered", () => transcript(id).filter((l) => l.type === "turn-end").length === 3);
+  const said = transcript(id).filter((l) => l.type === "assistant" && l.message.content[0].type === "text").map((l) => l.message.content[0].text);
+  assert.deepEqual(said, ["wrote", "ran", "run denied"]);
+  const perms = transcript(id).filter((l) => l.type === "permission");
+  assert.deepEqual(perms.map((p) => [p.kind, p.allowed]), [["edit", true], ["execute", true], ["execute", false]]);
+  assert.match(perms[2].reason, /guard\[builder\]: refused\. pushing to a protected branch \(main\)/);
+  // agy's hook finds the same rules through its environment
+  const env = requests().filter((r) => r.env).pop().env;
+  assert.deepEqual(env, { SF_AGY_RULES: settings, SF_AGY_PROJECT: cwdFor("ruled") });
+  assert.equal(readState(id)!.state, "done", "a refusal is not a tripwire");
+});
+
+test("a session whose rules cannot be read, or whose agy would skip the hook, does not start", () => {
+  const settings = builderSettings();
+  assert.throws(() => start("norules", "hi", ["--settings", join(root, "missing.json")]), /settings .*missing\.json cannot be read/);
+  const file = agyHooksFile();
+  const saved = readFileSync(file, "utf8");
+  try {
+    rmSync(file);
+    assert.throws(() => start("nohook", "hi", ["--settings", settings]), /so agy's reads would go unchecked/);
+  } finally {
+    writeFileSync(file, saved);
+  }
+});
+
+test("a call agy's hook denied never ran only when the hook logged that deny, whatever its output", () => {
+  const c = { kind: "execute", asked: false, allowed: false };
+  const denial = "tool call denied by pre-tool hook: superfactory: no";
+  assert.equal(tripped(c, "failed", false, denial, true), null);
+  // the same text with no deny in the hook's log, or another hook's, or a deny the call outlived
+  assert.match(tripped(c, "failed", false, denial, false)!, /ran and failed without asking/);
+  assert.notEqual(tripped(c, "failed", false, "tool call denied by pre-tool hook: other", true), null);
+  assert.notEqual(tripped(c, "completed", false, denial, true), null);
+  // a failure with an empty output is a failure, not a call that never started
+  assert.match(tripped(c, "failed", false, { output: "" }, false)!, /ran and failed without asking/);
+  assert.notEqual(tripped(c, "failed", false, "exit 1", false), null);
+});
+
+test("agy's hook, as a launch installs it, refuses before the call, logs it, and the supervisor holds to its log", async () => {
+  const settings = builderSettings();
+  const id = start("hooked", "hook-read .env", ["--settings", settings]);
+  await until("the first turn to end", () => readState(id)?.state === "done");
+  const row = () => listSessions().find((s) => s.id === id)!;
+  antigravityBackend.deliver!(row(), "hook-run git push origin main");
+  antigravityBackend.deliver!(row(), "hook-read README.md");
+  antigravityBackend.deliver!(row(), `hook-mcp echo_add_issue_comment {"body":"hi","issue":1,"toolSummary":"x"}`);
+  await until("the messages to be answered", () => transcript(id).filter((l) => l.type === "turn-end").length === 4);
+  const said = transcript(id).filter((l) => l.type === "assistant" && l.message.content[0].type === "text").map((l) => l.message.content[0].text);
+  assert.deepEqual(said, ["hook-read denied", "hook-run denied", "hook-read ok", "hook-mcp denied"]);
+  const log = readFileSync(join(sessionDir(id), "hook.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(log.map((d) => [d.name, d.decision]), [["read_file", "deny"], ["run_command", "deny"], ["read_file", "pass"], ["mcp_echo_add_issue_comment", "deny"]]);
+  assert.match(log[0].reason, /^guard\[builder\]: refused\. \.env holds secrets/);
+  assert.match(log[1].reason, /pushing to a protected branch \(main\)/);
+  assert.match(log[3].reason, /not a tool of an MCP server this role is given: it is given none/);
+  assert.equal(transcript(id).filter((l) => l.type === "permission").length, 0, "nothing the hook denied was put to the supervisor");
+  assert.equal(readState(id)!.state, "done", "a call the hook denied is no tripwire");
+  antigravityBackend.deliver!(row(), "silent-fail");
+  await until("the session to fail", () => readState(id)?.state === "failed");
+  assert.match(readState(id)!.error!, /\(execute\) is not read-only and ran and failed without asking/);
 });

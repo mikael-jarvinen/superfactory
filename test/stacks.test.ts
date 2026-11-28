@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { join } from "node:path";
@@ -9,7 +9,7 @@ import { after, test } from "node:test";
 import { stacksFile } from "../src/board/server.js";
 import { leftWork, reviewOnly } from "../src/fleet.js";
 import { allRecs, loadRec, saveRec, transition } from "../src/state.js";
-import { alive } from "../src/stacks/process.js";
+import { alive, currentBoot, pidFromFile, processStart, writePidFile } from "../src/stacks/process.js";
 import { run } from "../src/util.js";
 import { releaseForReview, slotless } from "../src/stacks/engine.js";
 import { ensureWorktree, git } from "../src/worktree.js";
@@ -385,9 +385,14 @@ test("boot: up only for the slots that do not answer, the reserved one included,
   assert.match(r.stdout, /app slot 2: answers \(web, api\)/);
   assert.deepEqual(calls(dir), ["up app 0 web=web api=api"], "only the slot that did not answer, on the human's checkouts");
 
-  writeFileSync(join(ws.logsDir, "stacks", "boot.lock"), `${process.pid}\n`);
+  writeFileSync(join(ws.logsDir, "stacks", "boot.lock"), `${process.pid}\n${JSON.stringify(processStart(process.pid))}\n`);
   assert.match((await boot()).stdout, new RegExp(`another boot is running, pid ${process.pid}`));
   assert.deepEqual(calls(dir), []);
+  // a lock with no start stamp, or another process's, is no one's
+  for (const lock of [`${process.pid}\n`, `${process.pid}\n${JSON.stringify({ boot: currentBoot(), start: "1" })}\n`]) {
+    writeFileSync(join(ws.logsDir, "stacks", "boot.lock"), lock);
+    assert.doesNotMatch((await boot()).stdout, /another boot is running/);
+  }
 });
 
 async function freePort(): Promise<number> {
@@ -424,7 +429,7 @@ createServer((_, res) => res.end("ok")).listen(Number(process.argv[2]), "127.0.0
   const pidFile = join(dir, "logs", "web.pid");
   const start = (childFile: string) => ok(factory(dir, ["stack", "run-detached", "--pid-file", pidFile, "--log", join(dir, "logs", "web.log"),
     "--port", String(port), "--", process.execPath, server, String(port), childFile]), "run-detached");
-  const pids = () => [Number(readFileSync(pidFile, "utf8")), Number(readFileSync(join(dir, "child"), "utf8"))] as const;
+  const pids = () => [Number.parseInt(readFileSync(pidFile, "utf8"), 10), Number(readFileSync(join(dir, "child"), "utf8"))] as const;
 
   start(join(dir, "child"));
   ok(factory(dir, ["stack", "wait-http", `http://127.0.0.1:${port}/`, "--timeout", "20"]), "wait-http");
@@ -478,4 +483,25 @@ test("an assistant's item gets the slot it names: never the reserved one, a pinn
   ok(factory(dir, ["stack", "destroy", "--stack", "solo", "--slot", "2"]), "destroy");
   assert.equal(loadRec(ws, "LOCAL-launch")?.assistant_slot, null);
   assert.equal(loadRec(ws, "LOCAL-before")?.assistant_slot?.slot, 1, "the other hold stays");
+});
+
+test("a pid file names its pid by the start stamp it records, whatever the wall clock or the file's mtime says", () => {
+  const dir = tempWorkspace();
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const f = join(dir, "x.pid");
+  writePidFile(f, process.pid);
+  assert.equal(pidFromFile(f), process.pid);
+  // a forward clock step since the write looks like an mtime long before the process started
+  utimesSync(f, new Date(Date.now() - 86_400_000), new Date(Date.now() - 86_400_000));
+  assert.equal(pidFromFile(f), process.pid);
+  utimesSync(f, new Date(Date.now() + 86_400_000), new Date(Date.now() + 86_400_000));
+  assert.equal(pidFromFile(f), process.pid);
+  // the pid reused by another process, a stamp from another boot, a file with no stamp, a dead pid
+  const start = processStart(process.pid)!;
+  for (const text of [`${process.pid}\n${JSON.stringify({ ...start, start: "1" })}\n`, `${process.pid}\n${JSON.stringify({ ...start, boot: "other" })}\n`, `${process.pid}\n`, `${process.pid}\nnot json\n`, "999999999\n{}\n"]) {
+    writeFileSync(f, text);
+    assert.equal(pidFromFile(f), null, text);
+  }
+  assert.equal(start.boot, currentBoot());
+  assert.throws(() => writePidFile(f, process.pid, "wx"), /EEXIST/);
 });

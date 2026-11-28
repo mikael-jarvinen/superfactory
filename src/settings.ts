@@ -164,8 +164,9 @@ export interface SessionSettings {
 // Renders one session's settings into logs/run/settings-<name>.json and returns the path. Every
 // hook command carries what the hook needs to know about the session, the guard's role above all,
 // so no hook reads it from anywhere else. messageTool is the tool the session's backend sends
-// messages with, which the wake hook runs before; a backend's installSettings passes its own.
-export function renderSettings(ws: Workspace, s: SessionSettings, messageTool: string): string {
+// messages with, which the wake hook runs before; a backend's installSettings passes its own, null
+// for one with no message tool.
+export function renderSettings(ws: Workspace, s: SessionSettings, messageTool: string | null): string {
   const file = isSettingsPath(s.template) ? s.template : join(TEMPLATES_DIR, `${s.template}.json`);
   if (!existsSync(file))
     die(isSettingsPath(s.template) ? `settings for ${s.name}: ${file} does not exist`
@@ -209,9 +210,9 @@ export function renderSettings(ws: Workspace, s: SessionSettings, messageTool: s
   // Every role sends messages, and a message to a session that is off is lost, so every role wakes
   // its recipient first.
   const wakeArgs = ["--workspace", ws.dir, "hook", "wake", ...(s.host ? ["--from-host", s.host] : [])];
-  add("PreToolUse", messageTool, wakeArgs, WAKE_HOOK_TIMEOUT_S);
+  if (messageTool) add("PreToolUse", messageTool, wakeArgs, WAKE_HOOK_TIMEOUT_S);
   // a failed send from a host, to an agent it cannot wake, is explained
-  if (s.host) for (const ev of ["PostToolUse", "PostToolUseFailure"]) add(ev, messageTool, wakeArgs, 10);
+  if (s.host && messageTool) for (const ev of ["PostToolUse", "PostToolUseFailure"]) add(ev, messageTool, wakeArgs, 10);
   for (const h of names) {
     if (h === "wake" || h === "appendix") continue;
     if (h === "guard") {
