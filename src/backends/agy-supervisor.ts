@@ -28,6 +28,7 @@ import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { AcpError, AcpPeer, PROTOCOL_VERSION } from "./acp.js";
 import { agyBin, agySettingsFile, type AgyState, enqueue, FIRST_PROMPT, inbox, inboxDir, scopeUnit, sessionCgroup, sessionDir, transcriptFile, validId, writeJson } from "./agy-store.js";
+import { agyHookMissing, loadRules, PROJECT_ENV, type Rules, ruling, RULES_ENV } from "./agy-guard.js";
 import { permissionOutcome, readOnly } from "./read-only.js";
 import { cgroupProcs, currentBoot, killAllAsync, killTreeAsync, ownCgroup, startStamp } from "../stacks/process.js";
 
@@ -42,6 +43,9 @@ export interface SupervisorSpec {
   appendix?: string;
   mcpConfig?: string;
   load?: string;
+  // the agent's rendered settings (settings.ts), whose rules agy's calls are held to; without it
+  // only the read-only calls are allowed
+  settings?: string;
 }
 
 export function parseSpec(argv: string[], cwd: string): SupervisorSpec {
@@ -50,6 +54,7 @@ export function parseSpec(argv: string[], cwd: string): SupervisorSpec {
     options: {
       id: { type: "string" }, name: { type: "string" }, prompt: { type: "string" }, "add-dir": { type: "string", multiple: true },
       model: { type: "string" }, effort: { type: "string" }, appendix: { type: "string" }, "mcp-config": { type: "string" }, load: { type: "string" },
+      settings: { type: "string" },
     },
     strict: true,
   }).values;
@@ -60,7 +65,7 @@ export function parseSpec(argv: string[], cwd: string): SupervisorSpec {
     id: v.id, name: v.name, cwd, prompt: v.prompt, addDirs: v["add-dir"] ?? [],
     ...(v.model ? { model: v.model } : {}), ...(v.effort ? { effort: v.effort } : {}),
     ...(v.appendix ? { appendix: v.appendix } : {}), ...(v["mcp-config"] ? { mcpConfig: v["mcp-config"] } : {}),
-    ...(v.load ? { load: v.load } : {}),
+    ...(v.load ? { load: v.load } : {}), ...(v.settings ? { settings: v.settings } : {}),
   };
 }
 
@@ -147,6 +152,8 @@ export interface CallSeen {
   kind: unknown;
   asked: boolean;
   allowed: boolean;
+  // agy's tool name and arguments, from its announcement
+  input?: { name: string; args: Record<string, unknown> };
 }
 
 // The kind a call is held to, from what was seen of it before (undefined for a new call) and the
@@ -159,10 +166,17 @@ export function stricterKind(prev: CallSeen | undefined, now: unknown): unknown 
   return now;
 }
 
-export function tripped(c: CallSeen, status: unknown, kindChanged: boolean): string | null {
+// A failed call that agy stopped before it ran: denied by its PreToolUse hook (agy-guard.ts), or
+// dropped beside a call the supervisor denied, which agy reports failed with an empty output.
+export const neverRan = (output: unknown): boolean =>
+  (typeof output === "string" && output.startsWith("tool call denied")) ||
+  (!!output && typeof output === "object" && (output as { output?: unknown }).output === "");
+
+export function tripped(c: CallSeen, status: unknown, kindChanged: boolean, output?: unknown): string | null {
   if (readOnly(c.kind)) return null;
   if (c.allowed && kindChanged) return `changed its kind to ${String(c.kind)} after it was allowed as read-only`;
   if (status !== "completed" && status !== "failed") return null;
+  if (!c.asked && status === "failed" && neverRan(output)) return null;
   if (!c.asked) return `${status === "completed" ? "ran" : "ran and failed"} without asking`;
   if (!c.allowed && status === "completed") return "ran after it was denied";
   return null;
@@ -285,10 +299,26 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
     fail(unsafe);
     return end;
   }
+  let rules: Rules | null = null;
+  if (spec.settings) {
+    try {
+      rules = loadRules(spec.settings);
+    } catch (e) {
+      fail(`the session's settings ${spec.settings} cannot be read: ${(e as Error).message}`);
+      return end;
+    }
+    // reads inside the workspace never ask, so only agy's hook holds them to the rules
+    const missing = agyHookMissing();
+    if (missing) {
+      fail(`${missing}, so agy's reads would go unchecked; a launch writes it (agy-guard.ts ensureAgyHook)`);
+      return end;
+    }
+  }
 
   const args = ["acp", "--log-file", join(dir, "agy.log"), ...spec.addDirs.flatMap((d) => ["--add-dir", d])];
   log(`starting ${agyBin()} ${args.join(" ")} in ${spec.cwd}`);
-  child = spawn(agyBin(), args, { cwd: spec.cwd, stdio: ["pipe", "pipe", "pipe"], env: process.env });
+  const env = rules ? { ...process.env, [RULES_ENV]: rules.file, [PROJECT_ENV]: spec.cwd } : process.env;
+  child = spawn(agyBin(), args, { cwd: spec.cwd, stdio: ["pipe", "pipe", "pipe"], env });
   child.on("error", (e) => fail(`agy could not start: ${e.message}`));
   child.stderr?.on("data", (d) => process.stdout.write(`agy: ${d}`));
   agyExited = new Promise((r) => child!.once("exit", () => r()));
@@ -323,11 +353,13 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
     const prev = calls.get(id);
     // asked as read-only, a call announced as not read-only is still held to its announced kind
     const kind = stricterKind(prev, tc.kind);
-    const outcome = permissionOutcome(kind, p?.options);
-    const allowed = outcome.outcome === "selected" && readOnly(kind);
-    calls.set(id, { kind, asked: true, allowed });
-    log(`permission ${allowed ? "allowed" : "denied"}: ${String(kind)} ${JSON.stringify(tc.title ?? "")}`);
-    line({ type: "permission", toolCallId: id, kind, title: tc.title ?? null, allowed });
+    const input = tc.rawInput && typeof tc.rawInput === "object" ? { name: String(tc.name ?? prev?.input?.name ?? tc.title ?? ""), args: tc.rawInput } : prev?.input;
+    const refusal = rules ? ruling(rules, kind, input, spec.cwd) : readOnly(kind) ? null : "it is not read-only, and the session has no rules to hold it to";
+    const outcome = permissionOutcome(refusal === null, p?.options);
+    const allowed = outcome.outcome === "selected" && refusal === null;
+    calls.set(id, { kind, asked: true, allowed, ...(input ? { input } : {}) });
+    log(`permission ${allowed ? "allowed" : "denied"}: ${String(kind)} ${JSON.stringify(tc.title ?? "")}${refusal ? `: ${refusal}` : ""}`);
+    line({ type: "permission", toolCallId: id, kind, title: tc.title ?? null, allowed, ...(refusal ? { reason: refusal } : {}) });
     return { outcome };
   });
   // No client capability is offered for these, so they should not come; each is refused.
@@ -339,11 +371,11 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
   // A tool call's update: its kind, if it gives one, is held to the stricter (stricterKind), and the tripwire (tripped)
   // ends the session over a call that ran without the supervisor's leave. agy reports a call
   // in_progress before it asks and again after a denial, so only an end counts as having run.
-  const seen = (id: string, kind: unknown, status: unknown) => {
+  const seen = (id: string, kind: unknown, status: unknown, output?: unknown) => {
     const prev = calls.get(id);
-    const c: CallSeen = { kind: stricterKind(prev, kind), asked: prev?.asked ?? false, allowed: prev?.allowed ?? false };
+    const c: CallSeen = { kind: stricterKind(prev, kind), asked: prev?.asked ?? false, allowed: prev?.allowed ?? false, ...(prev?.input ? { input: prev.input } : {}) };
     calls.set(id, c);
-    const why = tripped(c, status, prev !== undefined && c.kind !== prev.kind);
+    const why = tripped(c, status, prev !== undefined && c.kind !== prev.kind, output);
     if (why) fail(`agy's tool call ${id} (${String(c.kind ?? "no kind")}) is not read-only and ${why}; the session cannot be kept read-only`);
   };
 
@@ -374,12 +406,13 @@ export async function supervise(spec: SupervisorSpec): Promise<number> {
         flushSaid();
         const id = String(u.toolCallId ?? "");
         line({ type: "assistant", message: { id: `${st.sessionId}:${++msgN}`, role: "assistant", model: st.model, content: [{ type: "tool_use", id, name: u.title ?? u.kind ?? "tool", kind: u.kind ?? null, input: u.rawInput ?? null }] } });
-        seen(id, u.kind, u.status);
+        seen(id, u.kind, u.status, u.rawOutput);
+        if (u.rawInput && typeof u.rawInput === "object") calls.get(id)!.input = { name: String(u.name ?? u.title ?? ""), args: u.rawInput };
         break;
       }
       case "tool_call_update": {
         const id = String(u.toolCallId ?? "");
-        seen(id, u.kind, u.status);
+        seen(id, u.kind, u.status, u.rawOutput);
         if (u.status === "completed" || u.status === "failed")
           line({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, is_error: u.status === "failed", content: u.rawOutput ?? u.content ?? null }] } });
         break;

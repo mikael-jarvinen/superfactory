@@ -197,6 +197,9 @@ export function remote(h: Host): Transport {
     stop(name, id, remove) {
       callSync(h, "POST", agentPath(name, "stop"), { id, remove }, 30_000);
     },
+    deliver(name, s, text, from) {
+      callSync(h, "POST", agentPath(name, "deliver"), { id: s.id, text, from }, 30_000);
+    },
     // A fetch of origin comes first, so this has a start's time.
     worktree(q) {
       const r = worktreeCall(h, "worktree", q, 120_000);

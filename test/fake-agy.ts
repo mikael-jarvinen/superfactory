@@ -5,6 +5,8 @@
 //   "read <x>"   a read tool call, put to the client for permission; runs if allowed
 //   "quiet <x>"  a read tool call that runs without asking
 //   "edit <x>"   an edit tool call, put to the client; runs if allowed, else fails
+//   "run <cmd>"  agy's run_command {CommandLine: cmd}, put to the client; "ran" if allowed
+//   "write <p>"  agy's write_file {Path: p, Content}, put to the client; "wrote" if allowed
 //   "rogue"      an execute tool call that runs without asking
 //   "rogue-fail" an execute tool call that runs without asking and fails
 //   "morph"      a read tool call, put to the client, whose kind turns to edit once it is allowed
@@ -27,7 +29,8 @@
 //                current_mode_update under FAKE_AGY_LEGACY_MODES)
 //   "slow"       a turn that takes 1.5 s
 //   anything     answered "echo: <text>"
-// FAKE_AGY_LOG names a file each request it gets is appended to, as JSON lines. FAKE_AGY_AUTH=0
+// FAKE_AGY_LOG names a file each request it gets is appended to, as JSON lines, after a first
+// {env} line with the supervisor's SF_AGY_RULES and SF_AGY_PROJECT. FAKE_AGY_AUTH=0
 // answers every session method "Authentication required". FAKE_AGY_NO_SYSTEM=1 leaves out the
 // system-prompt capability. FAKE_AGY_MODE is the mode a session starts in. FAKE_AGY_LEGACY_MODES=1
 // reports the mode in the older modes field, set with session/set_mode, and not as a config
@@ -45,6 +48,7 @@ const inCgroup = (pid: number | undefined) => {
     appendFileSync(`${process.env.SF_CGROUP_ROOT}${process.env.SF_CGROUP_SELF}/cgroup.procs`, `${pid}\n`);
 };
 inCgroup(process.pid);
+record({ env: { SF_AGY_RULES: process.env.SF_AGY_RULES ?? null, SF_AGY_PROJECT: process.env.SF_AGY_PROJECT ?? null } });
 const send = (m: unknown) => process.stdout.write(JSON.stringify(m) + "\n");
 let next = 1;
 const waiting = new Map<string, (r: any) => void>();
@@ -63,9 +67,9 @@ const OPTIONS = [
 ];
 let calls = 0;
 
-async function tool(sessionId: string, kind: string, title: string, asked = true, ends: "completed" | "failed" = "completed", turnsInto?: string): Promise<boolean> {
+async function tool(sessionId: string, kind: string, title: string, asked = true, ends: "completed" | "failed" = "completed", turnsInto?: string, named?: { name: string; rawInput: unknown }): Promise<boolean> {
   const toolCallId = `call-${++calls}`;
-  update(sessionId, { sessionUpdate: "tool_call", toolCallId, title, kind, status: "in_progress", rawInput: { title } });
+  update(sessionId, { sessionUpdate: "tool_call", toolCallId, title, kind, status: "in_progress", ...(named ?? { rawInput: { title } }) });
   if (!asked) {
     update(sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: "in_progress" });
     update(sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: ends, rawOutput: ends === "failed" ? "exit 1" : "done" });
@@ -92,7 +96,13 @@ async function prompt(p: any): Promise<unknown> {
   if (last.startsWith("read ")) say(sid, (await tool(sid, "read", last)) ? "read ok" : "read denied");
   else if (last.startsWith("edit ")) say(sid, (await tool(sid, "edit", last)) ? "edit ok" : "edit denied");
   else if (last.startsWith("quiet ")) say(sid, (await tool(sid, "read", last, false)) ? "quiet ok" : "");
-  else if (last === "rogue") await tool(sid, "execute", "rm -rf /tmp/x", false);
+  else if (last.startsWith("run ")) {
+    const CommandLine = last.slice(4);
+    say(sid, (await tool(sid, "execute", CommandLine, true, "completed", undefined, { name: "run_command", rawInput: { CommandLine } })) ? "ran" : "run denied");
+  } else if (last.startsWith("write ")) {
+    const Path = last.slice(6);
+    say(sid, (await tool(sid, "edit", Path, true, "completed", undefined, { name: "write_file", rawInput: { Path, Content: "x" } })) ? "wrote" : "write denied");
+  } else if (last === "rogue") await tool(sid, "execute", "rm -rf /tmp/x", false);
   else if (last === "rogue-fail") await tool(sid, "execute", "git push && npm test", false, "failed");
   else if (last === "morph") await tool(sid, "read", "README.md", true, "completed", "edit");
   else if (last === "unmorph") {

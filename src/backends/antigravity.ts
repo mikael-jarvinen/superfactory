@@ -12,18 +12,21 @@ import { die, sleep } from "../util.js";
 import type { AgentBackend, LaunchSpec } from "./backend.js";
 import { allStates, type AgyState, enqueue, inbox, newId, projectDir, readState, scopeUnit, sessionCgroup, sessionDir, transcriptsDir, validId, writeJson } from "./agy-store.js";
 import { CAPABILITIES } from "./capabilities.js";
+import { renderSettings } from "../settings.js";
+import { ensureAgyHook } from "./agy-guard.js";
 
 const SUPERVISOR = join(dirname(fileURLToPath(import.meta.url)), "agy-supervisor.js");
 
 // How long a start waits for its supervisor to send the first prompt, or to fail.
 export const START_WAIT_MS = 60_000;
 
-// The supervisor's arguments. Settings, remote control, autocompact and permission mode have no
-// ACP counterpart: an agy session takes no Claude settings (the backend has no installSettings),
-// its tools are put to the supervisor (read-only.ts) whatever the mode, and `agy acp` takes no
-// remote-control flag. The model and effort are the agent's own (launch.ts roleOf).
+// The supervisor's arguments. The settings are the role's rendered Claude settings, whose rules
+// the supervisor holds agy's calls to (agy-guard.ts). Remote control, autocompact and permission
+// mode have no ACP counterpart: every call is put to the supervisor whatever the mode, and `agy acp`
+// takes no remote-control flag. The model and effort are the agent's own (launch.ts roleOf).
 function launchArgs(spec: LaunchSpec): string[] {
   const args = ["--name", spec.name];
+  if (spec.settings) args.push("--settings", spec.settings);
   for (const d of spec.addDirs) args.push("--add-dir", d);
   if (spec.model) args.push("--model", spec.model);
   if (spec.effort) args.push("--effort", spec.effort);
@@ -196,6 +199,11 @@ export const antigravityBackend: AgentBackend = {
   alive: sessionAlive,
   midTurn,
   messageTool: null,
+  // the hook is written here, at every launch, so it names the factory that starts the session
+  installSettings: (ws, s) => {
+    ensureAgyHook();
+    return renderSettings(ws, s, null);
+  },
   deliver,
   logsHint: (id) => `the supervisor's log, ${join(sessionDir(id), "supervisor.log")}`,
   transcriptsDir,

@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { after, test } from "node:test";
 import { antigravityBackend, listSessions, sessionAlive, startSupervisor, stopSession } from "../src/backends/antigravity.js";
 import { allStates, readState, sessionDir } from "../src/backends/agy-store.js";
+import { agyHookMissing, agyHooksFile } from "../src/backends/agy-guard.js";
 import { mcpServers, modeOf, pickValue, stricterKind, tripped, unsafeSettings } from "../src/backends/agy-supervisor.js";
 import { backendFor } from "../src/backends/index.js";
 import { NAME_HEAD_BYTES } from "../src/agent-name.js";
@@ -124,17 +125,18 @@ test("the read-only list is read, search and think, and nothing else is allowed"
     { optionId: "r", kind: "reject_once" },
     { optionId: "r2", kind: "reject_always" },
   ];
-  for (const k of READ_ONLY_KINDS) assert.deepEqual(permissionOutcome(k, opts), { outcome: "selected", optionId: "a" }, k);
+  for (const k of READ_ONLY_KINDS) assert.equal(readOnly(k), true, k);
+  assert.deepEqual(permissionOutcome(true, opts), { outcome: "selected", optionId: "a" });
+  assert.deepEqual(permissionOutcome(false, opts), { outcome: "selected", optionId: "r" });
   // every other ACP ToolKind, a kind left out, and one not in the protocol
   for (const k of ["edit", "delete", "move", "execute", "fetch", "switch_mode", "other", undefined, null, "READ", "write"]) {
     assert.equal(readOnly(k), false, String(k));
-    assert.deepEqual(permissionOutcome(k, opts), { outcome: "selected", optionId: "r" }, String(k));
   }
-  assert.deepEqual(permissionOutcome("edit", [{ optionId: "r2", kind: "reject_always" }]), { outcome: "selected", optionId: "r2" });
+  assert.deepEqual(permissionOutcome(false, [{ optionId: "r2", kind: "reject_always" }]), { outcome: "selected", optionId: "r2" });
   // never an allow-always, and nothing to pick is cancelled
-  assert.deepEqual(permissionOutcome("read", [{ optionId: "a1", kind: "allow_always" }]), { outcome: "cancelled" });
-  assert.deepEqual(permissionOutcome("edit", [{ optionId: "a", kind: "allow_once" }]), { outcome: "cancelled" });
-  assert.deepEqual(permissionOutcome("read", "junk"), { outcome: "cancelled" });
+  assert.deepEqual(permissionOutcome(true, [{ optionId: "a1", kind: "allow_always" }]), { outcome: "cancelled" });
+  assert.deepEqual(permissionOutcome(false, [{ optionId: "a", kind: "allow_once" }]), { outcome: "cancelled" });
+  assert.deepEqual(permissionOutcome(true, "junk"), { outcome: "cancelled" });
 });
 
 test("agy settings that would run a tool without asking are refused", () => {
@@ -167,7 +169,10 @@ test("an antigravity agent never takes its role's Claude model or effort, and it
   const spec = launchSpec(w, rae, "hi", null, undefined);
   assert.equal(spec.model, undefined);
   assert.equal(spec.effort, undefined);
-  assert.equal(spec.settings, null, "an agy session takes no settings file");
+  // the role's rendered settings, whose rules the supervisor holds agy's calls to, with no wake hook
+  const rendered = JSON.parse(readFileSync(spec.settings!, "utf8"));
+  assert.ok(rendered.permissions?.deny?.length, "the reviewer's deny rules are rendered");
+  assert.ok(!JSON.stringify(rendered.hooks ?? {}).includes(" hook wake"), "no wake hook for a backend with no message tool");
   const own = tempWorkspace(agy('model = "Gemini 4 Neon"\neffort = "xhigh"\n'));
   after(() => rmSync(own, { recursive: true, force: true }));
   const w2 = openWorkspace(own, {});
@@ -184,7 +189,7 @@ test("a model the running agy does not offer fails the start, naming the agent a
     /nomodel's model "opus" is not one this agy offers; it offers gemini-flash \(Gemini Flash\), gemini-pro \(Gemini Pro\)\. Set model in factory\.toml/);
 });
 
-test("backend = \"antigravity\" loads, and takes no host", () => {
+test("backend = \"antigravity\" loads, on this machine or a host", () => {
   const ws = tempWorkspace(TOML.replace('name = "rae"\nrole = "reviewer"\n', 'name = "rae"\nrole = "reviewer"\nbackend = "antigravity"\n'));
   after(() => rmSync(ws, { recursive: true, force: true }));
   const c = loadConfig(join(ws, "factory.toml"), {});
@@ -192,9 +197,9 @@ test("backend = \"antigravity\" loads, and takes no host", () => {
   assert.equal(rae.backend, "antigravity");
   assert.equal(backendFor(rae), antigravityBackend);
   const hosted = tempWorkspace(TOML.replace('name = "rae"\nrole = "reviewer"\n', 'name = "rae"\nrole = "reviewer"\nbackend = "antigravity"\nhost = "far"\ncwd = "/far/rae"\n') +
-    '\n[hosts.far]\nssh = "far"\nurl = "http://far:1"\ntoken_file = "t"\n');
+    '\n[hosts.far]\nssh = "far"\nurl = "http://far:1"\ntoken_file = "t"\nhash_files = ["daemon.toml", "workspace.toml"]\n');
   after(() => rmSync(hosted, { recursive: true, force: true }));
-  assert.throws(() => loadConfig(join(hosted, "factory.toml"), {}), (e: unknown) => e instanceof ConfigError && e.problems.some((p) => /rae runs under antigravity, which runs on this machine only/.test(p)));
+  assert.equal(loadConfig(join(hosted, "factory.toml"), {}).agents.find((a) => a.name === "rae")!.host, "far");
 });
 
 test("a session outlives its start, sets its model and effort, goes idle after its turn, and its transcript is under projects/", async () => {
@@ -756,6 +761,40 @@ backend = "antigravity"
   void ws;
 });
 
+test("a session on a host wakes an Antigravity agent of that host there, and delivers to it there", async () => {
+  const dir = tempWorkspace(TOML.replace("[tracker]", `[roles.assistant]
+cwd = "assistants"
+permission_mode = "auto"
+settings = "readonly"
+
+[[agents]]
+name = "vesta"
+role = "assistant"
+backend = "antigravity"
+host = "far"
+cwd = "%CWD%"
+
+[tracker]`).replace("%CWD%", cwdFor("vesta")) + '\n[hosts.far]\nssh = "far"\nurl = "http://127.0.0.1:1"\ntoken_file = "t"\nhash_files = ["daemon.toml", "workspace.toml"]\n');
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const ws = openWorkspace(dir, {});
+  mkdirSync(join(dir, "assistants"), { recursive: true });
+  // the sender is named by its own transcript, not by where it runs: ada and another session share the lead's cwd
+  const own = join(root, "s1h.jsonl");
+  writeFileSync(own, [JSON.stringify({ type: "agent-name", agentName: "ada", sessionId: "s1h" }), JSON.stringify({ type: "user" })].join("\n") + "\n");
+  const input = JSON.stringify({ hook_event_name: "PreToolUse", session_id: "s1h", transcript_path: own, cwd: join(dir, "lead"), tool_name: "SendMessage", tool_input: { to: "vesta", message: "read notes.md" } });
+  const r = hook(["--wait-seconds", "20", "--from-host", "far"], input, dir);
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout!).hookSpecificOutput;
+  assert.equal(out.permissionDecision, "deny");
+  assert.match(out.permissionDecisionReason, /^Delivered: vesta runs on antigravity.*after a fresh start/);
+  const s = listSessions().find((x) => x.name === "vesta" && sessionAlive(x))!;
+  await until("the message to be answered", () => transcript(s.id!).some((l) => l.type === "assistant" && l.message.content[0].text === "read ok"));
+  const asked = transcript(s.id!).filter((l) => l.type === "user" && l.message.content[0].type === "text").map((l) => l.message.content[0].text);
+  assert.equal(asked.length, 2);
+  assert.equal(asked[1], "Message from ada:\n\nread notes.md");
+  void ws;
+});
+
 test("a sender with no transcript naming it is unknown, never a guess", () => {
   assert.equal(senderName({ session_id: "s9", cwd: join(root, "nowhere") }), "unknown (session s9)");
   const t = join(root, "s8.jsonl");
@@ -770,7 +809,7 @@ test("a sender with no transcript naming it is unknown, never a guess", () => {
   assert.equal(senderName({ session_id: "s6", transcript_path: deep }), "unknown (session s6)");
 });
 
-test("a send from a host session to an Antigravity agent is refused at once, as unsupported", () => {
+test("a send from a host session to an Antigravity agent on another machine is refused at once", () => {
   const dir = tempWorkspace(TOML.replace("[tracker]", `[roles.assistant]
 cwd = "assistants"
 permission_mode = "auto"
@@ -787,11 +826,61 @@ backend = "antigravity"
   const input = JSON.stringify({ hook_event_name: "PreToolUse", session_id: "s2", cwd: "/far/lead", tool_name: "SendMessage", tool_input: { to: "vega", message: "hi" } });
   const r = hook(["--from-host", "far"], input, dir);
   assert.equal(r.code, 2);
-  assert.match(r.stderr!, /vega runs under antigravity, and an antigravity agent can only be messaged from a session on the primary.*not from far.*not supported/s);
+  assert.match(r.stderr!, /vega runs under antigravity on the primary, and an antigravity agent can only be messaged from a session on the primary or on its own machine, not from far\. .*ask the lead/s);
   assert.doesNotMatch(r.stderr!, /factory wake|Tell .* that vega is off/);
   assert.ok(Date.now() - t0 < 5000);
   assert.equal(listSessions().some((x) => x.name === "vega" && sessionAlive(x) && x.startedAt as number >= t0), false, "nothing was started");
   // and the failed-send explanation stays out of it
   const post = JSON.stringify({ hook_event_name: "PostToolUse", session_id: "s2", cwd: "/far/lead", tool_name: "SendMessage", tool_input: { to: "vega", message: "hi" }, tool_response: { success: false, message: "No agent named vega is reachable" } });
   assert.deepEqual(hook(["--from-host", "far"], post, dir), { code: 0 });
+});
+
+// A builder's rendered settings, as an antigravity launch writes them, and the hook entry in place.
+function builderSettings(): string {
+  const ws = tempWorkspace(TOML.replace('name = "bea"\nrole = "builder"\n', 'name = "bea"\nrole = "builder"\nbackend = "antigravity"\n'));
+  after(() => rmSync(ws, { recursive: true, force: true }));
+  const w = openWorkspace(ws, {});
+  const spec = launchSpec(w, w.config.agents.find((a) => a.name === "bea")!, "hi", null, undefined);
+  assert.equal(agyHookMissing(), null, "the launch wrote agy's hook entry");
+  return spec.settings!;
+}
+
+test("with the role's settings, agy's edits and commands are held to its rules, as a Claude agent's are", async () => {
+  const settings = builderSettings();
+  const id = start("ruled", "write notes.txt", ["--settings", settings]);
+  const row = () => listSessions().find((s) => s.id === id)!;
+  await until("the first turn to end", () => readState(id)?.state === "done");
+  antigravityBackend.deliver!(row(), "run git status && ls");
+  antigravityBackend.deliver!(row(), "run git push origin main");
+  await until("the messages to be answered", () => transcript(id).filter((l) => l.type === "turn-end").length === 3);
+  const said = transcript(id).filter((l) => l.type === "assistant" && l.message.content[0].type === "text").map((l) => l.message.content[0].text);
+  assert.deepEqual(said, ["wrote", "ran", "run denied"]);
+  const perms = transcript(id).filter((l) => l.type === "permission");
+  assert.deepEqual(perms.map((p) => [p.kind, p.allowed]), [["edit", true], ["execute", true], ["execute", false]]);
+  assert.match(perms[2].reason, /guard\[builder\]: refused\. pushing to a protected branch \(main\)/);
+  // agy's hook finds the same rules through its environment
+  const env = requests().filter((r) => r.env).pop().env;
+  assert.deepEqual(env, { SF_AGY_RULES: settings, SF_AGY_PROJECT: cwdFor("ruled") });
+  assert.equal(readState(id)!.state, "done", "a refusal is not a tripwire");
+});
+
+test("a session whose rules cannot be read, or whose agy would skip the hook, does not start", () => {
+  const settings = builderSettings();
+  assert.throws(() => start("norules", "hi", ["--settings", join(root, "missing.json")]), /settings .*missing\.json cannot be read/);
+  const file = agyHooksFile();
+  const saved = readFileSync(file, "utf8");
+  try {
+    rmSync(file);
+    assert.throws(() => start("nohook", "hi", ["--settings", settings]), /so agy's reads would go unchecked/);
+  } finally {
+    writeFileSync(file, saved);
+  }
+});
+
+test("a call agy's hook denied never ran, so it is no tripwire", () => {
+  // the denied call, and a sibling agy fails with empty output after it
+  assert.equal(tripped({ kind: "execute", asked: false, allowed: false }, "failed", false, "tool call denied by pre-tool hook: superfactory: no"), null);
+  assert.equal(tripped({ kind: "execute", asked: false, allowed: false }, "failed", false, { output: "" }), null);
+  assert.notEqual(tripped({ kind: "execute", asked: false, allowed: false }, "failed", false, "exit 1"), null);
+  assert.notEqual(tripped({ kind: "execute", asked: false, allowed: false }, "completed", false, "tool call denied by pre-tool hook: x"), null);
 });

@@ -76,7 +76,7 @@ createServer((req, res) => {
     if (req.url === "/agents/rae/start") return send(200, { id: "launched1" });
     const id = body ? JSON.parse(body).id : null;
     if (id === "r422") return send(422, { error: "not that one" }); // a session route: a 422 here is no refusal
-    if (req.url === "/agents/rae/stop") return send(200, {});
+    if (req.url === "/agents/rae/stop" || req.url === "/agents/rae/deliver") return send(200, {});
     const q = body ? JSON.parse(body) : {};
     const wt = "/far/" + q.repo + "/.claude/worktrees/" + q.ticket;
     if (req.url === "/agents/cal/start") {
@@ -209,10 +209,12 @@ test("the remote transport: each operation is a request to the host's daemon", a
   const id = t.start({ agent: rae, cwd: "/far/rae", prompt: "hello", appendix: "the appendix", runDir: ws.runDir, phase: undefined, args: () => assert.fail("rendered on the host, not here"), env: { SECRET: "x" } });
   assert.equal(id, "launched1");
   t.stop("rae", "r1", true);
+  t.deliver("rae", rows[0]!, "Message from ada:\n\nhi", "ada");
   assert.deepEqual(d.requests().map((r) => [r.method, r.url, r.body]), [
     ["GET", "/agents?all=1", null],
     ["POST", "/agents/rae/start", { cwd: "/far/rae", prompt: "hello", appendix: "the appendix", phase: null }],
     ["POST", "/agents/rae/stop", { id: "r1", remove: true }],
+    ["POST", "/agents/rae/deliver", { id: "r1", text: "Message from ada:\n\nhi", from: "ada" }],
   ]);
   // a 422 on a session route is an unknown host: stop throws Unreachable
   assert.throws(() => t.stop("rae", "r422", false), (e: unknown) => e instanceof Unreachable && /HTTP 422 not that one/.test(e.message));
@@ -273,6 +275,7 @@ test("waiting for a started session, a host that cannot be asked on one poll is 
     alive: (s): s is Session => !!s && s.alive === true,
     start: () => "launched1",
     stop: () => assert.fail("not used"),
+    deliver: () => assert.fail("not used"),
     worktree: () => assert.fail("not used"),
     worktreeLeft: () => assert.fail("not used"),
     removeWorktree: () => assert.fail("not used"),

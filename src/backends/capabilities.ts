@@ -16,5 +16,5 @@ export const CAPABILITIES: Record<BackendName, BackendCapabilities> = {
   claude: { listing: "`claude agents`", onHosts: true, roleModel: true },
   // Which models agy takes is asked of the agy that runs, at start (agy-supervisor.ts pickValue),
   // never of a list kept here, which would go stale with the next agy.
-  antigravity: { listing: "the antigravity sessions", onHosts: false, roleModel: false },
+  antigravity: { listing: "the antigravity sessions", onHosts: true, roleModel: false },
 };

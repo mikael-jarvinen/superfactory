@@ -22,6 +22,7 @@ import { hook as markedCommentsHook } from "./hooks/marked-comments.js";
 import { hook as noSideChannelsHook } from "./hooks/no-side-channels.js";
 import { hook as statusHook } from "./hooks/status.js";
 import { hook as wakeHook } from "./hooks/wake.js";
+import { agyHook } from "./backends/agy-guard.js";
 import { idleWork, idleWorkFor } from "./idle.js";
 import { comment } from "./gate/comment.js";
 import { deltaRange } from "./gate/delta.js";
@@ -1173,7 +1174,8 @@ const HOOK_FNS: Record<HookName, (argv: string[], input: string, workspace?: str
 // guard must answer even when factory.toml does not load. Exit 2 blocks the tool call.
 function cmdHook(argv: string[], workspace: string | undefined): number {
   const [name, ...rest] = argv;
-  const fn = HOOK_FNS[name as HookName];
+  // agy's PreToolUse hook (agy-guard.ts), which agy runs, not a Claude session's settings
+  const fn = name === "agy" ? agyHook : HOOK_FNS[name as HookName];
   if (!fn) throw new UsageError(`hook: ${name ? `no hook ${pyRepr(name)}` : "which hook?"}; hooks are ${HOOKS.join(", ")}`);
   let input = "";
   try {
