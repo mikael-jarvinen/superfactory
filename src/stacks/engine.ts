@@ -7,7 +7,7 @@ import { probeAll, stacksFile } from "../board/server.js";
 import type { Repo, Stack } from "../config.js";
 import type { Session } from "../fleet.js";
 import { BUSY, loadRec, saveRec } from "../state.js";
-import { local, sessionAlive } from "../transport.js";
+import { local } from "../transport.js";
 import type { Workspace } from "../workspace.js";
 import { die, now, pyDumps, realpathLoose, run, sleep } from "../util.js";
 import { git, HTTPS, registeredWorktrees, worktreePath } from "../worktree.js";
@@ -176,7 +176,7 @@ export function slotInUse(ws: Workspace, stack: Stack, v: SlotView, sessions: ()
     return `the session listing failed (${(e as Error).message}), so nobody can say ${v.ticket}'s worktree is idle`;
   }
   for (const s of rows) {
-    if ((s.state !== "working" && s.status !== "busy") || !sessionAlive(s) || !s.cwd) continue;
+    if ((s.state !== "working" && s.status !== "busy") || !local.alive(s) || !s.cwd) continue;
     const cwd = realpathLoose(s.cwd.replace(/\/+$/, ""));
     const wt = wts.find((w) => cwd === w || cwd.startsWith(`${w}/`));
     if (wt) return `${s.name ?? s.id ?? "a session"}'s session is working in ${basename(wt)}`;

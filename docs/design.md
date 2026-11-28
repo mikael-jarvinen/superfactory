@@ -36,13 +36,16 @@ src/
                   LOCAL- work, with no backlog to wait in, goes off with --title, and
                   `factory state --off` lists it
   fleet.ts        agents from config; finding, waiting for and stopping their sessions
-  transport.ts    where an agent's sessions live and every session operation; the local one
-                  runs `claude agents --json` and friends, with any undocumented daemon
-                  internals behind one function
+  transport.ts    where an agent's sessions live and every session operation; a local one
+                  runs the agent's backend on this machine, one listing per backend
+  backends/       which CLI runs an agent's sessions: backend.ts (the AgentBackend interface),
+                  claude.ts (`claude --bg` and `claude agents --json`, with any undocumented
+                  daemon internals behind one function), index.ts (backendFor, by `backend`)
   claude-bin.ts   which claude binary to run
   remote.ts       the transport for an agent with a host: each session operation is a request
                   to the factory daemon there, and a host that cannot be asked is unknown
-  launch.ts       the `claude --bg` command line, appendix assembly, the READY handshake
+  launch.ts       the launch spec the agent's backend renders, appendix assembly, the READY
+                  handshake
   settings.ts     render each role's Claude Code settings at launch into logs/run/
   worktree.ts     worktree per work item, push over https, dirty and pushed checks
   messages.ts     say, messages, rotation

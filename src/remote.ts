@@ -30,7 +30,8 @@ import { readFileSync } from "node:fs";
 import type { Host } from "./config.js";
 import { validKey } from "./state.js";
 import type { Session } from "./fleet.js";
-import { LISTING_TIMEOUT_MS, local, type Transport, type WorktreeRequest } from "./transport.js";
+import { LISTING_TIMEOUT_MS } from "./backends/claude.js";
+import { local, type Transport, type WorktreeRequest } from "./transport.js";
 import type { Workspace } from "./workspace.js";
 import { FactoryError } from "./util.js";
 

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { lead } from "../fleet.js";
 import { claudeEnv, claudeScoped, scopeCheck } from "../scope.js";
 import { ghBin } from "../gate/github.js";
-import { renderSettings } from "../settings.js";
+import { claudeBackend } from "../backends/claude.js";
 import { parseRead } from "../tracker/read.js";
 import { iso } from "../failures.js";
 import type { Workspace } from "../workspace.js";
@@ -70,7 +70,7 @@ export function claudeArgs(ws: Workspace, job: Job, tools: string[]): string[] {
   const w = ws.config.watchers;
   const model = w.model ?? "sonnet";
   const mode = watcherMode(ws);
-  const settings = renderSettings(ws, { name: `watcher.${job}`, role: "watcher", template: "watcher", permissionMode: mode });
+  const settings = claudeBackend.installSettings(ws, { name: `watcher.${job}`, role: "watcher", template: "watcher", permissionMode: mode });
   return ["-p", "--model", model, "--effort", "low", "--permission-mode", mode, "--settings", settings, "--allowedTools", tools.join(",")];
 }
 

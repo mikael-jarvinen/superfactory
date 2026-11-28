@@ -17,3 +17,6 @@ export function claudeBin(env: NodeJS.ProcessEnv = process.env): string {
   for (const d of (env.PATH ?? "").split(delimiter)) if (d && executable(join(d, "claude"))) return join(d, "claude");
   return join(homedir(), ".local", "bin", "claude");
 }
+
+// Claude Code's config dir: its transcripts, daemon roster and login are under it.
+export const claudeConfigDir = () => process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");

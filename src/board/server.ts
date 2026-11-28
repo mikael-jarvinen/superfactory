@@ -16,7 +16,8 @@ import { roster } from "../config.js";
 import { capitalize, firstSentence, run, sleep } from "../util.js";
 import { refreshHosts, report, type Report, TranscriptUsage } from "./analytics.js";
 import type { Runner } from "./remote-transcripts.js";
-import { oauthUsage, type PlanFetch, PlanUsage, POLL_EVERY } from "./plan-usage.js";
+import { backendFor } from "../backends/index.js";
+import { type PlanFetch, PlanUsage, POLL_EVERY } from "./plan-usage.js";
 import { weekly, type Weekly, WEEKLY_SINCE } from "./weekly.js";
 import { attachmentsDir, MAX_IMAGES, postMessage, Receipts, saveAttachment } from "./inbox.js";
 import { markSeen, readSeen } from "./seen.js";
@@ -552,7 +553,8 @@ export function serve(ws: Workspace, opts: ServeOptions = {}): Promise<Board> {
   let analytics: { at: number; body: Report & { at: string } } | null = null;
   let weeklyView: { at: number; body: Weekly } | null = null;
   const plan = PlanUsage.of(ws);
-  const planFetch = opts.plan === undefined ? oauthUsage() : opts.plan;
+  // The plan the board meters is the one the lead's backend logs in with.
+  const planFetch = opts.plan === undefined ? backendFor(lead(ws)).planUsage() : opts.plan;
   // Other hosts' transcripts are read in the background, once per ANALYTICS_EVERY at most, and a
   // report made while a read runs counts what was read before it; when the read ends, the next
   // request makes a new report.

@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import vm from "node:vm";
 import { JSDOM } from "jsdom";
-import { projectDirFor, quantile, refreshHosts, report, stat, TranscriptUsage, weekOf } from "../src/board/analytics.js";
+import { claudeBackend } from "../src/backends/claude.js";
+import { quantile, refreshHosts, report, stat, TranscriptUsage, weekOf } from "../src/board/analytics.js";
 import { parseReply, type RemoteQuery, type Runner, sshRunner } from "../src/board/remote-transcripts.js";
 import { serve } from "../src/board/server.js";
 import { appendEvent, saveRec } from "../src/state.js";
@@ -34,7 +35,7 @@ const call = (t: string, id: string, u: Record<string, number>) =>
   JSON.stringify({ type: "assistant", timestamp: t, requestId: `req_${id}`, message: { id, role: "assistant", content: [{ type: "text", text: "x" }], usage: u } });
 
 function transcript(cwd: string, file: string, name: string | null, lines: string[]) {
-  const dir = projectDirFor(cwd);
+  const dir = claudeBackend.projectDir(cwd);
   mkdirSync(dir, { recursive: true });
   const head = name ? [JSON.stringify({ type: "agent-name", agentName: name, sessionId: "s" })] : [];
   writeFileSync(join(dir, file), [...head, ...lines].join("\n") + "\n");
@@ -74,15 +75,15 @@ function workspace(): Workspace {
     call("2026-11-02T14:30:00Z", "m3", { output_tokens: 20 }),
     call("2026-11-10T12:00:00Z", "m6", { output_tokens: 11 }), // LOCAL-a with the human
   ]);
-  mkdirSync(join(projectDirFor(otto), "s1", "subagents"), { recursive: true });
-  writeFileSync(join(projectDirFor(otto), "s1", "subagents", "agent-x.jsonl"), call("2026-11-02T14:45:00Z", "m4", { output_tokens: 5 }) + "\n");
+  mkdirSync(join(claudeBackend.projectDir(otto), "s1", "subagents"), { recursive: true });
+  writeFileSync(join(claudeBackend.projectDir(otto), "s1", "subagents", "agent-x.jsonl"), call("2026-11-02T14:45:00Z", "m4", { output_tokens: 5 }) + "\n");
   // nap shares the cwd and is never an item's agent; a session with no name is nobody's.
   transcript(otto, "s2.jsonl", "nap", [call("2026-11-02T11:00:00Z", "n1", { output_tokens: 9 })]);
   transcript(otto, "s3.jsonl", null, [call("2026-11-02T11:00:00Z", "q1", { output_tokens: 1000 })]);
   transcript(otto, "s4.jsonl", "otto-probe", [call("2026-11-02T11:00:00Z", "p1", { output_tokens: 1000 })]);
   // last written before the first change, so never read
   transcript(otto, "s5.jsonl", "otto", [call("2026-11-02T11:00:00Z", "o1", { output_tokens: 1000 })]);
-  utimesSync(join(projectDirFor(otto), "s5.jsonl"), new Date("2026-10-01T00:00:00Z"), new Date("2026-10-01T00:00:00Z"));
+  utimesSync(join(claudeBackend.projectDir(otto), "s5.jsonl"), new Date("2026-10-01T00:00:00Z"), new Date("2026-10-01T00:00:00Z"));
   // the lead counts, with no item, whatever it was doing
   transcript(join(dir, "lead"), "l1.jsonl", "ada", [call("2026-11-02T11:00:00Z", "a1", { output_tokens: 1000 })]);
   // bea's worktree of WEB-1
@@ -147,7 +148,7 @@ test("a transcript is read on from where it stopped, and a call is still counted
   const ws = workspace();
   const usage = new TranscriptUsage();
   report(ws, usage, NOW);
-  const f = join(projectDirFor(join(ws.dir, "assistants")), "s1.jsonl");
+  const f = join(claudeBackend.projectDir(join(ws.dir, "assistants")), "s1.jsonl");
   writeFileSync(f, readFileSync(f, "utf8") + call("2026-11-02T14:31:00Z", "m3", { output_tokens: 20 }) + "\n" +
     call("2026-11-02T14:40:00Z", "m5", { output_tokens: 100 }) + "\n");
   const r = report(ws, usage, NOW);

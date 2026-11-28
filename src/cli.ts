@@ -9,7 +9,8 @@ import { boardLine, runBoard, startBoard, stopBoard } from "./board/server.js";
 import { doctor } from "./doctor.js";
 import { agentOrDie, builderLeft, byRole, findSession, fleetLines, owedNote, owesSession, lead, listing, type Session, stopSession, stopWorktree, waitForName } from "./fleet.js";
 import { Unreachable } from "./remote.js";
-import { agentSessions, midTurn, transportFor, transports } from "./transport.js";
+import { agentSessions, transportFor, transports } from "./transport.js";
+import { backendFor } from "./backends/index.js";
 import type { Agent } from "./config.js";
 import { assistantPrompt, buildAppendix, buildingPrompt, designerPrompt, findingsAt, fixingPrompt, handoffPath, launch, leadPrompt, reviewerPrompt, roleAppendix, roleOf } from "./launch.js";
 import { bringUpLead } from "./lead-up.js";
@@ -487,7 +488,7 @@ function cmdDispatch(ws: Workspace, argv: string[]) {
     const isRedo = REDO.has(cur);
     if (on === ticket && !force && cur && (isRedo || cur === "fixing" || TRANSITIONS[cur].has("fixing"))) {
       keep();
-      if (midTurn(s))
+      if (backendFor(ag).midTurn(s))
         throw new FactoryError(`${name} is mid-turn on ${ticket} (${s.id}). Its next brief or round starts a fresh session, ` +
           `which would cut this turn short: dispatch again once it is idle.`);
       const wasAt = (kept?.worktree ?? "").replace(/\/+$/, "");
